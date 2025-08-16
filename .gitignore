@@ -1,0 +1,56 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+.python-version
+
+# Директории окружения
+.env
+.venv
+env/
+venv/
+ENV/
+
+# PyInstaller
+*.spec
+
+# Тесты / покрытие
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+.coverage.*
+.cache
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# mypy / type check
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pytype/
+
+# Cython debug
+cython_debug/
+
+# ---- VS Code ----
+.vscode/
+.history/
+
+# ---- Системные файлы ----
+.DS_Store
+Thumbs.db
+
+# ---- Логи ----
+*.log
+
+# ---- IDE / редакторы ----
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# ---- Дополнительно ----
+# Папки данных (если они не нужны в Git)
+data/

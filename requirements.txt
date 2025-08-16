@@ -1,0 +1,9 @@
+fastapi
+httpx
+requests
+uvicorn
+python-dotenv
+redis
+pydantic-settings
+aiogram
+tenacity
