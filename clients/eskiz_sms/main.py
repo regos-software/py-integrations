@@ -142,6 +142,14 @@ class EskizSmsIntegration(IntegrationSmsBase, ClientBase):
             logger.warning(f"Ошибка при обновлении токена: {e}")
             return None
 
+    async def handle_external(self, data: dict) -> Any:
+        """
+        Обработка внешних запросов (не от REGOS).
+        Пока метод-заглушка, просто логируем данные и возвращаем успех.
+        """
+        logger.info(f"handle_external вызван с данными: {data}")
+        return IntegrationSuccessResponse(result={"status": "ok"})
+
     async def send_messages(self, messages: list[dict]) -> Any:
         logger.info("Начата отправка SMS через ESKIZ")
         if not self.connected_integration_id:

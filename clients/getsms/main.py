@@ -83,6 +83,13 @@ class GetSmsIntegration(IntegrationSmsBase, ClientBase):
         except Exception as e:
             logger.error(f"Ошибка отправки запроса: {e}")
             raise
+    async def handle_external(self, data: dict) -> Any:
+        """
+        Обработка внешних запросов (не от REGOS).
+        Пока метод-заглушка, просто логируем данные и возвращаем успех.
+        """
+        logger.info(f"handle_external вызван с данными: {data}")
+        return IntegrationSuccessResponse(result={"status": "ok"})
 
     async def send_messages(self, messages: list[dict]) -> Any:
         logger.info("Начата отправка SMS через GETSMS")
