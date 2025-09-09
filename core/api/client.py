@@ -4,6 +4,7 @@ from pydantic import BaseModel
 
 from schemas.api.base import APIBaseResponse
 from core.logger import setup_logger
+from config.settings import settings
 
 logger = setup_logger("api_client")
 TResponse = TypeVar("TResponse", bound=BaseModel)
@@ -14,7 +15,7 @@ class APIClient:
     Универсальный клиент REGOS API для работы с конкретной интеграцией по её ID.
     """
 
-    BASE_URL = "https://dev-integration.regos.uz"  
+    BASE_URL = settings.integration_url  
 
     def __init__(
         self,
