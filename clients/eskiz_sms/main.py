@@ -49,7 +49,7 @@ class EskizSmsIntegration(IntegrationSmsBase, ClientBase):
         )
 
     async def _get_settings(self, cache_key: str) -> dict:
-        """Получение настроек GETSMS из Redis или API"""
+        """Получение настроек из Redis или API"""
         # 1. Пробуем Redis
         if settings.redis_enabled and redis_client:
             try:
@@ -68,7 +68,7 @@ class EskizSmsIntegration(IntegrationSmsBase, ClientBase):
             async with RegosAPI(connected_integration_id=self.connected_integration_id) as api:
                 settings_response = await api.integrations.connected_integration_setting.get(
                     ConnectedIntegrationSettingRequest(
-                        integration_key="sms_getsms"
+                        integration_key="sms_eskiz"
                     )
                 )
 
