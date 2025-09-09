@@ -45,15 +45,21 @@ class GetSmsIntegration(IntegrationSmsBase, ClientBase):
         )
 
     async def _get_settings(self, cache_key: str) -> dict:
+        """Получение настроек GETSMS из Redis или API"""
+        # 1. Пробуем Redis
         if settings.redis_enabled and redis_client:
-            cached_settings = await redis_client.get(cache_key)
-            if cached_settings:
-                logger.debug("Настройки получены из Redis-кеша")
-                return json.loads(cached_settings)
+            try:
+                cached_data = await redis_client.get(cache_key)
+                if cached_data:
+                    logger.debug(f"Настройки получены из Redis: {cache_key}")
+                    if isinstance(cached_data, (bytes, bytearray)):
+                        cached_data = cached_data.decode("utf-8")
+                    return json.loads(cached_data)
+            except Exception as error:
+                logger.warning(f"Ошибка Redis: {error}, загружаем из API")
 
-        logger.debug("Настройки не найдены в кеше, получаем из API")
-
-
+        # 2. Если нет в кеше — API
+        logger.debug(f"Настройки не найдены в кеше, загружаем из API")
         try:
             async with RegosAPI(connected_integration_id=self.connected_integration_id) as api:
                 settings_response = await api.integrations.connected_integration_setting.get(
@@ -61,14 +67,22 @@ class GetSmsIntegration(IntegrationSmsBase, ClientBase):
                         integration_key="sms_getsms"
                     )
                 )
-                
-            settings_map = {s["key"].lower(): s["value"] for s in settings_response.result}
+
+            # settings_response — это список моделей ConnectedIntegrationSetting
+            settings_map = {item.key.lower(): item.value for item in settings_response}
+
+            # 3. Сохраняем в Redis
             if settings.redis_enabled and redis_client:
-                await redis_client.setex(cache_key, self.SETTINGS_TTL, json.dumps(settings_map))
+                try:
+                    await redis_client.setex(cache_key, self.SETTINGS_TTL, json.dumps(settings_map))
+                except Exception as error:
+                    logger.warning(f"Не удалось сохранить настройки в Redis: {error}")
+
             return settings_map
-        except Exception as e:
-            logger.exception("Ошибка при получении настроек")
+        except Exception as error:
+            logger.error(f"Ошибка получения настроек для {self.connected_integration_id}: {error}")
             raise
+
 
     async def _make_request(self, data: dict) -> Any:
         try:
@@ -83,6 +97,13 @@ class GetSmsIntegration(IntegrationSmsBase, ClientBase):
         except Exception as e:
             logger.error(f"Ошибка отправки запроса: {e}")
             raise
+    async def handle_external(self, data: dict) -> Any:
+        """
+        Обработка внешних запросов (не от REGOS).
+        Пока метод-заглушка, просто логируем данные и возвращаем успех.
+        """
+        logger.info(f"handle_external вызван с данными: {data}")
+        return IntegrationSuccessResponse(result={"status": "ok"})
 
     async def send_messages(self, messages: list[dict]) -> Any:
         logger.info("Начата отправка SMS через GETSMS")

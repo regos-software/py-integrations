@@ -1,20 +1,34 @@
-from abc import ABC, abstractmethod
-from typing import Any
+from abc import ABC
+from typing import Any, Optional
 from schemas.integration.integration_base import IntegrationBase
+from schemas.integration.base import IntegrationSuccessResponse, IntegrationErrorResponse, IntegrationErrorModel
 
 
 class IntegrationSmsBase(IntegrationBase, ABC):
     """
-    Абстрактный базовый класс для SMS-интеграций с REGOS.
-    Наследуется от IntegrationBase и добавляет метод отправки сообщений.
+    Базовый класс для SMS-интеграций с REGOS.
+    Содержит заглушки для базовых методов и обязательно требует реализации send_messages.
     """
 
-    @abstractmethod
-    async def send_messages(self, messages: list[dict]) -> Any:
-        """
-        Отправка одного или нескольких сообщений через SMS-интеграцию.
+    async def connect(self, *args, **kwargs) -> Any:
+        return IntegrationSuccessResponse(result={"status": "stub connect"})
 
-        :param messages: Список сообщений в формате словарей.
-        :return: Результат отправки.
-        """
-        pass
+    async def disconnect(self, *args, **kwargs) -> Any:
+        return IntegrationSuccessResponse(result={"status": "stub disconnect"})
+
+    async def reconnect(self, *args, **kwargs) -> Any:
+        return IntegrationSuccessResponse(result={"status": "stub reconnect"})
+
+    async def update_settings(self, *args, **kwargs) -> Any:
+        return IntegrationSuccessResponse(result={"status": "stub update_settings"})
+
+    async def handle_webhook(self, data: Optional[dict] = None, **kwargs) -> Any:
+        return IntegrationSuccessResponse(result={"status": "stub handle_webhook"})
+
+    async def handle_external(self, data: Optional[dict] = None, **kwargs) -> Any:
+        return IntegrationSuccessResponse(result={"status": "stub handle_external"})
+
+    async def send_messages(self, messages: list[dict]) -> Any:
+        return IntegrationErrorResponse(
+            result=IntegrationErrorModel(error=9999, description="send_messages not implemented")
+        )
