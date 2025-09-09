@@ -46,7 +46,7 @@ class GetSmsIntegration(IntegrationSmsBase, ClientBase):
 
     async def _get_settings(self, cache_key: str) -> dict:
         """Получение настроек GETSMS из Redis или API"""
-        # 1. Сначала пробуем Redis
+        # 1. Пробуем Redis
         if settings.redis_enabled and redis_client:
             try:
                 cached_data = await redis_client.get(cache_key)
@@ -58,7 +58,7 @@ class GetSmsIntegration(IntegrationSmsBase, ClientBase):
             except Exception as error:
                 logger.warning(f"Ошибка Redis: {error}, загружаем из API")
 
-        # 2. Если нет в кеше — идём в API
+        # 2. Если нет в кеше — API
         logger.debug(f"Настройки не найдены в кеше, загружаем из API")
         try:
             async with RegosAPI(connected_integration_id=self.connected_integration_id) as api:
@@ -68,11 +68,8 @@ class GetSmsIntegration(IntegrationSmsBase, ClientBase):
                     )
                 )
 
-            # если API вернул список (как в логах)
-            if isinstance(settings_response, list):
-                settings_map = {item["key"].lower(): item["value"] for item in settings_response}
-            else:  # fallback если это объект с `.result`
-                settings_map = {s.key.lower(): s.value for s in settings_response.result}
+            # settings_response — это список моделей ConnectedIntegrationSetting
+            settings_map = {item.key.lower(): item.value for item in settings_response}
 
             # 3. Сохраняем в Redis
             if settings.redis_enabled and redis_client:
