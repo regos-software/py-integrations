@@ -22,6 +22,7 @@ logger = setup_logger("eskiz_sms")
 
 class EskizSmsIntegration(IntegrationSmsBase, ClientBase):
     BASE_URL = "https://notify.eskiz.uz/api"
+    SETTINGS_TTL = settings.redis_cache_ttl
     ENDPOINTS = {
         "login": f"{BASE_URL}/auth/login",
         "refresh": f"{BASE_URL}/auth/refresh",
