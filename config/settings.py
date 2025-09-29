@@ -4,7 +4,7 @@ class Settings(BaseSettings):
     environment: str = "dev"
     debug: bool = True
     api_token: str = ""
-    integration_url: str = "https://dev-integration.regos.uz"
+    integration_url: str = "https://integration.regos.uz"
     service_a_token: str = ""
     log_level: str = "DEBUG"  
     redis_enabled: bool = False
