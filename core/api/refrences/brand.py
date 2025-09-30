@@ -1,5 +1,6 @@
 from typing import List, Optional, Iterable
-from enum import IntEnum
+from enum import Enum
+from pydantic import BaseModel
 
 from core.logger import setup_logger
 from schemas.api.base import APIBaseResponse
@@ -7,14 +8,14 @@ from schemas.api.refrences.brand import Brand
 
 logger = setup_logger("references.brand")
 
-class SortColumn(IntEnum):
-    ID = 1
-    NAME = 2
-    LAST_UPDATE = 3
+class SortColumn(str, Enum):
+    ID = "Id"
+    NAME = "Name"
+    LAST_UPDATE = "LastUpdate"
 
-class SortDirection(IntEnum):
-    ASC = 1
-    DESC = 2
+class SortDirection(str, Enum):
+    ASC = "asc"
+    DESC = "desc"
 
 class SortOrder(BaseModel):
     column: SortColumn
@@ -56,7 +57,7 @@ class BrandService:
            return []
         return [Brand.model_validate(x) for x in resp.result]
 
-    async def get_by_ids(self, ids: Iterable) -> List[Brand]:
+    async def get_by_ids(self, ids: Iterable[int]) -> List[Brand]:
         return await self.get(BrandGetRequest(ids=list(ids)))
 
     async def add(self, req: BrandAddRequest) -> int | None:
