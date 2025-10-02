@@ -18,6 +18,8 @@ from clients.base import ClientBase
 from core.logger import setup_logger
 from config.settings import settings
 from core.redis import redis_client
+from email.utils import formataddr
+from email.header import Header
 
 logger = setup_logger("email_sender")
 
@@ -68,6 +70,7 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
         "user": "smtp_user",
         "default_subject": "smtp_default_subject",
         "use_ssl": "smtp_use_ssl",
+        "name": "smtp_name",
         "pool_size": "smtp_pool_size",  # опционно
     }
 
@@ -189,6 +192,16 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
             smtp_user = settings_map.get(self.SETTINGS_KEYS["user"]) or from_email
             default_subject = settings_map.get(self.SETTINGS_KEYS["default_subject"]) or "Уведомление"
 
+            sender_name_raw = settings_map.get(self.SETTINGS_KEYS["name"])
+            # лёгкая санация от CR/LF во избежание инъекций заголовков
+            sender_name = re.sub(r"[\r\n]+", " ", str(sender_name_raw)).strip() if sender_name_raw else ""
+
+            from_header = (
+                formataddr((str(Header(sender_name, "utf-8")), from_email))
+                if sender_name else
+                from_email
+)
+
             pool_size_raw = settings_map.get(self.SETTINGS_KEYS["pool_size"])
             try:
                 pool_size = int(pool_size_raw) if pool_size_raw else self.DEFAULT_POOL_SIZE
@@ -253,18 +266,18 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
                         is_html = bool(item.get("is_html", True))
 
                         email_msg = self._build_email_message(
-                            from_addr=from_email,
+                            from_addr=from_header,    
                             to_addr=recipient,
                             subject=subject,
                             body=body,
                             is_html=is_html,
                         )
-
                         try:
                             send_status, envelope_id = await asyncio.wait_for(
                                 smtp.send_message(email_msg, sender=from_email, recipients=[recipient]),
                                 timeout=self.COMMAND_TIMEOUT,
                             )
+
                             accepted = {
                                 rcpt: {
                                     "code": resp.code,
