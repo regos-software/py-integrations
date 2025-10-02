@@ -1,15 +1,13 @@
 import asyncio
 import json
-import os
 import re
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional, Sequence
 from email.message import EmailMessage
 
 import aiosmtplib
 
 from core.api.regos_api import RegosAPI
 from schemas.api.integrations.connected_integration_setting import ConnectedIntegrationSettingRequest
-
 from schemas.integration.base import (
     IntegrationSuccessResponse,
     IntegrationErrorResponse,
@@ -17,7 +15,6 @@ from schemas.integration.base import (
 )
 from schemas.integration.email_integration_base import IntegrationEmailBase
 from clients.base import ClientBase
-
 from core.logger import setup_logger
 from config.settings import settings
 from core.redis import redis_client
@@ -27,61 +24,55 @@ logger = setup_logger("email_sender")
 
 class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
     """
-    Интеграция отправки EMAIL через SMTP.
+    Формат входа идентичен другим интеграциям:
+    async def send_messages(self, messages: List[Dict]) -> Dict
 
-    ЕДИНЫЙ входной формат:
-    messages = [
-        {
-            "campaign_recipient_id": 88,    # опционально
-            "sms_id": null,                 # опционально
-            "recipient": "user@example.com",
-            "message": "Текст письма"
-        },
-        ...
-    ]
+    Каждый message:
+    {
+        "campaign_recipient_id": <int|null>,
+        "sms_id": <int|null>,
+        "recipient": "<email>",
+        "message": "<text>"
+    }
+
+    Возвращаем как в примере Telegram:
+    {
+        "sent_batches": <int>,
+        "details": [ <result per batch>, ... ]
+    }
     """
 
     INTEGRATION_KEY = "email_sender"
+
+    # Таймауты короче, чтобы не зависать и укладываться в SLA
     CONNECT_TIMEOUT = 5
     COMMAND_TIMEOUT = 5
-    SETTINGS_TTL = settings.redis_cache_ttl
 
-    # Пул параллельных SMTP-соединений (можно переопределить через настройку)
+    # Производительность: параллельные SMTP-сессии на батч
     DEFAULT_POOL_SIZE = 10
     MAX_POOL_SIZE = 20
 
-    # Ожидаемые ключи в ConnectedIntegrationSetting (кейсы не важны)
-    # Вы перечислили: SMTP_HOST, SMTP_PORT, SMTP_EMAIL, SMTP_PASSWORD,
-    # SMTP_USER, SMTP_DEFAULT_SUBJECT, SMTP_USE_SSL
+    # Управление размером батча (как в других интеграциях)
+    BATCH_SIZE = 250
+
+    SETTINGS_TTL = settings.redis_cache_ttl
     SETTINGS_KEYS = {
         "host": "smtp_host",
         "port": "smtp_port",
         "email": "smtp_email",
         "password": "smtp_password",
-        "user": "smtp_user",  # если логин отличается от email
+        "user": "smtp_user",
         "default_subject": "smtp_default_subject",
         "use_ssl": "smtp_use_ssl",
-        # необязательное: размер пула
-        "pool_size": "smtp_pool_size",
+        "pool_size": "smtp_pool_size",  # опционно
     }
 
     EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    # -------------------- helpers --------------------
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        return False
-
-    # ----------------------- служебные -----------------------
-
-    def _error_response(self, code: int, description: str) -> IntegrationErrorResponse:
-        return IntegrationErrorResponse(
-            result=IntegrationErrorModel(error=code, description=description)
-        )
+    def _create_error_response(self, code: int, description: str) -> IntegrationErrorResponse:
+        return IntegrationErrorResponse(result=IntegrationErrorModel(error=code, description=description))
 
     @staticmethod
     def _to_bool(value: Any) -> bool:
@@ -91,22 +82,20 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
             return False
         return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
-    async def _get_settings(self, cache_key: str) -> dict:
-        """Настройки SMTP из Redis или API."""
+    async def _fetch_settings(self, cache_key: str) -> dict:
         # 1) Redis
         if settings.redis_enabled and redis_client:
             try:
                 cached = await redis_client.get(cache_key)
                 if cached:
-                    logger.debug(f"Настройки получены из Redis: {cache_key}")
                     if isinstance(cached, (bytes, bytearray)):
                         cached = cached.decode("utf-8")
+                    logger.debug(f"Настройки получены из Redis: {cache_key}")
                     return json.loads(cached)
             except Exception as err:
                 logger.warning(f"Ошибка Redis: {err}, загружаем из API")
 
         # 2) API
-        logger.debug("Настройки не найдены в кеше, загружаем из API")
         async with RegosAPI(connected_integration_id=self.connected_integration_id) as api:
             settings_response = await api.integrations.connected_integration_setting.get(
                 ConnectedIntegrationSettingRequest(integration_key=self.INTEGRATION_KEY)
@@ -114,7 +103,7 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
 
         settings_map = {item.key.lower(): item.value for item in settings_response}
 
-        # 3) Кешируем
+        # 3) Cache
         if settings.redis_enabled and redis_client:
             try:
                 await redis_client.setex(cache_key, self.SETTINGS_TTL, json.dumps(settings_map))
@@ -126,9 +115,7 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
     def _is_valid_email(self, addr: str) -> bool:
         return bool(self.EMAIL_RE.match(addr or ""))
 
-    def _build_email_message(
-        self, from_addr: str, to_addr: str, subject: str, body: str, is_html: bool = False
-    ) -> EmailMessage:
+    def _build_email_message(self, from_addr: str, to_addr: str, subject: str, body: str, is_html: bool = False) -> EmailMessage:
         msg = EmailMessage()
         msg["From"] = from_addr
         msg["To"] = to_addr
@@ -139,47 +126,47 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
             msg.set_content(body or "")
         return msg
 
-    async def _open_smtp(
-        self, host: str, port: int, user: str, password: str, use_ssl: bool
-    ) -> aiosmtplib.SMTP:
-        smtp = aiosmtplib.SMTP(
-            hostname=host,
-            port=port,
-            timeout=self.COMMAND_TIMEOUT,
-            source_address=None,
-            use_tls=use_ssl,  # SMTPS при True
-        )
-        await smtp.connect(timeout=self.CONNECT_TIMEOUT)
-        # При не-SSL поднимаем TLS, если доступно
+    async def _open_smtp(self, host: str, port: int, user: str, password: str, use_ssl: bool) -> aiosmtplib.SMTP:
+        smtp = aiosmtplib.SMTP(hostname=host, port=port, timeout=self.COMMAND_TIMEOUT, use_tls=use_ssl)
+        await asyncio.wait_for(smtp.connect(), timeout=self.CONNECT_TIMEOUT)
         if not use_ssl:
             try:
-                await smtp.starttls()
+                await asyncio.wait_for(smtp.starttls(), timeout=self.COMMAND_TIMEOUT)
             except aiosmtplib.errors.SMTPException as tls_err:
-                logger.warning(f"STARTTLS недоступен или не удался: {tls_err}")
-        await smtp.login(user, password)
+                logger.warning(f"STARTTLS недоступен/ошибка: {tls_err}")
+        await asyncio.wait_for(smtp.login(user, password), timeout=self.COMMAND_TIMEOUT)
         return smtp
 
-    # ----------------------- публичные -----------------------
+    # -------------------- public API --------------------
 
     async def handle_external(self, data: dict) -> Any:
         logger.info(f"handle_external вызван с данными: {data}")
         return IntegrationSuccessResponse(result={"status": "ok"})
 
-    async def send_messages(self, messages: list[dict]) -> Any:
-        """
-        Единый формат (как в SMS), но recipient — это EMAIL.
-        Требования по скорости покрываем пулом параллельных SMTP-соединений.
-        """
-        logger.info("Начата отправка email через EmailSenderIntegration (пул соединений)")
+    async def send_messages(self, messages: List[Dict]) -> Dict:
+        """Отправка email-сообщений батчами (контракт как в других интеграциях)."""
+        logger.info(f"Starting message send for ID {self.connected_integration_id}")
+
+        # Небольшая совместимость: если вдруг пришло {"messages": [...]}
+        if isinstance(messages, dict) and "messages" in messages:
+            messages = messages["messages"]
 
         if not self.connected_integration_id:
-            return self._error_response(1000, "connected_integration_id не указан")
+            return self._create_error_response(1000, "No connected_integration_id specified")
 
+        # Validate messages
+        for message in messages:
+            if "message" not in message or not message["message"]:
+                return self._create_error_response(1009, f"Message missing text: {message}")
+            if "recipient" not in message or not message["recipient"]:
+                return self._create_error_response(1010, f"Message missing recipient: {message}")
+            if not self._is_valid_email(str(message["recipient"]).strip()):
+                return self._create_error_response(1011, f"Invalid recipient email: {message['recipient']}")
+
+        # Fetch SMTP settings
         cache_key = f"clients:settings:{self.INTEGRATION_KEY}:{self.connected_integration_id}"
-
-        # --- настройки SMTP ---
         try:
-            settings_map = await self._get_settings(cache_key)
+            settings_map = await self._fetch_settings(cache_key)
             host = settings_map.get(self.SETTINGS_KEYS["host"])
             port_raw = settings_map.get(self.SETTINGS_KEYS["port"])
             from_email = settings_map.get(self.SETTINGS_KEYS["email"])
@@ -188,129 +175,119 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
             smtp_user = settings_map.get(self.SETTINGS_KEYS["user"]) or from_email
             default_subject = settings_map.get(self.SETTINGS_KEYS["default_subject"]) or "Уведомление"
 
-            # Размер пула: из настроек или дефолт
             pool_size_raw = settings_map.get(self.SETTINGS_KEYS["pool_size"])
             try:
                 pool_size = int(pool_size_raw) if pool_size_raw else self.DEFAULT_POOL_SIZE
             except Exception:
                 pool_size = self.DEFAULT_POOL_SIZE
             pool_size = max(1, min(self.MAX_POOL_SIZE, pool_size))
-            pool_size = min(pool_size, max(1, len(messages)))  # не больше числа писем
 
             if not all([host, port_raw, from_email, password]):
-                return self._error_response(
-                    1002,
-                    "Настройки интеграции не содержат один из обязательных параметров: "
-                    "SMTP_HOST, SMTP_PORT, SMTP_EMAIL, SMTP_PASSWORD",
-                )
-
+                return self._create_error_response(1002, "Missing SMTP settings (host/port/email/password)")
             try:
                 port = int(str(port_raw).strip())
             except Exception:
-                return self._error_response(1003, f"Некорректный порт SMTP: {port_raw}")
+                return self._create_error_response(1003, f"Invalid SMTP port: {port_raw}")
 
-        except Exception as e:
-            return self._error_response(1001, f"Ошибка при получении настроек: {e}")
+        except Exception as error:
+            return self._create_error_response(1001, f"Settings retrieval error: {error}")
 
-        # --- предвалидация и подготовка очереди ---
-        queue: asyncio.Queue[dict] = asyncio.Queue()
-        invalid_results: list[dict] = []
-        for item in messages:
-            recipient = (item.get("recipient") or "").strip()
-            if not self._is_valid_email(recipient):
-                invalid_results.append({
-                    "campaign_recipient_id": item.get("campaign_recipient_id"),
-                    "sms_id": item.get("sms_id"),
-                    "recipient": recipient,
-                    "error": "Некорректный email в поле recipient",
-                })
-                continue
-            await queue.put(item)
+        # ---------- отправка батчами (как в примере), внутри батча — параллельные воркеры ----------
+        results: List[Dict] = []
 
-        # Если все письма неверные — возвращаем сразу
-        if queue.empty():
+        async def send_batch(batch: Sequence[Dict], batch_index: int) -> Dict:
+            """
+            Отправляем один батч через пул из N параллельных SMTP-соединений.
+            Возвращаем структуру с результатами по батчу.
+            """
+            queue: asyncio.Queue[Dict] = asyncio.Queue()
+            for item in batch:
+                await queue.put(item)
+
+            # Не создаём больше соединений, чем писем в батче
+            local_pool = min(pool_size, max(1, queue.qsize()))
+            batch_results: List[Dict] = []
+
+            async def worker(wid: int):
+                smtp: Optional[aiosmtplib.SMTP] = None
+                try:
+                    smtp = await self._open_smtp(host, port, smtp_user, password, use_ssl)
+                    while True:
+                        try:
+                            item = await asyncio.wait_for(queue.get(), timeout=1.0)
+                        except asyncio.TimeoutError:
+                            break
+
+                        recipient = str(item["recipient"]).strip()
+                        body = item.get("message") or ""
+                        raw_subject = item.get("subject")
+                        subject = (raw_subject or (body[:70] + "…" if len(body) > 70 else body) or default_subject)
+
+                        email_msg = self._build_email_message(
+                            from_addr=from_email,
+                            to_addr=recipient,
+                            subject=subject,
+                            body=body,
+                            is_html=False,
+                        )
+
+                        try:
+                            send_result = await asyncio.wait_for(smtp.send_message(email_msg), timeout=self.COMMAND_TIMEOUT)
+                            batch_results.append({
+                                "campaign_recipient_id": item.get("campaign_recipient_id"),
+                                "sms_id": item.get("sms_id"),
+                                "recipient": recipient,
+                                "status": "sent",
+                                "response": str(send_result),
+                                "worker": wid,
+                            })
+                        except Exception as send_err:
+                            logger.error(f"[batch {batch_index} worker {wid}] send error to {recipient}: {send_err}")
+                            batch_results.append({
+                                "campaign_recipient_id": item.get("campaign_recipient_id"),
+                                "sms_id": item.get("sms_id"),
+                                "recipient": recipient,
+                                "error": str(send_err),
+                                "worker": wid,
+                            })
+                        finally:
+                            queue.task_done()
+                finally:
+                    if smtp:
+                        try:
+                            await asyncio.wait_for(smtp.quit(), timeout=2)
+                        except Exception:
+                            pass
+
+            tasks = [asyncio.create_task(worker(i + 1)) for i in range(local_pool)]
+            await queue.join()
+            for t in tasks:
+                try:
+                    await t
+                except Exception as e:
+                    logger.error(f"[batch {batch_index}] worker crashed: {e}")
+
+            sent = sum(1 for r in batch_results if r.get("status") == "sent")
             return {
-                "sent_messages": 0,
-                "total_messages": len(messages),
-                "details": invalid_results,
+                "batch_index": batch_index,
+                "sent": sent,
+                "total": len(batch),
+                "pool_used": local_pool,
+                "items": batch_results,
             }
 
-        # --- воркер отправки через своё SMTP-соединение ---
-        async def worker(worker_id: int, results: list[dict]):
-            smtp: Optional[aiosmtplib.SMTP] = None
+        for i in range(0, len(messages), self.BATCH_SIZE):
+            batch = messages[i:i + self.BATCH_SIZE]
+            logger.debug(f"Sending batch {i}-{i + len(batch)}")
             try:
-                smtp = await self._open_smtp(host, port, smtp_user, password, use_ssl)
-                while True:
-                    try:
-                        item = await asyncio.wait_for(queue.get(), timeout=1.0)
-                    except asyncio.TimeoutError:
-                        # очередь пуста для этого воркера
-                        break
+                result = await send_batch(batch, i)
+                results.append(result)
+            except Exception as error:
+                logger.error(f"Error sending batch {i}: {error}")
+                results.append({"error": str(error), "batch_index": i, "total": len(batch)})
 
-                    recipient = (item.get("recipient") or "").strip()
-                    body = item.get("message") or ""
-                    raw_subject = item.get("subject")
-                    # генерируем тему при отсутствии:
-                    subject = (raw_subject or (body[:70] + "…" if len(body) > 70 else body) or default_subject)
-
-                    email_msg = self._build_email_message(
-                        from_addr=from_email,
-                        to_addr=recipient,
-                        subject=subject,
-                        body=body,
-                        is_html=False,  # при необходимости переключите
-                    )
-
-                    try:
-                        send_result = await smtp.send_message(email_msg)
-                        results.append({
-                            "campaign_recipient_id": item.get("campaign_recipient_id"),
-                            "sms_id": item.get("sms_id"),
-                            "recipient": recipient,
-                            "status": "sent",
-                            "response": str(send_result),
-                            "worker": worker_id,
-                        })
-                    except Exception as send_err:
-                        logger.error(f"[worker {worker_id}] Ошибка отправки на {recipient}: {send_err}")
-                        results.append({
-                            "campaign_recipient_id": item.get("campaign_recipient_id"),
-                            "sms_id": item.get("sms_id"),
-                            "recipient": recipient,
-                            "error": str(send_err),
-                            "worker": worker_id,
-                        })
-                    finally:
-                        queue.task_done()
-            finally:
-                if smtp:
-                    try:
-                        await smtp.quit()
-                    except Exception as quit_err:
-                        logger.warning(f"[worker {worker_id}] Ошибка при закрытии SMTP-сессии: {quit_err}")
-
-        # --- запускаем пул воркеров ---
-        results: list[dict] = []
-        worker_tasks = [asyncio.create_task(worker(i + 1, results)) for i in range(pool_size)]
-
-        # дожидаемся обработки очереди и завершения воркеров
-        await queue.join()
-        for t in worker_tasks:
-            # если воркер ушёл в ожидание пустой очереди — он завершится сам по таймауту
-            try:
-                await t
-            except Exception as e:
-                logger.error(f"Воркер упал: {e}")
-
-        # добавляем ошибки валидации
-        results.extend(invalid_results)
-
-        sent_total = sum(1 for r in results if r.get("status") == "sent")
-        logger.info(f"Email-рассылка завершена. Отправлено: {sent_total} / {len(messages)} "
-                    f"(пул={pool_size})")
-
+        logger.info(f"Message sending completed. Processed {len(results)} batches")
         return {
-            "sent_messages": sent_total,
-            "total_messages": len(messages),
-            "details": results,
+            "sent_batches": len(results),
+            "details": results
         }
