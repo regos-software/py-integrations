@@ -249,9 +249,8 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
 
                         recipient = str(item["recipient"]).strip()
                         body = item.get("message") or ""
-                        raw_subject = item.get("subject")
-                        subject = (raw_subject or (body[:70] + "…" if len(body) > 70 else body) or default_subject)
-                        is_html = bool(item.get("is_html", False))
+                        subject = default_subject
+                        is_html = bool(item.get("is_html", True))
 
                         email_msg = self._build_email_message(
                             from_addr=from_email,
