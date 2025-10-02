@@ -52,8 +52,10 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
     DEFAULT_POOL_SIZE = 10
     MAX_POOL_SIZE = 20
 
-    # Управление размером батча (как в других интеграциях)
+    # Управление размером батча 
     BATCH_SIZE = 250
+    BATCH_JOIN_TIMEOUT = 15  # сек
+
 
     SETTINGS_TTL = settings.redis_cache_ttl
     SETTINGS_KEYS = {
@@ -195,23 +197,40 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
         # ---------- отправка батчами (как в примере), внутри батча — параллельные воркеры ----------
         results: List[Dict] = []
 
+        # внутри send_messages -> функция send_batch(batch, batch_index):
         async def send_batch(batch: Sequence[Dict], batch_index: int) -> Dict:
-            """
-            Отправляем один батч через пул из N параллельных SMTP-соединений.
-            Возвращаем структуру с результатами по батчу.
-            """
             queue: asyncio.Queue[Dict] = asyncio.Queue()
             for item in batch:
                 await queue.put(item)
 
-            # Не создаём больше соединений, чем писем в батче
             local_pool = min(pool_size, max(1, queue.qsize()))
             batch_results: List[Dict] = []
+
+            async def drain_queue_with_error(err_msg: str, worker_label: str = "init") -> int:
+                drained = 0
+                while True:
+                    try:
+                        item = queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    batch_results.append({
+                        "campaign_recipient_id": item.get("campaign_recipient_id"),
+                        "sms_id": item.get("sms_id"),
+                        "recipient": item.get("recipient"),
+                        "error": err_msg,
+                        "worker": worker_label,
+                    })
+                    queue.task_done()
+                    drained += 1
+                return drained
 
             async def worker(wid: int):
                 smtp: Optional[aiosmtplib.SMTP] = None
                 try:
+                    logger.debug(f"[batch {batch_index} w{wid}] opening SMTP {host}:{port} ssl={use_ssl}")
+                    # если connect/login упадут — перехватываем ниже
                     smtp = await self._open_smtp(host, port, smtp_user, password, use_ssl)
+                    logger.debug(f"[batch {batch_index} w{wid}] SMTP opened")
                     while True:
                         try:
                             item = await asyncio.wait_for(queue.get(), timeout=1.0)
@@ -224,11 +243,7 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
                         subject = (raw_subject or (body[:70] + "…" if len(body) > 70 else body) or default_subject)
 
                         email_msg = self._build_email_message(
-                            from_addr=from_email,
-                            to_addr=recipient,
-                            subject=subject,
-                            body=body,
-                            is_html=False,
+                            from_addr=from_email, to_addr=recipient, subject=subject, body=body, is_html=False,
                         )
 
                         try:
@@ -242,7 +257,7 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
                                 "worker": wid,
                             })
                         except Exception as send_err:
-                            logger.error(f"[batch {batch_index} worker {wid}] send error to {recipient}: {send_err}")
+                            logger.error(f"[batch {batch_index} w{wid}] send error to {recipient}: {send_err}")
                             batch_results.append({
                                 "campaign_recipient_id": item.get("campaign_recipient_id"),
                                 "sms_id": item.get("sms_id"),
@@ -252,6 +267,11 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
                             })
                         finally:
                             queue.task_done()
+
+                except Exception as open_err:
+                    # Критично: воркер не открыл SMTP — дренируем очередь, иначе queue.join() зависнет
+                    logger.error(f"[batch {batch_index} w{wid}] SMTP open failed: {open_err}")
+                    await drain_queue_with_error(f"SMTP open failed: {open_err}", worker_label=f"w{wid}")
                 finally:
                     if smtp:
                         try:
@@ -260,12 +280,19 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
                             pass
 
             tasks = [asyncio.create_task(worker(i + 1)) for i in range(local_pool)]
-            await queue.join()
-            for t in tasks:
-                try:
-                    await t
-                except Exception as e:
-                    logger.error(f"[batch {batch_index}] worker crashed: {e}")
+
+            # ждём завершение очереди, но с таймаутом
+            try:
+                await asyncio.wait_for(queue.join(), timeout=self.BATCH_JOIN_TIMEOUT)
+            except asyncio.TimeoutError:
+                logger.error(f"[batch {batch_index}] queue.join() timeout after {self.BATCH_JOIN_TIMEOUT}s, cancelling workers")
+                for t in tasks:
+                    t.cancel()
+                # дренируем остатки очереди, чтобы не потерять письма
+                await drain_queue_with_error("Batch join timeout; cancelled workers", worker_label="timeout")
+
+            # дожимаем воркеров (не упадём, даже если кто-то уже отменён)
+            await asyncio.gather(*tasks, return_exceptions=True)
 
             sent = sum(1 for r in batch_results if r.get("status") == "sent")
             return {
@@ -276,18 +303,3 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
                 "items": batch_results,
             }
 
-        for i in range(0, len(messages), self.BATCH_SIZE):
-            batch = messages[i:i + self.BATCH_SIZE]
-            logger.debug(f"Sending batch {i}-{i + len(batch)}")
-            try:
-                result = await send_batch(batch, i)
-                results.append(result)
-            except Exception as error:
-                logger.error(f"Error sending batch {i}: {error}")
-                results.append({"error": str(error), "batch_index": i, "total": len(batch)})
-
-        logger.info(f"Message sending completed. Processed {len(results)} batches")
-        return {
-            "sent_batches": len(results),
-            "details": results
-        }
