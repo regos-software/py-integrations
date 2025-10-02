@@ -17,6 +17,7 @@ from core.logger import setup_logger
 from clients.getsms.main import GetSmsIntegration
 from clients.eskiz_sms.main import EskizSmsIntegration
 from clients.telegram_bot_notification.main import TelegramBotNotificationIntegration
+from clients.email_sender.main import EmailSenderIntegration
 
 router = APIRouter()
 logger = setup_logger("clients_route")
@@ -26,6 +27,7 @@ INTEGRATION_CLASSES = {
     "getsms": GetSmsIntegration,
     "eskiz_sms": EskizSmsIntegration,
     "regos_telegram_notifier": TelegramBotNotificationIntegration,
+    "email_sender": EmailSenderIntegration
 }
 
 # Служебные заголовки, которые не нужно прокидывать обработчикам
