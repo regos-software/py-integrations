@@ -262,16 +262,27 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
                         )
 
                         try:
-                            send_result = await asyncio.wait_for(
-                                smtp.send_message(email_msg, mail_from=from_email, rcpt_to=[recipient]),
+                            send_status, envelope_id = await asyncio.wait_for(
+                                smtp.send_message(email_msg, sender=from_email, recipients=[recipient]),
                                 timeout=self.COMMAND_TIMEOUT,
                             )
+                            accepted = {
+                                rcpt: {
+                                    "code": resp.code,
+                                    "message": (resp.message or b"").decode("utf-8", errors="ignore"),
+                                }
+                                for rcpt, resp in (send_status or {}).items()
+                            }
+
                             batch_results.append({
                                 "campaign_recipient_id": item.get("campaign_recipient_id"),
                                 "sms_id": item.get("sms_id"),
                                 "recipient": recipient,
-                                "status": "sent",
-                                "response": str(send_result),
+                                "status": "sent" if accepted else "unknown",
+                                "response": {
+                                    "accepted": accepted,          # пер-адресатный код SMTP (обычно 250)
+                                    "envelope_id": envelope_id,    # id транзакции, если сервер вернул
+                                },
                                 "worker": wid,
                             })
                         except Exception as send_err:
