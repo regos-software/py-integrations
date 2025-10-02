@@ -32,12 +32,15 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
         "campaign_recipient_id": <int|null>,
         "sms_id": <int|null>,
         "recipient": "<email>",
-        "message": "<text>"
+        "message": "<text>",
+        "subject": "<string|optional>",
+        "is_html": <bool|optional>
     }
 
-    Возвращаем как в примере Telegram:
+    Возвращаем:
     {
         "sent_batches": <int>,
+        "sent_total": <int>,
         "details": [ <result per batch>, ... ]
     }
     """
@@ -52,10 +55,9 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
     DEFAULT_POOL_SIZE = 10
     MAX_POOL_SIZE = 20
 
-    # Управление размером батча 
+    # Управление размером батча
     BATCH_SIZE = 250
     BATCH_JOIN_TIMEOUT = 15  # сек
-
 
     SETTINGS_TTL = settings.redis_cache_ttl
     SETTINGS_KEYS = {
@@ -117,7 +119,14 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
     def _is_valid_email(self, addr: str) -> bool:
         return bool(self.EMAIL_RE.match(addr or ""))
 
-    def _build_email_message(self, from_addr: str, to_addr: str, subject: str, body: str, is_html: bool = False) -> EmailMessage:
+    def _build_email_message(
+        self,
+        from_addr: str,
+        to_addr: str,
+        subject: str,
+        body: str,
+        is_html: bool = False,
+    ) -> EmailMessage:
         msg = EmailMessage()
         msg["From"] = from_addr
         msg["To"] = to_addr
@@ -157,6 +166,9 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
             return self._create_error_response(1000, "No connected_integration_id specified")
 
         # Validate messages
+        if not messages:
+            return self._create_error_response(1004, "Empty messages payload")
+
         for message in messages:
             if "message" not in message or not message["message"]:
                 return self._create_error_response(1009, f"Message missing text: {message}")
@@ -194,10 +206,9 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
         except Exception as error:
             return self._create_error_response(1001, f"Settings retrieval error: {error}")
 
-        # ---------- отправка батчами (как в примере), внутри батча — параллельные воркеры ----------
+        # ---------- отправка батчами, внутри батча — параллельные воркеры ----------
         results: List[Dict] = []
 
-        # внутри send_messages -> функция send_batch(batch, batch_index):
         async def send_batch(batch: Sequence[Dict], batch_index: int) -> Dict:
             queue: asyncio.Queue[Dict] = asyncio.Queue()
             for item in batch:
@@ -228,7 +239,6 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
                 smtp: Optional[aiosmtplib.SMTP] = None
                 try:
                     logger.debug(f"[batch {batch_index} w{wid}] opening SMTP {host}:{port} ssl={use_ssl}")
-                    # если connect/login упадут — перехватываем ниже
                     smtp = await self._open_smtp(host, port, smtp_user, password, use_ssl)
                     logger.debug(f"[batch {batch_index} w{wid}] SMTP opened")
                     while True:
@@ -241,13 +251,21 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
                         body = item.get("message") or ""
                         raw_subject = item.get("subject")
                         subject = (raw_subject or (body[:70] + "…" if len(body) > 70 else body) or default_subject)
+                        is_html = bool(item.get("is_html", False))
 
                         email_msg = self._build_email_message(
-                            from_addr=from_email, to_addr=recipient, subject=subject, body=body, is_html=False,
+                            from_addr=from_email,
+                            to_addr=recipient,
+                            subject=subject,
+                            body=body,
+                            is_html=is_html,
                         )
 
                         try:
-                            send_result = await asyncio.wait_for(smtp.send_message(email_msg), timeout=self.COMMAND_TIMEOUT)
+                            send_result = await asyncio.wait_for(
+                                smtp.send_message(email_msg, mail_from=from_email, rcpt_to=[recipient]),
+                                timeout=self.COMMAND_TIMEOUT,
+                            )
                             batch_results.append({
                                 "campaign_recipient_id": item.get("campaign_recipient_id"),
                                 "sms_id": item.get("sms_id"),
@@ -279,6 +297,7 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
                         except Exception:
                             pass
 
+            logger.info(f"[batch {batch_index}] starting with pool={local_pool}, total_items={queue.qsize()}")
             tasks = [asyncio.create_task(worker(i + 1)) for i in range(local_pool)]
 
             # ждём завершение очереди, но с таймаутом
@@ -295,6 +314,7 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
             await asyncio.gather(*tasks, return_exceptions=True)
 
             sent = sum(1 for r in batch_results if r.get("status") == "sent")
+            logger.info(f"[batch {batch_index}] done: sent={sent}/{len(batch)}, pool_used={local_pool}")
             return {
                 "batch_index": batch_index,
                 "sent": sent,
@@ -303,3 +323,41 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
                 "items": batch_results,
             }
 
+        # ---- разбиение на батчи и запуск ----
+        batches = [messages[i: i + self.BATCH_SIZE] for i in range(0, len(messages), self.BATCH_SIZE)]
+        for idx, batch in enumerate(batches, 1):
+            try:
+                batch_result = await send_batch(batch, idx)
+            except Exception as e:
+                logger.exception(f"[batch {idx}] crashed: {e}")
+                batch_result = {
+                    "batch_index": idx,
+                    "sent": 0,
+                    "total": len(batch),
+                    "pool_used": 0,
+                    "items": [
+                        {
+                            "campaign_recipient_id": m.get("campaign_recipient_id"),
+                            "sms_id": m.get("sms_id"),
+                            "recipient": m.get("recipient"),
+                            "error": f"batch crash: {e}",
+                            "worker": None,
+                        }
+                        for m in batch
+                    ],
+                }
+            results.append(batch_result)
+
+        # ---- агрегированный ответ ----
+        total_sent = sum(b["sent"] for b in results)
+        response_payload = {
+            "sent_batches": len(results),
+            "sent_total": total_sent,
+            "details": results,
+        }
+
+        # Если ничего не отправилось и нет явных item-ошибок, считаем это общей ошибкой.
+        if not results:
+            return self._create_error_response(1012, "No batches processed")
+
+        return IntegrationSuccessResponse(result=response_payload)
