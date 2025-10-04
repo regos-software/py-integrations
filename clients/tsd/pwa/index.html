@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1, viewport-fit=cover"
+  />
+  <meta name="theme-color" content="#111827" />
+  <meta name="format-detection" content="telephone=no" />
+  <title>TSD • PWA</title>
+
+  <!-- PWA -->
+  <link rel="manifest" href="/clients/tsd?pwa=manifest" />
+  <link rel="icon" href="/clients/tsd?asset=icon-192.png" sizes="192x192" />
+  <link rel="icon" href="/clients/tsd?asset=icon-512.png" sizes="512x512" />
+  <link rel="apple-touch-icon" href="/clients/tsd?asset=icon-192.png" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+
+  <!-- Styles -->
+  <link rel="stylesheet" href="/clients/tsd?asset=app.css" />
+
+  <!-- App logic (expects elements with ids used below) -->
+  <script defer src="/clients/tsd?asset=app.js"></script>
+
+  <!-- Fallback for very old browsers / no JS -->
+  <noscript>
+    <style>
+      .noscript { background:#111827; color:#fff; padding:12px; text-align:center; }
+    </style>
+    <div class="noscript">Для работы приложения нужен JavaScript.</div>
+  </noscript>
+</head>
+<body>
+  <main class="container">
+    <!-- Header / Status -->
+    <div class="card">
+      <h1>TSD</h1>
+      <p class="muted">
+        token: <span id="token">—</span>
+      </p>
+
+      <div style="display:flex; gap:12px; flex-wrap:wrap; margin-top:12px;">
+        <button id="ping" class="btn">Ping API</button>
+        <!-- примеры быстрых действий (зависят от вашей реализации handle_external) -->
+        <!-- <button id="login" class="btn secondary">Login</button> -->
+      </div>
+    </div>
+
+    <!-- Demo form -->
+    <div class="card">
+      <h1>Демо-форма</h1>
+      <form id="demo-form">
+        <label for="text">Текст</label>
+        <textarea id="text" name="text" rows="3" placeholder="Введите сообщение..."></textarea>
+        <div style="margin-top:12px;">
+          <button type="submit" class="btn secondary">Отправить</button>
+        </div>
+      </form>
+    </div>
+
+    <!-- Output -->
+    <div class="card">
+      <h1>Ответ</h1>
+      <pre id="out">{}</pre>
+      <p class="muted" style="margin-top:8px;">
+        Ответы приходят из <code>POST /clients/tsd/external</code>.
+      </p>
+    </div>
+
+    <!-- Help -->
+    <div class="card">
+      <h1>Справка</h1>
+      <p class="muted">
+        Это PWA-клиент для интеграции TSD. Токен (connected_integration_id) передаётся
+        бэкендом через <code>window.__CI__</code> или параметром URL <code>?ci=...</code>.
+        Вызовы выполняются в <code>/clients/tsd/external</code> с заголовком
+        <code>Connected-Integration-Id</code>.
+      </p>
+      <p class="muted">
+        Service Worker регистрируется с областью <code>/clients/</code>, чтобы приложение
+        могло работать офлайн (базово).
+      </p>
+    </div>
+  </main>
+</body>
+</html>
