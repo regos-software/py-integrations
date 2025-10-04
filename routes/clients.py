@@ -5,6 +5,7 @@ from typing import Optional, Union, Any, Dict
 from fastapi import APIRouter, Header, Request, Path, Response
 from starlette.responses import JSONResponse
 
+from clients.tsd.main import TsdIntegration
 from schemas.integration.base import (
     IntegrationRequest,
     IntegrationSuccessResponse,
@@ -27,7 +28,8 @@ INTEGRATION_CLASSES = {
     "getsms": GetSmsIntegration,
     "eskiz_sms": EskizSmsIntegration,
     "regos_telegram_notifier": TelegramBotNotificationIntegration,
-    "email_sender": EmailSenderIntegration
+    "email_sender": EmailSenderIntegration,
+    "tsd": TsdIntegration,  
 }
 
 # Служебные заголовки, которые не нужно прокидывать обработчикам
