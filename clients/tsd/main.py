@@ -28,7 +28,7 @@ from schemas.integration.integration_base import IntegrationBase
 logger = setup_logger("tsd")
 
 
-class TsdIntegration(IntegrationBase, ClientBase):
+class TsdIntegration(IntegrationBase):
 
     INTEGRATION_KEY = "tsd"
 
