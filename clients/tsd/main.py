@@ -150,11 +150,11 @@ class TsdIntegration(ClientBase):
         )
 
         # 1) assets: ?asset=...
-        asset_rel = query.get("asset")
+        asset_rel = query.get("assets")
         if asset_rel:
             file_path = self._safe_join(self.ASSETS_DIR, str(asset_rel))
             if not file_path or not file_path.exists():
-                return Response("asset not found", status_code=404)
+                return Response("assets not found", status_code=404)
             return FileResponse(str(file_path))  # content-type определится автоматически
 
         # 2) service worker: ?pwa=sw
