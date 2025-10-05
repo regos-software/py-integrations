@@ -6,17 +6,14 @@ from email.message import EmailMessage
 
 from pathlib import Path
 from fastapi.encoders import jsonable_encoder
+from starlette.responses import JSONResponse 
 from starlette.responses import FileResponse, HTMLResponse, Response, RedirectResponse
 import json
 
 from core.api.regos_api import RegosAPI
 from schemas.api.docs.purchase import DocPurchaseGetRequest
 from schemas.api.integrations.connected_integration_setting import ConnectedIntegrationSettingRequest
-from schemas.integration.base import (
-    IntegrationSuccessResponse,
-    IntegrationErrorResponse,
-    IntegrationErrorModel,
-)
+
 
 from clients.base import ClientBase
 from core.logger import setup_logger
@@ -53,8 +50,9 @@ class TsdIntegration(ClientBase):
         except Exception:
             return None
         
-    def _create_error_response(self, code: int, description: str) -> IntegrationErrorResponse:
-        return IntegrationErrorResponse(result=IntegrationErrorModel(error=code, description=description))
+    def _json_error(self, status: int, description: str):
+        return JSONResponse(status_code=status, content={"error": status, "description": description})
+                                                     
 
     async def _fetch_settings(self, cache_key: str) -> dict:
         # 1) Redis
@@ -90,14 +88,10 @@ class TsdIntegration(ClientBase):
     # -------------------- public API --------------------
 
     async def handle_external(self, data: dict) -> Any:
-        """
-        POST API для PWA:
-          body: {"action": "...", "params": {...}}
-        """
         try:
             method = str(data.get("method") or "").upper()
             if method != "POST":
-                return self._create_error_response(405, "Method not allowed; use POST")
+                return self._json_error(405, "Method not allowed; use POST")
 
             headers: Dict[str, str] = data.get("headers") or {}
             ci = headers.get("Connected-Integration-Id") or getattr(self, "connected_integration_id", None)
@@ -107,15 +101,15 @@ class TsdIntegration(ClientBase):
             params = body.get("params") or {}
 
             if action in ("", "ping"):
-                return IntegrationSuccessResponse(result={"pong": True, "ci": ci})
+                return {"result": {"pong": True, "ci": ci}}
 
             if action == "login":
-                return IntegrationSuccessResponse(result={"status": "logged_in", "ci": ci})
+                return {"result": {"status": "logged_in", "ci": ci}}
 
             if action == "send":
-                return IntegrationSuccessResponse(result={"status": "sent", "ci": ci})
+                return {"result": {"status": "sent", "ci": ci}}
 
-            # -------------------- NEW: список документов --------------------
+            # список документов
             if action == "purchase_list":
                 page = int(params.get("page", 1) or 1)
                 page_size = int(params.get("page_size", 20) or 20)
@@ -133,110 +127,99 @@ class TsdIntegration(ClientBase):
                     )
                     docs = await api.docs.purchase.get(req)
 
-                # без маппинга: возвращаем «как есть»
-                return IntegrationSuccessResponse(result={
+                return {"result": {
                     "items": jsonable_encoder(docs),
                     "page": page,
                     "page_size": page_size
-                })
+                }}
 
-            # -------------------- NEW: один документ -----------------------
+            # один документ
             if action == "purchase_get":
                 doc_id = params.get("doc_id")
                 if not doc_id:
-                    return IntegrationErrorResponse(
-                        result=IntegrationErrorModel(error=400, description="doc_id is required")
-                    )
+                    return self._json_error(400, "doc_id is required")
 
                 async with RegosAPI(connected_integration_id=ci) as api:
                     doc = await api.docs.purchase.get_by_id(int(doc_id))
 
                 if not doc:
-                    return IntegrationErrorResponse(
-                        result=IntegrationErrorModel(error=404, description=f"DocPurchase id={doc_id} not found")
-                    )
+                    return self._json_error(404, f"DocPurchase id={doc_id} not found")
 
-                return IntegrationSuccessResponse(result={
+                return {"result": {
                     "doc": jsonable_encoder(doc),
-                    # оставлю поле для совместимости с UI; можешь убрать, если не нужно
                     "operations": []
-                })
+                }}
 
-            return IntegrationErrorResponse(
-                result=IntegrationErrorModel(error=400, description=f"Unknown action '{action}'")
-            )
+            return self._json_error(400, f"Unknown action '{action}'")
+
         except Exception as e:
             logger.exception("handle_external error")
-            return IntegrationErrorResponse(
-                result=IntegrationErrorModel(error=500, description=f"Server error: {e}")
-            )
-
+            return self._json_error(500, f"Server error: {e}")
 
 
     async def handle_ui(self, envelope: dict) -> Any:
-        """
-        UI (GET) — отдаём PWA из папки рядом:
-          /clients/tsd?pwa=sw          -> sw.js (application/javascript)
-          /clients/tsd?pwa=manifest    -> manifest.webmanifest (application/manifest+json)
-          /clients/tsd?asset=icon.png  -> assets/icon.png (content-type по расширению)
-          /clients/tsd[?ci=TOKEN]      -> index.html (+вставим window.__CI__=TOKEN)
-        """
         method = str(envelope.get("method") or "").upper()
         if method != "GET":
-            return self._create_error_response(405, "Method not allowed; use GET")
+            return self._json_error(405, "Method not allowed; use GET")
 
         headers: Dict[str, str] = envelope.get("headers") or {}
         query: Dict[str, Any] = envelope.get("query") or {}
 
-        # token из заголовка/квери/контекста
         token = (
             headers.get("Connected-Integration-Id")
             or query.get("ci")
             or getattr(self, "connected_integration_id", None)
         )
 
-        # 1) assets: ?asset=...
+        # assets (?asset=...)
         asset_rel = query.get("assets") or query.get("asset")
         if asset_rel:
             file_path = self._safe_join(self.ASSETS_DIR, str(asset_rel))
             if not file_path or not file_path.exists():
                 return Response("asset not found", status_code=404)
-            return FileResponse(str(file_path))
+            # Явно ставим content-type для .js/.css
+            mt = None
+            ext = file_path.suffix.lower()
+            if ext == ".js":
+                mt = "application/javascript"
+            elif ext == ".css":
+                mt = "text/css"
+            elif ext in (".webmanifest", ".json"):
+                mt = "application/manifest+json" if ext == ".webmanifest" else "application/json"
+            return FileResponse(str(file_path), media_type=mt)
 
-        # 2) service worker: ?pwa=sw
+        # service worker
         if str(query.get("pwa", "")).lower() == "sw":
             sw_path = self.PWA_DIR / "sw.js"
             if not sw_path.exists():
                 return Response("sw.js not found", status_code=404)
             return FileResponse(str(sw_path), media_type="application/javascript")
 
-        # 3) manifest: ?pwa=manifest
+        # manifest (ОТНОСИТЕЛЬНЫЕ пути!)
         if str(query.get("pwa", "")).lower() == "manifest":
             mf_path = self.PWA_DIR / "manifest.webmanifest"
             if mf_path.exists():
                 return FileResponse(str(mf_path), media_type="application/manifest+json")
-            # fallback: сгенерим минимальный manifest на лету
             manifest = {
                 "name": "TSD",
                 "short_name": "TSD",
                 "start_url": ".",
-                "scope": "/clients/",
+                "scope": "./",
                 "display": "standalone",
                 "background_color": "#ffffff",
                 "theme_color": "#111827",
                 "icons": [
-                    {"src": "/clients/tsd?asset=icon-192.png", "sizes": "192x192", "type": "image/png"},
-                    {"src": "/clients/tsd?asset=icon-512.png", "sizes": "512x512", "type": "image/png"},
+                    {"src": "?asset=icon-192.png", "sizes": "192x192", "type": "image/png"},
+                    {"src": "?asset=icon-512.png", "sizes": "512x512", "type": "image/png"},
                 ],
             }
             return Response(json.dumps(manifest, ensure_ascii=False), media_type="application/manifest+json")
 
-        # 4) index.html (по умолчанию)
+        # index.html (+ window.__CI__)
         index_path = self.PWA_DIR / "index.html"
         if not index_path.exists():
             return Response("index.html not found", status_code=500)
 
-        # читаем как текст и мягко внедрим токен (если есть)
         try:
             html = index_path.read_text(encoding="utf-8")
         except Exception:
@@ -244,14 +227,11 @@ class TsdIntegration(ClientBase):
 
         inject = ""
         if token:
-            # window.__CI__ доступен приложению
             safe_token = json.dumps(str(token))
             inject = f"<script>window.__CI__={safe_token};</script>"
 
-        if "</body>" in html.lower():
-            # простая вставка перед </body>
-            # ищем закрывающий тег без учета регистра
-            lower = html.lower()
+        lower = html.lower()
+        if "</body>" in lower:
             pos = lower.rfind("</body>")
             html = html[:pos] + inject + html[pos:]
         else:
