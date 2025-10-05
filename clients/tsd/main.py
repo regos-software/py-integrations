@@ -12,6 +12,7 @@ import json
 
 from core.api.regos_api import RegosAPI
 from schemas.api.docs.purchase import DocPurchaseGetRequest
+from schemas.api.docs.purchase_operation import PurchaseOperationAddRequest, PurchaseOperationDeleteItem, PurchaseOperationEditItem
 from schemas.api.integrations.connected_integration_setting import ConnectedIntegrationSettingRequest
 
 
@@ -100,6 +101,7 @@ class TsdIntegration(ClientBase):
             action = str(body.get("action") or "").lower()
             params = body.get("params") or {}
 
+            # --- ping/login/send ---
             if action in ("", "ping"):
                 return {"result": {"pong": True, "ci": ci}}
 
@@ -109,7 +111,7 @@ class TsdIntegration(ClientBase):
             if action == "send":
                 return {"result": {"status": "sent", "ci": ci}}
 
-            # список документов
+            # --- список документов ---
             if action == "purchase_list":
                 page = int(params.get("page", 1) or 1)
                 page_size = int(params.get("page_size", 20) or 20)
@@ -133,22 +135,76 @@ class TsdIntegration(ClientBase):
                     "page_size": page_size
                 }}
 
-            # один документ
+            # --- один документ + операции (ЕДИНСТВЕННАЯ ветка purchase_get) ---
             if action == "purchase_get":
-                doc_id = params.get("doc_id")
-                if not doc_id:
+                raw_id = params.get("doc_id")
+                if raw_id is None:
                     return self._json_error(400, "doc_id is required")
+                try:
+                    doc_id = int(raw_id)
+                except (TypeError, ValueError):
+                    return self._json_error(400, "doc_id must be integer")
 
                 async with RegosAPI(connected_integration_id=ci) as api:
-                    doc = await api.docs.purchase.get_by_id(int(doc_id))
+                    doc = await api.docs.purchase.get_by_id(doc_id)
+                    ops = await api.docs.purchase_operation.get_by_document_id(doc_id)
 
                 if not doc:
                     return self._json_error(404, f"DocPurchase id={doc_id} not found")
 
                 return {"result": {
                     "doc": jsonable_encoder(doc),
-                    "operations": []
+                    "operations": jsonable_encoder(ops)
                 }}
+
+            # --- операции документа ---
+            if action == "purchase_ops_get":
+                try:
+                    doc_id = int(params.get("doc_id"))
+                except (TypeError, ValueError):
+                    return self._json_error(400, "doc_id must be integer")
+                async with RegosAPI(connected_integration_id=ci) as api:
+                    ops = await api.docs.purchase_operation.get_by_document_id(doc_id)
+                return {"result": {"items": jsonable_encoder(ops)}}
+
+            if action == "purchase_ops_add":
+                payload = params.get("items") or []
+                if not isinstance(payload, list) or not payload:
+                    return self._json_error(400, "items (array) required")
+                async with RegosAPI(connected_integration_id=ci) as api:
+                    res = await api.docs.purchase_operation.add(
+                        [PurchaseOperationAddRequest.model_validate(x) for x in payload]
+                    )
+                return {"result": jsonable_encoder(res)}
+
+            if action == "purchase_ops_edit":
+                payload = params.get("items") or []
+                if not isinstance(payload, list) or not payload:
+                    return self._json_error(400, "items (array) required")
+                async with RegosAPI(connected_integration_id=ci) as api:
+                    res = await api.docs.purchase_operation.edit(
+                        [PurchaseOperationEditItem.model_validate(x) for x in payload]
+                    )
+                return {"result": jsonable_encoder(res)}
+
+            if action == "purchase_ops_delete":
+                payload = params.get("items") or []
+                if not isinstance(payload, list) or not payload:
+                    return self._json_error(400, "items (array) required")
+                async with RegosAPI(connected_integration_id=ci) as api:
+                    res = await api.docs.purchase_operation.delete(
+                        [PurchaseOperationDeleteItem.model_validate(x) for x in payload]
+                    )
+                return {"result": jsonable_encoder(res)}
+
+            # --- поиск номенклатуры ---
+            if action == "product_search":
+                q = (params.get("q") or "").strip()
+                if not q:
+                    return {"result": {"items": []}}
+                async with RegosAPI(connected_integration_id=ci) as api:
+                    items = await api.refrences.item.search_and_get(q)
+                return {"result": {"items": jsonable_encoder(items)}}
 
             return self._json_error(400, f"Unknown action '{action}'")
 

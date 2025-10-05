@@ -1,21 +1,53 @@
 // views/op_new.js — без import; получает ctx
-let mediaStream=null, scanTimer=null, pickedProduct=null;
+let mediaStream = null, scanTimer = null, pickedProduct = null;
 
 export async function screenOpNew(ctx, id) {
   await ctx.loadView("op_new");
   pickedProduct = null;
 
-  ctx.$("btn-scan").onclick      = startScan;
-  ctx.$("btn-close-scan").onclick= stopScan;
-  ctx.$("product-query").addEventListener("keydown", (e)=>{ if (e.key==="Enter"){ e.preventDefault(); doProductSearch(e.target.value.trim()); }});
-  ctx.$("btn-op-cancel").onclick = ()=>{ location.hash = `#/doc/${id}`; };
-  ctx.$("btn-op-save").onclick   = ()=>saveOp(id);
+  // --- helpers: UI busy/notify ---
+  function setBusy(b) {
+    const ids = ["btn-scan","btn-close-scan","product-query","barcode","qty","cost","price","expdate","btn-op-save","btn-op-cancel"];
+    ids.forEach(k => {
+      const el = ctx.$(k);
+      if (!el) return;
+      if ("disabled" in el) el.disabled = b;
+    });
+    const save = ctx.$("btn-op-save");
+    if (save) save.textContent = b ? "Сохранение..." : "Сохранить";
+  }
+  function toast(msg) {
+    // простой тост без зависимостей
+    let t = document.getElementById("toast");
+    if (!t) {
+      t = document.createElement("div");
+      t.id = "toast";
+      t.style.cssText = "position:fixed;left:50%;bottom:16px;transform:translateX(-50%);max-width:90%;background:#10b981;color:#fff;padding:10px 14px;border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,.2);z-index:9999;font-size:14px";
+      document.body.appendChild(t);
+    }
+    t.textContent = msg || "";
+    t.style.display = "block";
+    setTimeout(()=>{ t.style.display = "none"; }, 2000);
+  }
+
+  // --- wire UI ---
+  ctx.$("btn-scan").onclick       = startScan;
+  ctx.$("btn-close-scan").onclick = stopScan;
+  ctx.$("product-query").addEventListener("keydown", (e)=>{
+    if (e.key==="Enter"){
+      e.preventDefault();
+      doProductSearch(e.target.value.trim());
+    }
+  });
+  ctx.$("btn-op-cancel").onclick  = ()=>{ location.hash = `#/doc/${id}`; };
+  ctx.$("btn-op-save").onclick    = ()=>saveOp(id);
 
   let detector = null;
   if ("BarcodeDetector" in window) {
     try { detector = new BarcodeDetector({ formats: ["ean_13","ean_8","code_128","upc_a","upc_e","itf"] }); } catch {}
   }
 
+  // --- scan ---
   async function startScan(){
     ctx.$("scanner").classList.remove("hidden");
     try {
@@ -40,7 +72,10 @@ export async function screenOpNew(ctx, id) {
           }
         } catch {}
       }, 500);
-    } catch { alert("Не удалось открыть камеру. Введите штрих-код вручную."); ctx.$("scanner").classList.add("hidden"); }
+    } catch {
+      alert("Не удалось открыть камеру. Введите штрих-код вручную.");
+      ctx.$("scanner").classList.add("hidden");
+    }
   }
   function stopScan(){
     if (scanTimer) { clearInterval(scanTimer); scanTimer=null; }
@@ -52,8 +87,10 @@ export async function screenOpNew(ctx, id) {
     await doProductSearch(code, true);
   }
 
+  // --- search & pick ---
   async function doProductSearch(q, autoPick=false){
-    ctx.$("product-results").innerHTML = `<div class="muted">Поиск...</div>`;
+    const box = ctx.$("product-results");
+    box.innerHTML = `<div class="muted">Поиск...</div>`;
     const { data } = await ctx.api("product_search", { q, doc_id: id });
     const items = data?.result?.items || [];
     renderResults(items, autoPick);
@@ -66,11 +103,12 @@ export async function screenOpNew(ctx, id) {
     items.forEach(p=>{
       const el = document.createElement("div");
       el.className = "item";
+      const codeOrBarcode = p.code ?? p.base_barcode ?? (p.barcode_list ? String(p.barcode_list).split(",")[0]?.trim() : "");
       el.innerHTML = `
         <div class="row">
           <div>
             <div><strong>${ctx.esc(p.name||"")}</strong></div>
-            <div class="muted">${ctx.esc(p.code || p.barcode || "")}</div>
+            <div class="muted">${ctx.esc(codeOrBarcode||"")}</div>
           </div>
           <button class="btn">Выбрать</button>
         </div>`;
@@ -79,21 +117,74 @@ export async function screenOpNew(ctx, id) {
     });
   }
   function pick(p){
-    pickedProduct = { id: p.id || p.uuid || p.code, name: p.name, barcode: p.barcode || "" };
+    // сохраняем всё, что может пригодиться при добавлении (в т.ч. vat)
+    const barcode = p.base_barcode || (p.barcode_list ? String(p.barcode_list).split(",")[0]?.trim() : "");
+    pickedProduct = {
+      id: p.id || p.uuid || p.code,
+      name: p.name,
+      barcode,
+      vat_value: p?.vat?.value ?? 0
+    };
     ctx.$("product-picked").classList.remove("hidden");
     ctx.$("picked-name").textContent = pickedProduct.name || "—";
     ctx.$("picked-code").textContent = pickedProduct.barcode || "";
+    // фокус на количество для быстрого ввода
+    setTimeout(()=>{ ctx.$("qty")?.focus(); }, 0);
   }
+
+  // --- save ---
   async function saveOp(docId){
     if (!pickedProduct) return alert("Выберите товар");
-    const qty = ctx.toNumber(ctx.$("qty").value);
-    const cost = ctx.toNumber(ctx.$("cost").value);
+    const qty   = ctx.toNumber(ctx.$("qty").value);
+    const cost  = ctx.toNumber(ctx.$("cost").value);
     const price = ctx.toNumber(ctx.$("price").value);
-    const expdate = ctx.$("expdate").value || null;
     if (!qty || qty<=0) return alert("Введите количество");
-    const payload = { doc_id: docId, product_id: pickedProduct.id, qty, cost, price, expdate, barcode: ctx.$("barcode").value.trim() || pickedProduct.barcode || null };
-    const { ok, data } = await ctx.api("purchase_add_operation", payload);
-    if (ok && data?.result?.status==="ok"){ alert("Операция добавлена"); location.hash = `#/doc/${docId}`; }
-    else { alert("Не удалось сохранить операцию"); }
+
+    // минимальный VAT: берём из товара, иначе 0
+    const vat_value = Number(pickedProduct.vat_value ?? 0);
+
+    const item = {
+      document_id: Number(docId),
+      item_id: Number(pickedProduct.id),
+      quantity: qty,
+      cost: cost,
+      price: price || undefined,
+      vat_value
+      // description: можно добавить из отдельного поля при необходимости
+    };
+
+    setBusy(true);
+    try {
+      const { ok, data } = await ctx.api("purchase_ops_add", { items: [item] });
+      const affected = data?.result?.row_affected || 0;
+      if (ok && affected > 0) {
+        toast("Операция добавлена");
+        // подготовить форму для следующей операции
+        resetForm();
+      } else {
+        const msg = data?.description || "Не удалось сохранить операцию";
+        alert(msg);
+      }
+    } catch (e) {
+      alert("Ошибка сети при сохранении");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function resetForm(){
+    // очистка инпутов
+    ["barcode","product-query","qty","cost","price","expdate"].forEach(id=>{
+      const el = ctx.$(id);
+      if (el) el.value = "";
+    });
+    // скрыть выбранный товар
+    pickedProduct = null;
+    ctx.$("product-picked").classList.add("hidden");
+    // очистить результаты поиска
+    const box = ctx.$("product-results");
+    if (box) box.innerHTML = "";
+    // фокус на поиск
+    ctx.$("product-query")?.focus();
   }
 }

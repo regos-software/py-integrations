@@ -17,3 +17,11 @@ class APIErrorResult(BaseModel):
     """
     error: int = Field(..., description="Код ошибки")
     description: str = Field(..., description="Описание ошибки")
+
+
+class ArrayResult(BaseModel):
+    """
+    Универсальный ответ API REGOS при массовом действии.
+    """
+    row_affected: int
+    ids: List[int]
