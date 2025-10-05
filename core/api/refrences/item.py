@@ -1,4 +1,4 @@
-from typing import List, Iterable, Sequence
+from typing import List, Iterable, Optional, Sequence
 from pydantic import TypeAdapter, ValidationError
 
 from core.logger import setup_logger
@@ -95,8 +95,8 @@ class ItemService:
         return await self.get_by_ids(ids)
 
     # --- Альтернатива: сразу искать расширенные карточки по тексту (через GetExt) ---
-    async def search_and_get_ext(self, query: str, *, stock_id: int | None = None,
-                                 price_type_id: int | None = None, limit: int = 50) -> List[ItemExt]:
+    async def search_and_get_ext(self, query: str, *, stock_id: Optional[int] = None,
+                             price_type_id: Optional[int] = None, limit: int = 50) -> List[ItemExt]:
         req = ItemGetExtRequest(
             search=query,
             stock_id=stock_id,
