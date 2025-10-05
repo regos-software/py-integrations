@@ -62,7 +62,7 @@ async function reinitOAuth() {
     redirectUri: REGOS_REDIRECT_URI,
     containerId: "regos-login",
     language: ctx.getLocale(),
-    buttonSize: "m",
+    buttonSize: "xs",
     buttonTheme: "light",
     buttonType: "text",
     buttonTextType: "short",
