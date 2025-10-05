@@ -17,7 +17,7 @@ class RegosAPI:
         self.docs: "RegosAPI.Docs" = self.Docs(self)
         self.integrations: "RegosAPI.Integrations" = self.Integrations(self)
         self.reports: "RegosAPI.Reports" = self.Reports(self)
-
+        self.refrences: "RegosAPI.Refrences" = self.Refrences(self)
     @retry(
         wait=wait_exponential(min=0.2, max=5),
         stop=stop_after_attempt(3),
