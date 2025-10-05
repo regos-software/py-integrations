@@ -1,19 +1,23 @@
 {
   "app.title": "TSD • Закупки",
   "nav.back": "Назад",
+
   "common.loading": "Загрузка...",
   "common.nothing": "Ничего не найдено",
   "common.cancel": "Отмена",
   "common.save": "Сохранить",
+
   "docs.title": "Документы закупки",
   "docs.search.placeholder": "Поиск по номеру / поставщику...",
   "docs.refresh": "Обновить",
   "docs.status.new": "новый",
   "docs.status.performed": "проведён",
   "docs.status.blocked": "блок.",
+
   "doc.to_list": "К списку",
   "doc.add_op": "Добавить операцию",
   "doc.operations": "Операции",
+
   "op.title": "Новая операция",
   "op.scan": "Скан штрих-кода",
   "op.barcode.placeholder": "или введите штрих-код вручную",
@@ -23,6 +27,13 @@
   "op.cost": "Себестоимость",
   "op.price": "Цена продажи",
   "op.qty.required": "Введите количество",
+
   "toast.op_added": "Операция добавлена",
-  "oauth.error": "Ошибка авторизации"
+  "oauth.error": "Ошибка авторизации",
+
+  "main_menu": "Главное меню",
+  "doc_purchase": "Поступление от контрагента",
+  "doc_sales": "Отгрузка контрагенту",
+  "doc_inventory": "Инвентаризация",
+  "soon": "Скоро"
 }

@@ -2,16 +2,20 @@
 export async function screenHome(ctx) {
   await ctx.loadView("home");
 
-  ctx.$("home-title").textContent              = ctx.t("ready_title");
-  ctx.$("token-label").textContent             = ctx.t("current_token");
-  ctx.$("ci-label").textContent                = ctx.CI || "—";
+  // заголовок
+  ctx.$("home-title").textContent = ctx.t("main_menu");
 
-  ctx.$("btn-doc-purchase-txt").textContent    = ctx.t("doc_purchase");
-  ctx.$("btn-doc-sales-txt").textContent       = ctx.t("doc_sales");
-  ctx.$("btn-doc-inventory-txt").textContent   = ctx.t("doc_inventory");
-  ctx.$("pill-sales").textContent              = ctx.t("soon");
-  ctx.$("pill-inventory").textContent          = ctx.t("soon");
+  // подписи кнопок
+  ctx.$("btn-doc-purchase-txt").textContent  = ctx.t("doc_purchase");
+  ctx.$("btn-doc-sales-txt").textContent     = ctx.t("doc_sales");
+  ctx.$("btn-doc-inventory-txt").textContent = ctx.t("doc_inventory");
 
+  // бейджи "скоро"
+  const soonTxt = ctx.t("soon");
+  ctx.$("pill-sales").textContent     = soonTxt;
+  ctx.$("pill-inventory").textContent = soonTxt;
+
+  // действия
   ctx.$("btn-doc-purchase").onclick = () => { location.hash = "#/docs"; };
 
   const soon = () => {
@@ -22,9 +26,9 @@ export async function screenHome(ctx) {
       t.className = "toast";
       document.body.appendChild(t);
     }
-    t.textContent = ctx.t("soon");
+    t.textContent = soonTxt;
     t.classList.add("show");
-    setTimeout(()=>t.classList.remove("show"), 1500);
+    setTimeout(() => t.classList.remove("show"), 1500);
   };
   ctx.$("btn-doc-sales").onclick     = soon;
   ctx.$("btn-doc-inventory").onclick = soon;
