@@ -28,8 +28,6 @@ class RegosAPI:
     )
     async def call(self, path: str, body: Any, response_model: Type[T]) -> T:
         payload = jsonable_encoder(body, custom_encoder={Decimal: float})
-        if isinstance(payload, dict) and set(payload.keys()) == {"root"}:
-            payload = payload["root"]
         return await self._client.post(method_path=path, data=payload, response_model=response_model)
 
 
