@@ -2,14 +2,47 @@
 export async function screenDoc(ctx, id) {
   await ctx.loadView("doc");
 
-  // локализация кнопок/подписей
+  // локализация/подписи
   const $spinnerMsg = () => `<div class="muted">${ctx.t("common.loading")}</div>`;
   const $emptyMsg   = () => `<div class="muted">${ctx.t("doc.no_ops") || ctx.t("common.nothing")}</div>`;
 
-  ctx.$("btn-back-docs").textContent = ctx.t("doc.to_list");
-  ctx.$("btn-add-op").textContent    = ctx.t("doc.add_op");
-  ctx.$("btn-back-docs").onclick = () => { location.hash = "#/docs"; };
-  ctx.$("btn-add-op").onclick   = () => { location.hash = `#/doc/${id}/op/new`; };
+  // старая кнопка "к списку" — прячем (используем chevron возле заголовка)
+  const oldBackBtn = ctx.$("btn-back-docs");
+  if (oldBackBtn) oldBackBtn.classList.add("hidden");
+
+  // кнопка "добавить операцию"
+  const addOpBtn = ctx.$("btn-add-op");
+  if (addOpBtn) {
+    addOpBtn.textContent = ctx.t("doc.add_op");
+    addOpBtn.onclick = () => { location.hash = `#/doc/${id}/op/new`; };
+  }
+
+  // заголовок + chevron "назад" слева (аналогично lib/docs.js)
+  const titleEl = ctx.$("doc-title");
+  if (titleEl) {
+    // обёртка вокруг заголовка: row row-start (создаём один раз)
+    let wrap = titleEl.closest(".row");
+    if (!wrap || !wrap.classList.contains("row-start")) {
+      const newWrap = document.createElement("div");
+      newWrap.className = "row row-start";
+      titleEl.parentNode.insertBefore(newWrap, titleEl);
+      newWrap.appendChild(titleEl);
+      wrap = newWrap;
+    }
+    // кнопка Назад (chevron), создаём один раз
+    let btnBack = ctx.$("btn-doc-back");
+    if (!btnBack) {
+      btnBack = document.createElement("button");
+      btnBack.id = "btn-doc-back";
+      btnBack.className = "btn icon clear"; // прозрачная, без рамки
+      const backLabel = ctx.t("doc.to_list") || ctx.t("nav.back") || "Назад";
+      btnBack.title = backLabel;
+      btnBack.setAttribute("aria-label", backLabel);
+      btnBack.innerHTML = `<i class="fa-solid fa-chevron-left"></i>`;
+      btnBack.onclick = () => { location.hash = "#/docs"; };
+      wrap.insertBefore(btnBack, titleEl);
+    }
+  }
 
   // спиннер
   const list = ctx.$("ops-list");
@@ -25,8 +58,8 @@ export async function screenDoc(ctx, id) {
     ops = r2?.data?.result?.items || [];
   }
 
-  // шапка документа
-  ctx.$("doc-title").textContent = `${ctx.t("doc.title_prefix") || "Документ"} ${doc.code || id}`;
+  // шапка документа — тексты
+  if (titleEl) titleEl.textContent = `${ctx.t("doc.title_prefix") || "Документ"} ${doc.code || id}`;
   const statusStr = `${doc.performed ? ctx.t("docs.status.performed") : ctx.t("docs.status.new")}${
     doc.blocked ? " • " + ctx.t("docs.status.blocked") : ""
   }`;
@@ -35,7 +68,7 @@ export async function screenDoc(ctx, id) {
   const meta = [
     ctx.unixToLocal(doc.date),
     doc.partner?.name || "",
-    `${ctx.fmtNum(doc.amount, { minimumFractionDigits:2, maximumFractionDigits:2 })} ${doc.currency?.code_chr ?? "UZS"}`
+    `${ctx.fmtNum(doc.amount, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${doc.currency?.code_chr ?? "UZS"}`
   ].filter(Boolean).join(" · ");
   ctx.$("doc-meta").textContent = meta;
 
@@ -45,7 +78,7 @@ export async function screenDoc(ctx, id) {
 
   // ---------- helpers ----------
 
-  function toast(msg, isError=false){
+  function toast(msg, isError = false) {
     let t = document.getElementById("toast");
     if (!t) {
       t = document.createElement("div");
@@ -56,15 +89,15 @@ export async function screenDoc(ctx, id) {
     t.classList.toggle("error", !!isError);
     t.textContent = msg || "";
     t.classList.add("show");
-    setTimeout(()=>t.classList.remove("show"), 1600);
+    setTimeout(() => t.classList.remove("show"), 1600);
   }
 
-  function renderOps(items){
+  function renderOps(items) {
     list.innerHTML = "";
     items.forEach(op => list.appendChild(renderOpItem(op)));
   }
 
-  function renderOpItem(op){
+  function renderOpItem(op) {
     const item = op.item || {};
     const barcode = item.base_barcode
       || (item.barcode_list ? String(item.barcode_list).split(",")[0]?.trim() : "");
@@ -73,7 +106,7 @@ export async function screenDoc(ctx, id) {
     const wrap = document.createElement("div");
     wrap.className = "item compact";
 
-    // view mode
+    // view mode (текущая компактная вёрстка)
     const view = document.createElement("div");
     view.className = "row compact";
     view.innerHTML = `
@@ -193,14 +226,13 @@ export async function screenDoc(ctx, id) {
         const { ok, data } = await ctx.api("purchase_ops_edit", payload);
         const affected = data?.result?.row_affected || 0;
         if (ok && affected > 0) {
-          // обновим локально и перерисуем видимые фрагменты
+          // обновляем видимые фрагменты
           op.quantity = qty;
           op.cost = cost;
           if (Number.isFinite(price)) op.price = price; else op.price = undefined;
 
-          // точечно обновляем поля по классам (надёжнее, чем по индексам)
           const metaEl = view.querySelector(".meta");
-          metaEl.querySelector(".qty").innerHTML = `<strong>${ctx.fmtNum(op.quantity)}</strong> ${ctx.t("unit.pcs") || "шт"}`;
+          metaEl.querySelector(".qty").innerHTML   = `<strong>${ctx.fmtNum(op.quantity)}</strong> ${ctx.t("unit.pcs") || "шт"}`;
           metaEl.querySelector(".cost").textContent  = ctx.fmtMoney(op.cost);
           metaEl.querySelector(".price").textContent = ctx.fmtMoney(op.price ?? 0);
 
@@ -221,7 +253,7 @@ export async function screenDoc(ctx, id) {
     return wrap;
   }
 
-  function setBusy(b, elements){
+  function setBusy(b, elements) {
     (elements || []).forEach(el => {
       if (!el) return;
       el.disabled = !!b;
