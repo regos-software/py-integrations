@@ -1,27 +1,23 @@
-from typing import Optional, Union, List, Dict, Any
+# schemas/api/base.py
+from typing import Optional, Any
 from pydantic import BaseModel, Field
-
 
 class APIBaseResponse(BaseModel):
     """
     Универсальный ответ API REGOS.
+    Разные методы возвращают разные формы result (dict, list[dict], list[int], int, str ...),
+    поэтому здесь допускаем любой тип.
     """
     ok: bool = Field(..., description="True/False – метка успешного ответа")
-    result: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = Field(
-        None, description="Объект или массив объектов, возвращаемый сервером"
+    result: Optional[Any] = Field(
+        default=None,
+        description="Данные ответа (могут быть dict, list[dict], list[int], и т.д.)"
     )
 
 class APIErrorResult(BaseModel):
-    """
-    Модель описания ошибки в ответе сервера.
-    """
-    error: int = Field(..., description="Код ошибки")
-    description: str = Field(..., description="Описание ошибки")
-
+    error: int
+    description: str
 
 class ArrayResult(BaseModel):
-    """
-    Универсальный ответ API REGOS при массовом действии.
-    """
     row_affected: int
-    ids: List[int]
+    ids: list[int]
