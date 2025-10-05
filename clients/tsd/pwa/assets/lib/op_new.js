@@ -1,44 +1,9 @@
-// lib/op_new.js — без import; получает ctx
+// views/op_new.js — без import; получает ctx
 let mediaStream = null, scanTimer = null, pickedProduct = null, detector = null;
-
 
 export async function screenOpNew(ctx, id) {
   await ctx.loadView("op_new");
   pickedProduct = null;
-
-  // --- Заголовок + chevron "назад" к документу ---
-  // Ищем заголовок в пределах #app: сначала по известным id, затем первый h1
-  const appRoot  = ctx.$("app") || document.body;
-  const titleEl =
-    appRoot?.querySelector("#op-title, #op-new-title, .page-title, h1") || null;
-
-  if (titleEl) {
-    // Обёртка-ряд слева направо
-    let wrap = titleEl.closest(".row");
-    if (!wrap || !wrap.classList.contains("row-start")) {
-      const newWrap = document.createElement("div");
-      newWrap.className = "row row-start";
-      titleEl.parentNode.insertBefore(newWrap, titleEl);
-      newWrap.appendChild(titleEl);
-      wrap = newWrap;
-    }
-    // Кнопка назад (создаём один раз)
-    let backChevron = appRoot.querySelector("#btn-op-back");
-    if (!backChevron) {
-      backChevron = document.createElement("button");
-      backChevron.id = "btn-op-back";
-      backChevron.className = "btn icon clear"; // без рамки
-      const backLabel = ctx.t("nav.back") || ctx.t("doc.to_list") || "Назад";
-      backChevron.title = backLabel;
-      backChevron.setAttribute("aria-label", backLabel);
-      backChevron.innerHTML = `<i class="fa-solid fa-chevron-left"></i>`;
-      backChevron.onclick = () => {
-        stopScan();                   // закрыть камеру, если открыта
-        location.hash = `#/doc/${id}`;
-      };
-      wrap.insertBefore(backChevron, titleEl);
-    }
-  }
 
   // ---- helpers ----
   function setBusy(b) {
@@ -92,7 +57,7 @@ export async function screenOpNew(ctx, id) {
     if (e.key === "Enter") { e.preventDefault(); const v = e.target.value.trim(); if (v) runSearch(v); }
   });
 
-  ctx.$("btn-op-cancel").onclick = ()=>{ stopScan(); location.hash = `#/doc/${id}`; };
+  ctx.$("btn-op-cancel").onclick = ()=>{ location.hash = `#/doc/${id}`; };
   ctx.$("btn-op-save").onclick   = ()=>saveOp(id);
 
   // Быстрые кнопки количества
@@ -167,7 +132,7 @@ export async function screenOpNew(ctx, id) {
   function stopScan(){
     if (scanTimer) { cancelAnimationFrame(scanTimer); scanTimer=null; }
     if (mediaStream) { mediaStream.getTracks().forEach(t=>t.stop()); mediaStream=null; }
-    const sc = ctx.$("scanner"); if (sc) sc.classList.add("hidden");
+    ctx.$("scanner").classList.add("hidden");
   }
 
   function pick(p){
