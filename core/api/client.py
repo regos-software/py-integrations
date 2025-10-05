@@ -45,10 +45,15 @@ class APIClient:
         """
         url = f"{self.base_url}/gateway/out/{self.integration_id}/v1/{method_path}"
 
-        #  Исправление: поддерживаем list, dict и BaseModel
+        # Исправление: корректно сериализуем Decimal → float
         if isinstance(data, BaseModel):
-            payload = data.model_dump()
-        elif isinstance(data, (list, dict)):
+            payload = data.model_dump(mode="json")
+        elif isinstance(data, list):
+            payload = [
+                item.model_dump(mode="json") if isinstance(item, BaseModel) else item
+                for item in data
+            ]
+        elif isinstance(data, dict):
             payload = data
         else:
             raise TypeError(f"Unsupported data type for POST: {type(data)}")

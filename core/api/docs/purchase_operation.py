@@ -31,8 +31,7 @@ class PurchaseOperationService:
         return await self.get(PurchaseOperationGetRequest(document_ids=[doc_id]))
 
     async def add(self, items: List[PurchaseOperationAddRequest]) -> ArrayResult:
-        payload = [item.model_dump() for item in items]
-        resp = await self.api.call(self.PATH_ADD, payload, APIBaseResponse)
+        resp = await self.api.call(self.PATH_ADD, items, APIBaseResponse)
         return ArrayResult.model_validate(resp.result or {})
 
     async def edit(self, items: List[PurchaseOperationEditItem]) -> ArrayResult:
