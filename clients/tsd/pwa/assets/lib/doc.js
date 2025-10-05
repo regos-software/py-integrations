@@ -1,4 +1,4 @@
-// lib/doc.js — без import; получает ctx
+// views/doc.js — без import; получает ctx
 export async function screenDoc(ctx, id) {
   await ctx.loadView("doc");
 
@@ -6,41 +6,10 @@ export async function screenDoc(ctx, id) {
   const $spinnerMsg = () => `<div class="muted">${ctx.t("common.loading")}</div>`;
   const $emptyMsg   = () => `<div class="muted">${ctx.t("doc.no_ops") || ctx.t("common.nothing")}</div>`;
 
-  // кнопки действия (старую кнопку "к списку" прячем — используем chevron возле заголовка)
-  const oldBackBtn = ctx.$("btn-back-docs");
-  if (oldBackBtn) oldBackBtn.classList.add("hidden");
-  const addOpBtn = ctx.$("btn-add-op");
-  if (addOpBtn) {
-    addOpBtn.textContent = ctx.t("doc.add_op");
-    addOpBtn.onclick = () => { location.hash = `#/doc/${id}/op/new`; };
-  }
-
-  // шапка документа: заголовок + chevron "назад к списку" слева от него
-  const titleEl = ctx.$("doc-title");
-  if (titleEl) {
-    // обёртка вокруг заголовка (ставим row row-start, чтобы элементы шли слева направо)
-    let wrap = titleEl.closest(".row");
-    if (!wrap || !wrap.classList.contains("row-start")) {
-      const newWrap = document.createElement("div");
-      newWrap.className = "row row-start";
-      titleEl.parentNode.insertBefore(newWrap, titleEl);
-      newWrap.appendChild(titleEl);
-      wrap = newWrap;
-    }
-    // создаём chevron один раз
-    let backChevron = ctx.$("btn-doc-back");
-    if (!backChevron) {
-      backChevron = document.createElement("button");
-      backChevron.id = "btn-doc-back";
-      backChevron.className = "btn icon clear"; // без рамки
-      const backLabel = ctx.t("doc.to_list") || ctx.t("nav.back") || "Назад";
-      backChevron.title = backLabel;
-      backChevron.setAttribute("aria-label", backLabel);
-      backChevron.innerHTML = `<i class="fa-solid fa-chevron-left"></i>`;
-      backChevron.onclick = () => { location.hash = "#/docs"; };
-      wrap.insertBefore(backChevron, titleEl);
-    }
-  }
+  ctx.$("btn-back-docs").textContent = ctx.t("doc.to_list");
+  ctx.$("btn-add-op").textContent    = ctx.t("doc.add_op");
+  ctx.$("btn-back-docs").onclick = () => { location.hash = "#/docs"; };
+  ctx.$("btn-add-op").onclick   = () => { location.hash = `#/doc/${id}/op/new`; };
 
   // спиннер
   const list = ctx.$("ops-list");
@@ -56,8 +25,8 @@ export async function screenDoc(ctx, id) {
     ops = r2?.data?.result?.items || [];
   }
 
-  // шапка документа — тексты
-  if (titleEl) titleEl.textContent = `${ctx.t("doc.title_prefix") || "Документ"} ${doc.code || id}`;
+  // шапка документа
+  ctx.$("doc-title").textContent = `${ctx.t("doc.title_prefix") || "Документ"} ${doc.code || id}`;
   const statusStr = `${doc.performed ? ctx.t("docs.status.performed") : ctx.t("docs.status.new")}${
     doc.blocked ? " • " + ctx.t("docs.status.blocked") : ""
   }`;
@@ -104,38 +73,34 @@ export async function screenDoc(ctx, id) {
     const wrap = document.createElement("div");
     wrap.className = "item compact";
 
-    // view mode (две строки: верх — имя + справа иконки; под ним — код+штрихкод; ещё ниже — количество и цены)
+    // view mode
     const view = document.createElement("div");
+    view.className = "row compact";
     view.innerHTML = `
-      <div class="row compact top">
-        <div class="info">
-          <strong class="name">${ctx.esc(item.name || "")}</strong>
-          <div class="sub">
-            <span class="muted text-small code">${ctx.esc(code)}</span>
-            <span class="dot"></span>
-            <span class="muted text-small barcode">${ctx.esc(barcode || "")}</span>
-          </div>
-        </div>
-        <div class="op-actions">
-          <button class="btn icon small ghost op-edit"
-                  aria-label="${ctx.t("op.edit") || "Редактировать"}"
-                  title="${ctx.t("op.edit") || "Редактировать"}">
-            <i class="fa-solid fa-pen"></i>
-          </button>
-          <button class="btn icon small ghost op-del"
-                  aria-label="${ctx.t("op.delete") || "Удалить"}"
-                  title="${ctx.t("op.delete") || "Удалить"}">
-            <i class="fa-solid fa-trash"></i>
-          </button>
+      <div class="info">
+        <strong class="name">${ctx.esc(item.name || "")}</strong>
+        <div class="sub">
+          <span class="muted text-small code">#${ctx.esc(code)}</span>
+          <span class="dot"></span>
+          <span class="muted text-small barcode">${ctx.esc(barcode || "")}</span>
         </div>
       </div>
-
-      <div class="meta compact bottom">
+      <div class="meta compact">
         <span class="qty"><strong>${ctx.fmtNum(op.quantity)}</strong> ${ctx.t("unit.pcs") || "шт"}</span>
         <span class="dot"></span>
         <span class="cost">${ctx.fmtMoney(op.cost)}</span>
         <span class="dot"></span>
         <span class="price">${ctx.fmtMoney(op.price ?? 0)}</span>
+        <button class="btn icon small ghost op-edit"
+                aria-label="${ctx.t("op.edit") || "Редактировать"}"
+                title="${ctx.t("op.edit") || "Редактировать"}">
+          <i class="fa-solid fa-pen"></i>
+        </button>
+        <button class="btn icon small ghost op-del"
+                aria-label="${ctx.t("op.delete") || "Удалить"}"
+                title="${ctx.t("op.delete") || "Удалить"}">
+          <i class="fa-solid fa-trash"></i>
+        </button>
       </div>
     `;
 
@@ -233,9 +198,9 @@ export async function screenDoc(ctx, id) {
           op.cost = cost;
           if (Number.isFinite(price)) op.price = price; else op.price = undefined;
 
-          // точечно обновляем нижнюю строку (кол-во и цены)
-          const metaEl = wrap.querySelector(".meta.bottom");
-          metaEl.querySelector(".qty").innerHTML   = `<strong>${ctx.fmtNum(op.quantity)}</strong> ${ctx.t("unit.pcs") || "шт"}`;
+          // точечно обновляем поля по классам (надёжнее, чем по индексам)
+          const metaEl = view.querySelector(".meta");
+          metaEl.querySelector(".qty").innerHTML = `<strong>${ctx.fmtNum(op.quantity)}</strong> ${ctx.t("unit.pcs") || "шт"}`;
           metaEl.querySelector(".cost").textContent  = ctx.fmtMoney(op.cost);
           metaEl.querySelector(".price").textContent = ctx.fmtMoney(op.price ?? 0);
 
