@@ -1,17 +1,21 @@
-# services/docs/purchase_operation.py
 from typing import List
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, RootModel
+
 from schemas.api.base import APIBaseResponse, ArrayResult
 from schemas.api.docs.purchase_operation import (
     PurchaseOperation, PurchaseOperationGetRequest,
     PurchaseOperationAddRequest, PurchaseOperationEditItem, PurchaseOperationDeleteItem
 )
 
+class _AddPayload(RootModel[List[PurchaseOperationAddRequest]]): ...
+class _EditPayload(RootModel[List[PurchaseOperationEditItem]]): ...
+class _DeletePayload(RootModel[List[PurchaseOperationDeleteItem]]): ...
+
 class PurchaseOperationService:
-    PATH_GET   = "PurchaseOperation/Get"
-    PATH_ADD   = "PurchaseOperation/Add"
-    PATH_EDIT  = "PurchaseOperation/Edit"
-    PATH_DELETE= "PurchaseOperation/Delete"
+    PATH_GET    = "PurchaseOperation/Get"
+    PATH_ADD    = "PurchaseOperation/Add"
+    PATH_EDIT   = "PurchaseOperation/Edit"
+    PATH_DELETE = "PurchaseOperation/Delete"
 
     def __init__(self, api):
         self.api = api
@@ -27,17 +31,16 @@ class PurchaseOperationService:
         return await self.get(PurchaseOperationGetRequest(document_ids=[doc_id]))
 
     async def add(self, items: List[PurchaseOperationAddRequest]) -> ArrayResult:
-        payload = [i.model_dump(exclude_none=True) for i in items]  # 
+        payload = _AddPayload(items)
         resp = await self.api.call(self.PATH_ADD, payload, APIBaseResponse)
-        # result — dict с row_affected, ids
         return ArrayResult.model_validate(resp.result or {})
 
     async def edit(self, items: List[PurchaseOperationEditItem]) -> ArrayResult:
-        payload = [i.model_dump(exclude_none=True) for i in items]  # 
+        payload = _EditPayload(items)
         resp = await self.api.call(self.PATH_EDIT, payload, APIBaseResponse)
         return ArrayResult.model_validate(resp.result or {})
 
     async def delete(self, items: List[PurchaseOperationDeleteItem]) -> ArrayResult:
-        payload = [i.model_dump(exclude_none=True) for i in items]  # 
+        payload = _DeletePayload(items)
         resp = await self.api.call(self.PATH_DELETE, payload, APIBaseResponse)
         return ArrayResult.model_validate(resp.result or {})
