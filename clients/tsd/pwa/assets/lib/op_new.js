@@ -5,11 +5,45 @@ export async function screenOpNew(ctx, id) {
   await ctx.loadView("op_new");
   pickedProduct = null;
 
+  // --- Заголовок + chevron "Назад к документу" слева ---
+  // пробуем несколько id на случай разных шаблонов
+  const titleEl =
+    ctx.$("op-title") || ctx.$("op-new-title") || ctx.$("doc-title") || null;
+
+  if (titleEl) {
+    // обёртка вокруг заголовка: row row-start (создаём один раз)
+    let wrap = titleEl.closest(".row");
+    if (!wrap || !wrap.classList.contains("row-start")) {
+      const newWrap = document.createElement("div");
+      newWrap.className = "row row-start";
+      titleEl.parentNode.insertBefore(newWrap, titleEl);
+      newWrap.appendChild(titleEl);
+      wrap = newWrap;
+    }
+    // старая кнопка назад, если есть — прячем
+    const oldBack = ctx.$("btn-op-back-legacy") || ctx.$("btn-back-doc");
+    if (oldBack) oldBack.classList.add("hidden");
+
+    // chevron Назад (создаём один раз)
+    let btnBack = ctx.$("btn-op-back");
+    if (!btnBack) {
+      btnBack = document.createElement("button");
+      btnBack.id = "btn-op-back";
+      btnBack.className = "btn icon clear"; // прозрачная, без рамки
+      const backLabel = ctx.t("nav.back") || ctx.t("doc.to_list") || "Назад";
+      btnBack.title = backLabel;
+      btnBack.setAttribute("aria-label", backLabel);
+      btnBack.innerHTML = `<i class="fa-solid fa-chevron-left"></i>`;
+      btnBack.onclick = () => { stopScan(); location.hash = `#/doc/${id}`; };
+      wrap.insertBefore(btnBack, titleEl);
+    }
+  }
+
   // ---- helpers ----
   function setBusy(b) {
     const ids = ["btn-scan","btn-close-scan","product-query","barcode","qty","cost","price","btn-op-save","btn-op-cancel"];
     ids.forEach(k => { const el = ctx.$(k); if (el && "disabled" in el) el.disabled = b; });
-    const save = ctx.$("btn-op-save"); if (save) save.textContent = b ? "Сохранение..." : "Сохранить";
+    const save = ctx.$("btn-op-save"); if (save) save.textContent = b ? "Сохранение..." : (ctx.t?.("common.save") || "Сохранить");
   }
   function toast(msg, ok=true) {
     let t = document.getElementById("toast");
@@ -32,36 +66,36 @@ export async function screenOpNew(ctx, id) {
   // ---- поиск только по Enter ----
   const runSearch = async (q) => {
     const box = ctx.$("product-results");
-    box.textContent = "Поиск...";
+    if (box) box.textContent = ctx.t?.("common.searching") || "Поиск...";
     try {
       const { data } = await ctx.api("product_search", { q, doc_id: id });
       const items = data?.result?.items || [];
       if (!items.length) {
         pickedProduct = null;
-        ctx.$("product-picked").classList.add("hidden");
-        box.textContent = "Ничего не найдено";
+        ctx.$("product-picked")?.classList.add("hidden");
+        if (box) box.textContent = ctx.t?.("common.nothing") || "Ничего не найдено";
         return;
       }
       // Автовыбор первого
       pick(items[0]);
-      box.textContent = "";
+      if (box) box.textContent = "";
     } catch {
-      box.textContent = "Ошибка поиска";
+      if (box) box.textContent = ctx.t?.("common.error") || "Ошибка поиска";
     }
   };
 
-  ctx.$("barcode").addEventListener("keydown", (e)=>{
+  ctx.$("barcode")?.addEventListener("keydown", (e)=>{
     if (e.key === "Enter") { e.preventDefault(); const v = e.target.value.trim(); if (v) runSearch(v); }
   });
-  ctx.$("product-query").addEventListener("keydown", (e)=>{
+  ctx.$("product-query")?.addEventListener("keydown", (e)=>{
     if (e.key === "Enter") { e.preventDefault(); const v = e.target.value.trim(); if (v) runSearch(v); }
   });
 
-  ctx.$("btn-op-cancel").onclick = ()=>{ location.hash = `#/doc/${id}`; };
-  ctx.$("btn-op-save").onclick   = ()=>saveOp(id);
+  ctx.$("btn-op-cancel")?.addEventListener("click", ()=>{ stopScan(); location.hash = `#/doc/${id}`; });
+  ctx.$("btn-op-save")?.addEventListener("click", ()=>saveOp(id));
 
   // Быстрые кнопки количества
-  ctx.$("qty-quick").addEventListener("click", (e)=>{
+  ctx.$("qty-quick")?.addEventListener("click", (e)=>{
     const btn = e.target.closest("button[data-inc]");
     if (!btn) return;
     const inc = Number(btn.dataset.inc || "0");
@@ -73,24 +107,25 @@ export async function screenOpNew(ctx, id) {
   });
 
   // Навигация по Enter: qty -> cost -> price -> save
-  ctx.$("qty").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); ctx.$("cost").focus(); } });
-  ctx.$("cost").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); ctx.$("price").focus(); } });
-  ctx.$("price").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); saveOp(id); } });
+  ctx.$("qty")?.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); ctx.$("cost")?.focus(); } });
+  ctx.$("cost")?.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); ctx.$("price")?.focus(); } });
+  ctx.$("price")?.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); saveOp(id); } });
 
   // Сканер
-  ctx.$("btn-scan").onclick       = startScan;
-  ctx.$("btn-close-scan").onclick = stopScan;
+  ctx.$("btn-scan")?.addEventListener("click", startScan);
+  ctx.$("btn-close-scan")?.addEventListener("click", stopScan);
 
   if ("BarcodeDetector" in window) {
     try { detector = new BarcodeDetector({ formats: ["ean_13","ean_8","code_128","upc_a","upc_e","itf"] }); } catch {}
   }
 
   async function startScan(){
-    ctx.$("scanner").classList.remove("hidden");
+    ctx.$("scanner")?.classList.remove("hidden");
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false });
       mediaStream = stream;
       const video = ctx.$("preview");
+      if (!video) return;
       video.srcObject = stream; await video.play().catch(()=>{});
       const detectFrame = async () => {
         if (!mediaStream) return;
@@ -124,15 +159,16 @@ export async function screenOpNew(ctx, id) {
       };
       scanTimer = requestAnimationFrame(detectFrame);
     } catch {
-      toast("Не удалось открыть камеру", false);
-      ctx.$("scanner").classList.add("hidden");
-      ctx.$("barcode").focus();
+      toast(ctx.t?.("scanner.camera_error") || "Не удалось открыть камеру", false);
+      ctx.$("scanner")?.classList.add("hidden");
+      ctx.$("barcode")?.focus();
     }
   }
+
   function stopScan(){
-    if (scanTimer) { cancelAnimationFrame(scanTimer); scanTimer=null; }
-    if (mediaStream) { mediaStream.getTracks().forEach(t=>t.stop()); mediaStream=null; }
-    ctx.$("scanner").classList.add("hidden");
+    if (scanTimer) { cancelAnimationFrame(scanTimer); scanTimer = null; }
+    if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+    ctx.$("scanner")?.classList.add("hidden");
   }
 
   function pick(p){
@@ -141,22 +177,24 @@ export async function screenOpNew(ctx, id) {
       name: p.name || "—",
       barcode: firstBarcode(p),
       vat_value: p?.vat?.value ?? 0,
-      last_purchase_cost: p?.last_purchase_cost   // если бэк вернёт — покажем подсказку
+      last_purchase_cost: p?.last_purchase_cost
     };
-    ctx.$("product-picked").classList.remove("hidden");
-    ctx.$("picked-name").textContent = pickedProduct.name;
-    ctx.$("picked-code").textContent = pickedProduct.barcode || "";
+    ctx.$("product-picked")?.classList.remove("hidden");
+    const n = ctx.$("picked-name"); if (n) n.textContent = pickedProduct.name;
+    const c = ctx.$("picked-code"); if (c) c.textContent = pickedProduct.barcode || "";
 
     // подсказка "последняя закупка"
     const hintBox = ctx.$("cost-suggest");
-    hintBox.innerHTML = "";
-    const lpc = pickedProduct.last_purchase_cost;
-    if (lpc != null) {
-      const b = document.createElement("button");
-      b.className = "btn secondary";
-      b.textContent = `С/с из последней закупки: ${ctx.fmtMoney(lpc)}`;
-      b.onclick = () => { ctx.$("cost").value = String(lpc); ctx.$("cost").focus(); ctx.$("cost").select?.(); };
-      hintBox.appendChild(b);
+    if (hintBox) {
+      hintBox.innerHTML = "";
+      const lpc = pickedProduct.last_purchase_cost;
+      if (lpc != null) {
+        const b = document.createElement("button");
+        b.className = "btn secondary";
+        b.textContent = `${ctx.t?.("op.last_purchase_cost_hint") || "С/с из последней закупки"}: ${ctx.fmtMoney(lpc)}`;
+        b.onclick = () => { const ce = ctx.$("cost"); if (ce){ ce.value = String(lpc); ce.focus(); ce.select?.(); } };
+        hintBox.appendChild(b);
+      }
     }
     // сразу в qty
     setTimeout(()=>{ ctx.$("qty")?.focus(); }, 0);
@@ -165,17 +203,18 @@ export async function screenOpNew(ctx, id) {
   async function saveOp(docId){
     const qtyEl = ctx.$("qty");
     const costEl = ctx.$("cost");
-    const qty   = ctx.toNumber(qtyEl.value);
-    const cost  = ctx.toNumber(costEl.value);
-    const price = ctx.toNumber(ctx.$("price").value);
+    const priceEl = ctx.$("price");
+    const qty   = ctx.toNumber(qtyEl?.value);
+    const cost  = ctx.toNumber(costEl?.value);
+    const price = ctx.toNumber(priceEl?.value);
 
     markInvalid(qtyEl,false); markInvalid(costEl,false);
 
-    if (!pickedProduct) { toast("Сначала выберите товар", false); return; }
+    if (!pickedProduct) { toast(ctx.t?.("op.select_item_first") || "Сначала выберите товар", false); return; }
     let hasErr = false;
     if (!qty || qty <= 0) { markInvalid(qtyEl, true); hasErr = true; }
     if (!cost || cost <= 0){ markInvalid(costEl, true); hasErr = true; }
-    if (hasErr) { toast("Заполните обязательные поля", false); return; }
+    if (hasErr) { toast(ctx.t?.("common.fill_required") || "Заполните обязательные поля", false); return; }
 
     const item = {
       document_id: Number(docId),
@@ -191,13 +230,13 @@ export async function screenOpNew(ctx, id) {
       const { ok, data } = await ctx.api("purchase_ops_add", { items: [item] });
       const affected = data?.result?.row_affected || 0;
       if (ok && affected > 0) {
-        toast("Операция добавлена");
+        toast(ctx.t?.("toast.op_added") || "Операция добавлена");
         resetForm();
       } else {
-        toast(data?.description || "Не удалось сохранить операцию", false);
+        toast(data?.description || ctx.t?.("common.save_failed") || "Не удалось сохранить операцию", false);
       }
     } catch {
-      toast("Ошибка сети при сохранении", false);
+      toast(ctx.t?.("common.network_error") || "Ошибка сети при сохранении", false);
     } finally {
       setBusy(false);
     }
@@ -208,12 +247,12 @@ export async function screenOpNew(ctx, id) {
       const el = ctx.$(id); if (el){ el.value = ""; markInvalid(el,false); }
     });
     pickedProduct = null;
-    ctx.$("product-picked").classList.add("hidden");
-    ctx.$("cost-suggest").innerHTML = "";
-    ctx.$("product-results").textContent = "";
+    ctx.$("product-picked")?.classList.add("hidden");
+    const cs = ctx.$("cost-suggest"); if (cs) cs.innerHTML = "";
+    const pr = ctx.$("product-results"); if (pr) pr.textContent = "";
     ctx.$("barcode")?.focus();
   }
 
   // стартовый фокус — на штрих-код
-  ctx.$("barcode").focus();
+  ctx.$("barcode")?.focus();
 }
