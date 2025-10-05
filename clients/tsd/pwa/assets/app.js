@@ -19,10 +19,10 @@ ctx.registerSW();
 
 // грузим вьюхи динамически
 const views = {
-  home:   await import(rel('?assets=views/home.js')),   // export screenHome(ctx)
-  docs:   await import(rel('?assets=views/docs.js')),   // export screenDocs(ctx, page, q)
-  doc:    await import(rel('?assets=views/doc.js')),    // export screenDoc(ctx, id)
-  op_new: await import(rel('?assets=views/op_new.js')), // export screenOpNew(ctx, id)
+  home:   await import(rel('?assets=lib/home.js')),   // export screenHome(ctx)
+  docs:   await import(rel('?assets=lib/docs.js')),   // export screenDocs(ctx, page, q)
+  doc:    await import(rel('?assets=lib/doc.js')),    // export screenDoc(ctx, id)
+  op_new: await import(rel('?assets=lib/op_new.js')), // export screenOpNew(ctx, id)
 };
 
 // SPA router
