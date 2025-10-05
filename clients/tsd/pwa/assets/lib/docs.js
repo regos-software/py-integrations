@@ -14,31 +14,33 @@ export async function screenDocs(ctx, page = 1, queryStr = "") {
   docsPage = Math.max(1, page);
   docsQuery = queryStr;
 
-  // --- Заголовок + кнопка Домой слева ---
+  // --- Заголовок + кнопка Назад (chevron) слева ---
   const titleEl = ctx.$("docs-title");
   if (titleEl) {
     // обёртка вокруг заголовка (создаём один раз)
     let wrap = titleEl.closest(".row");
     if (!wrap || !wrap.classList.contains("row-start")) {
-      // создаём новую обёртку row row-start
       const newWrap = document.createElement("div");
       newWrap.className = "row row-start";
       titleEl.parentNode.insertBefore(newWrap, titleEl);
       newWrap.appendChild(titleEl);
       wrap = newWrap;
     }
-    // кнопка Домой (создаём один раз)
-    let btnHome = ctx.$("btn-docs-home");
-    if (!btnHome) {
-      btnHome = document.createElement("button");
-      btnHome.id = "btn-docs-home";
-      btnHome.className = "icon-btn";
-      const homeLabel = tt(ctx, "nav.home", "Главная");
-      btnHome.title = homeLabel;
-      btnHome.setAttribute("aria-label", homeLabel);
-      btnHome.innerHTML = `<i class="fa-solid fa-house"></i>`;
-      btnHome.onclick = () => { location.hash = "#/"; };
-      wrap.insertBefore(btnHome, titleEl);
+    // кнопка Назад (создаём один раз)
+    let btnBack = ctx.$("btn-docs-back");
+    if (!btnBack) {
+      btnBack = document.createElement("button");
+      btnBack.id = "btn-docs-back";
+      btnBack.className = "btn icon clear"; // без рамки, прозрачная
+      const backLabel = tt(ctx, "nav.back", "Назад");
+      btnBack.title = backLabel;
+      btnBack.setAttribute("aria-label", backLabel);
+      btnBack.innerHTML = `<i class="fa-solid fa-chevron-left"></i>`;
+      btnBack.onclick = () => {
+        if (history.length > 1) history.back();
+        else location.hash = "#/home";
+      };
+      wrap.insertBefore(btnBack, titleEl);
     }
   }
 
@@ -57,12 +59,12 @@ export async function screenDocs(ctx, page = 1, queryStr = "") {
         docsQuery = e.target.value.trim();
         screenDocs(ctx, 1, docsQuery);
       }
-    }, { once: true }); // предотвратить мульти-подписки при повторных рендерах
+    }, { once: true }); // чтобы не плодить обработчики при повторных рендерах
   }
 
   if (btnRefresh) {
     const label = ctx.t("docs.refresh");
-    btnRefresh.className = "btn icon ghost"; // сделать иконкой
+    btnRefresh.className = "btn icon ghost"; // компактная иконка
     btnRefresh.innerHTML = `<i class="fa-solid fa-rotate-right"></i>`;
     btnRefresh.title = label;
     btnRefresh.setAttribute("aria-label", label);

@@ -278,3 +278,13 @@ pre {
 .appbar-left, .appbar-right { display: flex; align-items: center; gap: 10px; }
 
 @media (max-width: 420px) { .lang-select { min-width: 96px; } }
+
+
+/* Кнопка-иконка без рамки (прозрачная) — универсальная */
+.btn.clear { background: transparent; border: 0; color: var(--fg); }
+
+/* Строка с заголовком и кнопкой назад — всё слева */
+.row-start { justify-content: flex-start; }
+
+/* Чуть больший отступ между строкой поиска и списком документов */
+#docs-list { margin-top: 10px; }
