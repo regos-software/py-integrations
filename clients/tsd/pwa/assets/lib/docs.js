@@ -133,9 +133,8 @@ function renderDocsRaw(ctx, items) {
           <div class="muted">${ctx.esc(supplier)}</div>
         </div>
         <div class="text-right">
-          <div class="pill">${ctx.esc(status)}</div>
           <div class="muted mt-4">${ctx.esc(dateStr)}</div>
-          <div class="muted mt-4">${amount} ${ctx.esc(currency)}</div>
+          <!--<div class="muted mt-4">${amount} ${ctx.esc(currency)}</div>-->
         </div>
       </div>
     `;
