@@ -259,3 +259,67 @@ pre {
   border: 0;
   margin: 10px 0;
 }
+
+/* ================================================================== */
+/* ============== Ops list: compact & mobile-friendly =============== */
+/* ================================================================== */
+
+/* комфортная тач-зона по умолчанию и на узких экранах */
+:root { --tap: 40px; }
+@media (max-width: 420px) { :root { --tap: 36px; } }
+@media (max-width: 360px) { :root { --tap: 32px; } }
+
+/* Текстовый helper, чтобы не трогать .btn.small */
+.text-small { font-size: 12px; }
+
+/* Карточка операции — немного плотнее, но в твоём стиле */
+.item.compact { padding: 10px 12px; }
+
+/* Горизонтальная компоновка с автоматическим переносом */
+.row.compact {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0; /* важно для ellipsis */
+}
+
+/* Левая колонка: имя + служебные строки */
+.info { flex: 1 1 auto; min-width: 0; }
+.name {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 600;
+}
+.sub { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.sub .code { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.sub .barcode { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Правая колонка: qty/cost/price + иконки */
+.meta.compact {
+  flex: 0 0 auto;
+  display: flex; align-items: center; gap: 8px;
+  flex-wrap: wrap; justify-content: flex-end;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Иконки-кнопки: тач-зона без текста; наследуют .btn/.ghost */
+.btn.icon { width: var(--tap); height: var(--tap); padding: 0; border-radius: 10px; }
+.btn.icon.small { width: var(--tap); height: var(--tap); }
+
+/* Мобильная адаптация */
+@media (max-width: 420px) {
+  /* Ломаем карточку в две строки: сверху info, снизу meta */
+  .row.compact { flex-direction: column; align-items: stretch; gap: 6px; }
+  .meta.compact { justify-content: space-between; }
+  /* Чтобы уместить больше полезного — прячем штрихкод */
+  .sub .barcode { display: none; }
+}
+
+/* Экстрамалые ширины */
+@media (max-width: 360px) {
+  .meta.compact .dot { display: none; } /* экономим пиксели */
+  .meta.compact { gap: 6px; }
+}

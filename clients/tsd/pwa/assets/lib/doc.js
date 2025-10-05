@@ -12,7 +12,8 @@ export async function screenDoc(ctx, id) {
   ctx.$("btn-add-op").onclick   = () => { location.hash = `#/doc/${id}/op/new`; };
 
   // спиннер
-  ctx.$("ops-list").innerHTML = $spinnerMsg();
+  const list = ctx.$("ops-list");
+  list.innerHTML = $spinnerMsg();
 
   // документ + операции
   const { data } = await ctx.api("purchase_get", { doc_id: id });
@@ -39,9 +40,7 @@ export async function screenDoc(ctx, id) {
   ctx.$("doc-meta").textContent = meta;
 
   // рендер списка операций
-  const list = ctx.$("ops-list");
   if (!ops?.length) { list.innerHTML = $emptyMsg(); return; }
-
   renderOps(ops);
 
   // ---------- helpers ----------
@@ -69,30 +68,38 @@ export async function screenDoc(ctx, id) {
     const item = op.item || {};
     const barcode = item.base_barcode
       || (item.barcode_list ? String(item.barcode_list).split(",")[0]?.trim() : "");
+    const code = (item.code ?? "").toString().padStart(6, "0"); // лидирующие нули
 
     const wrap = document.createElement("div");
-    wrap.className = "item";
+    wrap.className = "item compact";
 
     // view mode
     const view = document.createElement("div");
-    view.className = "row";
+    view.className = "row compact";
     view.innerHTML = `
-      <div>
-        <div><strong>${ctx.esc(item.name || "")}</strong></div>
-        <div class="muted">${ctx.esc(barcode || "")}</div>
+      <div class="info">
+        <strong class="name">${ctx.esc(item.name || "")}</strong>
+        <div class="sub">
+          <span class="muted text-small code">#${ctx.esc(code)}</span>
+          <span class="dot"></span>
+          <span class="muted text-small barcode">${ctx.esc(barcode || "")}</span>
+        </div>
       </div>
-      <div class="meta">
-        <div><strong>${ctx.fmtNum(op.quantity)}</strong> ${ctx.t("unit.pcs") || "шт"}</div>
+      <div class="meta compact">
+        <span class="qty"><strong>${ctx.fmtNum(op.quantity)}</strong> ${ctx.t("unit.pcs") || "шт"}</span>
         <span class="dot"></span>
-        <div class="muted">${ctx.t("op.cost")}: ${ctx.fmtMoney(op.cost)}</div>
+        <span class="cost">${ctx.fmtMoney(op.cost)}</span>
         <span class="dot"></span>
-        <div class="muted">${ctx.t("op.price")}: ${ctx.fmtMoney(op.price ?? 0)}</div>
-        <div style="width:8px"></div>
-        <button class="btn small ghost op-edit">
-          <i class="fa-solid fa-pen"></i> ${ctx.t("op.edit") || "Редактировать"}
+        <span class="price">${ctx.fmtMoney(op.price ?? 0)}</span>
+        <button class="btn icon small ghost op-edit"
+                aria-label="${ctx.t("op.edit") || "Редактировать"}"
+                title="${ctx.t("op.edit") || "Редактировать"}">
+          <i class="fa-solid fa-pen"></i>
         </button>
-        <button class="btn small ghost op-del">
-          <i class="fa-solid fa-trash"></i> ${ctx.t("op.delete") || "Удалить"}
+        <button class="btn icon small ghost op-del"
+                aria-label="${ctx.t("op.delete") || "Удалить"}"
+                title="${ctx.t("op.delete") || "Удалить"}">
+          <i class="fa-solid fa-trash"></i>
         </button>
       </div>
     `;
@@ -186,16 +193,16 @@ export async function screenDoc(ctx, id) {
         const { ok, data } = await ctx.api("purchase_ops_edit", payload);
         const affected = data?.result?.row_affected || 0;
         if (ok && affected > 0) {
-          // обновим локально и перерисуем одну карточку
+          // обновим локально и перерисуем видимые фрагменты
           op.quantity = qty;
           op.cost = cost;
           if (Number.isFinite(price)) op.price = price; else op.price = undefined;
 
-          // перерисовать view
-          view.querySelector(".muted:nth-of-type(1)"); // оставить как есть
-          view.querySelector(".meta").children[0].innerHTML = `<strong>${ctx.fmtNum(op.quantity)}</strong> ${ctx.t("unit.pcs") || "шт"}`;
-          view.querySelector(".meta").children[2].innerHTML = `${ctx.t("op.cost")}: ${ctx.fmtMoney(op.cost)}`;
-          view.querySelector(".meta").children[4].innerHTML = `${ctx.t("op.price")}: ${ctx.fmtMoney(op.price ?? 0)}`;
+          // точечно обновляем поля по классам (надёжнее, чем по индексам)
+          const metaEl = view.querySelector(".meta");
+          metaEl.querySelector(".qty").innerHTML = `<strong>${ctx.fmtNum(op.quantity)}</strong> ${ctx.t("unit.pcs") || "шт"}`;
+          metaEl.querySelector(".cost").textContent  = ctx.fmtMoney(op.cost);
+          metaEl.querySelector(".price").textContent = ctx.fmtMoney(op.price ?? 0);
 
           edit.classList.add("hidden");
           view.classList.remove("hidden");
