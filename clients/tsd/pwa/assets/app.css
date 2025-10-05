@@ -9,6 +9,7 @@
   --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji";
   --border: #e5e7eb;
   --hover: #f3f4f6;
+  --tap: 40px; /* комфортная тач-зона */
 }
 
 @media (prefers-color-scheme: dark) {
@@ -48,10 +49,9 @@ body {
 
 h1 { font-size: 20px; margin: 0 0 12px; }
 .muted { color: var(--muted); font-size: 14px; }
-
 a { color: inherit; }
 
-/* Buttons */
+/* ===== Buttons ===== */
 .btn {
   display: inline-flex;
   align-items: center;
@@ -73,7 +73,10 @@ a { color: inherit; }
 .btn:active { transform: translateY(1px); }
 .btn[disabled] { opacity: .6; cursor: default; }
 
-/* Inputs */
+/* Иконки-кнопки: переиспользуемо */
+.btn.icon { width: var(--tap); height: var(--tap); padding: 0; border-radius: 10px; }
+
+/* ===== Inputs ===== */
 input, textarea, select {
   width: 100%;
   padding: 10px 12px;
@@ -88,7 +91,7 @@ input:focus, textarea:focus, select:focus {
   border-color: transparent;
 }
 
-/* Pre */
+/* ===== Pre ===== */
 pre {
   background: #0b1220;
   color: #e5e7eb;
@@ -97,253 +100,158 @@ pre {
   overflow: auto;
 }
 
-/* --- AppBar / Header --- */
+/* ===== AppBar ===== */
 .appbar {
-  position: sticky;
-  top: 0;
-  z-index: 10;
+  position: sticky; top: 0; z-index: 10;
   background: var(--card);
   box-shadow: var(--shadow);
   padding: 10px 12px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
   border-radius: var(--radius);
 }
-.appbar .left,
-.appbar .right { display: flex; align-items: center; gap: 10px; }
+.appbar .left, .appbar .right { display: flex; align-items: center; gap: 10px; }
 .appbar h1 { font-size: 18px; margin: 0; }
 .time { font-variant-numeric: tabular-nums; font-weight: 600; }
 
 /* Back button */
 .icon-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  cursor: pointer;
-  background: var(--hover);
-  color: var(--fg);
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 36px; height: 36px; border-radius: 10px;
+  border: 1px solid var(--border); cursor: pointer;
+  background: var(--hover); color: var(--fg);
 }
 .icon-btn:active { transform: translateY(1px); }
 .icon-btn i { font-size: 16px; }
 
-/* SSO container + language select */
-#regos-login { min-width: 40px; display: flex; align-items: center; }
-.lang-select { width: auto; min-width: 120px; }
+/* ===== Layout utils (переиспользуемые) ===== */
+.hidden { display: none !important; }
+.row { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; }
+.stack { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.cluster { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.grow { flex: 1 1 auto; min-width: 0; }
+.w-full { width: 100%; }
+.text-sm { font-size: 12px; }
+.truncate { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.break-words { white-space: normal; word-break: break-word; }
 
-/* Main content (replaces inline padding) */
+/* ===== Content ===== */
 .content { padding-bottom: 72px; padding-top: 15px; }
 
-/* Utils */
-.hidden { display: none !important; }
-
-/* Rows / Layout */
-.row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.input-row { display: flex; gap: 8px; align-items: center; }
-.input-row > * { flex: 1; }
-.input-row .btn { flex: 0 0 auto; }
-
-/* Pills */
+/* ===== Pills ===== */
 .pill {
-  display: inline-block;
-  font-size: 12px;
-  padding: 3px 8px;
-  border-radius: 999px;
-  background: var(--hover);
-  color: var(--fg);
-  border: 1px solid var(--border);
+  display: inline-block; font-size: 12px; padding: 3px 8px; border-radius: 999px;
+  background: var(--hover); color: var(--fg); border: 1px solid var(--border);
   white-space: nowrap;
 }
 
-/* Lists */
-.list { display: grid; gap: 8px; }
+/* ===== Lists / Items ===== */
+.list { display: grid; gap: 8px; width: 100%; }
 .item {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 12px;
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: 12px; padding: 12px;
   transition: background .12s ease, border-color .12s ease;
-  cursor: pointer;
+  cursor: pointer; width: 100%; max-width: 100%; min-width: 0;
 }
 .item:hover { background: var(--hover); }
 
-/* Search list (op_new) */
+/* ===== Search list (op_new) ===== */
 .search-list { display: grid; gap: 8px; }
 .search-list .item { cursor: pointer; }
 
-/* Toolbar (paging) */
-.toolbar {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  margin-top: 10px;
-}
+/* ===== Toolbar ===== */
+.toolbar { display: flex; gap: 10px; align-items: center; margin-top: 10px; }
 .toolbar .muted { flex: 1; text-align: center; }
 
-/* Scanner */
+/* ===== Scanner ===== */
 #scanner { margin-top: 8px; }
-#preview {
-  display: block;
-  width: 100%;
-  border-radius: 12px;
-  background: #000;
-}
+#preview { display: block; width: 100%; border-radius: 12px; background: #000; }
 
-/* Toast (use class .toast and .show) */
+/* ===== Toast ===== */
 .toast {
-  position: fixed;
-  left: 50%;
-  bottom: 16px;
-  transform: translateX(-50%);
-  max-width: 90%;
-  background: #10b981;
-  color: #fff;
-  padding: 10px 14px;
-  border-radius: 8px;
-  box-shadow: 0 4px 14px rgba(0,0,0,.2);
-  z-index: 9999;
-  font-size: 14px;
-  display: none;
+  position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
+  max-width: 90%; background: #10b981; color: #fff;
+  padding: 10px 14px; border-radius: 8px; box-shadow: 0 4px 14px rgba(0,0,0,.2);
+  z-index: 9999; font-size: 14px; display: none;
 }
 .toast.error { background: #ef4444; }
 .toast.show { display: block; }
 
-/* Form: add operation (each field on its own line) */
+/* ===== Forms ===== */
 .form-vert { display: grid; grid-template-columns: 1fr; gap: 10px; }
-
-/* Quick increment buttons for quantity */
-.qty-quick {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
+.qty-quick { display: flex; flex-wrap: wrap; gap: 8px; }
 .qty-quick .chip {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 6px 10px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--hover);
-  color: var(--fg);
-  font-size: 14px;
-  cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 6px 10px; border-radius: 999px; border: 1px solid var(--border);
+  background: var(--hover); color: var(--fg); font-size: 14px; cursor: pointer;
 }
 .qty-quick .chip:active { transform: translateY(1px); }
 
-/* Small helpers for meta blocks */
-.meta {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  flex-wrap: wrap;
-}
-.meta .dot::before {
-  content: "•";
-  margin: 0 6px;
-  color: var(--muted);
-}
-
-/* Page title row spacing */
+/* ===== Meta helpers ===== */
+.meta { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.meta .dot::before { content: "•"; margin: 0 6px; color: var(--muted); }
 .page-actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
-
-/* Divider (optional) */
-.hr {
-  height: 1px;
-  background: var(--border);
-  border: 0;
-  margin: 10px 0;
-}
+.hr { height: 1px; background: var(--border); border: 0; margin: 10px 0; }
 
 /* ================================================================== */
-/* ============== Ops list: compact & mobile-friendly =============== */
+/* ==================== Ops list (универсальная версия) ============= */
 /* ================================================================== */
 
-/* комфортная тач-зона по умолчанию и на узких экранах */
-:root { --tap: 40px; }
-@media (max-width: 420px) { :root { --tap: 36px; } }
-@media (max-width: 360px) { :root { --tap: 32px; } }
+/* Список занимает всю ширину и не уезжает горизонтально */
+#ops-list { width: 100%; max-width: 100%; overflow-x: hidden; }
+#ops-list .item { cursor: default; }           /* карточки операций обычно не кликабельны целиком */
+#ops-list .item > div { min-width: 0; }        /* защита от flex-переполнения */
 
-/* Текстовый helper, чтобы не трогать .btn.small */
-.text-small { font-size: 12px; }
-
-/* Карточка операции — немного плотнее, но в твоём стиле */
-.item.compact { padding: 10px 12px; }
-
-/* Горизонтальная компоновка с автоматическим переносом */
-.row.compact {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+/* Верхняя полоса: имя на всю ширину слева, справа — действия */
+#ops-list .row,
+#ops-list .top { /* поддержка и без .top, и с ним */
+  align-items: flex-start;
   gap: 8px;
-  min-width: 0; /* важно для ellipsis */
 }
 
-/* Левая колонка: имя + служебные строки */
-.info { flex: 1 1 auto; min-width: 0; }
-.name {
-  display: block;
+/* Левая колонка (info) — тянется, переносит строки, не вываливается */
+#ops-list .info { flex: 1 1 auto; min-width: 0; }
+#ops-list .name {
+  font-weight: 600;
+  white-space: normal;     /* можно переносить */
+  word-break: break-word;  /* длинные слова ломаем */
+}
+
+/* Подпись: код + штрихкод (переносится, штрихкод усечём при нехватке места) */
+#ops-list .sub { display: flex; flex-wrap: wrap; gap: 6px 8px; min-width: 0; }
+#ops-list .sub .code { font-variant-numeric: tabular-nums; }
+#ops-list .sub .barcode {
+  max-width: 100%;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  font-weight: 600;
 }
-.sub { display: flex; align-items: center; gap: 6px; min-width: 0; }
-.sub .code { white-space: nowrap; font-variant-numeric: tabular-nums; }
-.sub .barcode { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-/* Правая колонка: qty/cost/price + иконки */
-.meta.compact {
-  flex: 0 0 auto;
-  display: flex; align-items: center; gap: 8px;
-  flex-wrap: wrap; justify-content: flex-end;
+/* Контейнер иконок действий (совместим с .op-actions и .actions) */
+#ops-list .actions,
+#ops-list .op-actions { flex: 0 0 auto; display: inline-flex; gap: 8px; }
+
+/* Нижняя полоса: количество и цены — отдельной строкой на всю ширину */
+#ops-list .meta,
+#ops-list .bottom {
+  width: 100%;
   font-variant-numeric: tabular-nums;
-}
-
-/* Иконки-кнопки: тач-зона без текста; наследуют .btn/.ghost */
-.btn.icon { width: var(--tap); height: var(--tap); padding: 0; border-radius: 10px; }
-.btn.icon.small { width: var(--tap); height: var(--tap); }
-
-/* Мобильная адаптация */
-@media (max-width: 420px) {
-  /* Ломаем карточку в две строки: сверху info, снизу meta */
-  .row.compact { flex-direction: column; align-items: stretch; gap: 6px; }
-  .meta.compact { justify-content: space-between; }
-  /* Чтобы уместить больше полезного — прячем штрихкод */
-  .sub .barcode { display: none; }
-}
-
-/* Экстрамалые ширины */
-@media (max-width: 360px) {
-  .meta.compact .dot { display: none; } /* экономим пиксели */
-  .meta.compact { gap: 6px; }
-}
-
-/* Верхняя строка карточки операций: имя слева, иконки справа */
-.item.compact .top {
-  align-items: flex-start; /* чтобы sub-строка не растягивала центрирование */
-}
-
-/* Контейнер иконок справа */
-.op-actions {
-  display: inline-flex;
+  justify-content: flex-start; /* читается как текстовая строка */
   gap: 8px;
-  flex: 0 0 auto;
+  margin-top: 6px; /* отступ от верхнего блока */
 }
 
-/* Нижняя строка (кол-во и цены) — отдельной полосой под верхним блоком */
-.meta.bottom {
-  margin-top: 6px;
-}
-
-/* На узких экранах (если flex ломается в колонку),
-   иконки просто падают под имя — остаётся кликабельно */
+/* Узкие экраны: позволяем верху ломаться в несколько строк,
+   блок действий может переехать ниже имени — всё остаётся кликабельно */
 @media (max-width: 420px) {
-  .item.compact .top { align-items: stretch; }
-  .op-actions { align-self: flex-start; }
+  :root { --tap: 36px; }
+  #ops-list .row,
+  #ops-list .top { flex-wrap: wrap; }
+  #ops-list .info { flex-basis: 100%; }
+  #ops-list .actions, #ops-list .op-actions { margin-left: auto; }
+}
+
+/* Очень узкие экраны — чуть плотнее, точки можно скрыть для экономии места */
+@media (max-width: 360px) {
+  :root { --tap: 32px; }
+  #ops-list .meta .dot { display: none; }
 }
