@@ -106,35 +106,39 @@ export async function screenDoc(ctx, id) {
     const wrap = document.createElement("div");
     wrap.className = "item compact";
 
-    // view mode (текущая компактная вёрстка)
+
     const view = document.createElement("div");
-    view.className = "row compact";
     view.innerHTML = `
-      <div class="info">
+    <div class="row top">
+        <div class="info">
         <strong class="name">${ctx.esc(item.name || "")}</strong>
         <div class="sub">
-          <span class="muted text-small code">${ctx.esc(code)}</span>
-          <span class="dot"></span>
-          <span class="muted text-small barcode">${ctx.esc(barcode || "")}</span>
+            <span class="muted text-small code">${ctx.esc(code)}</span>
+            <span class="dot"></span>
+            <span class="muted text-small barcode">${ctx.esc(barcode || "")}</span>
         </div>
-      </div>
-      <div class="meta compact">
+        </div>
+        <div class="actions">
+        <button class="btn icon clear op-edit"
+                aria-label="${ctx.t("op.edit") || "Редактировать"}"
+                title="${ctx.t("op.edit") || "Редактировать"}">
+            <i class="fa-solid fa-pen"></i>
+        </button>
+        <button class="btn icon clear op-del"
+                aria-label="${ctx.t("op.delete") || "Удалить"}"
+                title="${ctx.t("op.delete") || "Удалить"}">
+            <i class="fa-solid fa-trash"></i>
+        </button>
+        </div>
+    </div>
+
+    <div class="meta bottom">
         <span class="qty"><strong>${ctx.fmtNum(op.quantity)}</strong> ${ctx.t("unit.pcs") || "шт"}</span>
         <span class="dot"></span>
         <span class="cost">${ctx.fmtMoney(op.cost)}</span>
         <span class="dot"></span>
         <span class="price">${ctx.fmtMoney(op.price ?? 0)}</span>
-        <button class="btn icon small ghost op-edit"
-                aria-label="${ctx.t("op.edit") || "Редактировать"}"
-                title="${ctx.t("op.edit") || "Редактировать"}">
-          <i class="fa-solid fa-pen"></i>
-        </button>
-        <button class="btn icon small ghost op-del"
-                aria-label="${ctx.t("op.delete") || "Удалить"}"
-                title="${ctx.t("op.delete") || "Удалить"}">
-          <i class="fa-solid fa-trash"></i>
-        </button>
-      </div>
+    </div>
     `;
 
     // edit mode (скрыт)
