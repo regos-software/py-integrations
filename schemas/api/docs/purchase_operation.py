@@ -8,6 +8,7 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 from pydantic.config import ConfigDict
 
+from schemas.api.base import BaseSchema
 from schemas.api.refrences.item import Item
 from schemas.api.refrences.tax import VatCalculationType
 
@@ -38,7 +39,7 @@ class PurchaseOperation(BaseModel):
 
 # ---------- Get ----------
 
-class PurchaseOperationGetRequest(BaseModel):
+class PurchaseOperationGetRequest(BaseSchema):
     """
     Параметры для /v1/PurchaseOperation/Get
     """
@@ -49,7 +50,7 @@ class PurchaseOperationGetRequest(BaseModel):
 
 # ---------- Add ----------
 
-class PurchaseOperationAddRequest(BaseModel):
+class PurchaseOperationAddRequest(BaseSchema):
     """
     Один элемент массива для /v1/PurchaseOperation/Add
     Все элементы массива должны иметь одинаковый document_id.
@@ -67,7 +68,7 @@ class PurchaseOperationAddRequest(BaseModel):
 
 # ---------- Edit ----------
 
-class PurchaseOperationEditItem(BaseModel):
+class PurchaseOperationEditItem(BaseSchema):
     """
     Один элемент массива для /v1/PurchaseOperation/Edit
     """
@@ -84,7 +85,7 @@ class PurchaseOperationEditItem(BaseModel):
 
 # ---------- Delete ----------
 
-class PurchaseOperationDeleteItem(BaseModel):
+class PurchaseOperationDeleteItem(BaseSchema):
     """
     Один элемент массива для /v1/PurchaseOperation/Delete
     """

@@ -1,8 +1,14 @@
 # schemas/api/base.py
+from decimal import Decimal
 from typing import Optional, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
-class APIBaseResponse(BaseModel):
+class BaseSchema(BaseModel):
+    model_config = ConfigDict(
+        json_encoders={Decimal: float}
+    )
+
+class APIBaseResponse(BaseSchema):
     """
     Универсальный ответ API REGOS.
     Разные методы возвращают разные формы result (dict, list[dict], list[int], int, str ...),
@@ -14,10 +20,10 @@ class APIBaseResponse(BaseModel):
         description="Данные ответа (могут быть dict, list[dict], list[int], и т.д.)"
     )
 
-class APIErrorResult(BaseModel):
+class APIErrorResult(BaseSchema):
     error: int
     description: str
 
-class ArrayResult(BaseModel):
+class ArrayResult(BaseSchema):
     row_affected: int
     ids: list[int]
