@@ -1,13 +1,13 @@
 // app.js (router + bootstrap)
-import { CI, registerSW } from "./?assets=lib/api.js";
-import { $, out, tickClock } from "./?assets=lib/utils.js";
-import { screenHome } from "./?assets=views/home.js";
-import { screenDocs } from "./?assets=views/docs.js";
-import { screenDoc } from "./?assets=views/doc.js";
-import { screenOpNew } from "./?assets=views/op_new.js";
+import { CI, registerSW } from "/?assets=lib/api.js";
+import { $, out, tickClock } from "/?assets=lib/utils.js";
+import { screenHome } from "/?assets=views/home.js";
+import { screenDocs } from "/?assets=views/docs.js";
+import { screenDoc } from "/?assets=views/doc.js";
+import { screenOpNew } from "/?assets=views/op_new.js";
 
 // UI bootstrap
-$("title").textContent = "TSD • Закупки";
+$("title").textContent = "TSD";
 tickClock(); setInterval(tickClock, 1000);
 registerSW();
 
