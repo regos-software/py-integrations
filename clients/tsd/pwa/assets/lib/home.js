@@ -1,4 +1,4 @@
-// views/home.js — без import; получает ctx
+// lib/home.js — без import; получает ctx
 export async function screenHome(ctx) {
   await ctx.loadView("home");
 

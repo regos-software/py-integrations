@@ -1,4 +1,4 @@
-// views/op_new.js — без import; получает ctx
+// lib/op_new.js — без import; получает ctx
 let mediaStream = null, scanTimer = null, pickedProduct = null, detector = null;
 
 export async function screenOpNew(ctx, id) {

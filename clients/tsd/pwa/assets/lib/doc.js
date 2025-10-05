@@ -1,4 +1,4 @@
-// views/doc.js — без import; получает ctx
+// lib/doc.js — без import; получает ctx
 export async function screenDoc(ctx, id) {
   await ctx.loadView("doc");
 

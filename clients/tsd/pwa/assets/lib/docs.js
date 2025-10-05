@@ -1,4 +1,4 @@
-// views/docs.js — без import; получает ctx
+// lib/docs.js — без import; получает ctx
 let docsPage = 1;
 let docsTotalPages = 1;
 let docsQuery = "";
@@ -37,8 +37,7 @@ export async function screenDocs(ctx, page = 1, queryStr = "") {
       btnBack.setAttribute("aria-label", backLabel);
       btnBack.innerHTML = `<i class="fa-solid fa-chevron-left"></i>`;
       btnBack.onclick = () => {
-        if (history.length > 1) history.back();
-        else location.hash = "#/home";
+        location.hash = "#/home";
       };
       wrap.insertBefore(btnBack, titleEl);
     }
