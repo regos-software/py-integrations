@@ -1,54 +1,37 @@
-// токен приходим из window.__CI__ (вставляет backend) или из ?ci=
-const CI = window.__CI__ || new URLSearchParams(location.search).get("ci") || "";
+// app.js (router + bootstrap)
+import { CI, registerSW } from "./?assets=lib/api.js";
+import { $, out, tickClock } from "./?assets=lib/utils.js";
+import { screenHome } from "./?assets=views/home.js";
+import { screenDocs } from "./?assets=views/docs.js";
+import { screenDoc } from "./?assets=views/doc.js";
+import { screenOpNew } from "./?assets=views/op_new.js";
 
-const out = (id, value) => {
-  const el = document.getElementById(id);
-  if (el) el.textContent = typeof value === "string" ? value : JSON.stringify(value, null, 2);
-};
+// UI bootstrap
+$("title").textContent = "TSD • Закупки";
+tickClock(); setInterval(tickClock, 1000);
+registerSW();
 
-// регистрация SW (файл отдаётся по ?pwa=sw, scope = /clients/)
-if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.register("/clients/tsd?pwa=sw", { scope: "/clients/" })
-    .catch(err => console.warn("SW register failed", err));
-}
-
-// универсальный вызов backend API
-async function callApi(action, params = {}) {
-  const res = await fetch("/clients/tsd/external", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Connected-Integration-Id": CI
-    },
-    body: JSON.stringify({ action, params })
-  });
-  let data = {};
-  try { data = await res.json(); } catch {}
-  return { ok: res.ok, status: res.status, data };
-}
-
-// Демо UI-логика
-window.addEventListener("DOMContentLoaded", () => {
-  out("token", CI || "—");
-
-  const pingBtn = document.getElementById("ping");
-  if (pingBtn) {
-    pingBtn.addEventListener("click", async () => {
-      pingBtn.disabled = true;
-      const res = await callApi("ping");
-      out("out", res);
-      pingBtn.disabled = false;
-    });
+// SPA router
+async function router() {
+  const h = location.hash || "#/home";
+  if (h.startsWith("#/docs")) {
+    const qs = new URLSearchParams(h.split("?")[1] || "");
+    const p = parseInt(qs.get("page") || "1", 10) || 1;
+    const q = qs.get("q") || "";
+    await screenDocs(p, q);
+  } else if (h.startsWith("#/doc/") && h.endsWith("/op/new")) {
+    const id = h.split("/")[2];
+    await screenOpNew(id);
+  } else if (h.startsWith("#/doc/")) {
+    const id = h.split("/")[2];
+    await screenDoc(id);
+  } else {
+    await screenHome();
   }
+}
+window.addEventListener("hashchange", router);
+router();
 
-  // пример формы
-  const form = document.getElementById("demo-form");
-  if (form) {
-    form.addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const text = form.querySelector("textarea[name=text]")?.value || "";
-      const res = await callApi("send", { text });
-      out("out", res);
-    });
-  }
-});
+// для отладки
+window.__CI__ = CI;
+window.__out = out;

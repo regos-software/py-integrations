@@ -1,0 +1,35 @@
+<h1>Новая операция</h1>
+
+<div class="row" style="margin:8px 0 10px;">
+  <button class="btn" id="btn-scan">Скан штрих-кода</button>
+  <input id="barcode" placeholder="или введите штрих-код вручную" />
+</div>
+<div id="scanner" class="hidden">
+  <video id="preview" playsinline style="width:100%;border-radius:12px;background:#000"></video>
+  <div class="row" style="margin-top:8px;">
+    <span class="muted">Наведи камеру на штрих-код</span>
+    <button class="btn secondary" id="btn-close-scan">Закрыть</button>
+  </div>
+</div>
+
+<label>Поиск товара</label>
+<input id="product-query" placeholder="Наименование / артикул" />
+<div class="search-list" id="product-results" style="max-height:40vh;overflow:auto;margin-top:8px"></div>
+
+<div id="product-picked" class="hidden" style="margin-top:10px">
+  <div class="item">
+    <div class="row"><strong id="picked-name">—</strong><span class="muted" id="picked-code">—</span></div>
+  </div>
+</div>
+
+<div class="qty-box" style="margin-top:12px;display:grid;grid-template-columns:1fr 1fr;gap:10px">
+  <div><label>Количество</label><input id="qty" inputmode="decimal" placeholder="0" /></div>
+  <div><label>Себестоимость</label><input id="cost" inputmode="decimal" placeholder="0.00" /></div>
+  <div><label>Цена продажи</label><input id="price" inputmode="decimal" placeholder="0.00" /></div>
+  <div><label>Срок годности (опц.)</label><input id="expdate" type="date" /></div>
+</div>
+
+<div class="row" style="margin-top:12px">
+  <button class="btn" id="btn-op-save">Сохранить</button>
+  <button class="btn secondary" id="btn-op-cancel">Отмена</button>
+</div>

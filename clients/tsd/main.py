@@ -5,10 +5,12 @@ from typing import Any, Dict, List, Optional, Sequence
 from email.message import EmailMessage
 
 from pathlib import Path
+from fastapi.encoders import jsonable_encoder
 from starlette.responses import FileResponse, HTMLResponse, Response, RedirectResponse
 import json
 
 from core.api.regos_api import RegosAPI
+from schemas.api.docs.purchase import DocPurchaseGetRequest
 from schemas.api.integrations.connected_integration_setting import ConnectedIntegrationSettingRequest
 from schemas.integration.base import (
     IntegrationSuccessResponse,
@@ -107,15 +109,58 @@ class TsdIntegration(ClientBase):
             if action in ("", "ping"):
                 return IntegrationSuccessResponse(result={"pong": True, "ci": ci})
 
-            # пример: login
             if action == "login":
-                # TODO: ваша логика
                 return IntegrationSuccessResponse(result={"status": "logged_in", "ci": ci})
 
-            # пример: отправка/сохранение чего-либо
             if action == "send":
-                # TODO: ваша логика с params
                 return IntegrationSuccessResponse(result={"status": "sent", "ci": ci})
+
+            # -------------------- NEW: список документов --------------------
+            if action == "purchase_list":
+                page = int(params.get("page", 1) or 1)
+                page_size = int(params.get("page_size", 20) or 20)
+                query = (params.get("query") or "").strip() or None
+                start = params.get("start_date")
+                end = params.get("end_date")
+
+                async with RegosAPI(connected_integration_id=ci) as api:
+                    req = DocPurchaseGetRequest(
+                        start_date=start,
+                        end_date=end,
+                        search=query,
+                        limit=page_size,
+                        offset=(page - 1) * page_size,
+                    )
+                    docs = await api.docs.purchase.get(req)
+
+                # без маппинга: возвращаем «как есть»
+                return IntegrationSuccessResponse(result={
+                    "items": jsonable_encoder(docs),
+                    "page": page,
+                    "page_size": page_size
+                })
+
+            # -------------------- NEW: один документ -----------------------
+            if action == "purchase_get":
+                doc_id = params.get("doc_id")
+                if not doc_id:
+                    return IntegrationErrorResponse(
+                        result=IntegrationErrorModel(error=400, description="doc_id is required")
+                    )
+
+                async with RegosAPI(connected_integration_id=ci) as api:
+                    doc = await api.docs.purchase.get_by_id(int(doc_id))
+
+                if not doc:
+                    return IntegrationErrorResponse(
+                        result=IntegrationErrorModel(error=404, description=f"DocPurchase id={doc_id} not found")
+                    )
+
+                return IntegrationSuccessResponse(result={
+                    "doc": jsonable_encoder(doc),
+                    # оставлю поле для совместимости с UI; можешь убрать, если не нужно
+                    "operations": []
+                })
 
             return IntegrationErrorResponse(
                 result=IntegrationErrorModel(error=400, description=f"Unknown action '{action}'")
@@ -125,6 +170,7 @@ class TsdIntegration(ClientBase):
             return IntegrationErrorResponse(
                 result=IntegrationErrorModel(error=500, description=f"Server error: {e}")
             )
+
 
 
     async def handle_ui(self, envelope: dict) -> Any:
@@ -150,12 +196,12 @@ class TsdIntegration(ClientBase):
         )
 
         # 1) assets: ?asset=...
-        asset_rel = query.get("assets")
+        asset_rel = query.get("assets") or query.get("asset")
         if asset_rel:
             file_path = self._safe_join(self.ASSETS_DIR, str(asset_rel))
             if not file_path or not file_path.exists():
-                return Response("assets not found", status_code=404)
-            return FileResponse(str(file_path))  # content-type определится автоматически
+                return Response("asset not found", status_code=404)
+            return FileResponse(str(file_path))
 
         # 2) service worker: ?pwa=sw
         if str(query.get("pwa", "")).lower() == "sw":
