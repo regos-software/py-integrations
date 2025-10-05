@@ -1,15 +1,15 @@
 from typing import List
-from pydantic import TypeAdapter, RootModel
+from pydantic import TypeAdapter
 
 from schemas.api.base import APIBaseResponse, ArrayResult
 from schemas.api.docs.purchase_operation import (
-    PurchaseOperation, PurchaseOperationGetRequest,
-    PurchaseOperationAddRequest, PurchaseOperationEditItem, PurchaseOperationDeleteItem
+    PurchaseOperation,
+    PurchaseOperationGetRequest,
+    PurchaseOperationAddRequest,
+    PurchaseOperationEditItem,
+    PurchaseOperationDeleteItem,
 )
 
-class _AddPayload(RootModel[List[PurchaseOperationAddRequest]]): ...
-class _EditPayload(RootModel[List[PurchaseOperationEditItem]]): ...
-class _DeletePayload(RootModel[List[PurchaseOperationDeleteItem]]): ...
 
 class PurchaseOperationService:
     PATH_GET    = "PurchaseOperation/Get"
@@ -31,16 +31,14 @@ class PurchaseOperationService:
         return await self.get(PurchaseOperationGetRequest(document_ids=[doc_id]))
 
     async def add(self, items: List[PurchaseOperationAddRequest]) -> ArrayResult:
-        payload = _AddPayload(items)
-        resp = await self.api.call(self.PATH_ADD, payload, APIBaseResponse)
+        # передаём список моделей как есть — RegosAPI.call сам сериализует
+        resp = await self.api.call(self.PATH_ADD, items, APIBaseResponse)
         return ArrayResult.model_validate(resp.result or {})
 
     async def edit(self, items: List[PurchaseOperationEditItem]) -> ArrayResult:
-        payload = _EditPayload(items)
-        resp = await self.api.call(self.PATH_EDIT, payload, APIBaseResponse)
+        resp = await self.api.call(self.PATH_EDIT, items, APIBaseResponse)
         return ArrayResult.model_validate(resp.result or {})
 
     async def delete(self, items: List[PurchaseOperationDeleteItem]) -> ArrayResult:
-        payload = _DeletePayload(items)
-        resp = await self.api.call(self.PATH_DELETE, payload, APIBaseResponse)
+        resp = await self.api.call(self.PATH_DELETE, items, APIBaseResponse)
         return ArrayResult.model_validate(resp.result or {})

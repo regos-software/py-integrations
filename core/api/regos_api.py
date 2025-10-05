@@ -1,5 +1,7 @@
 from __future__ import annotations
+from decimal import Decimal
 from typing import Type, TypeVar, Any
+from fastapi.encoders import jsonable_encoder
 import httpx
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 
@@ -25,7 +27,11 @@ class RegosAPI:
         reraise=True,
     )
     async def call(self, path: str, body: Any, response_model: Type[T]) -> T:
-        return await self._client.post(method_path=path, data=body, response_model=response_model)
+        payload = jsonable_encoder(body, custom_encoder={Decimal: float})
+        if isinstance(payload, dict) and set(payload.keys()) == {"root"}:
+            payload = payload["root"]
+        return await self._client.post(method_path=path, data=payload, response_model=response_model)
+
 
     async def close(self) -> None:
         await self._client.close()
