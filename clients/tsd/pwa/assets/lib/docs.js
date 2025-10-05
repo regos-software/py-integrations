@@ -37,7 +37,8 @@ export async function screenDocs(ctx, page = 1, queryStr = "") {
       btnBack.setAttribute("aria-label", backLabel);
       btnBack.innerHTML = `<i class="fa-solid fa-chevron-left"></i>`;
       btnBack.onclick = () => {
-        location.hash = "#/home";
+        if (history.length > 1) history.back();
+        else location.hash = "#/home";
       };
       wrap.insertBefore(btnBack, titleEl);
     }
