@@ -6,10 +6,41 @@ export async function screenDoc(ctx, id) {
   const $spinnerMsg = () => `<div class="muted">${ctx.t("common.loading")}</div>`;
   const $emptyMsg   = () => `<div class="muted">${ctx.t("doc.no_ops") || ctx.t("common.nothing")}</div>`;
 
-  ctx.$("btn-back-docs").textContent = ctx.t("doc.to_list");
-  ctx.$("btn-add-op").textContent    = ctx.t("doc.add_op");
-  ctx.$("btn-back-docs").onclick = () => { location.hash = "#/docs"; };
-  ctx.$("btn-add-op").onclick   = () => { location.hash = `#/doc/${id}/op/new`; };
+  // кнопки действия (старую кнопку "к списку" прячем — используем chevron возле заголовка)
+  const oldBackBtn = ctx.$("btn-back-docs");
+  if (oldBackBtn) oldBackBtn.classList.add("hidden");
+  const addOpBtn = ctx.$("btn-add-op");
+  if (addOpBtn) {
+    addOpBtn.textContent = ctx.t("doc.add_op");
+    addOpBtn.onclick = () => { location.hash = `#/doc/${id}/op/new`; };
+  }
+
+  // шапка документа: заголовок + chevron "назад к списку" слева от него
+  const titleEl = ctx.$("doc-title");
+  if (titleEl) {
+    // обёртка вокруг заголовка (ставим row row-start, чтобы элементы шли слева направо)
+    let wrap = titleEl.closest(".row");
+    if (!wrap || !wrap.classList.contains("row-start")) {
+      const newWrap = document.createElement("div");
+      newWrap.className = "row row-start";
+      titleEl.parentNode.insertBefore(newWrap, titleEl);
+      newWrap.appendChild(titleEl);
+      wrap = newWrap;
+    }
+    // создаём chevron один раз
+    let backChevron = ctx.$("btn-doc-back");
+    if (!backChevron) {
+      backChevron = document.createElement("button");
+      backChevron.id = "btn-doc-back";
+      backChevron.className = "btn icon clear"; // без рамки
+      const backLabel = ctx.t("doc.to_list") || ctx.t("nav.back") || "Назад";
+      backChevron.title = backLabel;
+      backChevron.setAttribute("aria-label", backLabel);
+      backChevron.innerHTML = `<i class="fa-solid fa-chevron-left"></i>`;
+      backChevron.onclick = () => { location.hash = "#/docs"; };
+      wrap.insertBefore(backChevron, titleEl);
+    }
+  }
 
   // спиннер
   const list = ctx.$("ops-list");
@@ -25,8 +56,8 @@ export async function screenDoc(ctx, id) {
     ops = r2?.data?.result?.items || [];
   }
 
-  // шапка документа
-  ctx.$("doc-title").textContent = `${ctx.t("doc.title_prefix") || "Документ"} ${doc.code || id}`;
+  // шапка документа — тексты
+  if (titleEl) titleEl.textContent = `${ctx.t("doc.title_prefix") || "Документ"} ${doc.code || id}`;
   const statusStr = `${doc.performed ? ctx.t("docs.status.performed") : ctx.t("docs.status.new")}${
     doc.blocked ? " • " + ctx.t("docs.status.blocked") : ""
   }`;
