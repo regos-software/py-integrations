@@ -16,9 +16,21 @@ const ctx = {
   getLocale: i18nLib.getLocale,
 };
 
+// --- helpers (UI) ---
+function setAppTitle(text) {
+  // 1) всегда обновляем системный заголовок вкладки
+  try { document.title = text || document.title; } catch {}
+  // 2) если в верстке есть #title — обновим и его
+  const h = ctx.$("title");
+  if (h) h.textContent = text;
+}
+
 // --- UI bootstrap ---
-ctx.$("title").textContent = "TSD";
-ctx.tickClock(); setInterval(ctx.tickClock, 1000);
+setAppTitle("TSD");                           // <<< БЫЛО: ctx.$("title").textContent = "TSD";
+if (ctx.$("now")) {                           // запуск часов — только если есть #now
+  ctx.tickClock();
+  setInterval(ctx.tickClock, 1000);
+}
 ctx.registerSW?.();
 
 // Инициализация i18n (выставляем язык из localStorage/браузера)
@@ -35,7 +47,7 @@ if (langSelect) {
   });
 }
 
-// Единая кнопка «Назад»
+// Единая кнопка «Назад» (если в верстке осталась)
 const backBtn = ctx.$("nav-back");
 if (backBtn) {
   backBtn.addEventListener("click", () => {
@@ -45,7 +57,7 @@ if (backBtn) {
 }
 
 // --- REGOS OAuth (инициализация/переинициализация) ---
-const REGOS_CLIENT_ID   = "your_client_id_here"; // TODO: замените на реальный clientId
+const REGOS_CLIENT_ID    = "your_client_id_here"; // TODO: замените на реальный clientId
 const REGOS_REDIRECT_URI = new URL("?assets=oauth/redirect.html", location.href).toString();
 
 async function reinitOAuth() {
@@ -71,7 +83,6 @@ async function reinitOAuth() {
     silent: true,
     debug: false,
     onData: (user, access_token) => {
-      // при необходимости можем сохранить токен в ctx
       ctx.currentUser = user || null;
       ctx.accessToken = access_token || null;
     },
