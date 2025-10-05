@@ -11,8 +11,8 @@ class Firm(BaseModel):
     """
     id: int  # ID предприятия
     group: FirmGroup  # ID группы предприятия
-    name: str  # Наименование предприятия
-    full_name: str  # Полное наименование предприятия
+    name: Optional[str] = None  # Наименование предприятия
+    full_name: Optional[str] = None  # Полное наименование предприятия
     boss_name: Optional[str] = None  # Руководитель
     address: Optional[str] = None  # Адрес
     phones: Optional[str] = None  # Телефоны
