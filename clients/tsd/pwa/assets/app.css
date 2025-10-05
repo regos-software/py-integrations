@@ -323,3 +323,27 @@ pre {
   .meta.compact .dot { display: none; } /* экономим пиксели */
   .meta.compact { gap: 6px; }
 }
+
+/* Верхняя строка карточки операций: имя слева, иконки справа */
+.item.compact .top {
+  align-items: flex-start; /* чтобы sub-строка не растягивала центрирование */
+}
+
+/* Контейнер иконок справа */
+.op-actions {
+  display: inline-flex;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+/* Нижняя строка (кол-во и цены) — отдельной полосой под верхним блоком */
+.meta.bottom {
+  margin-top: 6px;
+}
+
+/* На узких экранах (если flex ломается в колонку),
+   иконки просто падают под имя — остаётся кликабельно */
+@media (max-width: 420px) {
+  .item.compact .top { align-items: stretch; }
+  .op-actions { align-self: flex-start; }
+}

@@ -1,5 +1,7 @@
 // views/op_new.js — без import; получает ctx
 let mediaStream = null, scanTimer = null, pickedProduct = null, detector = null;
+let zxingReader = null;     // ZXing fallback
+let scanningEngine = "none"; // 'native' | 'zxing' | 'none'
 
 export async function screenOpNew(ctx, id) {
   await ctx.loadView("op_new");
@@ -28,6 +30,31 @@ export async function screenOpNew(ctx, id) {
   function markInvalid(el, on=true){ if (!el) return; el.style.borderColor = on ? "#ef4444" : ""; el.style.boxShadow = on ? "0 0 0 2px rgba(239,68,68,.2)" : ""; }
   function simulateEnter(el){ if (el) el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); }
   const firstBarcode = (p) => p?.base_barcode ?? (p?.barcode_list ? String(p.barcode_list).split(",")[0]?.trim() : "") ?? p?.code ?? "";
+
+  // динамическая подгрузка UMD-скриптов без import
+  function loadScriptOnce(url) {
+    return new Promise((resolve, reject) => {
+      if (document.querySelector(`script[data-src="${url}"]`)) return resolve();
+      const s = document.createElement("script");
+      s.async = true;
+      s.dataset.src = url;
+      s.src = url;
+      s.onload = () => resolve();
+      s.onerror = () => reject(new Error("Failed to load " + url));
+      document.head.appendChild(s);
+    });
+  }
+  async function ensureZXing(){
+    // ZXing UMD (глобальный window.ZXing)
+    if (window.ZXing?.BrowserMultiFormatReader) return true;
+    try {
+      // можно заменить на предпочитаемый CDN/пин-версию
+      await loadScriptOnce("https://cdn.jsdelivr.net/npm/@zxing/library@0.20.0/umd/index.min.js");
+      return !!(window.ZXing?.BrowserMultiFormatReader);
+    } catch {
+      return false;
+    }
+  }
 
   // ---- поиск только по Enter ----
   const runSearch = async (q) => {
@@ -81,26 +108,34 @@ export async function screenOpNew(ctx, id) {
   ctx.$("btn-scan").onclick       = startScan;
   ctx.$("btn-close-scan").onclick = stopScan;
 
+  // Пытаемся создать нативный детектор (если доступен)
   if ("BarcodeDetector" in window) {
-    try { detector = new BarcodeDetector({ formats: ["ean_13","ean_8","code_128","upc_a","upc_e","itf"] }); } catch {}
+    try { detector = new BarcodeDetector({ formats: ["ean_13","ean_8","code_128","upc_a","upc_e","itf"] }); }
+    catch { detector = null; }
   }
 
   async function startScan(){
     ctx.$("scanner").classList.remove("hidden");
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false });
-      mediaStream = stream;
-      const video = ctx.$("preview");
-      video.srcObject = stream; await video.play().catch(()=>{});
-      const detectFrame = async () => {
-        if (!mediaStream) return;
-        try {
-          let okCode = null;
-          if (detector) {
+
+    // 1) Нативный путь (BarcodeDetector)
+    if (detector) {
+      scanningEngine = "native";
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false });
+        mediaStream = stream;
+        const video = ctx.$("preview");
+        video.srcObject = stream; await video.play().catch(()=>{});
+
+        const detectFrame = async () => {
+          if (!mediaStream) return;
+          try {
+            let okCode = null;
             try {
               const res = await detector.detect(video);
               if (res && res[0]) okCode = res[0].rawValue || res[0].displayValue || null;
-            } catch {
+            } catch {}
+            if (!okCode) {
+              // иногда детектор требует растровое изображение
               try {
                 const c = document.createElement("canvas");
                 c.width = video.videoWidth || 640; c.height = video.videoHeight || 360;
@@ -109,29 +144,80 @@ export async function screenOpNew(ctx, id) {
                 if (res2 && res2[0]) okCode = res2[0].rawValue || res2[0].displayValue || null;
               } catch {}
             }
+            if (okCode) { handleFound(okCode); return; }
+          } finally {
+            scanTimer = requestAnimationFrame(detectFrame);
           }
-          if (okCode) {
-            const pq = ctx.$("product-query"), bc = ctx.$("barcode");
-            if (bc) bc.value = okCode;
-            if (pq) pq.value = okCode;
-            stopScan();
-            simulateEnter(pq);
-            return;
-          }
-        } finally {
-          scanTimer = requestAnimationFrame(detectFrame);
-        }
-      };
-      scanTimer = requestAnimationFrame(detectFrame);
-    } catch {
-      toast("Не удалось открыть камеру", false);
-      ctx.$("scanner").classList.add("hidden");
-      ctx.$("barcode").focus();
+        };
+        scanTimer = requestAnimationFrame(detectFrame);
+        return;
+      } catch {
+        // если камеру открыть не удалось — пробуем ZXing
+      }
     }
+
+    // 2) Fallback: ZXing (UMD) — без import, авто-подгрузка
+    if (await ensureZXing()) {
+      scanningEngine = "zxing";
+      try {
+        zxingReader = new window.ZXing.BrowserMultiFormatReader();
+        // выбираем тыловую камеру, если есть
+        let deviceId = undefined;
+        try {
+          const devices = await window.ZXing.BrowserCodeReader.listVideoInputDevices();
+          const back = devices?.find(d => /back|rear|environment/i.test(d.label));
+          deviceId = (back || devices?.[0])?.deviceId;
+        } catch {}
+        await zxingReader.decodeFromVideoDevice(deviceId, "preview", (result, err, _controls) => {
+          // err могут быть NotFound/Checksum/Format — игнорируем, ждём следующий кадр
+          if (result) {
+            const text = typeof result.getText === "function" ? result.getText() : (result.text || "");
+            if (text) handleFound(text);
+          }
+        });
+        return;
+      } catch (e) {
+        toast("Не удалось запустить ZXing-распознавание", false);
+        stopScan();
+        return;
+      }
+    }
+
+    // 3) Если ни нативный, ни ZXing не доступны
+    scanningEngine = "none";
+    toast("Распознавание штрихкодов в этом браузере недоступно. Введите код вручную.", false);
+    ctx.$("scanner").classList.add("hidden");
+    ctx.$("barcode").focus();
   }
+
+  function handleFound(okCode){
+    const pq = ctx.$("product-query"), bc = ctx.$("barcode");
+    if (bc) bc.value = okCode;
+    if (pq) pq.value = okCode;
+    stopScan();
+    simulateEnter(pq); // запускаем поиск product_search
+  }
+
   function stopScan(){
+    // останавливаем rAF
     if (scanTimer) { cancelAnimationFrame(scanTimer); scanTimer=null; }
-    if (mediaStream) { mediaStream.getTracks().forEach(t=>t.stop()); mediaStream=null; }
+    // нативный поток камеры
+    if (mediaStream) {
+      mediaStream.getTracks().forEach(t=>t.stop());
+      mediaStream=null;
+    }
+    // ZXing
+    if (zxingReader) {
+      try { zxingReader.reset(); } catch {}
+      zxingReader = null;
+    }
+    // подчистим srcObject на всякий
+    const video = ctx.$("preview");
+    if (video && video.srcObject) {
+      try { video.srcObject.getTracks().forEach(t=>t.stop()); } catch {}
+      video.srcObject = null;
+    }
+    scanningEngine = "none";
     ctx.$("scanner").classList.add("hidden");
   }
 
@@ -141,7 +227,7 @@ export async function screenOpNew(ctx, id) {
       name: p.name || "—",
       barcode: firstBarcode(p),
       vat_value: p?.vat?.value ?? 0,
-      last_purchase_cost: p?.last_purchase_cost   // если бэк вернёт — покажем подсказку
+      last_purchase_cost: p?.last_purchase_cost
     };
     ctx.$("product-picked").classList.remove("hidden");
     ctx.$("picked-name").textContent = pickedProduct.name;
@@ -158,7 +244,6 @@ export async function screenOpNew(ctx, id) {
       b.onclick = () => { ctx.$("cost").value = String(lpc); ctx.$("cost").focus(); ctx.$("cost").select?.(); };
       hintBox.appendChild(b);
     }
-    // сразу в qty
     setTimeout(()=>{ ctx.$("qty")?.focus(); }, 0);
   }
 

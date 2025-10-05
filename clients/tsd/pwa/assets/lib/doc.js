@@ -73,34 +73,38 @@ export async function screenDoc(ctx, id) {
     const wrap = document.createElement("div");
     wrap.className = "item compact";
 
-    // view mode
+    // view mode (две строки: верх — имя + справа иконки; под ним — код+штрихкод; ещё ниже — количество и цены)
     const view = document.createElement("div");
-    view.className = "row compact";
     view.innerHTML = `
-      <div class="info">
-        <strong class="name">${ctx.esc(item.name || "")}</strong>
-        <div class="sub">
-          <span class="muted text-small code">#${ctx.esc(code)}</span>
-          <span class="dot"></span>
-          <span class="muted text-small barcode">${ctx.esc(barcode || "")}</span>
+      <div class="row compact top">
+        <div class="info">
+          <strong class="name">${ctx.esc(item.name || "")}</strong>
+          <div class="sub">
+            <span class="muted text-small code">${ctx.esc(code)}</span>
+            <span class="dot"></span>
+            <span class="muted text-small barcode">${ctx.esc(barcode || "")}</span>
+          </div>
+        </div>
+        <div class="op-actions">
+          <button class="btn icon small ghost op-edit"
+                  aria-label="${ctx.t("op.edit") || "Редактировать"}"
+                  title="${ctx.t("op.edit") || "Редактировать"}">
+            <i class="fa-solid fa-pen"></i>
+          </button>
+          <button class="btn icon small ghost op-del"
+                  aria-label="${ctx.t("op.delete") || "Удалить"}"
+                  title="${ctx.t("op.delete") || "Удалить"}">
+            <i class="fa-solid fa-trash"></i>
+          </button>
         </div>
       </div>
-      <div class="meta compact">
+
+      <div class="meta compact bottom">
         <span class="qty"><strong>${ctx.fmtNum(op.quantity)}</strong> ${ctx.t("unit.pcs") || "шт"}</span>
         <span class="dot"></span>
         <span class="cost">${ctx.fmtMoney(op.cost)}</span>
         <span class="dot"></span>
         <span class="price">${ctx.fmtMoney(op.price ?? 0)}</span>
-        <button class="btn icon small ghost op-edit"
-                aria-label="${ctx.t("op.edit") || "Редактировать"}"
-                title="${ctx.t("op.edit") || "Редактировать"}">
-          <i class="fa-solid fa-pen"></i>
-        </button>
-        <button class="btn icon small ghost op-del"
-                aria-label="${ctx.t("op.delete") || "Удалить"}"
-                title="${ctx.t("op.delete") || "Удалить"}">
-          <i class="fa-solid fa-trash"></i>
-        </button>
       </div>
     `;
 
@@ -198,9 +202,9 @@ export async function screenDoc(ctx, id) {
           op.cost = cost;
           if (Number.isFinite(price)) op.price = price; else op.price = undefined;
 
-          // точечно обновляем поля по классам (надёжнее, чем по индексам)
-          const metaEl = view.querySelector(".meta");
-          metaEl.querySelector(".qty").innerHTML = `<strong>${ctx.fmtNum(op.quantity)}</strong> ${ctx.t("unit.pcs") || "шт"}`;
+          // точечно обновляем нижнюю строку (кол-во и цены)
+          const metaEl = wrap.querySelector(".meta.bottom");
+          metaEl.querySelector(".qty").innerHTML   = `<strong>${ctx.fmtNum(op.quantity)}</strong> ${ctx.t("unit.pcs") || "шт"}`;
           metaEl.querySelector(".cost").textContent  = ctx.fmtMoney(op.cost);
           metaEl.querySelector(".price").textContent = ctx.fmtMoney(op.price ?? 0);
 
