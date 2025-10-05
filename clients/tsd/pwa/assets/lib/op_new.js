@@ -7,7 +7,7 @@ export async function screenOpNew(ctx, id) {
 
   // --- helpers: UI busy/notify ---
   function setBusy(b) {
-    const ids = ["btn-scan","btn-close-scan","product-query","barcode","qty","cost","price","expdate","btn-op-save","btn-op-cancel"];
+    const ids = ["btn-scan","btn-close-scan","product-query","barcode","qty","cost","price","btn-op-save","btn-op-cancel"];
     ids.forEach(k => {
       const el = ctx.$(k);
       if (!el) return;
@@ -17,7 +17,6 @@ export async function screenOpNew(ctx, id) {
     if (save) save.textContent = b ? "Сохранение..." : "Сохранить";
   }
   function toast(msg) {
-    // простой тост без зависимостей
     let t = document.getElementById("toast");
     if (!t) {
       t = document.createElement("div");
@@ -29,6 +28,10 @@ export async function screenOpNew(ctx, id) {
     t.style.display = "block";
     setTimeout(()=>{ t.style.display = "none"; }, 2000);
   }
+  function simulateEnter(el){
+    if (!el) return;
+    el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  }
 
   // --- wire UI ---
   ctx.$("btn-scan").onclick       = startScan;
@@ -36,7 +39,8 @@ export async function screenOpNew(ctx, id) {
   ctx.$("product-query").addEventListener("keydown", (e)=>{
     if (e.key==="Enter"){
       e.preventDefault();
-      doProductSearch(e.target.value.trim());
+      const q = e.target.value.trim();
+      if (q) doProductSearch(q); // поиск запускается только по Enter
     }
   });
   ctx.$("btn-op-cancel").onclick  = ()=>{ location.hash = `#/doc/${id}`; };
@@ -65,9 +69,13 @@ export async function screenOpNew(ctx, id) {
           if (res && res[0]) {
             const code = res[0].rawValue || res[0].displayValue;
             if (code) {
-              ctx.$("barcode").value = code;
+              // подставляем в оба поля и "жмём" Enter на поле поиска
+              const pq = ctx.$("product-query");
+              const bc = ctx.$("barcode");
+              if (bc) bc.value = code;
+              if (pq) { pq.value = code; }
               stopScan();
-              await onBarcode(code);
+              simulateEnter(pq); // симулируем Enter
             }
           }
         } catch {}
@@ -82,28 +90,25 @@ export async function screenOpNew(ctx, id) {
     if (mediaStream) { mediaStream.getTracks().forEach(t=>t.stop()); mediaStream=null; }
     ctx.$("scanner").classList.add("hidden");
   }
-  async function onBarcode(code){
-    ctx.$("product-query").value = code;
-    await doProductSearch(code, true);
-  }
 
   // --- search & pick ---
-  async function doProductSearch(q, autoPick=false){
+  async function doProductSearch(q){
     const box = ctx.$("product-results");
     box.innerHTML = `<div class="muted">Поиск...</div>`;
     const { data } = await ctx.api("product_search", { q, doc_id: id });
     const items = data?.result?.items || [];
-    renderResults(items, autoPick);
+    renderResults(items);
   }
-  function renderResults(items, autoPick){
+  function renderResults(items){
     const box = ctx.$("product-results");
     if (!items.length){ box.innerHTML = `<div class="muted">Ничего не найдено</div>`; return; }
-    if (autoPick && items.length===1){ return pick(items[0]); }
     box.innerHTML = "";
     items.forEach(p=>{
       const el = document.createElement("div");
       el.className = "item";
-      const codeOrBarcode = p.code ?? p.base_barcode ?? (p.barcode_list ? String(p.barcode_list).split(",")[0]?.trim() : "");
+      const codeOrBarcode = p.base_barcode
+        ?? (p.barcode_list ? String(p.barcode_list).split(",")[0]?.trim() : "")
+        ?? p.code;
       el.innerHTML = `
         <div class="row">
           <div>
@@ -117,7 +122,6 @@ export async function screenOpNew(ctx, id) {
     });
   }
   function pick(p){
-    // сохраняем всё, что может пригодиться при добавлении (в т.ч. vat)
     const barcode = p.base_barcode || (p.barcode_list ? String(p.barcode_list).split(",")[0]?.trim() : "");
     pickedProduct = {
       id: p.id || p.uuid || p.code,
@@ -128,7 +132,6 @@ export async function screenOpNew(ctx, id) {
     ctx.$("product-picked").classList.remove("hidden");
     ctx.$("picked-name").textContent = pickedProduct.name || "—";
     ctx.$("picked-code").textContent = pickedProduct.barcode || "";
-    // фокус на количество для быстрого ввода
     setTimeout(()=>{ ctx.$("qty")?.focus(); }, 0);
   }
 
@@ -140,7 +143,6 @@ export async function screenOpNew(ctx, id) {
     const price = ctx.toNumber(ctx.$("price").value);
     if (!qty || qty<=0) return alert("Введите количество");
 
-    // минимальный VAT: берём из товара, иначе 0
     const vat_value = Number(pickedProduct.vat_value ?? 0);
 
     const item = {
@@ -159,13 +161,12 @@ export async function screenOpNew(ctx, id) {
       const affected = data?.result?.row_affected || 0;
       if (ok && affected > 0) {
         toast("Операция добавлена");
-        // подготовить форму для следующей операции
-        resetForm();
+        resetForm(); // остаёмся на экране, готовим новую операцию
       } else {
         const msg = data?.description || "Не удалось сохранить операцию";
         alert(msg);
       }
-    } catch (e) {
+    } catch {
       alert("Ошибка сети при сохранении");
     } finally {
       setBusy(false);
@@ -173,18 +174,14 @@ export async function screenOpNew(ctx, id) {
   }
 
   function resetForm(){
-    // очистка инпутов
-    ["barcode","product-query","qty","cost","price","expdate"].forEach(id=>{
+    ["barcode","product-query","qty","cost","price"].forEach(id=>{
       const el = ctx.$(id);
       if (el) el.value = "";
     });
-    // скрыть выбранный товар
     pickedProduct = null;
     ctx.$("product-picked").classList.add("hidden");
-    // очистить результаты поиска
     const box = ctx.$("product-results");
     if (box) box.innerHTML = "";
-    // фокус на поиск
     ctx.$("product-query")?.focus();
   }
 }
