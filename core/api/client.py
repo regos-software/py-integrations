@@ -1,5 +1,5 @@
 import httpx
-from typing import Optional, Type, TypeVar
+from typing import Any, Optional, Type, TypeVar
 from pydantic import BaseModel
 
 from schemas.api.base import APIBaseResponse
@@ -37,14 +37,21 @@ class APIClient:
     async def post(
         self,
         method_path: str,
-        data: BaseModel,
+        data: Any,
         response_model: Type[TResponse] = APIBaseResponse
     ) -> TResponse:
         """
         Универсальный POST-запрос к методам интеграции.
         """
         url = f"{self.base_url}/gateway/out/{self.integration_id}/v1/{method_path}"
-        payload = data.dict()
+
+        #  Исправление: поддерживаем list, dict и BaseModel
+        if isinstance(data, BaseModel):
+            payload = data.model_dump()
+        elif isinstance(data, (list, dict)):
+            payload = data
+        else:
+            raise TypeError(f"Unsupported data type for POST: {type(data)}")
 
         logger.info(f"POST {url}")
         logger.debug(f"Payload: {payload}")
@@ -64,6 +71,7 @@ class APIClient:
         except Exception as e:
             logger.exception(f"Непредвиденная ошибка при POST {url}: {str(e)}")
             raise
+
 
     async def close(self):
         logger.debug("Закрытие httpx.AsyncClient")
