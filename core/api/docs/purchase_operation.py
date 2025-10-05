@@ -31,8 +31,8 @@ class PurchaseOperationService:
         return await self.get(PurchaseOperationGetRequest(document_ids=[doc_id]))
 
     async def add(self, items: List[PurchaseOperationAddRequest]) -> ArrayResult:
-        # передаём список моделей как есть — RegosAPI.call сам сериализует
-        resp = await self.api.call(self.PATH_ADD, items, APIBaseResponse)
+        payload = [item.model_dump() for item in items]
+        resp = await self.api.call(self.PATH_ADD, payload, APIBaseResponse)
         return ArrayResult.model_validate(resp.result or {})
 
     async def edit(self, items: List[PurchaseOperationEditItem]) -> ArrayResult:
