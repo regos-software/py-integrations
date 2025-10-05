@@ -113,7 +113,7 @@ pre {
 .appbar h1 { font-size: 18px; margin: 0; }
 .time { font-variant-numeric: tabular-nums; font-weight: 600; }
 
-/* Back button */
+/* Back/Home small icon button */
 .icon-btn {
   display: inline-flex; align-items: center; justify-content: center;
   width: 36px; height: 36px; border-radius: 10px;
@@ -123,9 +123,10 @@ pre {
 .icon-btn:active { transform: translateY(1px); }
 .icon-btn i { font-size: 16px; }
 
-/* ===== Layout utils (переиспользуемые) ===== */
+/* ===== Layout utils (reuse) ===== */
 .hidden { display: none !important; }
 .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; }
+.row-start { justify-content: flex-start; }
 .stack { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .cluster { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
 .grow { flex: 1 1 auto; min-width: 0; }
@@ -133,6 +134,8 @@ pre {
 .text-sm { font-size: 12px; }
 .truncate { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .break-words { white-space: normal; word-break: break-word; }
+.text-right { text-align: right; }
+.mt-4 { margin-top: 4px; }
 
 /* ===== Content ===== */
 .content { padding-bottom: 72px; padding-top: 15px; }
@@ -193,30 +196,40 @@ pre {
 .hr { height: 1px; background: var(--border); border: 0; margin: 10px 0; }
 
 /* ================================================================== */
+/* ==================== Docs: search row (reusable) ================= */
+/* ================================================================== */
+
+/* одна линия: input + иконка */
+.input-row {
+  display: flex; align-items: center; gap: 8px;
+  flex-wrap: nowrap; min-width: 0;
+}
+.input-row input { flex: 1 1 auto; min-width: 0; }
+.input-row .btn.icon { flex: 0 0 var(--tap); }
+#btn-docs-refresh:active i { transform: rotate(-20deg); transition: transform .12s; }
+
+/* ================================================================== */
 /* ==================== Ops list (универсальная версия) ============= */
 /* ================================================================== */
 
 /* Список занимает всю ширину и не уезжает горизонтально */
 #ops-list { width: 100%; max-width: 100%; overflow-x: hidden; }
-#ops-list .item { cursor: default; }           /* карточки операций обычно не кликабельны целиком */
-#ops-list .item > div { min-width: 0; }        /* защита от flex-переполнения */
+#ops-list .item { cursor: default; }
+#ops-list .item > div { min-width: 0; }
 
-/* Верхняя полоса: имя на всю ширину слева, справа — действия */
+/* Верхняя полоса: имя слева, справа — действия */
 #ops-list .row,
-#ops-list .top { /* поддержка и без .top, и с ним */
-  align-items: flex-start;
-  gap: 8px;
-}
+#ops-list .top { align-items: flex-start; gap: 8px; }
 
-/* Левая колонка (info) — тянется, переносит строки, не вываливается */
+/* Левая колонка (info) — тянется, переносится */
 #ops-list .info { flex: 1 1 auto; min-width: 0; }
 #ops-list .name {
   font-weight: 600;
-  white-space: normal;     /* можно переносить */
-  word-break: break-word;  /* длинные слова ломаем */
+  white-space: normal;
+  word-break: break-word;
 }
 
-/* Подпись: код + штрихкод (переносится, штрихкод усечём при нехватке места) */
+/* Подпись: код + штрихкод */
 #ops-list .sub { display: flex; flex-wrap: wrap; gap: 6px 8px; min-width: 0; }
 #ops-list .sub .code { font-variant-numeric: tabular-nums; }
 #ops-list .sub .barcode {
@@ -226,32 +239,42 @@ pre {
   text-overflow: ellipsis;
 }
 
-/* Контейнер иконок действий (совместим с .op-actions и .actions) */
+/* Действия справа */
 #ops-list .actions,
 #ops-list .op-actions { flex: 0 0 auto; display: inline-flex; gap: 8px; }
 
-/* Нижняя полоса: количество и цены — отдельной строкой на всю ширину */
+/* Нижняя полоса: количество и цены */
 #ops-list .meta,
 #ops-list .bottom {
   width: 100%;
   font-variant-numeric: tabular-nums;
-  justify-content: flex-start; /* читается как текстовая строка */
+  justify-content: flex-start;
   gap: 8px;
-  margin-top: 6px; /* отступ от верхнего блока */
+  margin-top: 6px;
 }
 
-/* Узкие экраны: позволяем верху ломаться в несколько строк,
-   блок действий может переехать ниже имени — всё остаётся кликабельно */
+/* Узкие экраны */
 @media (max-width: 420px) {
   :root { --tap: 36px; }
-  #ops-list .row,
-  #ops-list .top { flex-wrap: wrap; }
+  #ops-list .row, #ops-list .top { flex-wrap: wrap; }
   #ops-list .info { flex-basis: 100%; }
   #ops-list .actions, #ops-list .op-actions { margin-left: auto; }
 }
 
-/* Очень узкие экраны — чуть плотнее, точки можно скрыть для экономии места */
+/* Очень узкие */
 @media (max-width: 360px) {
   :root { --tap: 32px; }
   #ops-list .meta .dot { display: none; }
 }
+
+/* ===== Misc ===== */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0,0,1px,1px); white-space: nowrap; border: 0;
+}
+
+/* Поддержка старых контейнеров */
+.appbar .left, .appbar .right,
+.appbar-left, .appbar-right { display: flex; align-items: center; gap: 10px; }
+
+@media (max-width: 420px) { .lang-select { min-width: 96px; } }

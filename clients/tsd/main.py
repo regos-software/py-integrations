@@ -121,6 +121,8 @@ class TsdIntegration(ClientBase):
 
                 async with RegosAPI(connected_integration_id=ci) as api:
                     req = DocPurchaseGetRequest(
+                        performed=False,
+                        deleted_mark=False,
                         start_date=start,
                         end_date=end,
                         search=query,

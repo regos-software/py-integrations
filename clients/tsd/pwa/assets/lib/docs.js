@@ -14,12 +14,60 @@ export async function screenDocs(ctx, page = 1, queryStr = "") {
   docsPage = Math.max(1, page);
   docsQuery = queryStr;
 
+  // --- Заголовок + кнопка Домой слева ---
+  const titleEl = ctx.$("docs-title");
+  if (titleEl) {
+    // обёртка вокруг заголовка (создаём один раз)
+    let wrap = titleEl.closest(".row");
+    if (!wrap || !wrap.classList.contains("row-start")) {
+      // создаём новую обёртку row row-start
+      const newWrap = document.createElement("div");
+      newWrap.className = "row row-start";
+      titleEl.parentNode.insertBefore(newWrap, titleEl);
+      newWrap.appendChild(titleEl);
+      wrap = newWrap;
+    }
+    // кнопка Домой (создаём один раз)
+    let btnHome = ctx.$("btn-docs-home");
+    if (!btnHome) {
+      btnHome = document.createElement("button");
+      btnHome.id = "btn-docs-home";
+      btnHome.className = "icon-btn";
+      const homeLabel = tt(ctx, "nav.home", "Главная");
+      btnHome.title = homeLabel;
+      btnHome.setAttribute("aria-label", homeLabel);
+      btnHome.innerHTML = `<i class="fa-solid fa-house"></i>`;
+      btnHome.onclick = () => { location.hash = "#/"; };
+      wrap.insertBefore(btnHome, titleEl);
+    }
+  }
+
   // Заголовки и подписи через i18n
-  ctx.$("docs-title").textContent = ctx.t("docs.title");
+  if (titleEl) titleEl.textContent = ctx.t("docs.title");
+
   const search = ctx.$("search-docs");
-  if (search) search.placeholder = ctx.t("docs.search.placeholder");
   const btnRefresh = ctx.$("btn-docs-refresh");
-  if (btnRefresh) btnRefresh.textContent = ctx.t("docs.refresh");
+
+  if (search) {
+    search.placeholder = ctx.t("docs.search.placeholder");
+    search.value = docsQuery;
+    // Поиск по Enter
+    search.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        docsQuery = e.target.value.trim();
+        screenDocs(ctx, 1, docsQuery);
+      }
+    }, { once: true }); // предотвратить мульти-подписки при повторных рендерах
+  }
+
+  if (btnRefresh) {
+    const label = ctx.t("docs.refresh");
+    btnRefresh.className = "btn icon ghost"; // сделать иконкой
+    btnRefresh.innerHTML = `<i class="fa-solid fa-rotate-right"></i>`;
+    btnRefresh.title = label;
+    btnRefresh.setAttribute("aria-label", label);
+    btnRefresh.onclick = () => screenDocs(ctx, docsPage, docsQuery);
+  }
 
   const btnPrev = ctx.$("prev-page");
   const btnNext = ctx.$("next-page");
@@ -27,20 +75,15 @@ export async function screenDocs(ctx, page = 1, queryStr = "") {
   if (btnNext) btnNext.textContent = tt(ctx, "nav.next", "Вперёд");
 
   // init UI
-  ctx.$("page-indicator").textContent = `${docsPage} / ...`;
-  ctx.$("docs-list").innerHTML = `<div class="muted">${ctx.t("common.loading")}</div>`;
+  const pageInd = ctx.$("page-indicator");
+  if (pageInd) pageInd.textContent = `${docsPage} / ...`;
 
-  // handlers
-  btnRefresh.onclick = () => screenDocs(ctx, docsPage, docsQuery);
-  search.value = docsQuery;
-  search.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      docsQuery = e.target.value.trim();
-      screenDocs(ctx, 1, docsQuery);
-    }
-  });
-  btnPrev.onclick = () => { if (docsPage > 1) screenDocs(ctx, docsPage - 1, docsQuery); };
-  btnNext.onclick = () => { if (docsPage < docsTotalPages) screenDocs(ctx, docsPage + 1, docsQuery); };
+  const list = ctx.$("docs-list");
+  if (list) list.innerHTML = `<div class="muted">${ctx.t("common.loading")}</div>`;
+
+  // handlers пагинации
+  if (btnPrev) btnPrev.onclick = () => { if (docsPage > 1) screenDocs(ctx, docsPage - 1, docsQuery); };
+  if (btnNext) btnNext.onclick = () => { if (docsPage < docsTotalPages) screenDocs(ctx, docsPage + 1, docsQuery); };
 
   // запрос
   const pageSize = 20;
@@ -49,13 +92,15 @@ export async function screenDocs(ctx, page = 1, queryStr = "") {
   const items = (data?.result?.items) || [];
   const hasMore = items.length === pageSize;
   docsTotalPages = hasMore ? (docsPage + 1) : docsPage;
-  ctx.$("page-indicator").textContent = `${docsPage} / ${docsTotalPages}`;
 
+  if (pageInd) pageInd.textContent = `${docsPage} / ${docsTotalPages}`;
   renderDocsRaw(ctx, items);
 }
 
 function renderDocsRaw(ctx, items) {
   const list = ctx.$("docs-list");
+  if (!list) return;
+
   if (!items.length) {
     list.innerHTML = `<div class="muted">${ctx.t("common.nothing")}</div>`;
     return;

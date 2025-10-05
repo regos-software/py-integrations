@@ -23,23 +23,20 @@
   <script src="https://auth.regos.uz/widget/regos-oauth-sdk.js"></script>
 </head>
 <body>
-  <header class="appbar">
-    <div class="appbar-left">
-      <button id="nav-back" class="icon-btn" title="Назад" aria-label="Назад">
-        <i class="fa-solid fa-arrow-left"></i>
-      </button>
-      <h1 id="title">TSD</h1>
-    </div>
-    <div class="appbar-right">
-      <select id="lang-select" class="lang-select" aria-label="Language">
-        <option value="ru">RU</option>
-        <option value="en">EN</option>
-        <option value="uz">UZ</option>
-      </select>
-      <span class="time" id="now">--:--:--</span>
-      <div id="regos-login"></div>
-    </div>
-  </header>
+<header class="appbar">
+  <div class="left">
+    <label for="lang-select" class="sr-only">Язык</label>
+    <select id="lang-select" class="lang-select" aria-label="Language">
+      <option value="ru">RU</option>
+      <option value="en">EN</option>
+      <option value="uz">UZ</option>
+    </select>
+  </div>
+
+  <div class="right">
+    <div id="regos-login"></div>
+  </div>
+</header>
 
   <main class="container content">
     <div id="app" class="card"></div>
