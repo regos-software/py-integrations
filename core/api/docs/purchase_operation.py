@@ -2,14 +2,13 @@ from typing import List, Iterable
 from pydantic import TypeAdapter
 
 from core.logger import setup_logger
-from schemas.api.base import APIBaseResponse
+from schemas.api.base import APIBaseResponse, ArrayResult
 from schemas.api.docs.purchase_operation import (
     PurchaseOperationGetRequest,
     PurchaseOperation,
     PurchaseOperationAddRequest,
     PurchaseOperationEditItem,
-    PurchaseOperationDeleteItem,
-    ArrayResult,
+    PurchaseOperationDeleteItem
 )
 
 logger = setup_logger("docs.PurchaseOperation")
