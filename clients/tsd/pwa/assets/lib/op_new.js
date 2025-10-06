@@ -9,9 +9,10 @@ export async function screenOpNew(ctx, id) {
   function setBusy(b) {
     const ids = ["btn-scan","btn-close-scan","product-query","barcode","qty","cost","price","btn-op-save","btn-op-cancel"];
     ids.forEach(k => { const el = ctx.$(k); if (el && "disabled" in el) el.disabled = b; });
-    const save = ctx.$("btn-op-save"); if (save) save.textContent = b ? "Сохранение..." : "Сохранить";
+    const save = ctx.$("btn-op-save");
+    if (save) save.textContent = b ? ctx.t("saving") : ctx.t("save");
   }
-  function toast(msg, ok=true) {
+  function toast(msg, ok = true) {
     let t = document.getElementById("toast");
     if (!t) {
       t = document.createElement("div");
@@ -23,30 +24,34 @@ export async function screenOpNew(ctx, id) {
     t.style.background = ok ? "#10b981" : "#ef4444";
     t.style.color = "#fff";
     t.style.display = "block";
-    setTimeout(()=>{ t.style.display = "none"; }, 2000);
+    setTimeout(() => { t.style.display = "none"; }, 2000);
   }
-  function markInvalid(el, on=true){ if (!el) return; el.style.borderColor = on ? "#ef4444" : ""; el.style.boxShadow = on ? "0 0 0 2px rgba(239,68,68,.2)" : ""; }
+  function markInvalid(el, on = true) {
+    if (!el) return;
+    el.style.borderColor = on ? "#ef4444" : "";
+    el.style.boxShadow   = on ? "0 0 0 2px rgba(239,68,68,.2)" : "";
+  }
   function simulateEnter(el){ if (el) el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); }
   const firstBarcode = (p) => p?.base_barcode ?? (p?.barcode_list ? String(p.barcode_list).split(",")[0]?.trim() : "") ?? p?.code ?? "";
 
   // ---- поиск только по Enter ----
   const runSearch = async (q) => {
     const box = ctx.$("product-results");
-    box.textContent = "Поиск...";
+    box.textContent = ctx.t("searching");
     try {
       const { data } = await ctx.api("product_search", { q, doc_id: id });
       const items = data?.result?.items || [];
       if (!items.length) {
         pickedProduct = null;
         ctx.$("product-picked").classList.add("hidden");
-        box.textContent = "Ничего не найдено";
+        box.textContent = ctx.t("nothing_found");
         return;
       }
       // Автовыбор первого
       pick(items[0]);
       box.textContent = "";
     } catch {
-      box.textContent = "Ошибка поиска";
+      box.textContent = ctx.t("search_error");
     }
   };
 
@@ -57,6 +62,8 @@ export async function screenOpNew(ctx, id) {
     if (e.key === "Enter") { e.preventDefault(); const v = e.target.value.trim(); if (v) runSearch(v); }
   });
 
+  ctx.$("btn-op-cancel").textContent = ctx.t("cancel");
+  ctx.$("btn-op-save").textContent   = ctx.t("save");
   ctx.$("btn-op-cancel").onclick = ()=>{ location.hash = `#/doc/${id}`; };
   ctx.$("btn-op-save").onclick   = ()=>saveOp(id);
 
@@ -124,7 +131,7 @@ export async function screenOpNew(ctx, id) {
       };
       scanTimer = requestAnimationFrame(detectFrame);
     } catch {
-      toast("Не удалось открыть камеру", false);
+      toast(ctx.t("camera_open_failed"), false);
       ctx.$("scanner").classList.add("hidden");
       ctx.$("barcode").focus();
     }
@@ -154,7 +161,7 @@ export async function screenOpNew(ctx, id) {
     if (lpc != null) {
       const b = document.createElement("button");
       b.className = "btn secondary";
-      b.textContent = `С/с из последней закупки: ${ctx.fmtMoney(lpc)}`;
+      b.textContent = ctx.t("last_purchase_cost_hint", { cost: ctx.fmtMoney(lpc) });
       b.onclick = () => { ctx.$("cost").value = String(lpc); ctx.$("cost").focus(); ctx.$("cost").select?.(); };
       hintBox.appendChild(b);
     }
@@ -171,11 +178,11 @@ export async function screenOpNew(ctx, id) {
 
     markInvalid(qtyEl,false); markInvalid(costEl,false);
 
-    if (!pickedProduct) { toast("Сначала выберите товар", false); return; }
+    if (!pickedProduct) { toast(ctx.t("select_product_first"), false); return; }
     let hasErr = false;
     if (!qty || qty <= 0) { markInvalid(qtyEl, true); hasErr = true; }
     if (!cost || cost <= 0){ markInvalid(costEl, true); hasErr = true; }
-    if (hasErr) { toast("Заполните обязательные поля", false); return; }
+    if (hasErr) { toast(ctx.t("fill_required_fields"), false); return; }
 
     const item = {
       document_id: Number(docId),
@@ -191,13 +198,13 @@ export async function screenOpNew(ctx, id) {
       const { ok, data } = await ctx.api("purchase_ops_add", { items: [item] });
       const affected = data?.result?.row_affected || 0;
       if (ok && affected > 0) {
-        toast("Операция добавлена");
+        toast(ctx.t("op_added"));
         resetForm();
       } else {
-        toast(data?.description || "Не удалось сохранить операцию", false);
+        toast(data?.description || ctx.t("save_failed"), false);
       }
     } catch {
-      toast("Ошибка сети при сохранении", false);
+      toast(ctx.t("network_error_save"), false);
     } finally {
       setBusy(false);
     }
