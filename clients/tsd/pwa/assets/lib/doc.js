@@ -116,6 +116,8 @@ export async function screenDoc(ctx, id) {
             <span class="muted text-small code">${ctx.esc(code)}</span>
             <span class="dot"></span>
             <span class="muted text-small barcode">${ctx.esc(barcode || "")}</span>
+            <span class="dot"></span>
+            <span class="muted text-small barcode">${ctx.esc(op.description || "")}</span>
         </div>
         </div>
         <div class="actions">
@@ -133,7 +135,7 @@ export async function screenDoc(ctx, id) {
     </div>
 
     <div class="meta bottom">
-        <span class="qty"><strong>${ctx.fmtNum(op.quantity)}</strong> ${ctx.t("unit.pcs") || "шт"}</span>
+        <span class="qty"><strong>${ctx.fmtNum(op.quantity)}</strong> ${item.unit.name || "шт"}</span>
         <span class="dot"></span>
         <span class="cost">${ctx.fmtMoney(op.cost)}</span>
         <span class="dot"></span>
