@@ -12,7 +12,7 @@ import json
 
 from core.api.regos_api import RegosAPI
 from schemas.api.docs.cheque import SortOrder
-from schemas.api.docs.purchase import DocPurchaseGetRequest
+from schemas.api.docs.purchase import DocPurchaseGetRequest, DocPurchaseSortOrder
 from schemas.api.docs.purchase_operation import PurchaseOperationAddRequest, PurchaseOperationDeleteItem, PurchaseOperationEditItem
 from schemas.api.integrations.connected_integration_setting import ConnectedIntegrationSettingRequest
 
@@ -128,7 +128,7 @@ class TsdIntegration(ClientBase):
                         end_date=end,
                         search=query,
                         limit=page_size,
-                        sort_orders=[SortOrder(column="id", direction="asc")],
+                        sort_orders=[DocPurchaseSortOrder(column="date", direction="asc")],
                         offset=(page - 1) * page_size,
                     )
                     docs = await api.docs.purchase.get(req)

@@ -42,7 +42,7 @@ class DocPurchase(BaseModel):
     deleted_mark: bool
     last_update: int  # unixtime sec
 
-class SortOrder(BaseModel):
+class DocPurchaseSortOrder(BaseModel):
     column: Optional[str] = None
     direction: Optional[str] = None
 
