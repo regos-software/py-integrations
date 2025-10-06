@@ -42,7 +42,9 @@ class DocPurchase(BaseModel):
     deleted_mark: bool
     last_update: int  # unixtime sec
 
-
+class SortOrder(BaseModel):
+    column: Optional[str] = None
+    direction: Optional[str] = None
 
 class DocPurchaseGetRequest(BaseModel):
     """
@@ -68,7 +70,7 @@ class DocPurchaseGetRequest(BaseModel):
     search: Optional[str] = None
 
     # Сортировка и пэйджинг
-#    sort_orders: Optional[List[SortOrder]] = None
+    sort_orders: Optional[List[SortOrder]] = None
     limit: Optional[int] = Field(default=None, ge=1)
     offset: Optional[int] = Field(default=None, ge=0)
 

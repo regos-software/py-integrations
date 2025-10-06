@@ -127,6 +127,7 @@ class TsdIntegration(ClientBase):
                         end_date=end,
                         search=query,
                         limit=page_size,
+                        sort_orders= list[Dict[str, str]]({"column": "date", "direction": "asc"}),
                         offset=(page - 1) * page_size,
                     )
                     docs = await api.docs.purchase.get(req)
