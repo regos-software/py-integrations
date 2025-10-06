@@ -234,7 +234,7 @@ class TsdIntegration(ClientBase):
         if asset_rel:
             file_path = self._safe_join(self.ASSETS_DIR, str(asset_rel))
             if not file_path or not file_path.exists():
-                return Response("asset not found", status_code=404)
+                return Response("assets not found", status_code=404)
             # Явно ставим content-type для .js/.css
             mt = None
             ext = file_path.suffix.lower()
