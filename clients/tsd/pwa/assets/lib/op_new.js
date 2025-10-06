@@ -1,4 +1,4 @@
-// views/op_new.js — ZXing (UMD) + поиск ItemExt, иконки-кнопки (без overlay)
+// views/op_new.js — ZXing (UMD) + поиск ItemExt, иконки-кнопки (без overlay) + i18n
 
 let zxingReader = null;
 let zxingControls = null;
@@ -31,12 +31,57 @@ function setBusy(ctx, busy) {
   const ids = ["btn-scan","btn-close-scan","product-query","barcode","qty","cost","price","description","btn-op-save","btn-op-cancel"];
   ids.forEach(k => { const el = ctx.$(k); if (el && "disabled" in el) el.disabled = busy; });
   const save = ctx.$("btn-op-save");
-  if (save) save.textContent = busy ? ctx.t("op.saving") : ctx.t("common.save");
+  if (save) save.textContent = busy ? (ctx.t("op.saving") || "Сохранение...") : (ctx.t("common.save") || "Сохранить");
 }
 const firstBarcodeFromItem = (core) =>
   core?.base_barcode ??
   (core?.barcode_list ? String(core.barcode_list).split(",")[0]?.trim() : "") ??
   core?.code ?? "";
+
+// ==== I18N ====
+function applyI18n(ctx) {
+  const setTxt = (el, v) => { if (el) el.textContent = v; };
+  const setHTML = (el, v) => { if (el) el.innerHTML = v; };
+  const setPh = (el, v) => { if (el) el.placeholder = v; };
+
+  // Заголовок
+  setTxt(document.querySelector("h1"), ctx.t("op.title") || "Новая операция");
+
+  // Сканер — кнопки и подсказка
+  const btnScan = ctx.$("btn-scan");
+  if (btnScan) {
+    btnScan.setAttribute("aria-label", ctx.t("op.scan") || "Скан штрих-кода");
+    btnScan.title = ctx.t("op.scan") || "Скан штрих-кода";
+    // текст в самом элементе мы позже заменяем на иконку
+  }
+  const scanHint = document.querySelector("#scanner .row .muted");
+  setTxt(scanHint, ctx.t("scanner.hint") || "Наведи камеру на штрих-код");
+
+  const btnClose = ctx.$("btn-close-scan");
+  if (btnClose) {
+    btnClose.setAttribute("aria-label", ctx.t("common.cancel") || "Отмена");
+    btnClose.title = ctx.t("common.cancel") || "Отмена";
+  }
+
+  // Поле штрих-кода
+  setPh(ctx.$("barcode"), ctx.t("op.barcode.placeholder") || "или введите штрих-код и нажмите Enter");
+
+  // Поиск товара
+  setTxt(document.querySelector('label[for="product-query"]'), ctx.t("op.search.label") || "Поиск товара");
+  setPh(ctx.$("product-query"), ctx.t("op.search.placeholder") || "Наименование / артикул");
+
+  // Поля ввода
+  const reqStar = ' <span class="muted">*</span>';
+  setHTML(document.querySelector('label[for="qty"]'),   (ctx.t("op.qty")   || "Количество")   + reqStar);
+  setHTML(document.querySelector('label[for="cost"]'),  (ctx.t("op.cost")  || "Стоимость")    + reqStar);
+  setTxt (document.querySelector('label[for="price"]'), (ctx.t("op.price") || "Цена"));
+  setTxt (document.querySelector('label[for="description"]'), ctx.t("op.description") || "Описание");
+  setPh  (ctx.$("description"), ctx.t("op.description.placeholder") || "Комментарий к операции (необяз.)");
+
+  // Кнопки действий
+  setTxt(ctx.$("btn-op-save"),   ctx.t("common.save")   || "Сохранить");
+  setTxt(ctx.$("btn-op-cancel"), ctx.t("common.cancel") || "Отмена");
+}
 
 // ==== ZXing ====
 const loadZXing = once(async () => {
@@ -54,7 +99,7 @@ const loadZXing = once(async () => {
 async function ensureZXingReader() {
   if (zxingReader) return zxingReader;
   const ok = await loadZXing();
-  if (!ok) throw new Error("ZXing UMD не загрузился");
+  if (!ok) throw new Error("ZXing UMD не загрузился"); // лог только в консоль, пользователю покажем локализованную ошибку
   const ZX = window.ZXing;
   const hints = new Map();
   if (ZX.DecodeHintType && ZX.BarcodeFormat) {
@@ -92,7 +137,6 @@ async function pickBackCameraId() {
 // ==== подсказочные кнопки под полями ====
 function mountUnderInput(inputEl, id, value, className, onClick) {
   if (!inputEl || value == null) return;
-  // убрать предыдущую кнопку (если была)
   const prev = document.getElementById(id);
   if (prev?.parentElement) prev.parentElement.removeChild(prev);
 
@@ -159,7 +203,7 @@ function pick(ctx, ext) {
 }
 async function runSearch(ctx, q, docId) {
   const box = ctx.$("product-results");
-  box.textContent = ctx.t("searching");
+  box.textContent = ctx.t("searching") || "Поиск...";
   try {
     const payload = { q, doc_id: Number(docId) };
     if (docCtx.price_type_id != null) payload.price_type_id = Number(docCtx.price_type_id);
@@ -169,24 +213,24 @@ async function runSearch(ctx, q, docId) {
     if (!items.length) {
       pickedProduct = null;
       ctx.$("product-picked").classList.add("hidden");
-      box.textContent = ctx.t("common.nothing");
+      box.textContent = ctx.t("common.nothing") || "Ничего не найдено";
       return;
     }
     pick(ctx, items[0]);   // авто-выбор первого ItemExt
     box.textContent = "";
   } catch {
-    box.textContent = ctx.t("search_error");
+    box.textContent = ctx.t("search_error") || "Ошибка поиска";
   }
 }
 
 // ==== сканер ====
 async function startScan(ctx) {
   const insecure = location.protocol !== "https:" && location.hostname !== "localhost";
-  if (insecure) { toast(ctx.t("camera_open_failed"), false); return; }
+  if (insecure) { toast(ctx.t("camera_open_failed") || "Не удалось открыть камеру", false); return; }
 
   const video = ctx.$("preview");
   const scanner = ctx.$("scanner");
-  if (!video || !scanner) { toast(ctx.t("camera_open_failed"), false); return; }
+  if (!video || !scanner) { toast(ctx.t("camera_open_failed") || "Не удалось открыть камеру", false); return; }
 
   try {
     const reader = await ensureZXingReader();
@@ -220,7 +264,7 @@ async function startScan(ctx) {
   } catch (e) {
     console.error("[ZXing] start error:", e);
     stopScan(ctx);
-    toast(ctx.t("camera_open_failed"), false);
+    toast(ctx.t("camera_open_failed") || "Не удалось открыть камеру", false);
   }
 }
 
@@ -249,11 +293,11 @@ async function saveOp(ctx, docId) {
 
   markInvalid(qtyEl,false); markInvalid(costEl,false);
 
-  if (!pickedProduct?.id) { toast(ctx.t("select_product_first"), false); return; }
+  if (!pickedProduct?.id) { toast(ctx.t("select_product_first") || "Сначала выберите товар", false); return; }
   let hasErr = false;
   if (!qty || qty <= 0) { markInvalid(qtyEl, true); hasErr = true; }
   if (!cost || cost <= 0){ markInvalid(costEl, true); hasErr = true; }
-  if (hasErr) { toast(ctx.t("fill_required_fields"), false); return; }
+  if (hasErr) { toast(ctx.t("fill_required_fields") || "Заполните обязательные поля", false); return; }
 
   const item = {
     document_id: Number(docId),
@@ -262,7 +306,7 @@ async function saveOp(ctx, docId) {
     cost: cost,
     vat_value: Number(pickedProduct.vat_value ?? 0),
     ...(price ? { price } : {}),
-    ...(description ? { description } : {}) // <— добавили описание
+    ...(description ? { description } : {}) // <— описание опционально
   };
 
   setBusy(ctx, true);
@@ -270,13 +314,13 @@ async function saveOp(ctx, docId) {
     const { ok, data } = await ctx.api("purchase_ops_add", { items: [item] });
     const affected = data?.result?.row_affected || 0;
     if (ok && affected > 0) {
-      toast(ctx.t("toast.op_added"));
+      toast(ctx.t("toast.op_added") || "Операция добавлена");
       resetForm(ctx);
     } else {
-      toast(data?.description || ctx.t("save_failed"), false);
+      toast(data?.description || ctx.t("save_failed") || "Не удалось сохранить операцию", false);
     }
   } catch {
-    toast(ctx.t("network_error_save"), false);
+    toast(ctx.t("network_error_save") || "Ошибка сети при сохранении", false);
   } finally {
     setBusy(ctx, false);
   }
@@ -285,7 +329,7 @@ function resetForm(ctx) {
   ["barcode","product-query","qty","cost","price"].forEach(id=>{
     const el = ctx.$(id); if (el){ el.value = ""; markInvalid(el,false); }
   });
-  // description не очищаем — пусть остаётся, как просили «необязательное»
+  // description не очищаем — пусть остаётся
   pickedProduct = null;
   ctx.$("product-picked")?.classList.add("hidden");
   ctx.$("product-results").textContent = "";
@@ -298,6 +342,9 @@ function resetForm(ctx) {
 export async function screenOpNew(ctx, id) {
   await ctx.loadView("op_new");
   ctx.__docId = Number(id);
+
+  // Локализация всех статических элементов экрана
+  applyI18n(ctx);
 
   // подтянуть контекст документа (price_type_id, stock_id)
   try {
@@ -312,13 +359,13 @@ export async function screenOpNew(ctx, id) {
   const btnClose = ctx.$("btn-close-scan");
   if (btnScan) {
     btnScan.classList.add("btn", "icon");
-    btnScan.setAttribute("aria-label", ctx.t("op.scan"));
+    btnScan.setAttribute("aria-label", ctx.t("op.scan") || "Скан штрих-кода");
     btnScan.innerHTML = `<i class="fa-solid fa-camera"></i>`;
     btnScan.onclick = () => startScan(ctx);
   }
   if (btnClose) {
     btnClose.classList.add("btn", "icon");
-    btnClose.setAttribute("aria-label", ctx.t("common.cancel"));
+    btnClose.setAttribute("aria-label", ctx.t("common.cancel") || "Отмена");
     btnClose.innerHTML = `<i class="fa-solid fa-xmark"></i>`;
     btnClose.onclick = () => stopScan(ctx);
   }

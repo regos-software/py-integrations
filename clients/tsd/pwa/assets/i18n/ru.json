@@ -62,6 +62,8 @@
   "save_failed": "Не удалось сохранить операцию",
   "network_error_save": "Ошибка сети при сохранении",
   "last_purchase_cost_hint": "Стоимость: {cost}",
-  "install_app": "Установить приложение"
+  "install_app": "Установить приложение",
+  "op.description": "Описание",
+  "op.description.placeholder": "Комментарий к операции"
 
 }
