@@ -6,6 +6,11 @@ let pickedProduct = null;
 let currentDeviceId = null;
 let docCtx = { price_type_id: null, stock_id: null };
 
+// ZXing fallback
+let zxingReader = null;
+let zxingReady = false;
+let zxingBusy = false;
+
 // overlay для подсветки зоны сканирования и боксов
 let overlay = null, og = null; // canvas + 2D context
 
@@ -97,8 +102,8 @@ export async function screenOpNew(ctx, id) {
     og.strokeStyle = "#00e676";
     og.lineWidth = 3;
     for (const b of boxes) {
-      const bb = b.boundingBox;
-      const cp = b.cornerPoints;
+      const bb = b?.boundingBox;
+      const cp = b?.cornerPoints;
       if (bb && typeof bb.x === "number") {
         og.strokeRect(bb.x + rx, bb.y + ry, bb.width, bb.height);
       } else if (Array.isArray(cp) && cp.length) {
@@ -108,6 +113,58 @@ export async function screenOpNew(ctx, id) {
         og.closePath();
         og.stroke();
       }
+    }
+  }
+
+  // ZXing loader + reader
+  async function ensureZXing() {
+    if (zxingReady && zxingReader) return true;
+    // грузим UMD-скрипт из ассетов
+    if (!window.ZXing) {
+      await new Promise((resolve, reject) => {
+        const s = document.createElement("script");
+        s.src = "?assets=lib/zxing.min.js";
+        s.async = true;
+        s.onload = resolve;
+        s.onerror = reject;
+        document.head.appendChild(s);
+      }).catch(()=>{});
+    }
+    if (!window.ZXing) return false;
+
+    try {
+      const ZX = window.ZXing;
+      zxingReader = new ZX.BrowserMultiFormatReader();
+
+      // Подскажем нужные форматы (ускоряет)
+      const hints = new ZX.Map();
+      const formats = [
+        ZX.BarcodeFormat.EAN_13,
+        ZX.BarcodeFormat.EAN_8,
+        ZX.BarcodeFormat.UPC_A,
+        ZX.BarcodeFormat.UPC_E,
+        ZX.BarcodeFormat.ITF,
+        ZX.BarcodeFormat.CODE_128,
+        ZX.BarcodeFormat.CODE_39,
+        ZX.BarcodeFormat.CODABAR
+      ];
+      hints.set(ZX.DecodeHintType.POSSIBLE_FORMATS, formats);
+      zxingReader.setHints(hints);
+      zxingReady = true;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function decodeWithZXing(canvas) {
+    if (!zxingReady || zxingBusy) return null;
+    zxingBusy = true;
+    try {
+      const res = await zxingReader.decodeFromCanvas(canvas).catch(()=>null);
+      return res?.text || null;
+    } finally {
+      zxingBusy = false;
     }
   }
 
@@ -130,15 +187,14 @@ export async function screenOpNew(ctx, id) {
       if (docCtx.stock_id != null)      payload.stock_id      = Number(docCtx.stock_id);
 
       const { data } = await ctx.api("product_search", payload);
-      const items = data?.result?.items || [];   // ожидаем массив ItemExt
+      const items = data?.result?.items || [];   // ItemExt[]
       if (!items.length) {
         pickedProduct = null;
         ctx.$("product-picked").classList.add("hidden");
         box.textContent = ctx.t("nothing_found");
         return;
       }
-      // Автовыбор первого ItemExt
-      pick(items[0]);
+      pick(items[0]); // авто-выбор
       box.textContent = "";
     } catch {
       box.textContent = ctx.t("search_error");
@@ -233,7 +289,7 @@ export async function screenOpNew(ctx, id) {
 
     try {
       let stream = await navigator.mediaDevices.getUserMedia(primaryConstraints).catch(()=>null);
-      // 2) fallback: используем deviceId тыловой камеры, если доступно
+      // 2) fallback: тыловая камера по deviceId
       if (!stream) {
         const backId = await pickBackCamera();
         if (backId) {
@@ -255,7 +311,7 @@ export async function screenOpNew(ctx, id) {
         await new Promise(r => setTimeout(r, 50));
       }
 
-      // попытка включить фонарик (не везде поддерживается)
+      // попытка включить фонарик (если доступен)
       try {
         const [track] = stream.getVideoTracks();
         const caps = track?.getCapabilities?.() || {};
@@ -264,7 +320,7 @@ export async function screenOpNew(ctx, id) {
         }
       } catch {}
 
-      // рабочий канвас для ROI
+      // канвас для ROI
       const work = document.createElement("canvas");
       const wg = work.getContext("2d", { willReadFrequently: true });
 
@@ -274,46 +330,67 @@ export async function screenOpNew(ctx, id) {
         const { rx, ry, rw, rh } = roiRect(video);
         work.width = rw; work.height = rh;
         wg.imageSmoothingEnabled = false;
-        // немного усилим картинку
+        // усилим картинку
         wg.filter = "contrast(140%) brightness(115%)";
         wg.drawImage(video, rx, ry, rw, rh, 0, 0, rw, rh);
 
-        let result = null;
+        let code = null;
         let boxes = [];
 
+        // 1) Нативный детектор
         if (detector) {
           try {
-            result = await detector.detect(work);
+            const result = await detector.detect(work);
             boxes = result || [];
+            if (result && result[0]) code = result[0].rawValue || result[0].displayValue || null;
           } catch {}
-          // Поворот на 90°, если не нашли
-          if (!result || !result.length) {
+          // Поворот ROI на 90°
+          if (!code) {
             const rot = document.createElement("canvas");
             rot.width = rh; rot.height = rw;
             const rg = rot.getContext("2d");
             rg.translate(rot.width/2, rot.height/2);
             rg.rotate(Math.PI/2);
             rg.drawImage(work, -work.width/2, -work.height/2);
-            try { result = await detector.detect(rot); boxes = result || []; } catch {}
+            try {
+              const result2 = await detector.detect(rot);
+              boxes = result2 || boxes;
+              if (result2 && result2[0]) code = result2[0].rawValue || result2[0].displayValue || null;
+            } catch {}
+          }
+        }
+
+        // 2) ZXing fallback
+        if (!code) {
+          if (!zxingReady) await ensureZXing();
+          if (zxingReady) {
+            code = await decodeWithZXing(work);
+            if (!code) {
+              // Попробуем повернуть ROI
+              const rot = document.createElement("canvas");
+              rot.width = rh; rot.height = rw;
+              const rg = rot.getContext("2d");
+              rg.translate(rot.width/2, rot.height/2);
+              rg.rotate(Math.PI/2);
+              rg.drawImage(work, -work.width/2, -work.height/2);
+              code = await decodeWithZXing(rot);
+            }
           }
         }
 
         drawROIandBoxes(video, boxes);
 
-        if (result && result[0]) {
-          const code = result[0].rawValue || result[0].displayValue || null;
-          if (code) {
-            const pq = ctx.$("product-query"), bc = ctx.$("barcode");
-            if (bc) bc.value = code;
-            if (pq) pq.value = code;
-            try { navigator.vibrate?.(40); } catch {}
-            stopScan();
-            simulateEnter(pq);
-            return;
-          }
+        if (code) {
+          const pq = ctx.$("product-query"), bc = ctx.$("barcode");
+          if (bc) bc.value = code;
+          if (pq) pq.value = code;
+          try { navigator.vibrate?.(40); } catch {}
+          stopScan();
+          simulateEnter(pq);
+          return;
         }
 
-        scanTimer = setTimeout(() => requestAnimationFrame(detectFrame), 80);
+        scanTimer = setTimeout(() => requestAnimationFrame(detectFrame), 90);
       };
 
       requestAnimationFrame(detectFrame);
@@ -337,10 +414,7 @@ export async function screenOpNew(ctx, id) {
     }
     const scanner = ctx.$("scanner");
     if (scanner) scanner.classList.add("hidden");
-    // чистим оверлей
-    if (og && overlay) {
-      og.clearRect(0,0,overlay.width,overlay.height);
-    }
+    if (og && overlay) { og.clearRect(0,0,overlay.width,overlay.height); }
   }
   function safeStopScan(){ try { stopScan(); } catch {} }
 
