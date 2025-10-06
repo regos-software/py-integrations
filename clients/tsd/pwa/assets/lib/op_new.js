@@ -1,18 +1,17 @@
-// views/op_new.js — без import; получает ctx
+// views/op_new.js — ZXing-only; без import; получает ctx
 let mediaStream = null;
 let scanTimer = null;
-let detector = null;
 let pickedProduct = null;
 let currentDeviceId = null;
 let docCtx = { price_type_id: null, stock_id: null };
 
-// ZXing fallback
+// ZXing
 let zxingReader = null;
 let zxingReady = false;
 let zxingBusy = false;
 
-// overlay для подсветки зоны сканирования и боксов
-let overlay = null, og = null; // canvas + 2D context
+// overlay для подсветки зоны сканирования
+let overlay = null, og = null; // canvas + 2D ctx
 
 export async function screenOpNew(ctx, id) {
   await ctx.loadView("op_new");
@@ -79,7 +78,7 @@ export async function screenOpNew(ctx, id) {
     const ry = Math.round((h - rh) / 2);
     return { rx, ry, rw, rh, w, h };
   }
-  function drawROIandBoxes(video, boxes=[]) {
+  function drawROI(video) {
     if (!overlay || !og) return;
     layoutOverlay(video);
     og.clearRect(0,0,overlay.width,overlay.height);
@@ -97,29 +96,12 @@ export async function screenOpNew(ctx, id) {
     og.lineWidth = 2;
     og.strokeStyle = "#ffffff";
     og.strokeRect(rx, ry, rw, rh);
-
-    // найденные боксы
-    og.strokeStyle = "#00e676";
-    og.lineWidth = 3;
-    for (const b of boxes) {
-      const bb = b?.boundingBox;
-      const cp = b?.cornerPoints;
-      if (bb && typeof bb.x === "number") {
-        og.strokeRect(bb.x + rx, bb.y + ry, bb.width, bb.height);
-      } else if (Array.isArray(cp) && cp.length) {
-        og.beginPath();
-        og.moveTo(cp[0].x + rx, cp[0].y + ry);
-        for (let i=1; i<cp.length; i++) og.lineTo(cp[i].x + rx, cp[i].y + ry);
-        og.closePath();
-        og.stroke();
-      }
-    }
   }
 
   // ZXing loader + reader
   async function ensureZXing() {
     if (zxingReady && zxingReader) return true;
-    // грузим UMD-скрипт из ассетов
+
     if (!window.ZXing) {
       await new Promise((resolve, reject) => {
         const s = document.createElement("script");
@@ -130,13 +112,16 @@ export async function screenOpNew(ctx, id) {
         document.head.appendChild(s);
       }).catch(()=>{});
     }
-    if (!window.ZXing) return false;
+    if (!window.ZXing) {
+      toast("ZXing not loaded", false);
+      return false;
+    }
 
     try {
       const ZX = window.ZXing;
       zxingReader = new ZX.BrowserMultiFormatReader();
 
-      // Подскажем нужные форматы (ускоряет)
+      // Подсказываем форматы — ускоряет
       const hints = new ZX.Map();
       const formats = [
         ZX.BarcodeFormat.EAN_13,
@@ -150,9 +135,11 @@ export async function screenOpNew(ctx, id) {
       ];
       hints.set(ZX.DecodeHintType.POSSIBLE_FORMATS, formats);
       zxingReader.setHints(hints);
+
       zxingReady = true;
       return true;
     } catch {
+      toast("ZXing init error", false);
       return false;
     }
   }
@@ -247,14 +234,6 @@ export async function screenOpNew(ctx, id) {
   ctx.$("btn-scan").onclick       = startScan;
   ctx.$("btn-close-scan").onclick = stopScan;
 
-  // BarcodeDetector (если доступен) — расширенный список форматов
-  if ("BarcodeDetector" in window) {
-    try {
-      const FORMATS = ["ean_13","ean_8","upc_a","upc_e","itf","code_128","code_39","codabar","qr_code"];
-      detector = new BarcodeDetector({ formats: FORMATS });
-    } catch {}
-  }
-
   // авто-стоп при сворачивании/уходе
   document.addEventListener("visibilitychange", () => { if (document.hidden) stopScan(); });
   window.addEventListener("pagehide", stopScan);
@@ -324,6 +303,12 @@ export async function screenOpNew(ctx, id) {
       const work = document.createElement("canvas");
       const wg = work.getContext("2d", { willReadFrequently: true });
 
+      // заранее загрузим ZXing
+      if (!zxingReady) {
+        const ok = await ensureZXing();
+        if (!ok) { toast(ctx.t("camera_open_failed"), false); stopScan(); return; }
+      }
+
       const detectFrame = async () => {
         if (!mediaStream) return;
 
@@ -334,51 +319,20 @@ export async function screenOpNew(ctx, id) {
         wg.filter = "contrast(140%) brightness(115%)";
         wg.drawImage(video, rx, ry, rw, rh, 0, 0, rw, rh);
 
-        let code = null;
-        let boxes = [];
+        let code = await decodeWithZXing(work);
 
-        // 1) Нативный детектор
-        if (detector) {
-          try {
-            const result = await detector.detect(work);
-            boxes = result || [];
-            if (result && result[0]) code = result[0].rawValue || result[0].displayValue || null;
-          } catch {}
-          // Поворот ROI на 90°
-          if (!code) {
-            const rot = document.createElement("canvas");
-            rot.width = rh; rot.height = rw;
-            const rg = rot.getContext("2d");
-            rg.translate(rot.width/2, rot.height/2);
-            rg.rotate(Math.PI/2);
-            rg.drawImage(work, -work.width/2, -work.height/2);
-            try {
-              const result2 = await detector.detect(rot);
-              boxes = result2 || boxes;
-              if (result2 && result2[0]) code = result2[0].rawValue || result2[0].displayValue || null;
-            } catch {}
-          }
-        }
-
-        // 2) ZXing fallback
+        // Поворот ROI на 90° (если не найдено)
         if (!code) {
-          if (!zxingReady) await ensureZXing();
-          if (zxingReady) {
-            code = await decodeWithZXing(work);
-            if (!code) {
-              // Попробуем повернуть ROI
-              const rot = document.createElement("canvas");
-              rot.width = rh; rot.height = rw;
-              const rg = rot.getContext("2d");
-              rg.translate(rot.width/2, rot.height/2);
-              rg.rotate(Math.PI/2);
-              rg.drawImage(work, -work.width/2, -work.height/2);
-              code = await decodeWithZXing(rot);
-            }
-          }
+          const rot = document.createElement("canvas");
+          rot.width = rh; rot.height = rw;
+          const rg = rot.getContext("2d");
+          rg.translate(rot.width/2, rot.height/2);
+          rg.rotate(Math.PI/2);
+          rg.drawImage(work, -work.width/2, -work.height/2);
+          code = await decodeWithZXing(rot);
         }
 
-        drawROIandBoxes(video, boxes);
+        drawROI(video);
 
         if (code) {
           const pq = ctx.$("product-query"), bc = ctx.$("barcode");
@@ -390,7 +344,7 @@ export async function screenOpNew(ctx, id) {
           return;
         }
 
-        scanTimer = setTimeout(() => requestAnimationFrame(detectFrame), 90);
+        scanTimer = setTimeout(() => requestAnimationFrame(detectFrame), 110);
       };
 
       requestAnimationFrame(detectFrame);
@@ -436,7 +390,7 @@ export async function screenOpNew(ctx, id) {
     ctx.$("picked-name").textContent = pickedProduct.name;
     ctx.$("picked-code").textContent = pickedProduct.barcode || "";
 
-    // подсказки: последняя закупка + цена продажи (если есть)
+    // подсказки
     const hintBox = ctx.$("cost-suggest");
     hintBox.innerHTML = "";
     const lpc = pickedProduct.last_purchase_cost;
@@ -463,7 +417,6 @@ export async function screenOpNew(ctx, id) {
       hintBox.appendChild(b2);
     }
 
-    // сразу фокус в qty
     setTimeout(()=>{ ctx.$("qty")?.focus(); }, 0);
   }
 
