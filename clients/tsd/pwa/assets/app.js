@@ -1,11 +1,10 @@
-// app.js (router + bootstrap) — без статичных import
-
+// app.js (router + bootstrap) — без статичных import и с PWA-кнопкой установки
 const rel = (q) => new URL(q, import.meta.url).toString();
 
 // Либы: api, utils, i18n
-const apiLib    = await import(rel('?assets=lib/api.js'));     // { CI, api, registerSW }
-const utilsLib  = await import(rel('?assets=lib/utils.js'));   // { $, out, tickClock, loadView, esc, fmtMoney, fmtNum, unixToLocal, toNumber }
-const i18nLib   = await import(rel('?assets=lib/i18n.js'));    // { initI18n, t, setLocale, getLocale }
+const apiLib   = await import(rel('?assets=lib/api.js'));   // { CI, api, registerSW }
+const utilsLib = await import(rel('?assets=lib/utils.js')); // { $, out, tickClock, loadView, esc, fmtMoney, fmtNum, unixToLocal, toNumber }
+const i18nLib  = await import(rel('?assets=lib/i18n.js'));  // { initI18n, t, setLocale, getLocale, fmt }
 
 // Контекст, который будем передавать во вьюхи
 const ctx = {
@@ -14,40 +13,112 @@ const ctx = {
   t: i18nLib.t,
   setLocale: i18nLib.setLocale,
   getLocale: i18nLib.getLocale,
+  fmt: i18nLib.fmt,
 };
 
 // --- helpers (UI) ---
 function setAppTitle(text) {
-  // 1) всегда обновляем системный заголовок вкладки
   try { document.title = text || document.title; } catch {}
-  // 2) если в верстке есть #title — обновим и его
   const h = ctx.$("title");
   if (h) h.textContent = text;
 }
 
+// Создаём/находим кнопку установки (если её нет в верстке)
+function ensureInstallButton() {
+  let btn = ctx.$("btn-install");
+  if (!btn) {
+    const container =
+      document.querySelector(".appbar .right") ||
+      document.querySelector(".appbar-right") ||
+      document.body;
+
+    btn = document.createElement("button");
+    btn.id = "btn-install";
+    btn.className = "btn small hidden";
+    btn.innerHTML = `<i class="fa-solid fa-download"></i> <span id="btn-install-txt"></span>`;
+    container.appendChild(btn);
+  }
+  return btn;
+}
+
+// Настраиваем кнопку «Установить» через beforeinstallprompt
+function setupInstallCTA() {
+  const btn = ensureInstallButton();
+  const txt = ctx.$("btn-install-txt");
+  if (txt) txt.textContent = ctx.t?.("install_app") || "Установить";
+
+  const hide = () => btn.classList.add("hidden");
+  const show = () => btn.classList.remove("hidden");
+
+  const isStandalone =
+    window.matchMedia?.("(display-mode: standalone)").matches ||
+    window.navigator.standalone === true;
+
+  if (isStandalone) hide();
+
+  let deferredPrompt = null;
+
+  window.addEventListener("beforeinstallprompt", (e) => {
+    e.preventDefault();
+    deferredPrompt = e;
+    show();
+  });
+
+  btn.addEventListener("click", async () => {
+    if (!deferredPrompt) return;
+    btn.disabled = true;
+    try {
+      deferredPrompt.prompt();
+      await deferredPrompt.userChoice;
+    } finally {
+      btn.disabled = false;
+      hide();
+      deferredPrompt = null;
+    }
+  });
+
+  window.addEventListener("appinstalled", hide);
+}
+
 // --- UI bootstrap ---
-setAppTitle("TSD");                           // <<< БЫЛО: ctx.$("title").textContent = "TSD";
-if (ctx.$("now")) {                           // запуск часов — только если есть #now
+setAppTitle("TSD"); // первоначальный заголовок до i18n
+if (ctx.$("now")) {
   ctx.tickClock();
   setInterval(ctx.tickClock, 1000);
 }
-ctx.registerSW?.();
 
-// Инициализация i18n (выставляем язык из localStorage/браузера)
+// Регистрация Service Worker
+if (typeof ctx.registerSW === "function") {
+  ctx.registerSW();
+} else if ("serviceWorker" in navigator) {
+  const scopePath = location.pathname.endsWith("/") ? location.pathname : location.pathname + "/";
+  navigator.serviceWorker
+    .register(new URL("?pwa=sw", location.href).toString(), { scope: scopePath })
+    .catch(err => console.error("[SW register fallback] failed:", err));
+}
+
+// Инициализация i18n
 await i18nLib.initI18n();
+
+// Локализуем заголовок и кнопку установки
+setAppTitle(ctx.t("app_title") || "TSD");
+setupInstallCTA();
+
 const langSelect = ctx.$("lang-select");
 if (langSelect) {
   langSelect.value = ctx.getLocale();
   langSelect.addEventListener("change", async () => {
     ctx.setLocale(langSelect.value);
-    // Перезапустим OAuth с новым языком
-    await reinitOAuth();
+    setAppTitle(ctx.t("app_title") || "TSD");
+    const installTxt = ctx.$("btn-install-txt");
+    if (installTxt) installTxt.textContent = ctx.t?.("install_app") || "Установить";
     // Перерисуем текущий экран (чтобы тексты обновились)
     router();
+    // reinitOAuth временно отключён
   });
 }
 
-// Единая кнопка «Назад» (если в верстке осталась)
+// Единая кнопка «Назад»
 const backBtn = ctx.$("nav-back");
 if (backBtn) {
   backBtn.addEventListener("click", () => {
@@ -56,19 +127,13 @@ if (backBtn) {
   });
 }
 
-// --- REGOS OAuth (инициализация/переинициализация) ---
+/* ---------------- REGOS OAuth (временно закомментировано) ----------------
 const REGOS_CLIENT_ID    = "your_client_id_here"; // TODO: замените на реальный clientId
 const REGOS_REDIRECT_URI = new URL("?assets=oauth/redirect.html", location.href).toString();
 
 async function reinitOAuth() {
   if (!window.RegosOAuthSDK) return;
-
-  try {
-    // Если SDK поддерживает destroy — очищаем предыдущую инициализацию
-    window.RegosOAuthSDK.destroy?.();
-  } catch (_) {}
-
-  // Инициализация с текущим языком
+  try { window.RegosOAuthSDK.destroy?.(); } catch (_) {}
   await window.RegosOAuthSDK.initialize({
     clientId: REGOS_CLIENT_ID,
     redirectUri: REGOS_REDIRECT_URI,
@@ -82,20 +147,13 @@ async function reinitOAuth() {
     flow: "auto",
     silent: true,
     debug: false,
-    onData: (user, access_token) => {
-      ctx.currentUser = user || null;
-      ctx.accessToken = access_token || null;
-    },
-    onLogout: () => {
-      ctx.currentUser = null;
-      ctx.accessToken = null;
-    },
+    onData: (user, access_token) => { ctx.currentUser = user || null; ctx.accessToken = access_token || null; },
+    onLogout: () => { ctx.currentUser = null; ctx.accessToken = null; },
     onError: (err) => console.error("[REGOS OAuth] error:", err?.message || err),
   });
 }
-
-// Стартуем OAuth (после initI18n, чтобы язык корректно выставился)
-await reinitOAuth();
+// await reinitOAuth();
+-------------------------------------------------------------------------- */
 
 // --- Вьюхи грузим динамически ---
 const views = {
