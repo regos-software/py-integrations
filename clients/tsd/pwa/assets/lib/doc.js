@@ -159,6 +159,10 @@ export async function screenDoc(ctx, id) {
         <label>${ctx.t("op.price")}</label>
         <input type="number" step="any" inputmode="decimal" class="op-price" value="${ctx.esc(op.price ?? "")}" />
       </div>
+    <div>
+        <label>${ctx.t("op.description")}</label>
+        <input type="text" class="op-description" value="${ctx.esc(op.description ?? "")}" />
+      </div>
       <div class="page-actions">
         <button class="btn small op-save">${ctx.t("common.save")}</button>
         <button class="btn small ghost op-cancel">${ctx.t("common.cancel")}</button>
@@ -212,6 +216,7 @@ export async function screenDoc(ctx, id) {
       const qty   = ctx.toNumber(edit.querySelector(".op-qty").value);
       const cost  = ctx.toNumber(edit.querySelector(".op-cost").value);
       const price = ctx.toNumber(edit.querySelector(".op-price").value);
+      const description = edit.querySelector(".op-description").value;
       if (!qty || qty <= 0) { alert(ctx.t("op.qty.required")); return; }
 
       const savingText = ctx.t("op.saving") || "Сохранение...";
@@ -225,6 +230,7 @@ export async function screenDoc(ctx, id) {
             id: op.id,
             quantity: qty,
             cost: cost,
+            description: description || undefined,
             // price опционален — не отправляем, если пустой/NaN
             ...(Number.isFinite(price) ? { price } : {})
           }]
