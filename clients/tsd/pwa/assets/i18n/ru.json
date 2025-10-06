@@ -46,5 +46,21 @@
   "toast.op_deleted": "Операция удалена",
   "toast.op_updated": "Операция сохранена",
 
-  "unit.pcs": "шт"
+  "unit.pcs": "шт",
+
+
+  "save": "Сохранить",
+  "saving": "Сохранение...",
+  "cancel": "Отмена",
+  "searching": "Поиск...",
+  "nothing_found": "Ничего не найдено",
+  "search_error": "Ошибка поиска",
+  "camera_open_failed": "Не удалось открыть камеру",
+  "select_product_first": "Сначала выберите товар",
+  "fill_required_fields": "Заполните обязательные поля",
+  "op_added": "Операция добавлена",
+  "save_failed": "Не удалось сохранить операцию",
+  "network_error_save": "Ошибка сети при сохранении",
+  "last_purchase_cost_hint": "С/с из последней закупки: {cost}"
+
 }
