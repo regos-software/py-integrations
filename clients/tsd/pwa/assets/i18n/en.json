@@ -15,7 +15,7 @@
   "docs.status.blocked": "blk.",
 
   "doc.to_list": "Back to list",
-  "doc.add_op": "Add operation",
+  "doc.add_op": "Add",
   "doc.operations": "Operations",
 
   "op.title": "New operation",
@@ -60,6 +60,6 @@
   "op_added": "Operation added",
   "save_failed": "Failed to save the operation",
   "network_error_save": "Network error while saving",
-  "last_purchase_cost_hint": "Cost from last purchase: {cost}",
+  "last_purchase_cost_hint": "Cos: {cost}",
   "install_app": "Install app"
 }

@@ -6,12 +6,13 @@ let pickedProduct = null;
 let currentDeviceId = null;
 let docCtx = { price_type_id: null, stock_id: null };
 
+// overlay для подсветки зоны сканирования и боксов
+let overlay = null, og = null; // canvas + 2D context
+
 export async function screenOpNew(ctx, id) {
   await ctx.loadView("op_new");
 
-  // сброс предыдущего состояния сканера (если экран открыли повторно)
   safeStopScan();
-
   pickedProduct = null;
   docCtx = { price_type_id: null, stock_id: null };
 
@@ -48,6 +49,68 @@ export async function screenOpNew(ctx, id) {
       item?.code ?? "";
   }
 
+  // overlay helpers
+  function ensureOverlay(video) {
+    if (overlay && og) return;
+    overlay = document.createElement("canvas");
+    overlay.id = "scan-overlay";
+    overlay.style.cssText = "position:absolute;inset:0;pointer-events:none;";
+    const parent = video.parentElement || video;
+    parent.style.position = parent.style.position || "relative";
+    parent.appendChild(overlay);
+    og = overlay.getContext("2d");
+  }
+  function layoutOverlay(video) {
+    const w = video.videoWidth || video.clientWidth || 640;
+    const h = video.videoHeight || video.clientHeight || 360;
+    overlay.width = w;
+    overlay.height = h;
+  }
+  function roiRect(video) {
+    const w = video.videoWidth || 640, h = video.videoHeight || 360;
+    const rw = Math.round(w * 0.7);
+    const rh = Math.round(h * 0.5);
+    const rx = Math.round((w - rw) / 2);
+    const ry = Math.round((h - rh) / 2);
+    return { rx, ry, rw, rh, w, h };
+  }
+  function drawROIandBoxes(video, boxes=[]) {
+    if (!overlay || !og) return;
+    layoutOverlay(video);
+    og.clearRect(0,0,overlay.width,overlay.height);
+
+    const { rx, ry, rw, rh } = roiRect(video);
+
+    // затемняем остальной фон
+    og.fillStyle = "rgba(0,0,0,0.35)";
+    og.fillRect(0,0,overlay.width,ry);
+    og.fillRect(0,ry,rx,rh);
+    og.fillRect(rx+rw,ry,overlay.width-(rx+rw),rh);
+    og.fillRect(0,ry+rh,overlay.width,overlay.height-(ry+rh));
+
+    // рамка ROI
+    og.lineWidth = 2;
+    og.strokeStyle = "#ffffff";
+    og.strokeRect(rx, ry, rw, rh);
+
+    // найденные боксы
+    og.strokeStyle = "#00e676";
+    og.lineWidth = 3;
+    for (const b of boxes) {
+      const bb = b.boundingBox;
+      const cp = b.cornerPoints;
+      if (bb && typeof bb.x === "number") {
+        og.strokeRect(bb.x + rx, bb.y + ry, bb.width, bb.height);
+      } else if (Array.isArray(cp) && cp.length) {
+        og.beginPath();
+        og.moveTo(cp[0].x + rx, cp[0].y + ry);
+        for (let i=1; i<cp.length; i++) og.lineTo(cp[i].x + rx, cp[i].y + ry);
+        og.closePath();
+        og.stroke();
+      }
+    }
+  }
+
   // ==== подтянем контекст документа ====
   const idNum = Number(id);
   try {
@@ -55,9 +118,7 @@ export async function screenOpNew(ctx, id) {
     const doc = data?.result?.doc;
     docCtx.price_type_id = doc?.price_type?.id ?? null;
     docCtx.stock_id      = doc?.stock?.id ?? null;
-  } catch {
-    // не критично: поиск просто пойдет без контекстных параметров
-  }
+  } catch { /* не критично */ }
 
   // ==== поиск по Enter (возвращает только ItemExt) ====
   const runSearch = async (q) => {
@@ -130,12 +191,15 @@ export async function screenOpNew(ctx, id) {
   ctx.$("btn-scan").onclick       = startScan;
   ctx.$("btn-close-scan").onclick = stopScan;
 
-  // BarcodeDetector (если доступен)
+  // BarcodeDetector (если доступен) — расширенный список форматов
   if ("BarcodeDetector" in window) {
-    try { detector = new BarcodeDetector({ formats: ["ean_13","ean_8","code_128","upc_a","upc_e","itf"] }); } catch {}
+    try {
+      const FORMATS = ["ean_13","ean_8","upc_a","upc_e","itf","code_128","code_39","codabar","qr_code"];
+      detector = new BarcodeDetector({ formats: FORMATS });
+    } catch {}
   }
 
-  // Авто-стоп при сворачивании/уходе
+  // авто-стоп при сворачивании/уходе
   document.addEventListener("visibilitychange", () => { if (document.hidden) stopScan(); });
   window.addEventListener("pagehide", stopScan);
 
@@ -149,37 +213,27 @@ export async function screenOpNew(ctx, id) {
   }
 
   async function startScan(){
-    // Требуется HTTPS (кроме localhost)
     const insecure = location.protocol !== "https:" && location.hostname !== "localhost";
     if (insecure) { toast(ctx.t("camera_open_failed"), false); return; }
 
-    stopScan(); // закрыть предыдущее
+    stopScan();
     const scanner = ctx.$("scanner");
-    if (scanner) scanner.classList.remove("hidden");
+    scanner?.classList.remove("hidden");
 
     const video = ctx.$("preview");
     if (!video) { toast(ctx.t("camera_open_failed"), false); return; }
 
-    try {
-      // атрибуты для iOS Safari
-      video.setAttribute("playsinline", "");
-      video.setAttribute("webkit-playsinline", "");
-      video.autoplay = true;
-      video.muted = true;
-    } catch {}
+    try { video.setAttribute("playsinline",""); video.setAttribute("webkit-playsinline",""); video.autoplay = true; video.muted = true; } catch {}
+
+    // 1) пробуем FullHD с environment
+    const primaryConstraints = {
+      video: { facingMode: { ideal: "environment" }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+      audio: false
+    };
 
     try {
-      // 1) с facingMode: environment или сохранённым deviceId
-      const primaryConstraints = {
-        video: currentDeviceId
-          ? { deviceId: { exact: currentDeviceId } }
-          : { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
-        audio: false
-      };
-
       let stream = await navigator.mediaDevices.getUserMedia(primaryConstraints).catch(()=>null);
-
-      // 2) если не удалось — после разрешения выберем тыловую камеру по deviceId
+      // 2) fallback: используем deviceId тыловой камеры, если доступно
       if (!stream) {
         const backId = await pickBackCamera();
         if (backId) {
@@ -187,44 +241,81 @@ export async function screenOpNew(ctx, id) {
           if (stream) currentDeviceId = backId;
         }
       }
-
       if (!stream) throw new Error("no-stream");
 
       mediaStream = stream;
       video.srcObject = stream;
       await video.play().catch(()=>{});
 
+      ensureOverlay(video);
+
+      // дождёмся валидных размеров видео
+      let guard = 0;
+      while ((video.videoWidth|0) < 160 && guard++ < 50) {
+        await new Promise(r => setTimeout(r, 50));
+      }
+
+      // попытка включить фонарик (не везде поддерживается)
+      try {
+        const [track] = stream.getVideoTracks();
+        const caps = track?.getCapabilities?.() || {};
+        if (caps.torch) {
+          await track.applyConstraints({ advanced: [{ torch: true }] }).catch(()=>{});
+        }
+      } catch {}
+
+      // рабочий канвас для ROI
+      const work = document.createElement("canvas");
+      const wg = work.getContext("2d", { willReadFrequently: true });
+
       const detectFrame = async () => {
         if (!mediaStream) return;
-        try {
-          let okCode = null;
-          if (detector) {
-            try {
-              const res = await detector.detect(video);
-              if (res && res[0]) okCode = res[0].rawValue || res[0].displayValue || null;
-            } catch {
-              try {
-                const c = document.createElement("canvas");
-                c.width = video.videoWidth || 640; c.height = video.videoHeight || 360;
-                const g = c.getContext("2d"); g.drawImage(video, 0, 0, c.width, c.height);
-                const res2 = await detector.detect(c);
-                if (res2 && res2[0]) okCode = res2[0].rawValue || res2[0].displayValue || null;
-              } catch {}
-            }
+
+        const { rx, ry, rw, rh } = roiRect(video);
+        work.width = rw; work.height = rh;
+        wg.imageSmoothingEnabled = false;
+        // немного усилим картинку
+        wg.filter = "contrast(140%) brightness(115%)";
+        wg.drawImage(video, rx, ry, rw, rh, 0, 0, rw, rh);
+
+        let result = null;
+        let boxes = [];
+
+        if (detector) {
+          try {
+            result = await detector.detect(work);
+            boxes = result || [];
+          } catch {}
+          // Поворот на 90°, если не нашли
+          if (!result || !result.length) {
+            const rot = document.createElement("canvas");
+            rot.width = rh; rot.height = rw;
+            const rg = rot.getContext("2d");
+            rg.translate(rot.width/2, rot.height/2);
+            rg.rotate(Math.PI/2);
+            rg.drawImage(work, -work.width/2, -work.height/2);
+            try { result = await detector.detect(rot); boxes = result || []; } catch {}
           }
-          if (okCode) {
+        }
+
+        drawROIandBoxes(video, boxes);
+
+        if (result && result[0]) {
+          const code = result[0].rawValue || result[0].displayValue || null;
+          if (code) {
             const pq = ctx.$("product-query"), bc = ctx.$("barcode");
-            if (bc) bc.value = okCode;
-            if (pq) pq.value = okCode;
+            if (bc) bc.value = code;
+            if (pq) pq.value = code;
+            try { navigator.vibrate?.(40); } catch {}
             stopScan();
             simulateEnter(pq);
             return;
           }
-        } finally {
-          // троттлинг детекции (~12 FPS)
-          scanTimer = setTimeout(() => requestAnimationFrame(detectFrame), 80);
         }
+
+        scanTimer = setTimeout(() => requestAnimationFrame(detectFrame), 80);
       };
+
       requestAnimationFrame(detectFrame);
     } catch {
       stopScan();
@@ -246,6 +337,10 @@ export async function screenOpNew(ctx, id) {
     }
     const scanner = ctx.$("scanner");
     if (scanner) scanner.classList.add("hidden");
+    // чистим оверлей
+    if (og && overlay) {
+      og.clearRect(0,0,overlay.width,overlay.height);
+    }
   }
   function safeStopScan(){ try { stopScan(); } catch {} }
 
