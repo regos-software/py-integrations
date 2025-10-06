@@ -100,73 +100,58 @@ export async function screenOpNew(ctx, id) {
   }
 
   // ZXing loader + reader
-async function ensureZXing() {
-  if (zxingReady && zxingReader) return true;
+  async function ensureZXing() {
+    if (zxingReady && zxingReader) return true;
 
-  // грузим UMD-скрипт из ассетов, если ещё не в window
-  if (!window.ZXing) {
-    zxingLoadTries++;
-    console.debug("[ZXing] load try", zxingLoadTries);
-    await new Promise((resolve) => {
-      const s = document.createElement("script");
-      s.src = "?assets=lib/zxing.min.js"; // файл должен существовать
-      s.async = true;
-      s.onload = resolve;
-      s.onerror = () => {
-        console.error("[ZXing] failed to load ?assets=lib/zxing.min.js");
-        resolve();
-      };
-      document.head.appendChild(s);
-    });
-  }
-  if (!window.ZXing) return false;
-
-  try {
-    const ZX = window.ZXing;
-
-    // НАТИВНАЯ Map, не ZX.Map
-    const hints = new Map();
-    const formats = [
-      ZX.BarcodeFormat.EAN_13,
-      ZX.BarcodeFormat.EAN_8,
-      ZX.BarcodeFormat.UPC_A,
-      ZX.BarcodeFormat.UPC_E,
-      ZX.BarcodeFormat.ITF,
-      ZX.BarcodeFormat.CODE_128,
-      ZX.BarcodeFormat.CODE_39,
-      ZX.BarcodeFormat.CODABAR
-    ];
-    hints.set(ZX.DecodeHintType.POSSIBLE_FORMATS, formats);
-
-    // Новые версии: hints можно передать в конструктор
-    // Старые версии: используем setHints, если есть
-    try {
-      zxingReader = new ZX.BrowserMultiFormatReader(hints);
-    } catch {
-      zxingReader = new ZX.BrowserMultiFormatReader();
-      if (typeof zxingReader.setHints === "function") {
-        zxingReader.setHints(hints);
-      }
+    if (!window.ZXing) {
+      zxingLoadTries++;
+      console.debug("[ZXing] load try", zxingLoadTries);
+      await new Promise((resolve) => {
+        const s = document.createElement("script");
+        s.src = "?assets=lib/zxing.min.js"; // файл должен существовать
+        s.async = true;
+        s.onload = resolve;
+        s.onerror = () => {
+          console.error("[ZXing] failed to load ?assets=lib/zxing.min.js");
+          resolve();
+        };
+        document.head.appendChild(s);
+      });
     }
+    if (!window.ZXing) return false;
 
-    zxingReady = true;
-    console.debug("[ZXing] ready");
-    return true;
-  } catch (e) {
-    console.error("[ZXing] init error:", e);
-    return false;
-  }
-}
-
-
-  async function decodeWithZXing(canvas) {
-    if (!zxingReady || zxingBusy) return null;
-    zxingBusy = true;
     try {
-      const res = await zxingReader.decodeFromCanvas(canvas).catch(()=>null);
-      return res?.text || null;
-    } finally {
-      zxingBusy = false;
+      const ZX = window.ZXing;
+
+      const hints = new Map();
+      const formats = [
+        ZX.BarcodeFormat.EAN_13,
+        ZX.BarcodeFormat.EAN_8,
+        ZX.BarcodeFormat.UPC_A,
+        ZX.BarcodeFormat.UPC_E,
+        ZX.BarcodeFormat.ITF,
+        ZX.BarcodeFormat.CODE_128,
+        ZX.BarcodeFormat.CODE_39,
+        ZX.BarcodeFormat.CODABAR
+      ];
+      hints.set(ZX.DecodeHintType.POSSIBLE_FORMATS, formats);
+
+      // конструктор менялся между версиями — пробуем оба пути
+      try {
+        zxingReader = new ZX.BrowserMultiFormatReader(hints);
+      } catch {
+        zxingReader = new ZX.BrowserMultiFormatReader();
+        if (typeof zxingReader.setHints === "function") {
+          zxingReader.setHints(hints);
+        }
+      }
+
+      zxingReady = true;
+      console.debug("[ZXing] ready");
+      return true;
+    } catch (e) {
+      console.error("[ZXing] init error:", e);
+      return false;
     }
   }
 
@@ -298,14 +283,9 @@ async function ensureZXing() {
       await video.play().catch(()=>{});
 
       ensureOverlay(video);
+      drawROI(video);
 
-      // дождёмся валидных размеров видео
-      let guard = 0;
-      while ((video.videoWidth|0) < 160 && guard++ < 50) {
-        await new Promise(r => setTimeout(r, 50));
-      }
-
-      // попытка включить фонарик (если доступен)
+      // включить фонарик (если доступен)
       try {
         const [track] = stream.getVideoTracks();
         const caps = track?.getCapabilities?.() || {};
@@ -314,68 +294,99 @@ async function ensureZXing() {
         }
       } catch {}
 
-      // канвас для ROI
-      const work = document.createElement("canvas");
-      const wg = work.getContext("2d", { willReadFrequently: true });
+      // ZXing
+      const ok = await ensureZXing();
+      if (!ok) {
+        toast("Не удалось загрузить модуль сканера (zxing). Проверьте ?assets=lib/zxing.min.js", false);
+        console.error("[ZXing] not loaded. Check URL /external/{ci}/?assets=lib/zxing.min.js and MIME type.");
+        return; // оставим камеру открытой, но без декодирования
+      }
 
-      const ensureAndMaybeToast = async () => {
-        const ok = await ensureZXing();
-        if (!ok && zxingLoadTries === 1) {
-          // показываем корректное сообщение (НЕ путать с камерой)
-          toast("Не удалось загрузить модуль сканера (zxing). Проверьте ?assets=lib/zxing.min.js", false);
-          console.error("[ZXing] not loaded. Check URL /external/{ci}/?assets=lib/zxing.min.js and MIME type.");
-        }
-        return ok;
-      };
+      let resolved = false;
 
-      // первая попытка загрузить ZXing
-      await ensureAndMaybeToast();
+      // API в разных версиях отличается — пробуем по очереди
+      const ZX = window.ZXing;
+      const useVideoDevice =
+        typeof zxingReader.decodeFromVideoDevice === "function" ||
+        typeof zxingReader.decodeFromInputVideoDevice === "function";
 
-      const detectFrame = async () => {
-        if (!mediaStream) return;
-
-        // если ZXing ещё не готов — повторяем попытки подгрузки
-        if (!zxingReady && zxingLoadTries < 5) {
-          await ensureAndMaybeToast();
-        }
-
-        const { rx, ry, rw, rh } = roiRect(video);
-        work.width = rw; work.height = rh;
-        wg.imageSmoothingEnabled = false;
-        wg.filter = "contrast(140%) brightness(115%)";
-        wg.drawImage(video, rx, ry, rw, rh, 0, 0, rw, rh);
-
-        let code = null;
-        if (zxingReady) {
-          code = await decodeWithZXing(work);
-          if (!code) {
-            // Поворот ROI на 90°
-            const rot = document.createElement("canvas");
-            rot.width = rh; rot.height = rw;
-            const rg = rot.getContext("2d");
-            rg.translate(rot.width/2, rot.height/2);
-            rg.rotate(Math.PI/2);
-            rg.drawImage(work, -work.width/2, -work.height/2);
-            code = await decodeWithZXing(rot);
+      if (useVideoDevice) {
+        const callback = (result, err) => {
+          if (resolved) return;
+          if (result && result.text) {
+            resolved = true;
+            onScanSuccess(result.text);
           }
+          // ошибки в потоковом режиме игнорируем (продолжаем слушать)
+        };
+
+        try {
+          if (typeof zxingReader.decodeFromVideoDevice === "function") {
+            await zxingReader.decodeFromVideoDevice(currentDeviceId ?? undefined, video, callback);
+          } else {
+            await zxingReader.decodeFromInputVideoDevice(currentDeviceId ?? undefined, video, callback);
+          }
+          // примечание: stop происходит через zxingReader.reset() в onScanSuccess
+        } catch (e) {
+          console.error("[ZXing] decodeFrom*VideoDevice error:", e);
+          // пойдём в фолбэк ниже
         }
+      }
 
-        drawROI(video);
-
-        if (code) {
-          const pq = ctx.$("product-query"), bc = ctx.$("barcode");
-          if (bc) bc.value = code;
-          if (pq) pq.value = code;
-          try { navigator.vibrate?.(40); } catch {}
-          stopScan();
-          simulateEnter(pq);
-          return;
+      // Фолбэк 1: decodeFromVideoElement (некоторые сборки)
+      if (!resolved && typeof zxingReader.decodeFromVideoElement === "function") {
+        try {
+          const res = await zxingReader.decodeFromVideoElement(video);
+          if (res && res.text) {
+            resolved = true;
+            onScanSuccess(res.text);
+          }
+        } catch (e) {
+          // продолжим к фолбэку 2
         }
+      }
 
-        scanTimer = setTimeout(() => requestAnimationFrame(detectFrame), 110);
-      };
+      // Фолбэк 2: canvas → dataURL → decodeFromImage
+      if (!resolved && typeof zxingReader.decodeFromImage === "function") {
+        const work = document.createElement("canvas");
+        const wg = work.getContext("2d", { willReadFrequently: true });
 
-      requestAnimationFrame(detectFrame);
+        const tryOnce = async () => {
+          if (!mediaStream) return null;
+          // ROI-область, чтобы не мусолить всю картинку
+          const { rx, ry, rw, rh } = roiRect(video);
+          work.width = rw; work.height = rh;
+          wg.imageSmoothingEnabled = false;
+          wg.filter = "contrast(140%) brightness(115%)";
+          wg.drawImage(video, rx, ry, rw, rh, 0, 0, rw, rh);
+          const dataURL = work.toDataURL("image/png");
+          try {
+            const res = await zxingReader.decodeFromImage(undefined, dataURL);
+            return res?.text || null;
+          } catch { return null; }
+        };
+
+        const loop = async () => {
+          if (resolved || !mediaStream) return;
+          const text = await tryOnce();
+          if (text) {
+            resolved = true;
+            onScanSuccess(text);
+            return;
+          }
+          scanTimer = setTimeout(loop, 120);
+        };
+        loop();
+      }
+
+      function onScanSuccess(code) {
+        const pq = ctx.$("product-query"), bc = ctx.$("barcode");
+        if (bc) bc.value = code;
+        if (pq) pq.value = code;
+        try { navigator.vibrate?.(40); } catch {}
+        stopScan();
+        simulateEnter(pq);
+      }
     } catch (e) {
       console.error("[camera] open error:", e);
       stopScan();
@@ -385,6 +396,7 @@ async function ensureZXing() {
   }
 
   function stopScan(){
+    try { zxingReader?.reset?.(); } catch {}
     if (scanTimer) { clearTimeout(scanTimer); scanTimer = null; }
     if (mediaStream) {
       try { mediaStream.getTracks().forEach(t=>t.stop()); } catch {}
