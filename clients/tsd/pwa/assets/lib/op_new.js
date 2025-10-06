@@ -1,4 +1,4 @@
-// views/op_new.js — ZXing (UMD) + поиск ItemExt, иконки-кнопки (без overlay) + i18n
+// views/op_new.js — ZXing (UMD) + поиск ItemExt, иконки-кнопки (без overlay) + i18n + live description
 
 let zxingReader = null;
 let zxingControls = null;
@@ -52,7 +52,6 @@ function applyI18n(ctx) {
   if (btnScan) {
     btnScan.setAttribute("aria-label", ctx.t("op.scan") || "Скан штрих-кода");
     btnScan.title = ctx.t("op.scan") || "Скан штрих-кода";
-    // текст в самом элементе мы позже заменяем на иконку
   }
   const scanHint = document.querySelector("#scanner .row .muted");
   setTxt(scanHint, ctx.t("scanner.hint") || "Наведи камеру на штрих-код");
@@ -81,57 +80,16 @@ function applyI18n(ctx) {
   // Кнопки действий
   setTxt(ctx.$("btn-op-save"),   ctx.t("common.save")   || "Сохранить");
   setTxt(ctx.$("btn-op-cancel"), ctx.t("common.cancel") || "Отмена");
+
+  // Обновим подпись превью описания (если оно показано)
+  updateDescPreview(ctx);
 }
 
-// ==== ZXing ====
-const loadZXing = once(async () => {
-  if (window.ZXing?.BrowserMultiFormatReader) return true;
-  await new Promise((resolve) => {
-    const s = document.createElement("script");
-    s.src = "?assets=lib/zxing.min.js";
-    s.async = true;
-    s.onload = resolve;
-    s.onerror = resolve;
-    document.head.appendChild(s);
-  });
-  return !!window.ZXing?.BrowserMultiFormatReader;
-});
-async function ensureZXingReader() {
-  if (zxingReader) return zxingReader;
-  const ok = await loadZXing();
-  if (!ok) throw new Error("ZXing UMD не загрузился"); // лог только в консоль, пользователю покажем локализованную ошибку
-  const ZX = window.ZXing;
-  const hints = new Map();
-  if (ZX.DecodeHintType && ZX.BarcodeFormat) {
-    hints.set(
-      ZX.DecodeHintType.POSSIBLE_FORMATS,
-      [
-        ZX.BarcodeFormat.EAN_13,
-        ZX.BarcodeFormat.EAN_8,
-        ZX.BarcodeFormat.UPC_A,
-        ZX.BarcodeFormat.UPC_E,
-        ZX.BarcodeFormat.ITF,
-        ZX.BarcodeFormat.CODE_128,
-        ZX.BarcodeFormat.CODE_39,
-        ZX.BarcodeFormat.CODABAR
-      ].filter(Boolean)
-    );
-  }
-  zxingReader = new ZX.BrowserMultiFormatReader(hints);
-  return zxingReader;
-}
-async function listCameras() {
-  const r = await ensureZXingReader();
-  const list = await r.listVideoInputDevices();
-  return (list || [])
-    .map(d => ({ deviceId: d.deviceId || d.id, label: d.label || "" }))
-    .filter(d => d.deviceId);
-}
-async function pickBackCameraId() {
-  const cams = await listCameras();
-  if (!cams.length) return null;
-  const back = cams.find(c => /back|environment|rear/i.test(c.label));
-  return (back || cams[0]).deviceId;
+// подписка на смену языка (если приложение шлёт событие i18n:change)
+function subscribeI18nChanges(ctx) {
+  const handler = () => applyI18n(ctx);
+  document.addEventListener("i18n:change", handler);
+  return () => document.removeEventListener("i18n:change", handler);
 }
 
 // ==== подсказочные кнопки под полями ====
@@ -149,6 +107,35 @@ function mountUnderInput(inputEl, id, value, className, onClick) {
   btn.textContent = value;
   btn.onclick = onClick;
   inputEl.insertAdjacentElement("afterend", btn);
+}
+
+// ==== отображение выбранного товара + превью описания ====
+function ensureDescRow(ctx) {
+  const picked = ctx.$("product-picked");
+  if (!picked) return null;
+
+  let row = picked.querySelector("#picked-desc");
+  if (!row) {
+    row = document.createElement("div");
+    row.id = "picked-desc";
+    row.className = "muted hidden";
+    row.style.marginTop = "4px";
+    picked.appendChild(row);
+  }
+  return row;
+}
+function updateDescPreview(ctx) {
+  const row = ensureDescRow(ctx);
+  if (!row) return;
+  const v = (ctx.$("description")?.value || "").trim();
+  if (v) {
+    const label = ctx.t("op.description") || "Описание";
+    row.textContent = `${label}: ${v}`;
+    row.classList.remove("hidden");
+  } else {
+    row.textContent = "";
+    row.classList.add("hidden");
+  }
 }
 
 // ==== поиск ItemExt → pick ====
@@ -184,7 +171,7 @@ function pick(ctx, ext) {
       () => { costEl.value = String(lpc); costEl.focus(); costEl.select?.(); }
     );
   } else {
-    const old = document.getElementById("cost-hint"); old?.remove?.();
+    document.getElementById("cost-hint")?.remove?.();
   }
 
   if (p != null) {
@@ -196,11 +183,15 @@ function pick(ctx, ext) {
       () => { priceEl.value = String(p); priceEl.focus(); priceEl.select?.(); }
     );
   } else {
-    const old = document.getElementById("price-hint"); old?.remove?.();
+    document.getElementById("price-hint")?.remove?.();
   }
+
+  // показать/обновить превью описания
+  updateDescPreview(ctx);
 
   setTimeout(() => ctx.$("qty")?.focus(), 0);
 }
+
 async function runSearch(ctx, q, docId) {
   const box = ctx.$("product-results");
   box.textContent = ctx.t("searching") || "Поиск...";
@@ -221,6 +212,57 @@ async function runSearch(ctx, q, docId) {
   } catch {
     box.textContent = ctx.t("search_error") || "Ошибка поиска";
   }
+}
+
+// ==== ZXing ====
+const loadZXing = once(async () => {
+  if (window.ZXing?.BrowserMultiFormatReader) return true;
+  await new Promise((resolve) => {
+    const s = document.createElement("script");
+    s.src = "?assets=lib/zxing.min.js";
+    s.async = true;
+    s.onload = resolve;
+    s.onerror = resolve;
+    document.head.appendChild(s);
+  });
+  return !!window.ZXing?.BrowserMultiFormatReader;
+});
+async function ensureZXingReader() {
+  if (zxingReader) return zxingReader;
+  const ok = await loadZXing();
+  if (!ok) throw new Error("ZXing UMD не загрузился");
+  const ZX = window.ZXing;
+  const hints = new Map();
+  if (ZX.DecodeHintType && ZX.BarcodeFormat) {
+    hints.set(
+      ZX.DecodeHintType.POSSIBLE_FORMATS,
+      [
+        ZX.BarcodeFormat.EAN_13,
+        ZX.BarcodeFormat.EAN_8,
+        ZX.BarcodeFormat.UPC_A,
+        ZX.BarcodeFormat.UPC_E,
+        ZX.BarcodeFormat.ITF,
+        ZX.BarcodeFormat.CODE_128,
+        ZX.BarcodeFormat.CODE_39,
+        ZX.BarcodeFormat.CODABAR
+      ].filter(Boolean)
+    );
+  }
+  zxingReader = new ZX.BrowserMultiFormatReader(hints);
+  return zxingReader;
+}
+async function listCameras() {
+  const r = await ensureZXingReader();
+  const list = await r.listVideoInputDevices();
+  return (list || [])
+    .map(d => ({ deviceId: d.deviceId || d.id, label: d.label || "" }))
+    .filter(d => d.deviceId);
+}
+async function pickBackCameraId() {
+  const cams = await listCameras();
+  if (!cams.length) return null;
+  const back = cams.find(c => /back|environment|rear/i.test(c.label));
+  return (back || cams[0]).deviceId;
 }
 
 // ==== сканер ====
@@ -335,6 +377,9 @@ function resetForm(ctx) {
   ctx.$("product-results").textContent = "";
   document.getElementById("cost-hint")?.remove?.();
   document.getElementById("price-hint")?.remove?.();
+  // очистим превью описания
+  const row = document.getElementById("picked-desc");
+  if (row) { row.textContent = ""; row.classList.add("hidden"); }
   ctx.$("barcode")?.focus();
 }
 
@@ -345,6 +390,8 @@ export async function screenOpNew(ctx, id) {
 
   // Локализация всех статических элементов экрана
   applyI18n(ctx);
+  // подписка на смену языка (если приложение диспатчит событие)
+  const offI18n = subscribeI18nChanges(ctx);
 
   // подтянуть контекст документа (price_type_id, stock_id)
   try {
@@ -394,13 +441,16 @@ export async function screenOpNew(ctx, id) {
   ctx.$("cost") ?.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); ctx.$("price")?.focus(); } });
   ctx.$("price")?.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); saveOp(ctx, ctx.__docId); } });
 
+  // live превью описания
+  ctx.$("description")?.addEventListener("input", () => updateDescPreview(ctx));
+
   // сохранить/отмена
   ctx.$("btn-op-cancel")?.addEventListener("click", () => { location.hash = `#/doc/${id}`; });
   ctx.$("btn-op-save")  ?.addEventListener("click", () => saveOp(ctx, ctx.__docId));
 
-  // корректное завершение сканера
+  // корректное завершение сканера и отписка от i18n
   document.addEventListener("visibilitychange", () => { if (document.hidden) stopScan(ctx); });
-  window.addEventListener("pagehide", () => stopScan(ctx));
+  window.addEventListener("pagehide", () => { stopScan(ctx); offI18n?.(); });
 
   // стартовый фокус — на штрих-код
   ctx.$("barcode")?.focus();
