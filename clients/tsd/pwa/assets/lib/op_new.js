@@ -28,10 +28,10 @@ function markInvalid(el, on = true) {
   el.style.boxShadow = on ? "0 0 0 2px rgba(239,68,68,.2)" : "";
 }
 function setBusy(ctx, busy) {
-  const ids = ["btn-scan","btn-close-scan","product-query","barcode","qty","cost","price","btn-op-save","btn-op-cancel"];
+  const ids = ["btn-scan","btn-close-scan","product-query","barcode","qty","cost","price","description","btn-op-save","btn-op-cancel"];
   ids.forEach(k => { const el = ctx.$(k); if (el && "disabled" in el) el.disabled = busy; });
   const save = ctx.$("btn-op-save");
-  if (save) save.textContent = busy ? ctx.t("saving") : ctx.t("save");
+  if (save) save.textContent = busy ? ctx.t("op.saving") : ctx.t("common.save");
 }
 const firstBarcodeFromItem = (core) =>
   core?.base_barcode ??
@@ -89,6 +89,24 @@ async function pickBackCameraId() {
   return (back || cams[0]).deviceId;
 }
 
+// ==== подсказочные кнопки под полями ====
+function mountUnderInput(inputEl, id, value, className, onClick) {
+  if (!inputEl || value == null) return;
+  // убрать предыдущую кнопку (если была)
+  const prev = document.getElementById(id);
+  if (prev?.parentElement) prev.parentElement.removeChild(prev);
+
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.id = id;
+  btn.className = className || "btn secondary";
+  btn.style.marginTop = "6px";
+  btn.style.display = "inline-block";
+  btn.textContent = value;
+  btn.onclick = onClick;
+  inputEl.insertAdjacentElement("afterend", btn);
+}
+
 // ==== поиск ItemExt → pick ====
 function pick(ctx, ext) {
   const core = ext?.item || {};
@@ -107,21 +125,34 @@ function pick(ctx, ext) {
   ctx.$("picked-name").textContent = pickedProduct.name;
   ctx.$("picked-code").textContent = pickedProduct.barcode || "";
 
-  const hintBox = ctx.$("cost-suggest");
-  hintBox.innerHTML = "";
-  if (pickedProduct.last_purchase_cost != null) {
-    const b = document.createElement("button");
-    b.className = "btn secondary";
-    b.textContent = ctx.t("last_purchase_cost_hint", { cost: ctx.fmtMoney(pickedProduct.last_purchase_cost) });
-    b.onclick = () => { ctx.$("cost").value = String(pickedProduct.last_purchase_cost); ctx.$("cost").focus(); ctx.$("cost").select?.(); };
-    hintBox.appendChild(b);
+  // подсказки: числа под соответствующими полями
+  const lpc = pickedProduct.last_purchase_cost;
+  const p   = pickedProduct.price;
+  const costEl  = ctx.$("cost");
+  const priceEl = ctx.$("price");
+
+  if (lpc != null) {
+    mountUnderInput(
+      costEl,
+      "cost-hint",
+      ctx.fmtMoney(lpc),
+      "btn secondary",
+      () => { costEl.value = String(lpc); costEl.focus(); costEl.select?.(); }
+    );
+  } else {
+    const old = document.getElementById("cost-hint"); old?.remove?.();
   }
-  if (pickedProduct.price != null) {
-    const b2 = document.createElement("button");
-    b2.className = "btn ghost";
-    b2.textContent = `${ctx.t("op.price")}: ${ctx.fmtMoney(pickedProduct.price)}`;
-    b2.onclick = () => { ctx.$("price").value = String(pickedProduct.price); ctx.$("price").focus(); ctx.$("price").select?.(); };
-    hintBox.appendChild(b2);
+
+  if (p != null) {
+    mountUnderInput(
+      priceEl,
+      "price-hint",
+      ctx.fmtMoney(p),
+      "btn ghost",
+      () => { priceEl.value = String(p); priceEl.focus(); priceEl.select?.(); }
+    );
+  } else {
+    const old = document.getElementById("price-hint"); old?.remove?.();
   }
 
   setTimeout(() => ctx.$("qty")?.focus(), 0);
@@ -138,7 +169,7 @@ async function runSearch(ctx, q, docId) {
     if (!items.length) {
       pickedProduct = null;
       ctx.$("product-picked").classList.add("hidden");
-      box.textContent = ctx.t("nothing_found");
+      box.textContent = ctx.t("common.nothing");
       return;
     }
     pick(ctx, items[0]);   // авто-выбор первого ItemExt
@@ -206,12 +237,15 @@ function stopScan(ctx) {
 
 // ==== сохранение операции ====
 async function saveOp(ctx, docId) {
-  const qtyEl = ctx.$("qty");
-  const costEl = ctx.$("cost");
+  const qtyEl   = ctx.$("qty");
+  const costEl  = ctx.$("cost");
   const priceEl = ctx.$("price");
-  const qty = ctx.toNumber(qtyEl.value);
-  const cost = ctx.toNumber(costEl.value);
+  const descEl  = ctx.$("description"); // необязательное поле
+
+  const qty   = ctx.toNumber(qtyEl.value);
+  const cost  = ctx.toNumber(costEl.value);
   const price = ctx.toNumber(priceEl.value);
+  const description = (descEl?.value || "").trim();
 
   markInvalid(qtyEl,false); markInvalid(costEl,false);
 
@@ -227,7 +261,8 @@ async function saveOp(ctx, docId) {
     quantity: qty,
     cost: cost,
     vat_value: Number(pickedProduct.vat_value ?? 0),
-    ...(price ? { price } : {})
+    ...(price ? { price } : {}),
+    ...(description ? { description } : {}) // <— добавили описание
   };
 
   setBusy(ctx, true);
@@ -235,7 +270,7 @@ async function saveOp(ctx, docId) {
     const { ok, data } = await ctx.api("purchase_ops_add", { items: [item] });
     const affected = data?.result?.row_affected || 0;
     if (ok && affected > 0) {
-      toast(ctx.t("op_added"));
+      toast(ctx.t("toast.op_added"));
       resetForm(ctx);
     } else {
       toast(data?.description || ctx.t("save_failed"), false);
@@ -250,10 +285,12 @@ function resetForm(ctx) {
   ["barcode","product-query","qty","cost","price"].forEach(id=>{
     const el = ctx.$(id); if (el){ el.value = ""; markInvalid(el,false); }
   });
+  // description не очищаем — пусть остаётся, как просили «необязательное»
   pickedProduct = null;
   ctx.$("product-picked")?.classList.add("hidden");
-  ctx.$("cost-suggest").innerHTML = "";
   ctx.$("product-results").textContent = "";
+  document.getElementById("cost-hint")?.remove?.();
+  document.getElementById("price-hint")?.remove?.();
   ctx.$("barcode")?.focus();
 }
 
@@ -281,7 +318,7 @@ export async function screenOpNew(ctx, id) {
   }
   if (btnClose) {
     btnClose.classList.add("btn", "icon");
-    btnClose.setAttribute("aria-label", ctx.t("cancel"));
+    btnClose.setAttribute("aria-label", ctx.t("common.cancel"));
     btnClose.innerHTML = `<i class="fa-solid fa-xmark"></i>`;
     btnClose.onclick = () => stopScan(ctx);
   }
