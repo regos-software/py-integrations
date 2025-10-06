@@ -9,7 +9,7 @@ let docCtx = { price_type_id: null, stock_id: null };
 export async function screenOpNew(ctx, id) {
   await ctx.loadView("op_new");
 
-  // Чистим предыдущее состояние сканера (если вернулись на экран повторно)
+  // сброс предыдущего состояния сканера (если экран открыли повторно)
   safeStopScan();
 
   pickedProduct = null;
@@ -42,10 +42,11 @@ export async function screenOpNew(ctx, id) {
     el.style.boxShadow   = on ? "0 0 0 2px rgba(239,68,68,.2)" : "";
   }
   function simulateEnter(el){ if (el) el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); }
-  const firstBarcode = (p) =>
-    p?.base_barcode ??
-    (p?.barcode_list ? String(p.barcode_list).split(",")[0]?.trim() : "") ??
-    p?.code ?? "";
+  function firstBarcodeFromItem(item){
+    return item?.base_barcode ??
+      (item?.barcode_list ? String(item.barcode_list).split(",")[0]?.trim() : "") ??
+      item?.code ?? "";
+  }
 
   // ==== подтянем контекст документа ====
   const idNum = Number(id);
@@ -58,7 +59,7 @@ export async function screenOpNew(ctx, id) {
     // не критично: поиск просто пойдет без контекстных параметров
   }
 
-  // ==== поиск по Enter ====
+  // ==== поиск по Enter (возвращает только ItemExt) ====
   const runSearch = async (q) => {
     const box = ctx.$("product-results");
     box.textContent = ctx.t("searching");
@@ -68,14 +69,14 @@ export async function screenOpNew(ctx, id) {
       if (docCtx.stock_id != null)      payload.stock_id      = Number(docCtx.stock_id);
 
       const { data } = await ctx.api("product_search", payload);
-      const items = data?.result?.items || [];
+      const items = data?.result?.items || [];   // ожидаем массив ItemExt
       if (!items.length) {
         pickedProduct = null;
         ctx.$("product-picked").classList.add("hidden");
         box.textContent = ctx.t("nothing_found");
         return;
       }
-      // Автовыбор первого
+      // Автовыбор первого ItemExt
       pick(items[0]);
       box.textContent = "";
     } catch {
@@ -248,19 +249,25 @@ export async function screenOpNew(ctx, id) {
   }
   function safeStopScan(){ try { stopScan(); } catch {} }
 
-  function pick(p){
+  // ====== принимаем ТОЛЬКО ItemExt ======
+  function pick(ext){
+    const core = ext?.item || {};
     pickedProduct = {
-      id: p.id || p.uuid || p.code,
-      name: p.name || "—",
-      barcode: firstBarcode(p),
-      vat_value: p?.vat?.value ?? 0,
-      last_purchase_cost: p?.last_purchase_cost
+      id: Number(core.id ?? core.code),
+      name: core.name || "—",
+      barcode: firstBarcodeFromItem(core),
+      vat_value: Number(core?.vat?.value ?? 0),
+      last_purchase_cost: ext?.last_purchase_cost ?? null,
+      price: ext?.price != null ? Number(ext.price) : null,
+      quantity_common: ext?.quantity?.common ?? null,
+      image_url: ext?.image_url || core?.image_url || null
     };
+
     ctx.$("product-picked").classList.remove("hidden");
     ctx.$("picked-name").textContent = pickedProduct.name;
     ctx.$("picked-code").textContent = pickedProduct.barcode || "";
 
-    // подсказка "последняя закупка"
+    // подсказки: последняя закупка + цена продажи (если есть)
     const hintBox = ctx.$("cost-suggest");
     hintBox.innerHTML = "";
     const lpc = pickedProduct.last_purchase_cost;
@@ -268,9 +275,25 @@ export async function screenOpNew(ctx, id) {
       const b = document.createElement("button");
       b.className = "btn secondary";
       b.textContent = ctx.t("last_purchase_cost_hint", { cost: ctx.fmtMoney(lpc) });
-      b.onclick = () => { ctx.$("cost").value = String(lpc); ctx.$("cost").focus(); ctx.$("cost").select?.(); };
+      b.onclick = () => {
+        ctx.$("cost").value = String(lpc);
+        ctx.$("cost").focus();
+        ctx.$("cost").select?.();
+      };
       hintBox.appendChild(b);
     }
+    if (pickedProduct.price != null) {
+      const b2 = document.createElement("button");
+      b2.className = "btn ghost";
+      b2.textContent = `${ctx.t("op.price")}: ${ctx.fmtMoney(pickedProduct.price)}`;
+      b2.onclick = () => {
+        ctx.$("price").value = String(pickedProduct.price);
+        ctx.$("price").focus();
+        ctx.$("price").select?.();
+      };
+      hintBox.appendChild(b2);
+    }
+
     // сразу фокус в qty
     setTimeout(()=>{ ctx.$("qty")?.focus(); }, 0);
   }
@@ -284,7 +307,10 @@ export async function screenOpNew(ctx, id) {
 
     markInvalid(qtyEl,false); markInvalid(costEl,false);
 
-    if (!pickedProduct) { toast(ctx.t("select_product_first"), false); return; }
+    if (!pickedProduct || pickedProduct.id == null || Number.isNaN(Number(pickedProduct.id))) {
+      toast(ctx.t("select_product_first"), false); return;
+    }
+
     let hasErr = false;
     if (!qty || qty <= 0) { markInvalid(qtyEl, true); hasErr = true; }
     if (!cost || cost <= 0){ markInvalid(costEl, true); hasErr = true; }
