@@ -1,28 +1,65 @@
 {
   "app.title": "TSD • Xaridlar",
   "nav.back": "Orqaga",
+
   "common.loading": "Yuklanmoqda...",
   "common.nothing": "Hech narsa topilmadi",
   "common.cancel": "Bekor qilish",
   "common.save": "Saqlash",
+
   "docs.title": "Xarid hujjatlari",
-  "docs.search.placeholder": "Raqam / yetkazib beruvchi bo‘yicha qidirish...",
+  "docs.search.placeholder": "Raqam/ta'minotchi bo'yicha qidirish...",
   "docs.refresh": "Yangilash",
   "docs.status.new": "yangi",
   "docs.status.performed": "o‘tkazilgan",
   "docs.status.blocked": "blok.",
-  "doc.to_list": "Ruyxatga qaytish",
-  "doc.add_op": "Operatsiya qo‘shish",
+
+  "doc.to_list": "Ro'yxatga qaytish",
+  "doc.add_op": "Operatsiya qo'shish",
   "doc.operations": "Operatsiyalar",
+
   "op.title": "Yangi operatsiya",
-  "op.scan": "Shtrixkodni skanerlash",
-  "op.barcode.placeholder": "yoki shtrixkodni qo‘lda kiriting",
-  "op.search.label": "Tovar qidirish",
+  "op.scan": "Shtrix-kodni skan qilish",
+  "op.barcode.placeholder": "yoki shtrix-kodni qo'lda kiriting",
+  "op.search.label": "Mahsulotni qidirish",
   "op.search.placeholder": "Nomi / artikul",
   "op.qty": "Miqdor",
   "op.cost": "Tannarx",
   "op.price": "Sotuv narxi",
   "op.qty.required": "Miqdor kiriting",
-  "toast.op_added": "Operatsiya qo‘shildi",
-  "oauth.error": "Avtorizatsiya xatosi"
+
+  "toast.op_added": "Operatsiya qo'shildi",
+  "oauth.error": "Avtorizatsiya xatosi",
+
+  "main_menu": "Asosiy menyu",
+  "doc_purchase": "Kontragentdan kirim",
+  "doc_sales": "Kontragentga jo'natish",
+  "doc_inventory": "Inventarizatsiya",
+  "soon": "Tez orada",
+  "doc.title_prefix": "Hujjat",
+  "doc.no_ops": "Hozircha operatsiyalar yo'q",
+
+  "op.edit": "Tahrirlash",
+  "op.delete": "O'chirish",
+  "op.saving": "Saqlanmoqda...",
+
+  "toast.op_deleted": "Operatsiya o'chirildi",
+  "toast.op_updated": "Operatsiya saqlandi",
+
+  "unit.pcs": "dona",
+
+  "save": "Saqlash",
+  "saving": "Saqlanmoqda...",
+  "cancel": "Bekor qilish",
+  "searching": "Qidirilmoqda...",
+  "nothing_found": "Hech narsa topilmadi",
+  "search_error": "Qidiruv xatosi",
+  "camera_open_failed": "Kamerani ochib bo'lmadi",
+  "select_product_first": "Avval mahsulotni tanlang",
+  "fill_required_fields": "Majburiy maydonlarni to'ldiring",
+  "op_added": "Operatsiya qo'shildi",
+  "save_failed": "Operatsiyani saqlab bo'lmadi",
+  "network_error_save": "Saqlash vaqtida tarmoq xatosi",
+  "last_purchase_cost_hint": "Oxirgi xariddagi tannarx: {cost}",
+  "install_app": "Ilovani o'rnatish"
 }

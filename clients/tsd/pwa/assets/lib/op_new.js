@@ -1,5 +1,5 @@
 // views/op_new.js — без import; получает ctx
-let mediaStream = null, scanTimer = null, pickedProduct = null, detector = null;
+let mediaStream = null, scanTimer = null, pickedProduct = null, detector = null, currentDeviceId = null;
 
 export async function screenOpNew(ctx, id) {
   await ctx.loadView("op_new");
@@ -9,8 +9,7 @@ export async function screenOpNew(ctx, id) {
   function setBusy(b) {
     const ids = ["btn-scan","btn-close-scan","product-query","barcode","qty","cost","price","btn-op-save","btn-op-cancel"];
     ids.forEach(k => { const el = ctx.$(k); if (el && "disabled" in el) el.disabled = b; });
-    const save = ctx.$("btn-op-save");
-    if (save) save.textContent = b ? ctx.t("saving") : ctx.t("save");
+    const save = ctx.$("btn-op-save"); if (save) save.textContent = b ? ctx.t("saving") : ctx.t("save");
   }
   function toast(msg, ok = true) {
     let t = document.getElementById("toast");
@@ -26,11 +25,7 @@ export async function screenOpNew(ctx, id) {
     t.style.display = "block";
     setTimeout(() => { t.style.display = "none"; }, 2000);
   }
-  function markInvalid(el, on = true) {
-    if (!el) return;
-    el.style.borderColor = on ? "#ef4444" : "";
-    el.style.boxShadow   = on ? "0 0 0 2px rgba(239,68,68,.2)" : "";
-  }
+  function markInvalid(el, on = true){ if (!el) return; el.style.borderColor = on ? "#ef4444" : ""; el.style.boxShadow = on ? "0 0 0 2px rgba(239,68,68,.2)" : ""; }
   function simulateEnter(el){ if (el) el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })); }
   const firstBarcode = (p) => p?.base_barcode ?? (p?.barcode_list ? String(p.barcode_list).split(",")[0]?.trim() : "") ?? p?.code ?? "";
 
@@ -47,8 +42,7 @@ export async function screenOpNew(ctx, id) {
         box.textContent = ctx.t("nothing_found");
         return;
       }
-      // Автовыбор первого
-      pick(items[0]);
+      pick(items[0]);       // авто-выбор первого
       box.textContent = "";
     } catch {
       box.textContent = ctx.t("search_error");
@@ -84,21 +78,89 @@ export async function screenOpNew(ctx, id) {
   ctx.$("cost").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); ctx.$("price").focus(); } });
   ctx.$("price").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); saveOp(id); } });
 
-  // Сканер
+  // ====== Сканер ======
+  // Иконки вместо текста на кнопках
+  const btnScan = ctx.$("btn-scan");
+  if (btnScan) {
+    btnScan.classList.add("btn","icon");
+    btnScan.innerHTML = `<i class="fa-solid fa-camera"></i><span class="sr-only">${ctx.esc(ctx.t("op.scan"))}</span>`;
+  }
+  const btnClose = ctx.$("btn-close-scan");
+  if (btnClose) {
+    btnClose.classList.add("btn","icon");
+    btnClose.innerHTML = `<i class="fa-solid fa-xmark"></i><span class="sr-only">${ctx.esc(ctx.t("common.cancel"))}</span>`;
+  }
+
   ctx.$("btn-scan").onclick       = startScan;
   ctx.$("btn-close-scan").onclick = stopScan;
 
+  // BarcodeDetector (если есть)
   if ("BarcodeDetector" in window) {
     try { detector = new BarcodeDetector({ formats: ["ean_13","ean_8","code_128","upc_a","upc_e","itf"] }); } catch {}
   }
 
-  async function startScan(){
-    ctx.$("scanner").classList.remove("hidden");
+  // аккуратно останавливаем при уходе со страницы/сворачивании
+  document.addEventListener("visibilitychange", () => { if (document.hidden) stopScan(); });
+  window.addEventListener("pagehide", stopScan);
+
+  // выбор лучшей тыловой камеры (после разрешения на камеру метки device.label становятся доступны)
+  async function pickBackCamera() {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" } }, audio: false });
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const cams = devices.filter(d => d.kind === "videoinput");
+      // приоритет: label содержит back|environment
+      const byLabel = cams.find(c => /back|environment/i.test(c.label));
+      return (byLabel || cams[0] || null)?.deviceId || null;
+    } catch { return null; }
+  }
+
+  async function startScan(){
+    // требуем HTTPS (кроме localhost)
+    const insecure = location.protocol !== "https:" && location.hostname !== "localhost";
+    if (insecure) { toast(ctx.t("camera_open_failed"), false); return; }
+
+    // закрыть предыдущее
+    stopScan();
+    ctx.$("scanner").classList.remove("hidden");
+
+    const video = ctx.$("preview");
+    if (!video) { toast(ctx.t("camera_open_failed"), false); return; }
+
+    // обязательные атрибуты для iOS Safari
+    try {
+      video.setAttribute("playsinline", "");
+      video.setAttribute("webkit-playsinline", "");
+      video.autoplay = true;
+      video.muted = true; // чтобы autoplay сработал без жеста
+    } catch {}
+
+    try {
+      // 1) пробуем с facingMode: environment ИЛИ сохранённым deviceId
+      const primaryConstraints = {
+        video: currentDeviceId
+          ? { deviceId: { exact: currentDeviceId } }
+          : { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false
+      };
+
+      let stream = await navigator.mediaDevices.getUserMedia(primaryConstraints).catch(()=>null);
+
+      // 2) если не удалось — после разрешения попробуем выбрать тыловую
+      if (!stream) {
+        const backId = await pickBackCamera();
+        if (backId) {
+          stream = await navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: backId } }, audio: false }).catch(()=>null);
+          if (stream) currentDeviceId = backId;
+        }
+      }
+
+      if (!stream) throw new Error("no-stream");
+
       mediaStream = stream;
-      const video = ctx.$("preview");
-      video.srcObject = stream; await video.play().catch(()=>{});
+      video.srcObject = stream;
+
+      await video.play().catch(()=>{});
+
       const detectFrame = async () => {
         if (!mediaStream) return;
         try {
@@ -126,19 +188,29 @@ export async function screenOpNew(ctx, id) {
             return;
           }
         } finally {
-          scanTimer = requestAnimationFrame(detectFrame);
+          // небольшой троттлинг, чтобы не жарить CPU
+          scanTimer = setTimeout(() => requestAnimationFrame(detectFrame), 80);
         }
       };
-      scanTimer = requestAnimationFrame(detectFrame);
-    } catch {
+      requestAnimationFrame(detectFrame);
+    } catch (err) {
+      stopScan();
       toast(ctx.t("camera_open_failed"), false);
-      ctx.$("scanner").classList.add("hidden");
       ctx.$("barcode").focus();
     }
   }
+
   function stopScan(){
-    if (scanTimer) { cancelAnimationFrame(scanTimer); scanTimer=null; }
-    if (mediaStream) { mediaStream.getTracks().forEach(t=>t.stop()); mediaStream=null; }
+    if (scanTimer) { clearTimeout(scanTimer); scanTimer = null; }
+    if (mediaStream) {
+      try { mediaStream.getTracks().forEach(t=>t.stop()); } catch {}
+      mediaStream = null;
+    }
+    const video = ctx.$("preview");
+    if (video) {
+      try { video.pause?.(); } catch {}
+      try { video.srcObject = null; } catch {}
+    }
     ctx.$("scanner").classList.add("hidden");
   }
 
@@ -148,7 +220,7 @@ export async function screenOpNew(ctx, id) {
       name: p.name || "—",
       barcode: firstBarcode(p),
       vat_value: p?.vat?.value ?? 0,
-      last_purchase_cost: p?.last_purchase_cost   // если бэк вернёт — покажем подсказку
+      last_purchase_cost: p?.last_purchase_cost
     };
     ctx.$("product-picked").classList.remove("hidden");
     ctx.$("picked-name").textContent = pickedProduct.name;
@@ -165,7 +237,6 @@ export async function screenOpNew(ctx, id) {
       b.onclick = () => { ctx.$("cost").value = String(lpc); ctx.$("cost").focus(); ctx.$("cost").select?.(); };
       hintBox.appendChild(b);
     }
-    // сразу в qty
     setTimeout(()=>{ ctx.$("qty")?.focus(); }, 0);
   }
 
