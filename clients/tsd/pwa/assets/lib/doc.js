@@ -117,7 +117,7 @@ export async function screenDoc(ctx, id) {
             <span class="dot"></span>
             <span class="muted text-small barcode">${ctx.esc(barcode || "")}</span>
             <span class="dot"></span>
-            <span class="muted text-small barcode">${ctx.esc(op.description || "")}</span>
+            <span class="muted text-small description">${ctx.esc(op.description || "")}</span>
         </div>
         </div>
         <div class="actions">
@@ -247,6 +247,7 @@ export async function screenDoc(ctx, id) {
           metaEl.querySelector(".qty").innerHTML   = `<strong>${ctx.fmtNum(op.quantity)}</strong> ${ctx.t("unit.pcs") || "шт"}`;
           metaEl.querySelector(".cost").textContent  = ctx.fmtMoney(op.cost);
           metaEl.querySelector(".price").textContent = ctx.fmtMoney(op.price ?? 0);
+          metaEl.querySelector(".description").textContent  = op.description || "";
 
           edit.classList.add("hidden");
           view.classList.remove("hidden");
