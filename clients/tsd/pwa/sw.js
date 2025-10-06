@@ -60,8 +60,6 @@ async function staleWhileRevalidate(request, cacheName = RUNTIME) {
 // ---------- fetch ----------
 self.addEventListener('fetch', (event) => {
   const req = event.request;
-
-  // только GET
   if (req.method !== 'GET') return;
 
   const url = new URL(req.url);
@@ -71,7 +69,6 @@ self.addEventListener('fetch', (event) => {
   if (req.mode === 'navigate') {
     event.respondWith((async () => {
       try {
-        // если включён navigationPreload
         const preload = await event.preloadResponse;
         if (preload) return preload;
         return await fetch(req);
@@ -84,13 +81,13 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Для ваших динамических ресурсов (?assets=...) — SWR
-  if (sameOrigin && url.searchParams.has('assets')) {
+  // 1) Наши query-ресурсы — SWR (ВАЖНО: раньше общего sameOrigin)
+  if (sameOrigin && (url.searchParams.has('assets') || url.search.startsWith('?pwa='))) {
     event.respondWith(staleWhileRevalidate(req));
     return;
   }
 
-  // Для заранее предкэшированных — cache-first
+  // 2) Прочие наши статики — cache-first с подстановкой сети
   if (sameOrigin) {
     event.respondWith((async () => {
       const hit = await caches.match(req);
@@ -99,11 +96,12 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Внешние статики (иконки, css/js с CDN) — SWR, остальное — сеть
-  const isStaticExt = /\.(?:css|js|woff2?|png|jpg|jpeg|svg|gif|ico)$/.test(url.pathname);
+  // 3) Внешние статики — SWR, остальное — сеть
+  const isStaticExt = /\.(?:css|js|woff2?|png|jpe?g|svg|gif|ico)$/.test(url.pathname);
   if (isStaticExt) {
     event.respondWith(staleWhileRevalidate(req));
   } else {
     event.respondWith(fetch(req));
   }
 });
+

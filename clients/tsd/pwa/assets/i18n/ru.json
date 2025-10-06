@@ -61,6 +61,7 @@
   "op_added": "Операция добавлена",
   "save_failed": "Не удалось сохранить операцию",
   "network_error_save": "Ошибка сети при сохранении",
-  "last_purchase_cost_hint": "С/с из последней закупки: {cost}"
+  "last_purchase_cost_hint": "С/с из последней закупки: {cost}",
+  "install_app": "Установить приложение"
 
 }

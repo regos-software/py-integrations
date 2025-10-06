@@ -1,4 +1,4 @@
-// api.js (token detection + API + SW)
+// lib/api.js (token detection + API + SW)
 
 // ---- CI (token) ----
 export const CI = (() => {
