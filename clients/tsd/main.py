@@ -128,7 +128,7 @@ class TsdIntegration(ClientBase):
                         end_date=end,
                         search=query,
                         limit=page_size,
-                        sort_orders=[DocPurchaseSortOrder(column="date", direction="asc")],
+                        sort_orders=[DocPurchaseSortOrder(column="date", direction="desc")],
                         offset=(page - 1) * page_size,
                     )
                     docs = await api.docs.purchase.get(req)
