@@ -1,4 +1,4 @@
-// views/op_new.js — ZXing (UMD) + поиск ItemExt, иконки-кнопки + корректный overlay
+// views/op_new.js — ZXing (UMD) + поиск ItemExt, иконки-кнопки (без overlay)
 
 let zxingReader = null;
 let zxingControls = null;
@@ -7,7 +7,7 @@ let pickedProduct = null;
 const docCtx = { price_type_id: null, stock_id: null };
 
 // ==== helpers ====
-const once = (fn) => { let done=false; return async (...a)=>{ if(done) return; done=true; return fn(...a); }; };
+const once = (fn) => { let done = false; return async (...a) => { if (done) return; done = true; return fn(...a); }; };
 
 function toast(msg, ok = true) {
   let t = document.getElementById("toast");
@@ -37,94 +37,6 @@ const firstBarcodeFromItem = (core) =>
   core?.base_barcode ??
   (core?.barcode_list ? String(core.barcode_list).split(",")[0]?.trim() : "") ??
   core?.code ?? "";
-
-// ==== overlay (ROI) ====
-let overlay = null, og = null, overlayObserver = null;
-
-function ensureOverlay(video) {
-  if (overlay && og) return;
-
-  const parent = video.parentElement || video;
-  if (getComputedStyle(parent).position === "static") parent.style.position = "relative";
-  parent.style.overflow = "hidden"; // важное: обрезаем, чтобы overlay не вылезал
-  // создаём canvas поверх видео
-  overlay = document.createElement("canvas");
-  overlay.id = "scan-overlay";
-  overlay.style.cssText = "position:absolute;inset:0;pointer-events:none;z-index:2;";
-  // если у видео скругления — повторим их на оверлее
-  try { overlay.style.borderRadius = getComputedStyle(video).borderRadius; } catch {}
-  parent.appendChild(overlay);
-  og = overlay.getContext("2d");
-
-  // следим за изменением размеров видимой области видео
-  overlayObserver = new ResizeObserver(() => layoutOverlay(video, true));
-  overlayObserver.observe(parent);
-  overlayObserver.observe(video);
-}
-
-function layoutOverlay(video, redraw = false) {
-  if (!overlay || !og) return;
-  const rect = video.getBoundingClientRect();
-  const dpr = Math.max(1, window.devicePixelRatio || 1);
-
-  // синхронизируем CSS-размер (визуальный) и пиксельный размер canvas
-  overlay.style.width = rect.width + "px";
-  overlay.style.height = rect.height + "px";
-  const pxW = Math.max(1, Math.floor(rect.width * dpr));
-  const pxH = Math.max(1, Math.floor(rect.height * dpr));
-  if (overlay.width !== pxW || overlay.height !== pxH) {
-    overlay.width = pxW;
-    overlay.height = pxH;
-  }
-  if (redraw) drawROI(video);
-}
-
-function drawROI(video) {
-  if (!overlay || !og) return;
-
-  // берём размеры canvas (они уже учитывают DPR)
-  const w = overlay.width;
-  const h = overlay.height;
-
-  og.clearRect(0, 0, w, h);
-
-  // прямоугольник интереса: под штрих-код (шире, чем выше)
-  const rw = Math.round(w * 0.78);
-  const rh = Math.round(h * 0.46);
-  const rx = Math.round((w - rw) / 2);
-  const ry = Math.round((h - rh) / 2);
-
-  // тень по краям
-  og.fillStyle = "rgba(0,0,0,0.35)";
-  og.fillRect(0,0,w,ry);
-  og.fillRect(0,ry,rx,rh);
-  og.fillRect(rx+rw,ry,w-(rx+rw),rh);
-  og.fillRect(0,ry+rh,w,h-(ry+rh));
-
-  // белая рамка
-  og.lineWidth = 2 * Math.max(1, window.devicePixelRatio || 1);
-  og.strokeStyle = "#ffffff";
-  og.strokeRect(rx, ry, rw, rh);
-
-  // лёгкие скругления углов
-  try {
-    const r = 10 * Math.max(1, window.devicePixelRatio || 1);
-    og.lineJoin = "round";
-    og.lineCap = "round";
-    og.beginPath();
-    roundedRect(og, rx, ry, rw, rh, r);
-    og.stroke();
-  } catch {}
-}
-function roundedRect(ctx, x, y, w, h, r) {
-  const rr = Math.min(r, w/2, h/2);
-  ctx.moveTo(x + rr, y);
-  ctx.arcTo(x + w, y, x + w, y + h, rr);
-  ctx.arcTo(x + w, y + h, x, y + h, rr);
-  ctx.arcTo(x, y + h, x, y, rr);
-  ctx.arcTo(x, y, x + w, y, rr);
-  ctx.closePath();
-}
 
 // ==== ZXing ====
 const loadZXing = once(async () => {
@@ -251,18 +163,9 @@ async function startScan(ctx) {
     scanner.classList.remove("hidden");
     video.setAttribute("playsinline",""); video.autoplay = true; video.muted = true;
 
-    ensureOverlay(video);
-    layoutOverlay(video, true);
-
     if (!currentDeviceId) currentDeviceId = await pickBackCameraId();
 
-    // Учитываем изменение реальных метаданных видео (размер кадра)
-    const onMeta = () => { layoutOverlay(video, true); };
-    video.removeEventListener("loadedmetadata", onMeta);
-    video.addEventListener("loadedmetadata", onMeta, { once: true });
-
     zxingControls = await reader.decodeFromVideoDevice(currentDeviceId ?? undefined, "preview", (result, err) => {
-      layoutOverlay(video, true);
       if (result?.text) {
         try { navigator.vibrate?.(35); } catch {}
         const code = result.text;
@@ -298,13 +201,7 @@ function stopScan(ctx) {
   const video = ctx.$("preview");
   if (video) { try { video.pause?.(); } catch {} try { video.srcObject = null; } catch {} }
 
-  // спрячем сканер и очистим overlay
   ctx.$("scanner")?.classList.add("hidden");
-  if (og && overlay) og.clearRect(0,0,overlay.width,overlay.height);
-
-  // отписка ResizeObserver (чтобы overlay не «жил» дальше)
-  try { overlayObserver?.disconnect?.(); } catch {}
-  overlayObserver = null;
 }
 
 // ==== сохранение операции ====
@@ -420,10 +317,6 @@ export async function screenOpNew(ctx, id) {
   // корректное завершение сканера
   document.addEventListener("visibilitychange", () => { if (document.hidden) stopScan(ctx); });
   window.addEventListener("pagehide", () => stopScan(ctx));
-  window.addEventListener("resize", () => {
-    const video = ctx.$("preview");
-    if (video && !ctx.$("scanner")?.classList.contains("hidden")) layoutOverlay(video, true);
-  });
 
   // стартовый фокус — на штрих-код
   ctx.$("barcode")?.focus();
