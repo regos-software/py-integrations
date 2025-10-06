@@ -148,7 +148,7 @@ function pick(ctx, ext) {
       priceEl,
       "price-hint",
       ctx.fmtMoney(p),
-      "btn ghost",
+      "btn secondary",
       () => { priceEl.value = String(p); priceEl.focus(); priceEl.select?.(); }
     );
   } else {
