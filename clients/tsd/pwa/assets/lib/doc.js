@@ -247,7 +247,11 @@ export async function screenDoc(ctx, id) {
           metaEl.querySelector(".qty").innerHTML   = `<strong>${ctx.fmtNum(op.quantity)}</strong> ${ctx.t("unit.pcs") || "шт"}`;
           metaEl.querySelector(".cost").textContent  = ctx.fmtMoney(op.cost);
           metaEl.querySelector(".price").textContent = ctx.fmtMoney(op.price ?? 0);
-          metaEl.querySelector(".description").textContent  = op.description || "";
+
+
+          const subEl = view.querySelector(".sub");
+          subEl.querySelector(".description").textContent  = op.description || "";
+
 
           edit.classList.add("hidden");
           view.classList.remove("hidden");
