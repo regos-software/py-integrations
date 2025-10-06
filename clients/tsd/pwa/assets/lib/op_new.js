@@ -127,7 +127,6 @@ export async function screenOpNew(ctx, id) {
         ].filter(Boolean);
         hints.set(ZX.DecodeHintType.POSSIBLE_FORMATS, formats);
       }
-      // некоторые версии принимают hints в конструкторе, некоторые — через setHints
       try {
         reader = new ReaderClass(hints);
       } catch {
@@ -144,12 +143,10 @@ export async function screenOpNew(ctx, id) {
   }
 
   async function listCameras() {
-    // разные версии: listVideoInputDevices или getVideoInputDevices
     const listFn = zxingReader.listVideoInputDevices || zxingReader.getVideoInputDevices;
     if (typeof listFn !== "function") return [];
     try {
       const devices = await listFn.call(zxingReader);
-      // Унифицируем к [{deviceId,label}]
       return devices.map(d => ({
         deviceId: d.deviceId || d.id || d.deviceId_,
         label: d.label || ""
@@ -210,42 +207,53 @@ export async function screenOpNew(ctx, id) {
   if (ctx.$("btn-op-cancel")) ctx.$("btn-op-cancel").textContent = ctx.t("cancel");
   if (ctx.$("btn-op-save"))   ctx.$("btn-op-save").textContent   = ctx.t("save");
 
-  ctx.$("btn-op-cancel").onclick = ()=>{ location.hash = `#/doc/${id}`; };
-  ctx.$("btn-op-save").onclick   = ()=>saveOp(id);
+  const onCancel = ctx.$("btn-op-cancel");
+  const onSave   = ctx.$("btn-op-save");
+  if (onCancel) onCancel.onclick = ()=>{ location.hash = `#/doc/${id}`; };
+  if (onSave)   onSave.onclick   = ()=>saveOp(id);
 
   // ---- быстрые кнопки количества ----
-  ctx.$("qty-quick").addEventListener("click", (e)=>{
-    const btn = e.target.closest("button[data-inc]");
-    if (!btn) return;
-    const inc = Number(btn.dataset.inc || "0");
-    const el = ctx.$("qty");
-    const val = ctx.toNumber(el.value) || 0;
-    el.value = String(val + inc);
-    el.focus();
-    el.select?.();
-  });
+  const quick = ctx.$("qty-quick");
+  if (quick) {
+    quick.addEventListener("click", (e)=>{
+      const btn = e.target.closest("button[data-inc]");
+      if (!btn) return;
+      const inc = Number(btn.dataset.inc || "0");
+      const el = ctx.$("qty");
+      const val = ctx.toNumber(el.value) || 0;
+      el.value = String(val + inc);
+      el.focus();
+      el.select?.();
+    });
+  }
 
   // ---- навигация Enter: qty -> cost -> price -> save ----
-  ctx.$("qty").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); ctx.$("cost").focus(); } });
-  ctx.$("cost").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); ctx.$("price").focus(); } });
-  ctx.$("price").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); saveOp(id); } });
+  ctx.$("qty")  ?.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); ctx.$("cost") ?.focus(); } });
+  ctx.$("cost") ?.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); ctx.$("price")?.focus(); } });
+  ctx.$("price")?.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); saveOp(id); } });
 
   // ---- кнопки камеры (иконки) ----
-  const btnScan = ctx.$("btn-scan");
+  const btnScan  = ctx.$("btn-scan");
+  const btnClose = ctx.$("btn-close-scan");
   if (btnScan) {
     btnScan.classList.add("btn","icon");
     btnScan.innerHTML = `<i class="fa-solid fa-camera"></i><span class="sr-only">${ctx.esc(ctx.t("op.scan"))}</span>`;
   }
-  const btnClose = ctx.$("btn-close-scan");
   if (btnClose) {
     btnClose.classList.add("btn","icon");
     btnClose.innerHTML = `<i class="fa-solid fa-xmark"></i><span class="sr-only">${ctx.esc(ctx.t("cancel"))}</span>`;
   }
 
-  btnScan.onclick       = startScan;
-  btnClose.onclick      = stopScan;
+  if (btnScan)  btnScan.onclick  = startScan;
+  if (btnClose) btnClose.onclick = stopScan;
+
   document.addEventListener("visibilitychange", () => { if (document.hidden) stopScan(); });
   window.addEventListener("pagehide", stopScan);
+  window.addEventListener("resize", () => {
+    const video = ctx.$("preview");
+    if (!video) return;
+    if (!ctx.$("scanner")?.classList.contains("hidden")) drawROI(video);
+  });
 
   async function startScan() {
     // HTTPS обязателен (кроме localhost)
@@ -264,26 +272,27 @@ export async function screenOpNew(ctx, id) {
     try { video.setAttribute("playsinline",""); video.setAttribute("webkit-playsinline",""); video.autoplay = true; video.muted = true; } catch {}
 
     ensureOverlay(video);
+    drawROI(video);
 
     // выбираем тыловую камеру, если получится
     if (!currentDeviceId) currentDeviceId = await pickBackCameraId();
 
     // Нормализуем вызов «непрерывного» декодирования в разных версиях библиотеки
     const startContinuous = async (deviceId, elId, onCode, onError) => {
-      // текущие версии:
+      // новые версии:
       if (typeof zxingReader.decodeFromVideoDevice === "function") {
-        return zxingReader.decodeFromVideoDevice(deviceId, elId, async (result, err, controls) => {
-          try { drawROI(video); } catch {}
+        return zxingReader.decodeFromVideoDevice(deviceId, elId, (result, err, controls) => {
+          drawROI(video);
           if (result && result.text) onCode(result.text, controls);
-          else if (err && !(err && err.name === "NotFoundException")) onError?.(err);
+          else if (err && err.name !== "NotFoundException") onError?.(err);
         });
       }
-      // более старые:
+      // старые:
       if (typeof zxingReader.decodeFromInputVideoDevice === "function") {
-        return zxingReader.decodeFromInputVideoDevice(deviceId, elId, async (result, err, controls) => {
-          try { drawROI(video); } catch {}
+        return zxingReader.decodeFromInputVideoDevice(deviceId, elId, (result, err, controls) => {
+          drawROI(video);
           if (result && result.text) onCode(result.text, controls);
-          else if (err && !(err && err.name === "NotFoundException")) onError?.(err);
+          else if (err && err.name !== "NotFoundException") onError?.(err);
         });
       }
       // fallback: один раз (без непрерывного)
@@ -296,10 +305,8 @@ export async function screenOpNew(ctx, id) {
     };
 
     try {
-      // старт
       zxingControls = await startContinuous(currentDeviceId ?? undefined, "preview",
-        (code, controls) => {
-          // нашли код
+        (code) => {
           try { navigator.vibrate?.(40); } catch {}
           const pq = ctx.$("product-query"), bc = ctx.$("barcode");
           if (bc) bc.value = code;
@@ -308,7 +315,6 @@ export async function screenOpNew(ctx, id) {
           simulateEnter(pq);    // триггерим поиск
         },
         (err) => {
-          // консоль для диагностики, но не мешаем UI
           console.debug("[ZXing] scan err:", err?.name || err);
         }
       );
