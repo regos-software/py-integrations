@@ -7,13 +7,14 @@ const utilsLib = await import(rel('?assets=lib/utils.js')); // { $, out, tickClo
 const i18nLib  = await import(rel('?assets=lib/i18n.js'));  // { initI18n, t, setLocale, getLocale, fmt }
 
 // Контекст, который будем передавать во вьюхи
+// i18n: проксируем функции, чтобы не залипали старые ссылки
 const ctx = {
   ...apiLib,
   ...utilsLib,
-  t: i18nLib.t,
-  setLocale: i18nLib.setLocale,
-  getLocale: i18nLib.getLocale,
-  fmt: i18nLib.fmt,
+  t:  (...a) => i18nLib.t(...a),        // ⬅ всегда актуальный переводчик
+  fmt:(...a) => i18nLib.fmt(...a),      // ⬅ актуальный форматтер
+  setLocale: async (...a) => i18nLib.setLocale(...a),
+  getLocale: () => i18nLib.getLocale(),
 };
 
 // --- helpers (UI) ---
@@ -99,22 +100,31 @@ if (typeof ctx.registerSW === "function") {
 
 // Инициализация i18n
 await i18nLib.initI18n();
+// a11y: проставим текущий язык на <html>
+document.documentElement.lang = ctx.getLocale();
 
 // Локализуем заголовок и кнопку установки
-setAppTitle(ctx.t("app_title") || "TSD");
+setAppTitle(ctx.t("app.title") || "TSD");
 setupInstallCTA();
 
 const langSelect = ctx.$("lang-select");
 if (langSelect) {
   langSelect.value = ctx.getLocale();
   langSelect.addEventListener("change", async () => {
-    ctx.setLocale(langSelect.value);
-    setAppTitle(ctx.t("app_title") || "TSD");
+    // i18n: обязательно дождаться смены локали (загрузка словаря и обновление биндера t)
+    await ctx.setLocale(langSelect.value);
+    document.documentElement.lang = ctx.getLocale();
+
+    // Обновим видимые тексты в шапке
+    setAppTitle(ctx.t("app.title") || "TSD");
     const installTxt = ctx.$("btn-install-txt");
     if (installTxt) installTxt.textContent = ctx.t?.("install_app") || "Установить";
+
     // Перерисуем текущий экран (чтобы тексты обновились)
-    router();
-    // reinitOAuth временно отключён
+    await router();
+
+    // Если вернёте OAuth — можно передавать актуальную локаль:
+    // await reinitOAuth();
   });
 }
 
