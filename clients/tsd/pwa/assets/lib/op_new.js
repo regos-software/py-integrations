@@ -9,6 +9,7 @@ let docCtx = { price_type_id: null, stock_id: null };
 let zxingReader = null;
 let zxingReady = false;
 let zxingBusy = false;
+let zxingLoadTries = 0;
 
 // overlay для подсветки зоны сканирования
 let overlay = null, og = null; // canvas + 2D ctx
@@ -102,18 +103,23 @@ export async function screenOpNew(ctx, id) {
   async function ensureZXing() {
     if (zxingReady && zxingReader) return true;
 
+    // грузим UMD-скрипт из ассетов
     if (!window.ZXing) {
-      await new Promise((resolve, reject) => {
+      zxingLoadTries++;
+      console.debug("[ZXing] load try", zxingLoadTries);
+      await new Promise((resolve) => {
         const s = document.createElement("script");
         s.src = "?assets=lib/zxing.min.js";
         s.async = true;
         s.onload = resolve;
-        s.onerror = reject;
+        s.onerror = () => {
+          console.error("[ZXing] failed to load ?assets=lib/zxing.min.js");
+          resolve();
+        };
         document.head.appendChild(s);
-      }).catch(()=>{});
+      });
     }
     if (!window.ZXing) {
-      toast("ZXing not loaded", false);
       return false;
     }
 
@@ -121,7 +127,6 @@ export async function screenOpNew(ctx, id) {
       const ZX = window.ZXing;
       zxingReader = new ZX.BrowserMultiFormatReader();
 
-      // Подсказываем форматы — ускоряет
       const hints = new ZX.Map();
       const formats = [
         ZX.BarcodeFormat.EAN_13,
@@ -137,9 +142,10 @@ export async function screenOpNew(ctx, id) {
       zxingReader.setHints(hints);
 
       zxingReady = true;
+      console.debug("[ZXing] ready");
       return true;
-    } catch {
-      toast("ZXing init error", false);
+    } catch (e) {
+      console.error("[ZXing] init error:", e);
       return false;
     }
   }
@@ -303,33 +309,46 @@ export async function screenOpNew(ctx, id) {
       const work = document.createElement("canvas");
       const wg = work.getContext("2d", { willReadFrequently: true });
 
-      // заранее загрузим ZXing
-      if (!zxingReady) {
+      const ensureAndMaybeToast = async () => {
         const ok = await ensureZXing();
-        if (!ok) { toast(ctx.t("camera_open_failed"), false); stopScan(); return; }
-      }
+        if (!ok && zxingLoadTries === 1) {
+          // показываем корректное сообщение (НЕ путать с камерой)
+          toast("Не удалось загрузить модуль сканера (zxing). Проверьте ?assets=lib/zxing.min.js", false);
+          console.error("[ZXing] not loaded. Check URL /external/{ci}/?assets=lib/zxing.min.js and MIME type.");
+        }
+        return ok;
+      };
+
+      // первая попытка загрузить ZXing
+      await ensureAndMaybeToast();
 
       const detectFrame = async () => {
         if (!mediaStream) return;
 
+        // если ZXing ещё не готов — повторяем попытки подгрузки
+        if (!zxingReady && zxingLoadTries < 5) {
+          await ensureAndMaybeToast();
+        }
+
         const { rx, ry, rw, rh } = roiRect(video);
         work.width = rw; work.height = rh;
         wg.imageSmoothingEnabled = false;
-        // усилим картинку
         wg.filter = "contrast(140%) brightness(115%)";
         wg.drawImage(video, rx, ry, rw, rh, 0, 0, rw, rh);
 
-        let code = await decodeWithZXing(work);
-
-        // Поворот ROI на 90° (если не найдено)
-        if (!code) {
-          const rot = document.createElement("canvas");
-          rot.width = rh; rot.height = rw;
-          const rg = rot.getContext("2d");
-          rg.translate(rot.width/2, rot.height/2);
-          rg.rotate(Math.PI/2);
-          rg.drawImage(work, -work.width/2, -work.height/2);
-          code = await decodeWithZXing(rot);
+        let code = null;
+        if (zxingReady) {
+          code = await decodeWithZXing(work);
+          if (!code) {
+            // Поворот ROI на 90°
+            const rot = document.createElement("canvas");
+            rot.width = rh; rot.height = rw;
+            const rg = rot.getContext("2d");
+            rg.translate(rot.width/2, rot.height/2);
+            rg.rotate(Math.PI/2);
+            rg.drawImage(work, -work.width/2, -work.height/2);
+            code = await decodeWithZXing(rot);
+          }
         }
 
         drawROI(video);
@@ -348,7 +367,8 @@ export async function screenOpNew(ctx, id) {
       };
 
       requestAnimationFrame(detectFrame);
-    } catch {
+    } catch (e) {
+      console.error("[camera] open error:", e);
       stopScan();
       toast(ctx.t("camera_open_failed"), false);
       ctx.$("barcode").focus();
