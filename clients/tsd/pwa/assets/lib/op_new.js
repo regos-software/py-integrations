@@ -100,55 +100,64 @@ export async function screenOpNew(ctx, id) {
   }
 
   // ZXing loader + reader
-  async function ensureZXing() {
-    if (zxingReady && zxingReader) return true;
+async function ensureZXing() {
+  if (zxingReady && zxingReader) return true;
 
-    // грузим UMD-скрипт из ассетов
-    if (!window.ZXing) {
-      zxingLoadTries++;
-      console.debug("[ZXing] load try", zxingLoadTries);
-      await new Promise((resolve) => {
-        const s = document.createElement("script");
-        s.src = "?assets=lib/zxing.min.js";
-        s.async = true;
-        s.onload = resolve;
-        s.onerror = () => {
-          console.error("[ZXing] failed to load ?assets=lib/zxing.min.js");
-          resolve();
-        };
-        document.head.appendChild(s);
-      });
-    }
-    if (!window.ZXing) {
-      return false;
-    }
-
-    try {
-      const ZX = window.ZXing;
-      zxingReader = new ZX.BrowserMultiFormatReader();
-
-      const hints = new ZX.Map();
-      const formats = [
-        ZX.BarcodeFormat.EAN_13,
-        ZX.BarcodeFormat.EAN_8,
-        ZX.BarcodeFormat.UPC_A,
-        ZX.BarcodeFormat.UPC_E,
-        ZX.BarcodeFormat.ITF,
-        ZX.BarcodeFormat.CODE_128,
-        ZX.BarcodeFormat.CODE_39,
-        ZX.BarcodeFormat.CODABAR
-      ];
-      hints.set(ZX.DecodeHintType.POSSIBLE_FORMATS, formats);
-      zxingReader.setHints(hints);
-
-      zxingReady = true;
-      console.debug("[ZXing] ready");
-      return true;
-    } catch (e) {
-      console.error("[ZXing] init error:", e);
-      return false;
-    }
+  // грузим UMD-скрипт из ассетов, если ещё не в window
+  if (!window.ZXing) {
+    zxingLoadTries++;
+    console.debug("[ZXing] load try", zxingLoadTries);
+    await new Promise((resolve) => {
+      const s = document.createElement("script");
+      s.src = "?assets=lib/zxing.min.js"; // файл должен существовать
+      s.async = true;
+      s.onload = resolve;
+      s.onerror = () => {
+        console.error("[ZXing] failed to load ?assets=lib/zxing.min.js");
+        resolve();
+      };
+      document.head.appendChild(s);
+    });
   }
+  if (!window.ZXing) return false;
+
+  try {
+    const ZX = window.ZXing;
+
+    // НАТИВНАЯ Map, не ZX.Map
+    const hints = new Map();
+    const formats = [
+      ZX.BarcodeFormat.EAN_13,
+      ZX.BarcodeFormat.EAN_8,
+      ZX.BarcodeFormat.UPC_A,
+      ZX.BarcodeFormat.UPC_E,
+      ZX.BarcodeFormat.ITF,
+      ZX.BarcodeFormat.CODE_128,
+      ZX.BarcodeFormat.CODE_39,
+      ZX.BarcodeFormat.CODABAR
+    ];
+    hints.set(ZX.DecodeHintType.POSSIBLE_FORMATS, formats);
+
+    // Новые версии: hints можно передать в конструктор
+    // Старые версии: используем setHints, если есть
+    try {
+      zxingReader = new ZX.BrowserMultiFormatReader(hints);
+    } catch {
+      zxingReader = new ZX.BrowserMultiFormatReader();
+      if (typeof zxingReader.setHints === "function") {
+        zxingReader.setHints(hints);
+      }
+    }
+
+    zxingReady = true;
+    console.debug("[ZXing] ready");
+    return true;
+  } catch (e) {
+    console.error("[ZXing] init error:", e);
+    return false;
+  }
+}
+
 
   async function decodeWithZXing(canvas) {
     if (!zxingReady || zxingBusy) return null;
