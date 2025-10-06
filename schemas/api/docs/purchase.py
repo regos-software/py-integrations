@@ -70,7 +70,7 @@ class DocPurchaseGetRequest(BaseModel):
     search: Optional[str] = None
 
     # Сортировка и пэйджинг
-    sort_orders: Optional[List[SortOrder]] = None
+    sort_orders: Optional[List[DocPurchaseSortOrder]] = None
     limit: Optional[int] = Field(default=None, ge=1)
     offset: Optional[int] = Field(default=None, ge=0)
 
