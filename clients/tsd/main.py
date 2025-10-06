@@ -199,14 +199,74 @@ class TsdIntegration(ClientBase):
                     )
                 return {"result": jsonable_encoder(res)}
 
-            # --- поиск номенклатуры ---
+            # --- поиск номенклатуры (с учётом контекста документа) ---
             if action == "product_search":
                 q = (params.get("q") or "").strip()
                 if not q:
                     return {"result": {"items": []}}
+
+                def _to_int(v):
+                    try:
+                        return int(v) if v is not None else None
+                    except (TypeError, ValueError):
+                        return None
+
+                # контекст из запроса
+                price_type_id = _to_int(params.get("price_type_id"))
+                stock_id      = _to_int(params.get("stock_id"))
+                limit         = _to_int(params.get("limit")) or 50
+                if limit < 1: limit = 1
+                if limit > 200: limit = 200
+
+                # при необходимости — подтягиваем контекст из документа
+                raw_doc_id = params.get("doc_id")
+                if (price_type_id is None or stock_id is None) and raw_doc_id is not None:
+                    doc_id = _to_int(raw_doc_id)
+                    if doc_id is None:
+                        return self._json_error(400, "doc_id must be integer")
+
+                    async with RegosAPI(connected_integration_id=ci) as api:
+                        doc = await api.docs.purchase.get_by_id(doc_id)
+
+                    if not doc:
+                        return self._json_error(404, f"DocPurchase id={doc_id} not found")
+
+                    # безопасно извлекаем идентификаторы
+                    try:
+                        if price_type_id is None and getattr(doc, "price_type", None):
+                            price_type_id = _to_int(getattr(doc.price_type, "id", None))
+                    except Exception:
+                        pass
+                    try:
+                        if stock_id is None and getattr(doc, "stock", None):
+                            stock_id = _to_int(getattr(doc.stock, "id", None))
+                    except Exception:
+                        pass
+
+                # выполняем поиск: сперва расширенный (GetExt), затем — мягкий откат
                 async with RegosAPI(connected_integration_id=ci) as api:
-                    items = await api.refrences.item.search_and_get(q)
+                    try:
+                        # Новый путь: расширенные карточки с учётом склада/типа цены
+                        items = await api.refrences.item.search_and_get_ext(
+                            q,
+                            stock_id=stock_id,
+                            price_type_id=price_type_id,
+                            limit=limit
+                        )
+                    except AttributeError:
+                        # Если метода нет (старый клиент) — откатываемся
+                        try:
+                            items = await api.refrences.item.search_and_get(
+                                q,
+                                price_type_id=price_type_id,
+                                stock_id=stock_id
+                            )
+                        except TypeError:
+                            # Совсем старый интерфейс: только по строке
+                            items = await api.refrences.item.search_and_get(q)
+
                 return {"result": {"items": jsonable_encoder(items)}}
+
 
             return self._json_error(400, f"Unknown action '{action}'")
 
