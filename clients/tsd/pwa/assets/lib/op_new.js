@@ -427,6 +427,11 @@ export async function screenOpNew(ctx, id) {
   ctx.$("barcode")?.addEventListener("keydown", enterSearch);
   ctx.$("product-query")?.addEventListener("keydown", enterSearch);
 
+  ctx.$("product-query")?.addEventListener("search", (e) => {
+  const v = e.target.value.trim();
+  if (v) runSearch(ctx, v, ctx.__docId);
+  });
+
   // быстрые + навигация Enter
   ctx.$("qty-quick")?.addEventListener("click", (e)=>{
     const btn = e.target.closest("button[data-inc]");

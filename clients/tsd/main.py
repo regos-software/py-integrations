@@ -6,6 +6,7 @@ from email.message import EmailMessage
 
 from pathlib import Path
 from fastapi.encoders import jsonable_encoder
+from httpx import request
 from starlette.responses import JSONResponse 
 from starlette.responses import FileResponse, HTMLResponse, Response, RedirectResponse
 import json
@@ -317,23 +318,27 @@ class TsdIntegration(ClientBase):
 
         # manifest (ОТНОСИТЕЛЬНЫЕ пути!)
         if str(query.get("pwa", "")).lower() == "manifest":
-            mf_path = self.PWA_DIR / "manifest.webmanifest"
-            if mf_path.exists():
-                return FileResponse(str(mf_path), media_type="application/manifest+json")
+            # определяем текущий путь без query (?pwa=manifest)
+            base_path = request.url.path.rstrip("/")
+
+            # формируем динамические пути для start_url и scope
             manifest = {
                 "name": "TSD",
                 "short_name": "TSD",
-                "start_url": ".",
-                "scope": "./",
+                "start_url": base_path,
+                "scope": f"{base_path}/",
                 "display": "standalone",
-                "background_color": "#ffffff",
+                "background_color": "#f7fafc",
                 "theme_color": "#111827",
                 "icons": [
                     {"src": "?asset=icon-192.png", "sizes": "192x192", "type": "image/png"},
                     {"src": "?asset=icon-512.png", "sizes": "512x512", "type": "image/png"},
+                    {"src": "?asset=icon-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable any"},
                 ],
             }
-            return Response(json.dumps(manifest, ensure_ascii=False), media_type="application/manifest+json")
+
+            return Response(json.dumps(manifest, ensure_ascii=False),
+                            media_type="application/manifest+json")
 
         # index.html (+ window.__CI__)
         index_path = self.PWA_DIR / "index.html"
