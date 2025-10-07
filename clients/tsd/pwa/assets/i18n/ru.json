@@ -1,0 +1,69 @@
+{
+  "app.title": "TSD",
+  "nav.back": "Назад",
+
+  "common.loading": "Загрузка...",
+  "common.nothing": "Ничего не найдено",
+  "common.cancel": "Отмена",
+  "common.save": "Сохранить",
+
+  "docs.title": "Документы закупки",
+  "docs.search.placeholder": "Поиск по номеру / поставщику...",
+  "docs.refresh": "Обновить",
+  "docs.status.new": "новый",
+  "docs.status.performed": "проведён",
+  "docs.status.blocked": "блок.",
+
+  "doc.to_list": "К списку",
+  "doc.add_op": "Добавить",
+  "doc.operations": "Операции",
+
+  "op.title": "Новая операция",
+  "op.scan": "Скан штрих-кода",
+  "op.barcode.placeholder": "или введите штрих-код вручную",
+  "op.search.label": "Поиск номенклатуры",
+  "op.search.placeholder": "Наименование / артикул",
+  "op.qty": "Количество",
+  "op.cost": "Стоимость",
+  "op.price": "Цена",
+  "op.qty.required": "Введите количество",
+
+  "toast.op_added": "Операция добавлена",
+  "oauth.error": "Ошибка авторизации",
+
+  "main_menu": "Главное меню",
+  "doc_purchase": "Поступление от контрагента",
+  "doc_sales": "Отгрузка контрагенту",
+  "doc_inventory": "Инвентаризация",
+  "soon": "Скоро",
+  "doc.title_prefix": "Документ",
+  "doc.no_ops": "Операций ещё нет",
+
+  "op.edit": "Редактировать",
+  "op.delete": "Удалить",
+  "op.saving": "Сохранение...",
+
+  "toast.op_deleted": "Операция удалена",
+  "toast.op_updated": "Операция сохранена",
+
+  "unit.pcs": "шт",
+
+
+  "save": "Сохранить",
+  "saving": "Сохранение...",
+  "cancel": "Отмена",
+  "searching": "Поиск...",
+  "nothing_found": "Ничего не найдено",
+  "search_error": "Ошибка поиска",
+  "camera_open_failed": "Не удалось открыть камеру",
+  "select_product_first": "Сначала выберите товар",
+  "fill_required_fields": "Заполните обязательные поля",
+  "op_added": "Операция добавлена",
+  "save_failed": "Не удалось сохранить операцию",
+  "network_error_save": "Ошибка сети при сохранении",
+  "last_purchase_cost_hint": "Стоимость: {cost}",
+  "install_app": "Установить приложение",
+  "op.description": "Описание",
+  "op.description.placeholder": "Комментарий к операции"
+
+}

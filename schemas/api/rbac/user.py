@@ -12,7 +12,7 @@ class UserGroup(BaseModel):
 
 class User(BaseModel):
     id: int
-    full_name: str
+    full_name: Optional[str] = None
     main_phone: Optional[str] = None
     user_group: Optional[UserGroup] = None
     enable_hints: Optional[bool] = None

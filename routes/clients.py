@@ -3,8 +3,10 @@ import re
 from typing import Optional, Union, Any, Dict
 
 from fastapi import APIRouter, Header, Request, Path, Response
+from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.responses import JSONResponse
 
+from clients.tsd.main import TsdIntegration
 from schemas.integration.base import (
     IntegrationRequest,
     IntegrationSuccessResponse,
@@ -17,6 +19,7 @@ from core.logger import setup_logger
 from clients.getsms.main import GetSmsIntegration
 from clients.eskiz_sms.main import EskizSmsIntegration
 from clients.telegram_bot_notification.main import TelegramBotNotificationIntegration
+from clients.email_sender.main import EmailSenderIntegration
 
 router = APIRouter()
 logger = setup_logger("clients_route")
@@ -26,6 +29,8 @@ INTEGRATION_CLASSES = {
     "getsms": GetSmsIntegration,
     "eskiz_sms": EskizSmsIntegration,
     "regos_telegram_notifier": TelegramBotNotificationIntegration,
+    "email_sender": EmailSenderIntegration,
+    "tsd": TsdIntegration,  
 }
 
 # Служебные заголовки, которые не нужно прокидывать обработчикам
@@ -148,6 +153,116 @@ async def handle_integration(
                 description=f"Ошибка во время вызова метода '{action_name}'"
             )
         )
+
+
+
+@router.get(
+    "/clients/{client}/",
+    include_in_schema=False
+)
+@router.get(
+    "/clients/{client}",
+    tags=["Integration"],
+    summary="UI (GET) для интеграции: строго вызывает integration.handle_ui"
+)
+async def handel_ui(
+    client: str = Path(..., description="Название интеграции"),
+    request: Request = ...,
+    connected_integration_id: Optional[str] = Header(None, alias="connected-integration-id"),
+) -> Any:
+    logger.info(f"[ui] GET UI для '{client}' {request.url}")
+    logger.info(f"[ui] Connected-Integration-Id: {connected_integration_id}")
+
+    # 1) Класс интеграции
+    integration_class = INTEGRATION_CLASSES.get(client)
+    if not integration_class:
+        return JSONResponse(
+            status_code=404,
+            content={"error": 404, "description": f"Интеграция '{client}' не найдена"},
+        )
+
+    # 2) Инстанс интеграции
+    try:
+        integration_instance = integration_class()
+        if connected_integration_id:
+            integration_instance.connected_integration_id = connected_integration_id
+    except Exception as e:
+        logger.exception(f"[ui] Ошибка инициализации интеграции '{client}': {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": 500, "description": "Ошибка инициализации интеграции"},
+        )
+
+    # 3) Envelope (GET без тела)
+    headers = _sanitize_headers(request.headers)
+    if connected_integration_id:
+        headers["Connected-Integration-Id"] = str(connected_integration_id)
+
+    envelope: Dict[str, Any] = {
+        "method": request.method,
+        "url": str(request.url),
+        "path": request.url.path,
+        "query": dict(request.query_params),
+        "headers": headers,
+        "body": None,
+        "client": request.client.host if request.client else None,
+    }
+
+    # 4) Строго требуем handle_ui у интеграции
+    handler = getattr(integration_instance, "handle_ui", None)
+    if not callable(handler):
+        return JSONResponse(
+            status_code=400,
+            content={"error": 400, "description": f"У интеграции '{client}' нет метода handle_ui"},
+        )
+
+    try:
+        result = await asyncio.wait_for(handler(envelope), timeout=180.0)
+
+        # 5) Проксируем ответ «как есть», с поддержкой редиректов и HTML
+        if isinstance(result, RedirectResponse):
+            return result
+
+        def _looks_like_url(s: str) -> bool:
+            return isinstance(s, str) and (s.startswith("http://") or s.startswith("https://") or "://" in s)
+
+        payload = getattr(result, "result", result)
+        if isinstance(payload, str) and _looks_like_url(payload):
+            return RedirectResponse(url=payload, status_code=302)
+        if isinstance(payload, dict):
+            for key in ("redirect_url", "url", "deeplink", "link"):
+                val = payload.get(key)
+                if isinstance(val, str) and _looks_like_url(val):
+                    return RedirectResponse(url=val, status_code=302)
+
+        accept = request.headers.get("accept", "")
+        if isinstance(result, (dict, list)):
+            return JSONResponse(status_code=200, content=result)
+        if isinstance(result, str):
+            if result.lstrip().lower().startswith("<!doctype") or result.lstrip().lower().startswith("<html") or "text/html" in accept:
+                return HTMLResponse(result, status_code=200)
+            return Response(status_code=200, content=result)
+        if isinstance(result, bytes):
+            return Response(status_code=200, content=result)
+        if isinstance(result, Response):
+            return result
+
+        return JSONResponse(status_code=200, content={"result": str(result)})
+
+    except asyncio.TimeoutError:
+        logger.error(f"[ui] Таймаут обработки UI для '{client}' (180 сек)")
+        return JSONResponse(
+            status_code=504,
+            content={"error": 504, "description": "Таймаут обработки UI (180 сек)"},
+        )
+    except Exception as e:
+        logger.exception(f"[ui] Ошибка при выполнении handle_ui для '{client}': {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": 500, "description": "Ошибка во время вызова handle_ui"},
+        )
+
+
 
 # ---------------------------------------- #
 #        EXTERNAL → handle_external        #

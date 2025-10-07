@@ -1,0 +1,291 @@
+/* app.css*/
+:root {
+  --bg: #f7fafc;
+  --fg: #111827;
+  --muted: #6b7280;
+  --card: #ffffff;
+  --primary: #111827;
+  --radius: 16px;
+  --shadow: 0 4px 14px rgba(0,0,0,.08);
+  --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, "Noto Sans", "Apple Color Emoji", "Segoe UI Emoji";
+  --border: #e5e7eb;
+  --hover: #f3f4f6;
+  --tap: 40px; /* комфортная тач-зона */
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0b0f14;
+    --fg: #e5e7eb;
+    --muted: #9ca3af;
+    --card: #111827;
+    --primary: #e5e7eb;
+    --shadow: 0 8px 24px rgba(0,0,0,.5);
+    --border: #1f2937;
+    --hover: #111827;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  padding: 24px;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.container { max-width: 860px; margin: 0 auto; }
+
+.card {
+  background: var(--card);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 24px;
+  margin: 0 0 20px 0;
+}
+
+h1 { font-size: 20px; margin: 0 0 12px; }
+.muted { color: var(--muted); font-size: 14px; }
+a { color: inherit; }
+
+/* ===== Buttons ===== */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 0;
+  background: var(--primary);
+  color: var(--bg);
+  text-decoration: none;
+  cursor: pointer;
+  transition: transform .02s ease;
+}
+.btn.secondary { background: #374151; }
+.btn.ghost { background: transparent; color: var(--fg); border: 1px solid var(--border); }
+.btn.small { padding: 6px 10px; border-radius: 10px; font-size: 14px; }
+.btn.block { width: 100%; }
+.btn:active { transform: translateY(1px); }
+.btn[disabled] { opacity: .6; cursor: default; }
+
+/* Иконки-кнопки: переиспользуемо */
+.btn.icon { width: var(--tap); height: var(--tap); padding: 0; border-radius: 10px; }
+
+/* ===== Inputs ===== */
+input, textarea, select {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--fg);
+}
+label { display: block; font-weight: 600; margin: 12px 0 6px; }
+input:focus, textarea:focus, select:focus {
+  outline: 2px solid rgba(59,130,246,.5);
+  border-color: transparent;
+}
+
+/* ===== Pre ===== */
+pre {
+  background: #0b1220;
+  color: #e5e7eb;
+  border-radius: 12px;
+  padding: 12px;
+  overflow: auto;
+}
+
+/* ===== AppBar ===== */
+.appbar {
+  position: sticky; top: 0; z-index: 10;
+  background: var(--card);
+  box-shadow: var(--shadow);
+  padding: 10px 12px;
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  border-radius: var(--radius);
+}
+.appbar .left, .appbar .right { display: flex; align-items: center; gap: 10px; }
+.appbar h1 { font-size: 18px; margin: 0; }
+.time { font-variant-numeric: tabular-nums; font-weight: 600; }
+
+/* Back/Home small icon button */
+.icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 36px; height: 36px; border-radius: 10px;
+  border: 1px solid var(--border); cursor: pointer;
+  background: var(--hover); color: var(--fg);
+}
+.icon-btn:active { transform: translateY(1px); }
+.icon-btn i { font-size: 16px; }
+
+/* ===== Layout utils (reuse) ===== */
+.hidden { display: none !important; }
+.row { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-width: 0; }
+.row-start { justify-content: flex-start; }
+.stack { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.cluster { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.grow { flex: 1 1 auto; min-width: 0; }
+.w-full { width: 100%; }
+.text-sm { font-size: 12px; }
+.truncate { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.break-words { white-space: normal; word-break: break-word; }
+.text-right { text-align: right; }
+.mt-4 { margin-top: 4px; }
+
+/* ===== Content ===== */
+.content { padding-bottom: 72px; padding-top: 15px; }
+
+/* ===== Pills ===== */
+.pill {
+  display: inline-block; font-size: 12px; padding: 3px 8px; border-radius: 999px;
+  background: var(--hover); color: var(--fg); border: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+/* ===== Lists / Items ===== */
+.list { display: grid; gap: 8px; width: 100%; }
+.item {
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: 12px; padding: 12px;
+  transition: background .12s ease, border-color .12s ease;
+  cursor: pointer; width: 100%; max-width: 100%; min-width: 0;
+}
+.item:hover { background: var(--hover); }
+
+/* ===== Search list (op_new) ===== */
+.search-list { display: grid; gap: 8px; }
+.search-list .item { cursor: pointer; }
+
+/* ===== Toolbar ===== */
+.toolbar { display: flex; gap: 10px; align-items: center; margin-top: 10px; }
+.toolbar .muted { flex: 1; text-align: center; }
+
+/* ===== Scanner ===== */
+#scanner { margin-top: 8px; }
+#preview { display: block; width: 100%; border-radius: 12px; background: #000; }
+
+/* ===== Toast ===== */
+.toast {
+  position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
+  max-width: 90%; background: #10b981; color: #fff;
+  padding: 10px 14px; border-radius: 8px; box-shadow: 0 4px 14px rgba(0,0,0,.2);
+  z-index: 9999; font-size: 14px; display: none;
+}
+.toast.error { background: #ef4444; }
+.toast.show { display: block; }
+
+/* ===== Forms ===== */
+.form-vert { display: grid; grid-template-columns: 1fr; gap: 10px; }
+.qty-quick { display: flex; flex-wrap: wrap; gap: 8px; }
+.qty-quick .chip {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 6px 10px; border-radius: 999px; border: 1px solid var(--border);
+  background: var(--hover); color: var(--fg); font-size: 14px; cursor: pointer;
+}
+.qty-quick .chip:active { transform: translateY(1px); }
+
+/* ===== Meta helpers ===== */
+.meta { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.meta .dot::before { content: "•"; margin: 0 6px; color: var(--muted); }
+.page-actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
+.hr { height: 1px; background: var(--border); border: 0; margin: 10px 0; }
+
+/* ================================================================== */
+/* ==================== Docs: search row (reusable) ================= */
+/* ================================================================== */
+
+/* одна линия: input + иконка */
+.input-row {
+  display: flex; align-items: center; gap: 8px;
+  flex-wrap: nowrap; min-width: 0;
+}
+.input-row input { flex: 1 1 auto; min-width: 0; }
+.input-row .btn.icon { flex: 0 0 var(--tap); }
+#btn-docs-refresh:active i { transform: rotate(-20deg); transition: transform .12s; }
+
+/* ================================================================== */
+/* ==================== Ops list (универсальная версия) ============= */
+/* ================================================================== */
+
+/* Список занимает всю ширину и не уезжает горизонтально */
+#ops-list { width: 100%; max-width: 100%; overflow-x: hidden; }
+#ops-list .item { cursor: default; }
+#ops-list .item > div { min-width: 0; }
+
+/* Верхняя полоса: имя слева, справа — действия */
+#ops-list .row,
+#ops-list .top { align-items: flex-start; gap: 8px; }
+
+/* Левая колонка (info) — тянется, переносится */
+#ops-list .info { flex: 1 1 auto; min-width: 0; }
+#ops-list .name {
+  font-weight: 600;
+  white-space: normal;
+  word-break: break-word;
+}
+
+/* Подпись: код + штрихкод */
+#ops-list .sub { display: flex; flex-wrap: wrap; gap: 6px 8px; min-width: 0; }
+#ops-list .sub .code { font-variant-numeric: tabular-nums; }
+#ops-list .sub .barcode {
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Действия справа */
+#ops-list .actions,
+#ops-list .op-actions { flex: 0 0 auto; display: inline-flex; gap: 8px; }
+
+/* Нижняя полоса: количество и цены */
+#ops-list .meta,
+#ops-list .bottom {
+  width: 100%;
+  font-variant-numeric: tabular-nums;
+  justify-content: flex-start;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+/* Узкие экраны */
+@media (max-width: 420px) {
+  :root { --tap: 36px; }
+  #ops-list .row, #ops-list .top { flex-wrap: wrap; }
+  #ops-list .info { flex-basis: 100%; }
+  #ops-list .actions, #ops-list .op-actions { margin-left: auto; }
+}
+
+/* Очень узкие */
+@media (max-width: 360px) {
+  :root { --tap: 32px; }
+  #ops-list .meta .dot { display: none; }
+}
+
+/* ===== Misc ===== */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0,0,1px,1px); white-space: nowrap; border: 0;
+}
+
+/* Поддержка старых контейнеров */
+.appbar .left, .appbar .right,
+.appbar-left, .appbar-right { display: flex; align-items: center; gap: 10px; }
+
+@media (max-width: 420px) { .lang-select { min-width: 96px; } }
+
+
+/* Кнопка-иконка без рамки (прозрачная) — универсальная */
+.btn.clear { background: transparent; border: 0; color: var(--fg); }
+
+/* Строка с заголовком и кнопкой назад — всё слева */
+.row-start { justify-content: flex-start; }
+
+/* Чуть больший отступ между строкой поиска и списком документов */
+#docs-list { margin-top: 10px; }
