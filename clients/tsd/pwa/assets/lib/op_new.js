@@ -258,11 +258,24 @@ async function listCameras() {
     .map(d => ({ deviceId: d.deviceId || d.id, label: d.label || "" }))
     .filter(d => d.deviceId);
 }
-async function pickBackCameraId() {
+async function pickBestCameraId(prefer = "macro") {
   const cams = await listCameras();
   if (!cams.length) return null;
-  const back = cams.find(c => /back|environment|rear/i.test(c.label));
-  return (back || cams[0]).deviceId;
+
+  // фильтры по типам камер
+  const regexes = {
+    macro: /macro|telephoto|zoom|close/i,
+    back: /back|environment|rear/i,
+    front: /front|user/i
+  };
+
+  // пробуем макро, потом обычную заднюю
+  let cam = cams.find(c => regexes[prefer]?.test(c.label));
+  if (!cam && prefer !== "back") cam = cams.find(c => regexes.back.test(c.label));
+  if (!cam) cam = cams[0];
+
+  console.log("[Camera] picked:", cam.label);
+  return cam.deviceId;
 }
 
 // ==== сканер ====
@@ -280,7 +293,7 @@ async function startScan(ctx) {
     scanner.classList.remove("hidden");
     video.setAttribute("playsinline",""); video.autoplay = true; video.muted = true;
 
-    if (!currentDeviceId) currentDeviceId = await pickBackCameraId();
+    if (!currentDeviceId) currentDeviceId = await pickBestCameraId("macro");
 
     zxingControls = await reader.decodeFromVideoDevice(currentDeviceId ?? undefined, "preview", (result, err) => {
       if (result?.text) {
