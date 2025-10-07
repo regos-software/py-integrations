@@ -18,24 +18,42 @@ export async function screenHome(ctx) {
   // действия
   ctx.$("btn-doc-purchase").onclick = () => { location.hash = "#/docs"; };
 
-  // QR со ссылкой на текущую страницу
-  const qrEl = ctx.$("qr-code");
-  if (qrEl && window.QRCode) {
-    // на случай повторного входа на screen: очищаем контейнер
-    qrEl.innerHTML = "";
+  // ---- QR со ссылкой на текущую страницу ----
+  const urlForQR = location.origin + location.pathname + location.hash;
 
+  // находим или создаём контейнер
+  let qrEl = ctx.$("qr-code");
+  if (!qrEl) {
+    const anchor = ctx.$("doc-types") || document.getElementById("app");
+    qrEl = document.createElement("div");
+    qrEl.id = "qr-code";
+    qrEl.className = "qr";
+    // поместим сразу под списком документов
+    if (anchor && anchor.insertAdjacentElement) {
+      anchor.insertAdjacentElement("afterend", qrEl);
+    } else {
+      document.body.appendChild(qrEl);
+    }
+  }
+
+  // очищаем и рисуем
+  qrEl.innerHTML = "";
+  if (window.QRCode) {
     new QRCode(qrEl, {
-      text: location.href,                // текущий адрес, включая hash
+      text: urlForQR,
       width: 192,
       height: 192,
-      correctLevel: QRCode.CorrectLevel.M
+      correctLevel: QRCode.CorrectLevel.M,
     });
-
-    // доступность и подсказка
-    qrEl.setAttribute("role", "img");
-    qrEl.setAttribute("aria-label", "QR для этой страницы");
-    qrEl.title = location.href;
+  } else {
+    // запасной вариант (библиотека ещё не подгрузилась)
+    qrEl.textContent = urlForQR;
   }
+
+  // доступность
+  qrEl.setAttribute("role", "img");
+  qrEl.setAttribute("aria-label", "QR для этой страницы");
+  qrEl.title = urlForQR;
 
   const soon = () => {
     let t = document.getElementById("toast");

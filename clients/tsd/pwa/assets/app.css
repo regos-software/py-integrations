@@ -289,3 +289,7 @@ pre {
 
 /* Чуть больший отступ между строкой поиска и списком документов */
 #docs-list { margin-top: 10px; }
+
+
+.qr { display:flex; justify-content:center; padding:12px; }
+.qr canvas, .qr img { width:192px; height:192px; }
