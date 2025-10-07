@@ -1,3 +1,5 @@
+import gzip
+import json
 import httpx
 from typing import Any, Optional, Type, TypeVar
 from pydantic import BaseModel
@@ -33,7 +35,9 @@ class APIClient:
         headers = {"Content-Type": "application/json"}
         logger.debug(f"Сформированы заголовки: {headers}")
         return headers
-
+    
+    
+    
     async def post(
         self,
         method_path: str,
@@ -42,17 +46,15 @@ class APIClient:
     ) -> TResponse:
         """
         Универсальный POST-запрос к методам интеграции.
+        Обрабатывает gzip-сжатые и обычные ответы.
         """
         url = f"{self.base_url}/gateway/out/{self.integration_id}/v1/{method_path}"
 
-        # Исправление: корректно сериализуем Decimal → float
+        # сериализация
         if isinstance(data, BaseModel):
             payload = data.model_dump(mode="json")
         elif isinstance(data, list):
-            payload = [
-                item.model_dump(mode="json") if isinstance(item, BaseModel) else item
-                for item in data
-            ]
+            payload = [item.model_dump(mode="json") if isinstance(item, BaseModel) else item for item in data]
         elif isinstance(data, dict):
             payload = data
         else:
@@ -63,18 +65,32 @@ class APIClient:
 
         try:
             resp = await self.client.post(url, json=payload, headers=self._headers())
-            logger.debug(f"Response status: {resp.status_code}")
-            logger.debug(f"Response body: {resp.text}")
+
+            # статус проверяем сразу, до чтения тела
             resp.raise_for_status()
-            return response_model(**resp.json())
+
+            # читаем байты тела
+            raw = await resp.aread()
+
+            # если gzip — распаковываем, иначе используем как есть
+            if raw.startswith(b"\x1f\x8b"):
+                logger.debug("Response is gzip-compressed, decompressing...")
+                raw = gzip.decompress(raw)
+
+            text = raw.decode("utf-8", errors="replace")
+            logger.debug(f"Response text (first 500 chars): {text[:500]}")
+
+            data = json.loads(text)
+            return response_model(**data)
+
         except httpx.RequestError as e:
-            logger.error(f"Ошибка запроса к {url}: {str(e)}")
+            logger.error(f"Ошибка запроса к {url}: {e}")
             raise
         except httpx.HTTPStatusError as e:
-            logger.error(f"Ошибка HTTP {e.response.status_code} при обращении к {url}: {e.response.text}")
+            logger.error(f"HTTP {e.response.status_code} при обращении к {url}: {e.response.text}")
             raise
         except Exception as e:
-            logger.exception(f"Непредвиденная ошибка при POST {url}: {str(e)}")
+            logger.exception(f"Непредвиденная ошибка при POST {url}: {e}")
             raise
 
 
