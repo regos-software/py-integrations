@@ -324,7 +324,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             bot_token = settings_map.get(TelegramSettings.BOT_TOKEN.value.lower())
             if not bot_token:
                 return self._create_error_response(1002, "No bot token in settings")
-            webhook_url = f"{TelegramBotConfig.WEBHOOK_BASE_URL}/{self.connected_integration_id}/external/"
+            webhook_url = f"{settings.integration_url}/{self.connected_integration_id}/external/"
             await self._initialize_bot()
             await self.bot.set_webhook(url=webhook_url)
             await self._setup_handlers()

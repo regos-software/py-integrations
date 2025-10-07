@@ -7,3 +7,4 @@ redis
 pydantic-settings
 aiogram
 tenacity
+aiosmtplib
