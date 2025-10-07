@@ -1,0 +1,65 @@
+{
+  "app.title": "TSD • Procurement",
+  "nav.back": "Back",
+
+  "common.loading": "Loading...",
+  "common.nothing": "Nothing found",
+  "common.cancel": "Cancel",
+  "common.save": "Save",
+
+  "docs.title": "Purchase documents",
+  "docs.search.placeholder": "Search by number / supplier…",
+  "docs.refresh": "Refresh",
+  "docs.status.new": "new",
+  "docs.status.performed": "posted",
+  "docs.status.blocked": "blk.",
+
+  "doc.to_list": "Back to list",
+  "doc.add_op": "Add",
+  "doc.operations": "Operations",
+
+  "op.title": "New operation",
+  "op.scan": "Barcode scan",
+  "op.barcode.placeholder": "or enter the barcode manually",
+  "op.search.label": "Product search",
+  "op.search.placeholder": "Name / SKU",
+  "op.qty": "Quantity",
+  "op.cost": "Unit cost",
+  "op.price": "Sale price",
+  "op.qty.required": "Enter quantity",
+
+  "toast.op_added": "Operation added",
+  "oauth.error": "Authentication error",
+
+  "main_menu": "Main menu",
+  "doc_purchase": "Goods receipt (from supplier)",
+  "doc_sales": "Shipment to counterparty",
+  "doc_inventory": "Inventory count",
+  "soon": "Coming soon",
+  "doc.title_prefix": "Document",
+  "doc.no_ops": "No operations yet",
+
+  "op.edit": "Edit",
+  "op.delete": "Delete",
+  "op.saving": "Saving...",
+
+  "toast.op_deleted": "Operation deleted",
+  "toast.op_updated": "Operation saved",
+
+  "unit.pcs": "pcs",
+
+  "save": "Save",
+  "saving": "Saving...",
+  "cancel": "Cancel",
+  "searching": "Searching...",
+  "nothing_found": "Nothing found",
+  "search_error": "Search error",
+  "camera_open_failed": "Could not access the camera",
+  "select_product_first": "Select a product first",
+  "fill_required_fields": "Fill in the required fields",
+  "op_added": "Operation added",
+  "save_failed": "Failed to save the operation",
+  "network_error_save": "Network error while saving",
+  "last_purchase_cost_hint": "Cos: {cost}",
+  "install_app": "Install app"
+}

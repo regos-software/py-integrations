@@ -1,5 +1,7 @@
 from __future__ import annotations
+from decimal import Decimal
 from typing import Type, TypeVar, Any
+from fastapi.encoders import jsonable_encoder
 import httpx
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 
@@ -17,7 +19,7 @@ class RegosAPI:
         self.docs: "RegosAPI.Docs" = self.Docs(self)
         self.integrations: "RegosAPI.Integrations" = self.Integrations(self)
         self.reports: "RegosAPI.Reports" = self.Reports(self)
-
+        self.refrences: "RegosAPI.Refrences" = self.Refrences(self)
     @retry(
         wait=wait_exponential(min=0.2, max=5),
         stop=stop_after_attempt(3),
@@ -44,7 +46,8 @@ class RegosAPI:
             from core.api.docs.cheque_operation import DocChequeOperationService
             from core.api.docs.retail_payment import DocRetailPaymentService
             from core.api.docs.cash_operation import CashOperationService
-
+            from core.api.docs.purchase import DocPurchaseService
+            from core.api.docs.purchase_operation import PurchaseOperationService
             # Initialize services
 
             self.cheque = DocsChequeService(api)
@@ -52,6 +55,8 @@ class RegosAPI:
             self.cheque_operation = DocChequeOperationService(api)
             self.retail_payment = DocRetailPaymentService(api)
             self.cash_operation= CashOperationService(api)
+            self.purchase = DocPurchaseService(api)
+            self.purchase_operation = PurchaseOperationService(api)
 
     class Integrations:
         def __init__(self, api: "RegosAPI"):
@@ -62,3 +67,10 @@ class RegosAPI:
         def __init__(self, api: "RegosAPI"):
             from core.api.reports.retail_report import RetailReportService
             self.retail_report = RetailReportService(api)
+
+    class Refrences:
+        def __init__(self, api: "RegosAPI"):
+            
+            from core.api.refrences.item import ItemService
+            
+            self.item = ItemService(api)
