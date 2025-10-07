@@ -11,6 +11,7 @@ from starlette.responses import JSONResponse
 from starlette.responses import FileResponse, HTMLResponse, Response, RedirectResponse
 import json
 
+from compression import gzip
 from core.api.regos_api import RegosAPI
 from schemas.api.docs.cheque import SortOrder
 from schemas.api.docs.purchase import DocPurchaseGetRequest, DocPurchaseSortOrder
@@ -56,6 +57,19 @@ class TsdIntegration(ClientBase):
     def _json_error(self, status: int, description: str):
         return JSONResponse(status_code=status, content={"error": status, "description": description})
                                                      
+    def _gzip_json(self, data: dict, status_code: int = 200) -> Response:
+        """Возвращает сжатый gzip JSONResponse."""
+        raw = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        compressed = gzip.compress(raw)
+        return Response(
+            content=compressed,
+            status_code=status_code,
+            media_type="application/json",
+            headers={
+                "Content-Encoding": "gzip",
+                "Vary": "Accept-Encoding"
+            }
+        )
 
     async def _fetch_settings(self, cache_key: str) -> dict:
         # 1) Redis
@@ -134,11 +148,11 @@ class TsdIntegration(ClientBase):
                     )
                     docs = await api.docs.purchase.get(req)
 
-                return {"result": {
+                return self._gzip_json({"result": {
                     "items": jsonable_encoder(docs),
                     "page": page,
                     "page_size": page_size
-                }}
+                }})
 
             # --- один документ + операции (ЕДИНСТВЕННАЯ ветка purchase_get) ---
             if action == "purchase_get":
@@ -157,10 +171,10 @@ class TsdIntegration(ClientBase):
                 if not doc:
                     return self._json_error(404, f"DocPurchase id={doc_id} not found")
 
-                return {"result": {
+                return self._gzip_json({"result": {
                     "doc": jsonable_encoder(doc),
                     "operations": jsonable_encoder(ops)
-                }}
+                }})
 
             # --- операции документа ---
             if action == "purchase_ops_get":
@@ -170,7 +184,7 @@ class TsdIntegration(ClientBase):
                     return self._json_error(400, "doc_id must be integer")
                 async with RegosAPI(connected_integration_id=ci) as api:
                     ops = await api.docs.purchase_operation.get_by_document_id(doc_id)
-                return {"result": {"items": jsonable_encoder(ops)}}
+                return self._gzip_json({"result": {"items": jsonable_encoder(ops)}})
 
             if action == "purchase_ops_add":
                 payload = params.get("items") or []
