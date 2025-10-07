@@ -116,7 +116,7 @@ class TsdIntegration(ClientBase):
             # --- список документов ---
             if action == "purchase_list":
                 page = int(params.get("page", 1) or 1)
-                page_size = int(params.get("page_size", 5) or 5)
+                page_size = int(params.get("page_size", 20) or 20)
                 query = (params.get("query") or "").strip() or None
                 start = params.get("start_date")
                 end = params.get("end_date")
@@ -319,7 +319,7 @@ class TsdIntegration(ClientBase):
         # manifest (ОТНОСИТЕЛЬНЫЕ пути!)
         if str(query.get("pwa", "")).lower() == "manifest":
             # определяем текущий путь без query (?pwa=manifest)
-            base_path = request.url.path.rstrip("/")
+            base_path = str(envelope.get("path") or "").rstrip("/")
 
             # формируем динамические пути для start_url и scope
             manifest = {
