@@ -319,7 +319,7 @@ class TsdIntegration(ClientBase):
         # manifest (ОТНОСИТЕЛЬНЫЕ пути!)
         if str(query.get("pwa", "")).lower() == "manifest":
             # определяем текущий путь без query (?pwa=manifest)
-            base_path = request.url.path.rstrip("/")
+            base_path = str(envelope.get("path") or "").rstrip("/")
 
             # формируем динамические пути для start_url и scope
             manifest = {
