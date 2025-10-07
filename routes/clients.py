@@ -335,13 +335,15 @@ async def handle_external(
     try:
         result = await asyncio.wait_for(handler(envelope), timeout=180.0)
 
+        if isinstance(result, Response):
+            return result
+        
         # Проксируем ответ «как есть»:
         if isinstance(result, (dict, list)):
             return JSONResponse(status_code=200, content=result)
         if isinstance(result, (str, bytes)):
             return Response(status_code=200, content=result)
-        if isinstance(result, Response):
-            return result
+
         # fallback – сериализуем строкой
         return JSONResponse(status_code=200, content={"result": str(result)})
 
