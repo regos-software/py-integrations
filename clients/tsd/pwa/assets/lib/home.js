@@ -33,16 +33,26 @@ export async function screenHome(ctx) {
   ctx.$("btn-doc-sales").onclick     = soon;
   ctx.$("btn-doc-inventory").onclick = soon;
 
-  const qrEl = ctx.$("qr-code");
-  if (qrEl) {
-    qrEl.innerHTML = ""; // на всякий случай очистить
-    new QRCode(qrEl, {
-      text: location.href,          // можно подставить любую нужную ссылку
+const qrEl = ctx.$("qr-code");
+if (qrEl) {
+  const QR = globalThis.QRCode; 
+  qrEl.innerHTML = "";
+  if (QR) {
+    new QR(qrEl, {
+      text: location.href,
       width: 160,
       height: 160,
-      correctLevel: QRCode.CorrectLevel.M
+      correctLevel: QR.CorrectLevel.M
     });
+  } else {
+    // Fallback на случай, если CDN не загрузился
+    const img = new Image();
+    img.width = 160; img.height = 160;
+    img.alt = "QR";
+    img.src = "https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=" + encodeURIComponent(location.href);
+    qrEl.replaceChildren(img);
   }
+}
 
   
 }
