@@ -42,10 +42,11 @@ class APIClient:
     ) -> TResponse:
         """
         Универсальный POST-запрос к методам интеграции.
+        Обрабатывает gzip-сжатые ответы.
         """
         url = f"{self.base_url}/gateway/out/{self.integration_id}/v1/{method_path}"
 
-        # Исправление: корректно сериализуем Decimal → float
+        # Сериализация данных
         if isinstance(data, BaseModel):
             payload = data.model_dump(mode="json")
         elif isinstance(data, list):
@@ -64,19 +65,33 @@ class APIClient:
         try:
             resp = await self.client.post(url, json=payload, headers=self._headers())
             logger.debug(f"Response status: {resp.status_code}")
-            logger.debug(f"Response body: {resp.text}")
+
+            # читаем "сырые" байты (важно!)
+            raw = await resp.aread()
+
+            # если gzip-сжатое тело — распаковываем
+            if raw.startswith(b"\x1f\x8b"):
+                logger.debug("Response is gzip-compressed, decompressing...")
+                raw = gzip.decompress(raw)
+
+            # декодируем и парсим JSON
+            text = raw.decode("utf-8", errors="replace")
+            logger.debug(f"Response text (first 500 chars): {text[:500]}")
+
+            data = json.loads(text)
             resp.raise_for_status()
-            return response_model(**resp.json())
+
+            return response_model(**data)
+
         except httpx.RequestError as e:
-            logger.error(f"Ошибка запроса к {url}: {str(e)}")
+            logger.error(f"Ошибка запроса к {url}: {e}")
             raise
         except httpx.HTTPStatusError as e:
             logger.error(f"Ошибка HTTP {e.response.status_code} при обращении к {url}: {e.response.text}")
             raise
         except Exception as e:
-            logger.exception(f"Непредвиденная ошибка при POST {url}: {str(e)}")
+            logger.exception(f"Непредвиденная ошибка при POST {url}: {e}")
             raise
-
 
     async def close(self):
         logger.debug("Закрытие httpx.AsyncClient")
