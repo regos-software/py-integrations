@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+import gzip
 from typing import Any, Dict, List, Optional, Sequence
 from email.message import EmailMessage
 
@@ -11,7 +12,7 @@ from starlette.responses import JSONResponse
 from starlette.responses import FileResponse, HTMLResponse, Response, RedirectResponse
 import json
 
-from compression import gzip
+
 from core.api.regos_api import RegosAPI
 from schemas.api.docs.cheque import SortOrder
 from schemas.api.docs.purchase import DocPurchaseGetRequest, DocPurchaseSortOrder
