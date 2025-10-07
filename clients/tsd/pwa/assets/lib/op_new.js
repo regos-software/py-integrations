@@ -278,6 +278,40 @@ async function pickBestCameraId(prefer = "macro") {
   return cam.deviceId;
 }
 
+async function enableFocus(video) {
+  try {
+    const stream = video.srcObject;
+    if (!stream) return;
+
+    const track = stream.getVideoTracks?.()[0];
+    if (!track) return;
+
+    const caps = track.getCapabilities?.() || {};
+    const settings = track.getSettings?.() || {};
+
+    // Автофокус, если доступен
+    if ('focusMode' in caps) {
+      await track.applyConstraints({
+        advanced: [{ focusMode: caps.focusMode.includes('continuous') ? 'continuous' : 'auto' }]
+      }).catch(console.warn);
+      console.log('[Camera] focus mode set to continuous');
+    }
+
+    // Если поддерживается ручная фокусировка (focusDistance)
+    if ('focusDistance' in caps) {
+      // Например, фокусируем ближе (0 — макро, 1 — бесконечность)
+      const near = caps.focusDistance.min ?? 0;
+      await track.applyConstraints({
+        advanced: [{ focusDistance: near }]
+      }).catch(console.warn);
+      console.log('[Camera] focusDistance set to near:', near);
+    }
+  } catch (err) {
+    console.warn('[Camera] focus control error:', err);
+  }
+}
+
+
 // ==== сканер ====
 async function startScan(ctx) {
   const insecure = location.protocol !== "https:" && location.hostname !== "localhost";
@@ -309,6 +343,7 @@ async function startScan(ctx) {
       }
     });
 
+    enableFocus(video);
     // фонарик, если доступен
     try {
       const ms = video.srcObject;
