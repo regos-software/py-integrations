@@ -4,7 +4,7 @@ from enum import Enum
 from typing import Optional
 from pydantic import BaseModel
 
-from schemas.api.refrences.account import Account
+from schemas.api.references.account import Account
 
 class PaymentType(BaseModel):
     """

@@ -7,8 +7,8 @@ from typing import List, Optional, Union
 from pydantic import BaseModel, Field, model_validator
 
 from schemas.api.rbac.user import User
-from schemas.api.refrences.retail_card import RetailCard
-from schemas.api.refrences.retail_return_reason import RetailReturnReason
+from schemas.api.references.retail_card import RetailCard
+from schemas.api.references.retail_return_reason import RetailReturnReason
 
 
 # ==== Enums (работа только по строкам) ====

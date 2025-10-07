@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 from core.logger import setup_logger
 from schemas.api.base import APIBaseResponse
-from schemas.api.refrences.brand import Brand
+from schemas.api.references.brand import Brand
 
 logger = setup_logger("references.brand")
 
