@@ -53,7 +53,7 @@ class TelegramSettings(Enum):
 # Configuration for Telegram bot
 class TelegramBotConfig:
     BASE_URL = "https://api.telegram.org"
-    #WEBHOOK_BASE_URL = "https://dev-integration.regos.uz/external"
+    WEBHOOK_BASE_URL = "https://integration.regos.uz/external"
     DEFAULT_TIMEOUT = 10  # HTTP request timeout in seconds
     SETTINGS_TTL = settings.redis_cache_ttl  # Cache duration for settings
     BATCH_SIZE = 50  # Number of messages to process in one batch
