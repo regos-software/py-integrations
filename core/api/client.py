@@ -93,6 +93,7 @@ class APIClient:
             logger.exception(f"Непредвиденная ошибка при POST {url}: {e}")
             raise
 
+
     async def close(self):
         logger.debug("Закрытие httpx.AsyncClient")
         await self.client.aclose()  
