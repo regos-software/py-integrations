@@ -11,8 +11,8 @@ class Stock(BaseModel):
     Модель, описывающая склады.
     """
     id: int  # ID склада
-    name: str  # Наименование склада
-    address: str  # Адрес склада
+    name: Optional[str] = None  # Наименование склада
+    address: Optional[str] = None  # Адрес склада
     firm: Firm  # Предприятие
     area: Decimal  # Площадь
     description: Optional[str] = None  # Примечание

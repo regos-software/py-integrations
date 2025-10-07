@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     redis_password: str = "psw"
     redis_cache_ttl: int = 60
 
+    oauth_client_id: str = ""
+
     class Config:
         env_file = ".env"
 

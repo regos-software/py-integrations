@@ -1,0 +1,70 @@
+<h1>Новая операция</h1>
+
+<!-- Сканер -->
+<div class="row" style="margin:8px 0 10px;">
+  <button class="btn" id="btn-scan">Скан штрих-кода</button>
+  <input id="barcode" type="search" placeholder="или введите штрих-код и нажмите Enter" autocomplete="off" />
+</div>
+<div id="scanner" class="hidden" style="position:relative">
+  <video id="preview" playsinline style="width:100%;border-radius:12px;background:#000;aspect-ratio:16/9"></video>
+  <div style="position:absolute;inset:0;pointer-events:none;display:flex;align-items:center;justify-content:center;">
+    <div style="width:70%;height:30%;border:2px solid rgba(255,255,255,.9);border-radius:10px"></div>
+  </div>
+  <div class="row" style="margin-top:8px;">
+    <span class="muted">Наведи камеру на штрих-код</span>
+    <button class="btn secondary" id="btn-close-scan">Закрыть</button>
+  </div>
+</div>
+
+<!-- Поиск -->
+<label for="product-query">Поиск товара</label>
+<input id="product-query" type="search" placeholder="Наименование / артикул (Enter — искать)" autocomplete="off" />
+<!-- Результаты мы не показываем; используем контейнер только для статуса -->
+<div id="product-results" class="muted" style="margin-top:6px"></div>
+
+<!-- Выбранный товар -->
+<div id="product-picked" class="hidden" style="margin-top:10px">
+  <div class="item">
+    <div class="row">
+      <strong id="picked-name">—</strong>
+      <span class="muted" id="picked-code">—</span>
+    </div>
+  </div>
+</div>
+
+<!-- Ввод (каждое поле — отдельной строкой) -->
+<div style="margin-top:12px;display:grid;grid-template-columns:1fr;gap:10px">
+  <div>
+    <label for="qty">Количество <span class="muted">*</span></label>
+    <input id="qty" inputmode="decimal" placeholder="0" autocomplete="off" />
+    <div id="qty-quick" class="row" style="gap:6px;margin-top:6px">
+      <button class="btn secondary" data-inc="1">+1</button>
+      <button class="btn secondary" data-inc="5">+5</button>
+      <button class="btn secondary" data-inc="10">+10</button>
+      <button class="btn secondary" data-inc="50">+50</button>
+      <button class="btn secondary" data-inc="100">+100</button>
+    </div>
+  </div>
+
+  <div>
+    <label for="cost">Себестоимость <span class="muted">*</span></label>
+    <input id="cost" inputmode="decimal" placeholder="0.00" autocomplete="off" />
+    <div id="cost-suggest" style="margin-top:6px"></div>
+  </div>
+
+  <div>
+    <label for="price">Цена продажи</label>
+    <input id="price" inputmode="decimal" placeholder="0.00" autocomplete="off" />
+  </div>
+
+  <div>
+    <label for="description">Описание</label>
+    <input id="description" placeholder="Комментарий к операции (необяз.)" autocomplete="off" />
+  </div>
+</div>
+
+<!-- Действия -->
+<div class="row" style="margin-top:12px">
+  <button class="btn" id="btn-op-save">Сохранить</button>
+  <button class="btn secondary" id="btn-op-cancel">Отмена</button>
+</div>

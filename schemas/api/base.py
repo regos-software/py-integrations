@@ -1,19 +1,29 @@
-from typing import Optional, Union, List, Dict, Any
-from pydantic import BaseModel, Field
+# schemas/api/base.py
+from decimal import Decimal
+from typing import Optional, Any
+from pydantic import BaseModel, ConfigDict, Field
 
-
-class APIBaseResponse(BaseModel):
-    """
-    Универсальный ответ API REGOS.
-    """
-    ok: bool = Field(..., description="True/False – метка успешного ответа")
-    result: Optional[Union[Dict[str, Any], List[Dict[str, Any]]]] = Field(
-        None, description="Объект или массив объектов, возвращаемый сервером"
+class BaseSchema(BaseModel):
+    model_config = ConfigDict(
+        json_encoders={Decimal: float}
     )
 
-class APIErrorResult(BaseModel):
+class APIBaseResponse(BaseSchema):
     """
-    Модель описания ошибки в ответе сервера.
+    Универсальный ответ API REGOS.
+    Разные методы возвращают разные формы result (dict, list[dict], list[int], int, str ...),
+    поэтому здесь допускаем любой тип.
     """
-    error: int = Field(..., description="Код ошибки")
-    description: str = Field(..., description="Описание ошибки")
+    ok: bool = Field(..., description="True/False – метка успешного ответа")
+    result: Optional[Any] = Field(
+        default=None,
+        description="Данные ответа (могут быть dict, list[dict], list[int], и т.д.)"
+    )
+
+class APIErrorResult(BaseSchema):
+    error: int
+    description: str
+
+class ArrayResult(BaseSchema):
+    row_affected: int
+    ids: list[int]
