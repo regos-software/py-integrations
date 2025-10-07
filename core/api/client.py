@@ -1,3 +1,5 @@
+import gzip
+import json
 import httpx
 from typing import Any, Optional, Type, TypeVar
 from pydantic import BaseModel
