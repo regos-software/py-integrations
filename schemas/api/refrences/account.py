@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pydantic import BaseModel
-from schemas.api.references.currency import Currency
+from schemas.api.refrences.currency import Currency
 
 
 class Account(BaseModel):

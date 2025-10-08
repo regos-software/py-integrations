@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 from pydantic import BaseModel
-from schemas.api.references.currency import Currency
+from schemas.api.refrences.currency import Currency
 
 
 class AccountBalance(BaseModel):

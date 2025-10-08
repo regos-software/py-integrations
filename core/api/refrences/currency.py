@@ -5,7 +5,7 @@ from pydantic import BaseModel
 
 from core.logger import setup_logger
 from schemas.api.base import APIBaseResponse
-from schemas.api.references.currency import Currency
+from schemas.api.refrences.currency import Currency
 
 logger = setup_logger("references.currency")
 

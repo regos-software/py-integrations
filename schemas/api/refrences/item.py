@@ -3,7 +3,7 @@ from enum import Enum
 from typing import Optional
 from pydantic import BaseModel
 
-from schemas.api.references.unit import Unit
+from schemas.api.refrences.unit import Unit
 
 
 class ItemGroup(BaseModel):

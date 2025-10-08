@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import List, Optional
 from pydantic import BaseModel
 
-from schemas.api.references.payment_type import PaymentType
+from schemas.api.refrences.payment_type import PaymentType
 
 
 

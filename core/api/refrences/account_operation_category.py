@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 from core.logger import setup_logger
 from schemas.api.base import APIBaseResponse
-from schemas.api.references.account_operation_category import AccountOperationCategory
+from schemas.api.refrences.account_operation_category import AccountOperationCategory
 
 logger = setup_logger("references.account_operation_category")
 

@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 from core.logger import setup_logger
 from schemas.api.base import APIBaseResponse
-from schemas.api.references.color import Color
+from schemas.api.refrences.color import Color
 
 logger = setup_logger("references.color")
 
