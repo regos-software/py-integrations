@@ -1,6 +1,6 @@
 from __future__ import annotations
 from enum import Enum
-from typing import Optional, List
+from typing import Any, Dict, Optional, List
 from decimal import Decimal
 from pydantic import BaseModel, Field
 
@@ -163,3 +163,33 @@ class ItemExt(BaseModel):
     price: Optional[Decimal] = None
     last_purchase_cost: Optional[Decimal] = None
     image_url: Optional[str] = None
+
+class ItemImportData(BaseModel):
+    index: Optional[str] = None
+    name: str
+    fullname: Optional[str] = None
+    code: Optional[str] = None
+    articul: Optional[str] = None
+    group_path: Optional[str] = None
+    barcodes: Optional[str] = None
+    color_name: Optional[str] = None
+    brand_name: Optional[str] = None
+    producer_name: Optional[str] = None
+    size_name: Optional[str] = None
+    unit_name: Optional[str] = None
+    department_name: Optional[str] = None
+    description: Optional[str] = None
+    vat_name: Optional[str] = None
+    icps: Optional[str] = None
+    labeled: Optional[int] = None
+    package_code: Optional[int] = None
+    parent_code: Optional[int] = None
+
+class ItemImportRequest(BaseModel):
+    comparation_value: Optional[str] = None
+    group_separator: Optional[str] = None
+    barcode_separator: Optional[str] = None
+    group_id: Optional[int] = None
+    unit_id: Optional[int] = None
+    vat_value_id: Optional[int] = None
+    data: Optional[List[Dict[str, Any]]] = None

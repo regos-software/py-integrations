@@ -1,7 +1,7 @@
 // sw.js
-const VERSION = '2025-10-06';
-const PRECACHE = `tsd-precache-v3-${VERSION}`;
-const RUNTIME  = `tsd-runtime-v3-${VERSION}`;
+const VERSION = '2025-10-08-react';
+const PRECACHE = `tsd-precache-v4-${VERSION}`;
+const RUNTIME  = `tsd-runtime-v4-${VERSION}`;
 
 // Важно: у вас в HTML ресурсы идут с query (?assets=..., ?pwa=manifest)
 // поэтому именно их и кладём в предкэш относительно scope SW.
@@ -12,7 +12,10 @@ const PRECACHE_URLS = [
   '?assets=app.css',
   '?assets=app.js',
   '?assets=icon-192.png',
-  '?assets=icon-512.png'
+  '?assets=icon-512.png',
+  '?assets=i18n/ru.json',
+  '?assets=i18n/en.json',
+  '?assets=i18n/uz.json'
 ];
 
 // ---------- install ----------
