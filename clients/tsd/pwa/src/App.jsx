@@ -1,13 +1,13 @@
-import React from 'react';
-import { HashRouter, Routes, Route, Navigate } from 'react-router-dom';
-import AppLayout from './components/AppLayout.jsx';
-import HomePage from './pages/HomePage.jsx';
-import DocsPage from './pages/DocsPage.jsx';
-import DocPage from './pages/DocPage.jsx';
-import OpNewPage from './pages/OpNewPage.jsx';
-import { AppProvider } from './context/AppContext.jsx';
-import { I18nProvider } from './context/I18nContext.jsx';
-import { ToastProvider } from './context/ToastContext.jsx';
+import React from "react";
+import { HashRouter, Routes, Route, Navigate } from "react-router-dom";
+import AppLayout from "./components/AppLayout.jsx";
+import HomePage from "./pages/HomePage.jsx";
+import DocsPage from "./pages/DocsPage.jsx";
+import DocPage from "./pages/DocPage.jsx";
+import OpNewPage from "./pages/OpNewPage.jsx";
+import { AppProvider } from "./context/AppContext.jsx";
+import { I18nProvider } from "./context/I18nContext.jsx";
+import { ToastProvider } from "./context/ToastContext.jsx";
 
 function Router() {
   return (

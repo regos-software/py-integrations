@@ -1083,7 +1083,7 @@ var require_react_development = __commonJS({
           }
           return dispatcher.useContext(Context);
         }
-        function useState10(initialState) {
+        function useState11(initialState) {
           var dispatcher = resolveDispatcher();
           return dispatcher.useState(initialState);
         }
@@ -1095,7 +1095,7 @@ var require_react_development = __commonJS({
           var dispatcher = resolveDispatcher();
           return dispatcher.useRef(initialValue);
         }
-        function useEffect12(create, deps) {
+        function useEffect13(create, deps) {
           var dispatcher = resolveDispatcher();
           return dispatcher.useEffect(create, deps);
         }
@@ -1878,7 +1878,7 @@ var require_react_development = __commonJS({
         exports.useContext = useContext4;
         exports.useDebugValue = useDebugValue;
         exports.useDeferredValue = useDeferredValue;
-        exports.useEffect = useEffect12;
+        exports.useEffect = useEffect13;
         exports.useId = useId;
         exports.useImperativeHandle = useImperativeHandle;
         exports.useInsertionEffect = useInsertionEffect;
@@ -1886,7 +1886,7 @@ var require_react_development = __commonJS({
         exports.useMemo = useMemo9;
         exports.useReducer = useReducer;
         exports.useRef = useRef4;
-        exports.useState = useState10;
+        exports.useState = useState11;
         exports.useSyncExternalStore = useSyncExternalStore;
         exports.useTransition = useTransition;
         exports.version = ReactVersion;
@@ -24428,11 +24428,11 @@ var require_jsx_runtime = __commonJS({
 });
 
 // src/main.jsx
-var import_react14 = __toESM(require_react(), 1);
+var import_react15 = __toESM(require_react(), 1);
 var import_client = __toESM(require_client(), 1);
 
 // src/App.jsx
-var import_react13 = __toESM(require_react(), 1);
+var import_react14 = __toESM(require_react(), 1);
 
 // node_modules/react-router-dom/dist/index.js
 var React2 = __toESM(require_react());
@@ -26608,18 +26608,21 @@ function setAppTitle(text) {
   }
 }
 function AppProvider({ children }) {
-  const value = (0, import_react.useMemo)(() => ({
-    ci: CI,
-    api,
-    assetUrl,
-    registerSW,
-    fmtMoney,
-    fmtNum,
-    toNumber,
-    unixToLocal,
-    esc,
-    setAppTitle
-  }), []);
+  const value = (0, import_react.useMemo)(
+    () => ({
+      ci: CI,
+      api,
+      assetUrl,
+      registerSW,
+      fmtMoney,
+      fmtNum,
+      toNumber,
+      unixToLocal,
+      esc,
+      setAppTitle
+    }),
+    []
+  );
   (0, import_react.useEffect)(() => {
     window.__CI__ = CI;
   }, []);
@@ -26641,7 +26644,9 @@ var STORAGE_KEY = "tsd_locale";
 function normLocale(locale) {
   if (!locale) return "ru";
   const lower = String(locale).toLowerCase();
-  const direct = SUPPORTED.find((lang) => lower === lang || lower.startsWith(`${lang}-`));
+  const direct = SUPPORTED.find(
+    (lang) => lower === lang || lower.startsWith(`${lang}-`)
+  );
   return direct || "ru";
 }
 function resolveInitialLocale() {
@@ -26675,58 +26680,72 @@ function I18nProvider({ children }) {
   const [locale, setLocale] = (0, import_react2.useState)(() => resolveInitialLocale());
   const [messages, setMessages] = (0, import_react2.useState)({});
   const [ready, setReady] = (0, import_react2.useState)(false);
-  const load = (0, import_react2.useCallback)(async (lc) => {
-    const normalized = normLocale(lc);
-    const loaded = await fetchMessages(assetUrl2, normalized);
-    setMessages(loaded);
-    setLocale(normalized);
-    document.documentElement.lang = normalized;
-    window.localStorage.setItem(STORAGE_KEY, normalized);
-    const title = loaded["app.title"] || "TSD";
-    setAppTitle2(title);
-    document.dispatchEvent(new CustomEvent("i18n:change"));
-  }, [assetUrl2, setAppTitle2]);
+  const load = (0, import_react2.useCallback)(
+    async (lc) => {
+      const normalized = normLocale(lc);
+      const loaded = await fetchMessages(assetUrl2, normalized);
+      setMessages(loaded);
+      setLocale(normalized);
+      document.documentElement.lang = normalized;
+      window.localStorage.setItem(STORAGE_KEY, normalized);
+      const title = loaded["app.title"] || "TSD";
+      setAppTitle2(title);
+      document.dispatchEvent(new CustomEvent("i18n:change"));
+    },
+    [assetUrl2, setAppTitle2]
+  );
   (0, import_react2.useEffect)(() => {
     load(locale).finally(() => setReady(true));
   }, []);
-  const translate = (0, import_react2.useCallback)((key, vars) => {
-    const template = messages[key];
-    if (!template) return key;
-    if (!vars) return template;
-    return Object.entries(vars).reduce(
-      (acc, [k, v]) => acc.replaceAll(`{${k}}`, String(v)),
-      template
-    );
-  }, [messages]);
-  const fmt = (0, import_react2.useMemo)(() => ({
-    money(value2, currency = "UZS") {
-      return new Intl.NumberFormat(locale, {
-        style: "currency",
-        currency,
-        maximumFractionDigits: 2,
-        minimumFractionDigits: 2
-      }).format(Number(value2 || 0));
+  const translate = (0, import_react2.useCallback)(
+    (key, vars) => {
+      const template = messages[key];
+      if (!template) return key;
+      if (!vars) return template;
+      return Object.entries(vars).reduce(
+        (acc, [k, v]) => acc.replaceAll(`{${k}}`, String(v)),
+        template
+      );
     },
-    number(value2, options = {}) {
-      return new Intl.NumberFormat(locale, options).format(Number(value2 || 0));
-    },
-    unix(ts) {
-      if (!ts) return "";
-      return new Intl.DateTimeFormat(locale, {
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-        hour: "2-digit",
-        minute: "2-digit"
-      }).format(new Date(Number(ts) * 1e3));
-    }
-  }), [locale]);
-  const value = (0, import_react2.useMemo)(() => ({
-    locale,
-    t: translate,
-    setLocale: load,
-    fmt
-  }), [fmt, load, locale, translate]);
+    [messages]
+  );
+  const fmt = (0, import_react2.useMemo)(
+    () => ({
+      money(value2, currency = "UZS") {
+        return new Intl.NumberFormat(locale, {
+          style: "currency",
+          currency,
+          maximumFractionDigits: 2,
+          minimumFractionDigits: 2
+        }).format(Number(value2 || 0));
+      },
+      number(value2, options = {}) {
+        return new Intl.NumberFormat(locale, options).format(
+          Number(value2 || 0)
+        );
+      },
+      unix(ts) {
+        if (!ts) return "";
+        return new Intl.DateTimeFormat(locale, {
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit"
+        }).format(new Date(Number(ts) * 1e3));
+      }
+    }),
+    [locale]
+  );
+  const value = (0, import_react2.useMemo)(
+    () => ({
+      locale,
+      t: translate,
+      setLocale: load,
+      fmt
+    }),
+    [fmt, load, locale, translate]
+  );
   if (!ready) {
     return null;
   }
@@ -26745,7 +26764,9 @@ var import_react3 = __toESM(require_react(), 1);
 var import_jsx_runtime3 = __toESM(require_jsx_runtime(), 1);
 function formatTime(date) {
   const pad = (n) => String(n).padStart(2, "0");
-  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(
+    date.getSeconds()
+  )}`;
 }
 function Clock() {
   const [time, setTime] = (0, import_react3.useState)(() => formatTime(/* @__PURE__ */ new Date()));
@@ -26866,13 +26887,7 @@ function AppLayout() {
   }, [registerSW2]);
   const showBack = location.pathname !== "/home";
   const handleBack = () => {
-    if (window.history.length > 1) {
-      navigate(-1);
-    } else if (location.pathname.startsWith("/doc")) {
-      navigate("/docs", { replace: true });
-    } else {
-      navigate("/home", { replace: true });
-    }
+    navigate(-1);
   };
   const backLabelRaw = t("nav.back");
   const backLabel = backLabelRaw === "nav.back" ? "\u041D\u0430\u0437\u0430\u0434" : backLabelRaw;
@@ -26915,11 +26930,16 @@ function ToastProvider({ children }) {
     setToast({ message, type });
     if (duration > 0) {
       window.setTimeout(() => {
-        setToast((current) => current && current.message === message ? null : current);
+        setToast(
+          (current) => current && current.message === message ? null : current
+        );
       }, duration);
     }
   }, []);
-  const value = (0, import_react8.useMemo)(() => ({ showToast, hideToast }), [showToast, hideToast]);
+  const value = (0, import_react8.useMemo)(
+    () => ({ showToast, hideToast }),
+    [showToast, hideToast]
+  );
   return /* @__PURE__ */ (0, import_jsx_runtime8.jsxs)(ToastContext.Provider, { value, children: [
     children,
     /* @__PURE__ */ (0, import_jsx_runtime8.jsx)(
@@ -27001,7 +27021,24 @@ function HomePage() {
 }
 
 // src/pages/DocsPage.jsx
+var import_react11 = __toESM(require_react(), 1);
+
+// src/hooks/useDebouncedValue.js
 var import_react10 = __toESM(require_react(), 1);
+function useDebouncedValue(value, delay = 300) {
+  const [debouncedValue, setDebouncedValue] = (0, import_react10.useState)(value);
+  (0, import_react10.useEffect)(() => {
+    const timeoutId = window.setTimeout(() => {
+      setDebouncedValue(value);
+    }, delay);
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [value, delay]);
+  return debouncedValue;
+}
+
+// src/pages/DocsPage.jsx
 var import_jsx_runtime10 = __toESM(require_jsx_runtime(), 1);
 var PAGE_SIZE = 20;
 function DocsPage() {
@@ -27009,47 +27046,57 @@ function DocsPage() {
   const { t, locale } = useI18n();
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
-  const page = Math.max(1, Number.parseInt(searchParams.get("page") || "1", 10) || 1);
+  const page = Math.max(
+    1,
+    Number.parseInt(searchParams.get("page") || "1", 10) || 1
+  );
   const query = searchParams.get("q") || "";
-  const [inputValue, setInputValue] = (0, import_react10.useState)(query);
-  const [items, setItems] = (0, import_react10.useState)([]);
-  const [totalPages, setTotalPages] = (0, import_react10.useState)(page);
-  const [loading, setLoading] = (0, import_react10.useState)(false);
-  const [error, setError] = (0, import_react10.useState)(null);
-  (0, import_react10.useEffect)(() => {
+  const [inputValue, setInputValue] = (0, import_react11.useState)(query);
+  const [items, setItems] = (0, import_react11.useState)([]);
+  const [totalPages, setTotalPages] = (0, import_react11.useState)(page);
+  const [loading, setLoading] = (0, import_react11.useState)(false);
+  const [error, setError] = (0, import_react11.useState)(null);
+  const debouncedSearch = useDebouncedValue(inputValue);
+  (0, import_react11.useEffect)(() => {
     setInputValue(query);
   }, [query]);
-  (0, import_react10.useEffect)(() => {
+  (0, import_react11.useEffect)(() => {
     const title = t("docs.title") || "\u0414\u043E\u043A\u0443\u043C\u0435\u043D\u0442\u044B \u0437\u0430\u043A\u0443\u043F\u043A\u0438";
     setAppTitle2(`${t("app.title") || "TSD"} \u2022 ${title}`);
   }, [locale, setAppTitle2, t]);
-  const fetchDocs = (0, import_react10.useCallback)(async () => {
+  const fetchDocs = (0, import_react11.useCallback)(async () => {
     setLoading(true);
     setError(null);
     try {
       const { data } = await api2("purchase_list", {
         page,
         page_size: PAGE_SIZE,
-        query
+        query: debouncedSearch
       });
       const received = data?.result?.items || [];
+      const total = data?.result?.total || 0;
       setItems(received);
-      const hasMore = received.length === PAGE_SIZE;
-      setTotalPages(hasMore ? page + 1 : page);
+      setTotalPages(total > 0 ? Math.ceil(total / PAGE_SIZE) : page);
     } catch (err) {
       setError(err);
       setItems([]);
     } finally {
       setLoading(false);
     }
-  }, [api2, page, query]);
-  (0, import_react10.useEffect)(() => {
+  }, [api2, page, debouncedSearch]);
+  (0, import_react11.useEffect)(() => {
+    console.log("helo");
     fetchDocs();
   }, [fetchDocs]);
+  (0, import_react11.useEffect)(() => {
+    const trimmed = debouncedSearch.trim();
+    if (trimmed === query) return;
+    updateSearchParams(1, trimmed);
+  }, [debouncedSearch, query]);
   const updateSearchParams = (nextPage, nextQuery = query) => {
     const params = new URLSearchParams();
     if (nextPage > 1) params.set("page", String(nextPage));
-    if (nextQuery) params.set("q", nextQuery);
+    params.set("q", nextQuery);
     setSearchParams(params);
   };
   const handleSearchSubmit = (event) => {
@@ -27062,22 +27109,30 @@ function DocsPage() {
   const handleNext = () => {
     if (page < totalPages) updateSearchParams(page + 1, query);
   };
-  const statusLabel = (0, import_react10.useCallback)((doc) => {
-    const normalize = (key, fallback) => {
-      const value = t(key);
-      return value === key ? fallback : value;
-    };
-    const parts = [];
-    parts.push(doc.performed ? normalize("docs.status.performed", "\u043F\u0440\u043E\u0432\u0435\u0434\u0451\u043D") : normalize("docs.status.new", "\u043D\u043E\u0432\u044B\u0439"));
-    if (doc.blocked) parts.push(normalize("docs.status.blocked", "\u0431\u043B\u043E\u043A."));
-    return parts.filter(Boolean).join(" \u2022 ");
-  }, [t]);
-  const nothingLabel = (0, import_react10.useMemo)(() => t("common.nothing") || "\u041D\u0438\u0447\u0435\u0433\u043E \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u043E", [t]);
-  const backLabel = (0, import_react10.useMemo)(() => {
+  const statusLabel = (0, import_react11.useCallback)(
+    (doc) => {
+      const normalize = (key, fallback) => {
+        const value = t(key);
+        return value === key ? fallback : value;
+      };
+      const parts = [];
+      parts.push(
+        doc.performed ? normalize("docs.status.performed", "\u043F\u0440\u043E\u0432\u0435\u0434\u0451\u043D") : normalize("docs.status.new", "\u043D\u043E\u0432\u044B\u0439")
+      );
+      if (doc.blocked) parts.push(normalize("docs.status.blocked", "\u0431\u043B\u043E\u043A."));
+      return parts.filter(Boolean).join(" \u2022 ");
+    },
+    [t]
+  );
+  const nothingLabel = (0, import_react11.useMemo)(
+    () => t("common.nothing") || "\u041D\u0438\u0447\u0435\u0433\u043E \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u043E",
+    [t]
+  );
+  const backLabel = (0, import_react11.useMemo)(() => {
     const value = t("nav.back");
     return value === "nav.back" ? "\u041D\u0430\u0437\u0430\u0434" : value;
   }, [t]);
-  const nextLabel = (0, import_react10.useMemo)(() => {
+  const nextLabel = (0, import_react11.useMemo)(() => {
     const value = t("nav.next");
     return value === "nav.next" ? "\u0412\u043F\u0435\u0440\u0451\u0434" : value;
   }, [t]);
@@ -27114,8 +27169,28 @@ function DocsPage() {
         totalPages
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { className: "cluster", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("button", { id: "prev-page", type: "button", className: "btn small ghost", onClick: handlePrev, disabled: page <= 1, children: backLabel }),
-        /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("button", { id: "next-page", type: "button", className: "btn small ghost", onClick: handleNext, disabled: page >= totalPages, children: nextLabel })
+        /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(
+          "button",
+          {
+            id: "prev-page",
+            type: "button",
+            className: "btn small ghost",
+            onClick: handlePrev,
+            disabled: page <= 1,
+            children: backLabel
+          }
+        ),
+        /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(
+          "button",
+          {
+            id: "next-page",
+            type: "button",
+            className: "btn small ghost",
+            onClick: handleNext,
+            disabled: page >= totalPages,
+            children: nextLabel
+          }
+        )
       ] })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { id: "docs-list", className: "list", "aria-live": "polite", children: [
@@ -27146,20 +27221,20 @@ function DocsPage() {
 }
 
 // src/pages/DocPage.jsx
-var import_react11 = __toESM(require_react(), 1);
+var import_react12 = __toESM(require_react(), 1);
 var import_jsx_runtime11 = __toESM(require_jsx_runtime(), 1);
 function OperationRow({ op, onDelete, onSave }) {
   const { t, fmt } = useI18n();
   const { toNumber: toNumber2 } = useApp();
-  const [editing, setEditing] = (0, import_react11.useState)(false);
-  const [form, setForm] = (0, import_react11.useState)({
+  const [editing, setEditing] = (0, import_react12.useState)(false);
+  const [form, setForm] = (0, import_react12.useState)({
     quantity: op.quantity,
     cost: op.cost,
     price: op.price ?? "",
     description: op.description ?? ""
   });
-  const [saving, setSaving] = (0, import_react11.useState)(false);
-  (0, import_react11.useEffect)(() => {
+  const [saving, setSaving] = (0, import_react12.useState)(false);
+  (0, import_react12.useEffect)(() => {
     setForm({
       quantity: op.quantity,
       cost: op.cost,
@@ -27328,11 +27403,11 @@ function DocPage() {
   const { t, locale, fmt } = useI18n();
   const { showToast } = useToast();
   const navigate = useNavigate();
-  const [doc, setDoc] = (0, import_react11.useState)(null);
-  const [operations, setOperations] = (0, import_react11.useState)([]);
-  const [loading, setLoading] = (0, import_react11.useState)(true);
-  const [error, setError] = (0, import_react11.useState)(null);
-  (0, import_react11.useEffect)(() => {
+  const [doc, setDoc] = (0, import_react12.useState)(null);
+  const [operations, setOperations] = (0, import_react12.useState)([]);
+  const [loading, setLoading] = (0, import_react12.useState)(true);
+  const [error, setError] = (0, import_react12.useState)(null);
+  (0, import_react12.useEffect)(() => {
     let cancelled = false;
     async function fetchDoc() {
       setLoading(true);
@@ -27366,7 +27441,7 @@ function DocPage() {
       cancelled = true;
     };
   }, [api2, id]);
-  (0, import_react11.useEffect)(() => {
+  (0, import_react12.useEffect)(() => {
     const prefix = t("doc.title_prefix") || "\u0414\u043E\u043A\u0443\u043C\u0435\u043D\u0442";
     const code = doc?.code || id;
     setAppTitle2(`${prefix} ${code}`);
@@ -27375,44 +27450,60 @@ function DocPage() {
     const question = t("confirm.delete_op") || "\u0423\u0434\u0430\u043B\u0438\u0442\u044C \u043E\u043F\u0435\u0440\u0430\u0446\u0438\u044E?";
     if (!window.confirm(question)) return;
     try {
-      const { ok, data } = await api2("purchase_ops_delete", { items: [{ id: opId }] });
+      const { ok, data } = await api2("purchase_ops_delete", {
+        items: [{ id: opId }]
+      });
       const affected = data?.result?.row_affected || 0;
       if (ok && affected > 0) {
         setOperations((prev) => prev.filter((op) => op.id !== opId));
-        showToast(t("toast.op_deleted") || "\u041E\u043F\u0435\u0440\u0430\u0446\u0438\u044F \u0443\u0434\u0430\u043B\u0435\u043D\u0430", { type: "success" });
+        showToast(t("toast.op_deleted") || "\u041E\u043F\u0435\u0440\u0430\u0446\u0438\u044F \u0443\u0434\u0430\u043B\u0435\u043D\u0430", {
+          type: "success"
+        });
       } else {
         throw new Error(data?.description || "Delete failed");
       }
     } catch (err) {
-      showToast(err.message || "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0443\u0434\u0430\u043B\u0438\u0442\u044C \u043E\u043F\u0435\u0440\u0430\u0446\u0438\u044E", { type: "error", duration: 2400 });
+      showToast(err.message || "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0443\u0434\u0430\u043B\u0438\u0442\u044C \u043E\u043F\u0435\u0440\u0430\u0446\u0438\u044E", {
+        type: "error",
+        duration: 2400
+      });
     }
   };
   const handleSave = async (opId, payload) => {
     try {
-      const { ok, data } = await api2("purchase_ops_edit", { items: [{ id: opId, ...payload }] });
+      const { ok, data } = await api2("purchase_ops_edit", {
+        items: [{ id: opId, ...payload }]
+      });
       const affected = data?.result?.row_affected || 0;
       if (ok && affected > 0) {
-        setOperations((prev) => prev.map((op) => {
-          if (op.id !== opId) return op;
-          const next = { ...op, ...payload };
-          if (!Object.prototype.hasOwnProperty.call(payload, "price")) {
-            next.price = op.price;
-          }
-          if (!Object.prototype.hasOwnProperty.call(payload, "description")) {
-            next.description = op.description;
-          }
-          return next;
-        }));
-        showToast(t("toast.op_updated") || "\u041E\u043F\u0435\u0440\u0430\u0446\u0438\u044F \u0441\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u0430", { type: "success" });
+        setOperations(
+          (prev) => prev.map((op) => {
+            if (op.id !== opId) return op;
+            const next = { ...op, ...payload };
+            if (!Object.prototype.hasOwnProperty.call(payload, "price")) {
+              next.price = op.price;
+            }
+            if (!Object.prototype.hasOwnProperty.call(payload, "description")) {
+              next.description = op.description;
+            }
+            return next;
+          })
+        );
+        showToast(t("toast.op_updated") || "\u041E\u043F\u0435\u0440\u0430\u0446\u0438\u044F \u0441\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u0430", {
+          type: "success"
+        });
         return true;
       }
       throw new Error(data?.description || "Save failed");
     } catch (err) {
-      showToast(err.message || "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0441\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C \u043E\u043F\u0435\u0440\u0430\u0446\u0438\u044E", { type: "error", duration: 2400 });
+      showToast(err.message || "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0441\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C \u043E\u043F\u0435\u0440\u0430\u0446\u0438\u044E", {
+        type: "error",
+        duration: 2400
+      });
       return false;
     }
   };
-  const status = (0, import_react11.useMemo)(() => {
+  const status = (0, import_react12.useMemo)(() => {
     if (!doc) return "";
     const segments = [];
     const performed = t("docs.status.performed");
@@ -27462,12 +27553,20 @@ function DocPage() {
         }
       )
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { id: "ops-list", className: "list", "aria-live": "polite", children: operations.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "muted", children: t("doc.no_ops") || t("common.nothing") || "\u041E\u043F\u0435\u0440\u0430\u0446\u0438\u0439 \u0435\u0449\u0451 \u043D\u0435\u0442" }) : operations.map((operation) => /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(OperationRow, { op: operation, onDelete: handleDelete, onSave: handleSave }, operation.id)) })
+    /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { id: "ops-list", className: "list", "aria-live": "polite", children: operations.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "muted", children: t("doc.no_ops") || t("common.nothing") || "\u041E\u043F\u0435\u0440\u0430\u0446\u0438\u0439 \u0435\u0449\u0451 \u043D\u0435\u0442" }) : operations.map((operation) => /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
+      OperationRow,
+      {
+        op: operation,
+        onDelete: handleDelete,
+        onSave: handleSave
+      },
+      operation.id
+    )) })
   ] });
 }
 
 // src/pages/OpNewPage.jsx
-var import_react12 = __toESM(require_react(), 1);
+var import_react13 = __toESM(require_react(), 1);
 
 // node_modules/ts-custom-error/dist/custom-error.mjs
 function fixProto(target, prototype) {
@@ -59530,25 +59629,25 @@ function OpNewPage() {
   const { api: api2, toNumber: toNumber2, setAppTitle: setAppTitle2 } = useApp();
   const { t, fmt, locale } = useI18n();
   const { showToast } = useToast();
-  const [docCtx, setDocCtx] = (0, import_react12.useState)({ price_type_id: null, stock_id: null });
-  const [barcodeValue, setBarcodeValue] = (0, import_react12.useState)("");
-  const [queryValue, setQueryValue] = (0, import_react12.useState)("");
-  const [quantity, setQuantity] = (0, import_react12.useState)("");
-  const [cost, setCost] = (0, import_react12.useState)("");
-  const [price, setPrice] = (0, import_react12.useState)("");
-  const [description, setDescription] = (0, import_react12.useState)("");
-  const [searchStatus, setSearchStatus] = (0, import_react12.useState)("idle");
-  const [picked, setPicked] = (0, import_react12.useState)(null);
-  const [saving, setSaving] = (0, import_react12.useState)(false);
-  const [scanning, setScanning] = (0, import_react12.useState)(false);
-  const [currentDeviceId, setCurrentDeviceId] = (0, import_react12.useState)(null);
-  const videoRef = (0, import_react12.useRef)(null);
-  const readerRef = (0, import_react12.useRef)(null);
-  const controlsRef = (0, import_react12.useRef)(null);
-  (0, import_react12.useEffect)(() => {
+  const [docCtx, setDocCtx] = (0, import_react13.useState)({ price_type_id: null, stock_id: null });
+  const [barcodeValue, setBarcodeValue] = (0, import_react13.useState)("");
+  const [queryValue, setQueryValue] = (0, import_react13.useState)("");
+  const [quantity, setQuantity] = (0, import_react13.useState)("");
+  const [cost, setCost] = (0, import_react13.useState)("");
+  const [price, setPrice] = (0, import_react13.useState)("");
+  const [description, setDescription] = (0, import_react13.useState)("");
+  const [searchStatus, setSearchStatus] = (0, import_react13.useState)("idle");
+  const [picked, setPicked] = (0, import_react13.useState)(null);
+  const [saving, setSaving] = (0, import_react13.useState)(false);
+  const [scanning, setScanning] = (0, import_react13.useState)(false);
+  const [currentDeviceId, setCurrentDeviceId] = (0, import_react13.useState)(null);
+  const videoRef = (0, import_react13.useRef)(null);
+  const readerRef = (0, import_react13.useRef)(null);
+  const controlsRef = (0, import_react13.useRef)(null);
+  (0, import_react13.useEffect)(() => {
     setAppTitle2(t("op.title") || "\u041D\u043E\u0432\u0430\u044F \u043E\u043F\u0435\u0440\u0430\u0446\u0438\u044F");
   }, [locale, setAppTitle2, t]);
-  (0, import_react12.useEffect)(() => {
+  (0, import_react13.useEffect)(() => {
     async function loadDocMeta() {
       try {
         const { data } = await api2("purchase_get", { doc_id: docId });
@@ -59563,44 +59662,48 @@ function OpNewPage() {
     }
     loadDocMeta();
   }, [api2, docId]);
-  const runSearch = (0, import_react12.useCallback)(async (value) => {
-    const queryText = value?.trim();
-    if (!queryText) return;
-    setSearchStatus("loading");
-    try {
-      const payload = { q: queryText, doc_id: docId };
-      if (docCtx.price_type_id != null) payload.price_type_id = Number(docCtx.price_type_id);
-      if (docCtx.stock_id != null) payload.stock_id = Number(docCtx.stock_id);
-      const { data } = await api2("product_search", payload);
-      const items = data?.result?.items || [];
-      if (!items.length) {
+  const runSearch = (0, import_react13.useCallback)(
+    async (value) => {
+      const queryText = value?.trim();
+      if (!queryText) return;
+      setSearchStatus("loading");
+      try {
+        const payload = { q: queryText, doc_id: docId };
+        if (docCtx.price_type_id != null)
+          payload.price_type_id = Number(docCtx.price_type_id);
+        if (docCtx.stock_id != null) payload.stock_id = Number(docCtx.stock_id);
+        const { data } = await api2("product_search", payload);
+        const items = data?.result?.items || [];
+        if (!items.length) {
+          setPicked(null);
+          setSearchStatus("empty");
+          return;
+        }
+        const ext = items[0];
+        const core = ext?.item || {};
+        setPicked({
+          id: Number(core.id ?? core.code),
+          name: core.name || "\u2014",
+          barcode: firstBarcode(core),
+          vat_value: Number(core?.vat?.value ?? 0),
+          last_purchase_cost: ext?.last_purchase_cost ?? null,
+          price: ext?.price != null ? Number(ext.price) : null,
+          quantity_common: ext?.quantity?.common ?? null,
+          unit: core?.unit?.name || "\u0448\u0442"
+        });
+        setSearchStatus("done");
+        window.setTimeout(() => {
+          document.getElementById("qty")?.focus();
+        }, 0);
+      } catch (err) {
+        console.warn("[search] error", err);
         setPicked(null);
-        setSearchStatus("empty");
-        return;
+        setSearchStatus("error");
       }
-      const ext = items[0];
-      const core = ext?.item || {};
-      setPicked({
-        id: Number(core.id ?? core.code),
-        name: core.name || "\u2014",
-        barcode: firstBarcode(core),
-        vat_value: Number(core?.vat?.value ?? 0),
-        last_purchase_cost: ext?.last_purchase_cost ?? null,
-        price: ext?.price != null ? Number(ext.price) : null,
-        quantity_common: ext?.quantity?.common ?? null,
-        unit: core?.unit?.name || "\u0448\u0442"
-      });
-      setSearchStatus("done");
-      window.setTimeout(() => {
-        document.getElementById("qty")?.focus();
-      }, 0);
-    } catch (err) {
-      console.warn("[search] error", err);
-      setPicked(null);
-      setSearchStatus("error");
-    }
-  }, [api2, docCtx.price_type_id, docCtx.stock_id, docId]);
-  const ensureReader = (0, import_react12.useCallback)(async () => {
+    },
+    [api2, docCtx.price_type_id, docCtx.stock_id, docId]
+  );
+  const ensureReader = (0, import_react13.useCallback)(async () => {
     if (readerRef.current) return readerRef.current;
     const hints = /* @__PURE__ */ new Map();
     readerRef.current = new BrowserMultiFormatReader2(hints, {
@@ -59608,7 +59711,7 @@ function OpNewPage() {
     });
     return readerRef.current;
   }, []);
-  const stopScan = (0, import_react12.useCallback)(() => {
+  const stopScan = (0, import_react13.useCallback)(() => {
     setScanning(false);
     try {
       controlsRef.current?.stop?.();
@@ -59633,7 +59736,7 @@ function OpNewPage() {
       }
     }
   }, []);
-  (0, import_react12.useEffect)(() => {
+  (0, import_react13.useEffect)(() => {
     const visibilityHandler = () => {
       if (document.hidden) stopScan();
     };
@@ -59645,65 +59748,81 @@ function OpNewPage() {
       stopScan();
     };
   }, [stopScan]);
-  (0, import_react12.useEffect)(() => {
+  (0, import_react13.useEffect)(() => {
     document.getElementById("barcode")?.focus();
   }, []);
-  const startScan = (0, import_react12.useCallback)(async () => {
+  const startScan = (0, import_react13.useCallback)(async () => {
     if (window.location.protocol !== "https:" && window.location.hostname !== "localhost") {
-      showToast(t("camera_open_failed") || "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043E\u0442\u043A\u0440\u044B\u0442\u044C \u043A\u0430\u043C\u0435\u0440\u0443", { type: "error" });
+      showToast(t("camera_open_failed") || "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043E\u0442\u043A\u0440\u044B\u0442\u044C \u043A\u0430\u043C\u0435\u0440\u0443", {
+        type: "error"
+      });
       return;
     }
     try {
       const reader = await ensureReader();
       const devices = await listVideoDevices(reader);
       if (!devices.length) {
-        showToast(t("camera_open_failed") || "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043E\u0442\u043A\u0440\u044B\u0442\u044C \u043A\u0430\u043C\u0435\u0440\u0443", { type: "error" });
+        showToast(t("camera_open_failed") || "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043E\u0442\u043A\u0440\u044B\u0442\u044C \u043A\u0430\u043C\u0435\u0440\u0443", {
+          type: "error"
+        });
         return;
       }
       const selectedDeviceId = currentDeviceId || pickCamera(devices) || devices[0].deviceId;
       setCurrentDeviceId(selectedDeviceId);
-      const controls = await reader.decodeFromVideoDevice(selectedDeviceId, videoRef.current, (result, err) => {
-        if (result?.text) {
-          const code = result.text;
-          setBarcodeValue(code);
-          setQueryValue(code);
-          stopScan();
-          runSearch(code);
-          try {
-            navigator.vibrate?.(35);
-          } catch {
+      const controls = await reader.decodeFromVideoDevice(
+        selectedDeviceId,
+        videoRef.current,
+        (result, err) => {
+          if (result?.text) {
+            const code = result.text;
+            setBarcodeValue(code);
+            setQueryValue(code);
+            stopScan();
+            runSearch(code);
+            try {
+              navigator.vibrate?.(35);
+            } catch {
+            }
+          } else if (err && err.name !== "NotFoundException") {
+            console.debug("[ZXing]", err?.name || err);
           }
-        } else if (err && err.name !== "NotFoundException") {
-          console.debug("[ZXing]", err?.name || err);
         }
-      });
+      );
       controlsRef.current = controls;
       setScanning(true);
     } catch (err) {
       console.error("[scan] start error", err);
-      showToast(t("camera_open_failed") || "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043E\u0442\u043A\u0440\u044B\u0442\u044C \u043A\u0430\u043C\u0435\u0440\u0443", { type: "error" });
+      showToast(t("camera_open_failed") || "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043E\u0442\u043A\u0440\u044B\u0442\u044C \u043A\u0430\u043C\u0435\u0440\u0443", {
+        type: "error"
+      });
       stopScan();
     }
   }, [currentDeviceId, ensureReader, runSearch, showToast, stopScan, t]);
   const handleSubmit = async () => {
     if (!picked?.id) {
-      showToast(t("select_product_first") || "\u0421\u043D\u0430\u0447\u0430\u043B\u0430 \u0432\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u0442\u043E\u0432\u0430\u0440", { type: "error" });
+      showToast(t("select_product_first") || "\u0421\u043D\u0430\u0447\u0430\u043B\u0430 \u0432\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u0442\u043E\u0432\u0430\u0440", {
+        type: "error"
+      });
       return;
     }
     const qtyNumber = toNumber2(quantity);
     const costNumber = toNumber2(cost);
     if (!qtyNumber || qtyNumber <= 0 || !costNumber || costNumber <= 0) {
-      showToast(t("fill_required_fields") || "\u0417\u0430\u043F\u043E\u043B\u043D\u0438\u0442\u0435 \u043E\u0431\u044F\u0437\u0430\u0442\u0435\u043B\u044C\u043D\u044B\u0435 \u043F\u043E\u043B\u044F", { type: "error" });
+      showToast(t("fill_required_fields") || "\u0417\u0430\u043F\u043E\u043B\u043D\u0438\u0442\u0435 \u043E\u0431\u044F\u0437\u0430\u0442\u0435\u043B\u044C\u043D\u044B\u0435 \u043F\u043E\u043B\u044F", {
+        type: "error"
+      });
       return;
     }
     const payload = {
-      items: [{
-        document_id: docId,
-        item_id: Number(picked.id),
-        quantity: qtyNumber,
-        cost: costNumber,
-        vat_value: Number(picked.vat_value ?? 0)
-      }]
+      items: [
+        {
+          document_id: docId,
+          item_id: Number(picked.id),
+          quantity: qtyNumber,
+          cost: costNumber,
+          vat_value: Number(picked.vat_value ?? 0)
+        }
+      ]
     };
     const priceNumber = toNumber2(price);
     if (priceNumber > 0) payload.items[0].price = priceNumber;
@@ -59713,7 +59832,9 @@ function OpNewPage() {
       const { ok, data } = await api2("purchase_ops_add", payload);
       const affected = data?.result?.row_affected || 0;
       if (ok && affected > 0) {
-        showToast(t("toast.op_added") || "\u041E\u043F\u0435\u0440\u0430\u0446\u0438\u044F \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u0430", { type: "success" });
+        showToast(t("toast.op_added") || "\u041E\u043F\u0435\u0440\u0430\u0446\u0438\u044F \u0434\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u0430", {
+          type: "success"
+        });
         setQuantity("");
         setCost("");
         setPrice("");
@@ -59726,20 +59847,23 @@ function OpNewPage() {
         throw new Error(data?.description || "Save failed");
       }
     } catch (err) {
-      showToast(err.message || t("save_failed") || "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0441\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C \u043E\u043F\u0435\u0440\u0430\u0446\u0438\u044E", { type: "error", duration: 2400 });
+      showToast(
+        err.message || t("save_failed") || "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0441\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C \u043E\u043F\u0435\u0440\u0430\u0446\u0438\u044E",
+        { type: "error", duration: 2400 }
+      );
     } finally {
       setSaving(false);
     }
   };
-  const descriptionPreview = (0, import_react12.useMemo)(() => {
+  const descriptionPreview = (0, import_react13.useMemo)(() => {
     if (!description.trim() || !picked) return "";
     return `${t("op.description") || "\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435"}: ${description.trim()}`;
   }, [description, picked, t]);
-  const lpcLabel = (0, import_react12.useMemo)(() => {
+  const lpcLabel = (0, import_react13.useMemo)(() => {
     if (picked?.last_purchase_cost == null) return null;
     return fmt.money(picked.last_purchase_cost);
   }, [fmt, picked]);
-  const priceLabel = (0, import_react12.useMemo)(() => {
+  const priceLabel = (0, import_react13.useMemo)(() => {
     if (picked?.price == null) return null;
     return fmt.money(picked.price);
   }, [fmt, picked]);
@@ -59995,7 +60119,7 @@ var import_jsx_runtime14 = __toESM(require_jsx_runtime(), 1);
 var container = document.getElementById("root");
 var root = (0, import_client.createRoot)(container);
 root.render(
-  /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(import_react14.default.StrictMode, { children: /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(App, {}) })
+  /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(import_react15.default.StrictMode, { children: /* @__PURE__ */ (0, import_jsx_runtime14.jsx)(App, {}) })
 );
 /*! Bundled license information:
 

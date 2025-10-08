@@ -1,4 +1,4 @@
-import React from 'react';
+import React from "react";
 
 export default function NavBackButton({ onClick, label }) {
   if (!onClick) return null;
@@ -7,8 +7,8 @@ export default function NavBackButton({ onClick, label }) {
       id="nav-back"
       type="button"
       className="btn icon clear"
-      aria-label={label || 'Назад'}
-      title={label || 'Назад'}
+      aria-label={label || "Назад"}
+      title={label || "Назад"}
       onClick={onClick}
     >
       <i className="fa-solid fa-chevron-left" aria-hidden="true" />

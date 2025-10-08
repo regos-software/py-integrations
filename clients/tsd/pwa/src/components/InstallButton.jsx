@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import { isStandalone } from '../lib/api.js';
+import React, { useCallback, useEffect, useState } from "react";
+import { isStandalone } from "../lib/api.js";
 
 export default function InstallButton({ label }) {
   const [promptEvent, setPromptEvent] = useState(null);
@@ -19,12 +19,12 @@ export default function InstallButton({ label }) {
       setVisible(false);
     };
 
-    window.addEventListener('beforeinstallprompt', handler);
-    window.addEventListener('appinstalled', installed);
+    window.addEventListener("beforeinstallprompt", handler);
+    window.addEventListener("appinstalled", installed);
 
     return () => {
-      window.removeEventListener('beforeinstallprompt', handler);
-      window.removeEventListener('appinstalled', installed);
+      window.removeEventListener("beforeinstallprompt", handler);
+      window.removeEventListener("appinstalled", installed);
     };
   }, []);
 
@@ -51,7 +51,7 @@ export default function InstallButton({ label }) {
       onClick={handleClick}
     >
       <i className="fa-solid fa-download" aria-hidden="true" />
-      <span id="btn-install-txt">{label || 'Install'}</span>
+      <span id="btn-install-txt">{label || "Install"}</span>
     </button>
   );
 }

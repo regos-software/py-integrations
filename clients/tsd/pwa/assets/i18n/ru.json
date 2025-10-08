@@ -48,7 +48,6 @@
 
   "unit.pcs": "шт",
 
-
   "save": "Сохранить",
   "saving": "Сохранение...",
   "cancel": "Отмена",
@@ -65,5 +64,4 @@
   "install_app": "Установить приложение",
   "op.description": "Описание",
   "op.description.placeholder": "Комментарий к операции"
-
 }

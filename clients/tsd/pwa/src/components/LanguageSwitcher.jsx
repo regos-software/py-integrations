@@ -1,10 +1,10 @@
-import React from 'react';
-import { useI18n } from '../context/I18nContext.jsx';
+import React from "react";
+import { useI18n } from "../context/I18nContext.jsx";
 
 const OPTIONS = [
-  { value: 'ru', label: 'RU' },
-  { value: 'en', label: 'EN' },
-  { value: 'uz', label: 'UZ' }
+  { value: "ru", label: "RU" },
+  { value: "en", label: "EN" },
+  { value: "uz", label: "UZ" },
 ];
 
 export default function LanguageSwitcher() {
@@ -12,7 +12,9 @@ export default function LanguageSwitcher() {
 
   return (
     <div className="lang-switcher">
-      <label className="sr-only" htmlFor="lang-select">Language</label>
+      <label className="sr-only" htmlFor="lang-select">
+        Language
+      </label>
       <select
         id="lang-select"
         className="lang-select"
