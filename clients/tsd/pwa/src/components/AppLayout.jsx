@@ -24,6 +24,15 @@ export default function AppLayout() {
   const [qrError, setQrError] = useState(null);
   const [qrCopied, setQrCopied] = useState(false);
   const [installDismissed, setInstallDismissed] = useState(false);
+  const [theme, setTheme] = useState(() => {
+    if (typeof window === "undefined") return "light";
+    const stored = window.localStorage.getItem("tsd-theme");
+    if (stored === "dark" || stored === "light") return stored;
+    if (window.matchMedia?.("(prefers-color-scheme: dark)")?.matches) {
+      return "dark";
+    }
+    return "light";
+  });
 
   const { pathname, search = "", hash = "" } = location;
 
@@ -78,10 +87,33 @@ export default function AppLayout() {
   const closeLabelRaw = t("common.close");
   const closeLabel =
     closeLabelRaw === "common.close" ? "Закрыть" : closeLabelRaw;
+  const isDark = theme === "dark";
+  const themeToggleLabel = isDark
+    ? t("theme.switch_to_light") || "Переключить на светлую тему"
+    : t("theme.switch_to_dark") || "Переключить на тёмную тему";
 
   const handleCloseQr = useCallback(() => {
     setQrOpen(false);
   }, []);
+
+  const handleToggleTheme = useCallback(() => {
+    setTheme((prev) => (prev === "dark" ? "light" : "dark"));
+  }, []);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const root = document.documentElement;
+    if (theme === "dark") {
+      root.classList.add("dark");
+    } else {
+      root.classList.remove("dark");
+    }
+  }, [theme]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem("tsd-theme", theme);
+  }, [theme]);
 
   useEffect(() => {
     if (!qrOpen) {
@@ -143,6 +175,18 @@ export default function AppLayout() {
             <NavBackButton onClick={handleBack} label={backLabel} />
           ) : null}
           <LanguageSwitcher />
+          <button
+            type="button"
+            className={iconButtonClass({ variant: "ghost" })}
+            onClick={handleToggleTheme}
+            aria-label={themeToggleLabel}
+            title={themeToggleLabel}
+          >
+            <i
+              className={cn("fa-solid", isDark ? "fa-sun" : "fa-moon")}
+              aria-hidden="true"
+            />
+          </button>
           <button
             type="button"
             className={iconButtonClass({ variant: "ghost" })}

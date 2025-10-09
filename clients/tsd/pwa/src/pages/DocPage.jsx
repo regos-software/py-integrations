@@ -219,6 +219,14 @@ function OperationRow({ op, onDelete, onSave }) {
           <div className="flex flex-wrap gap-3" id={`op-actions-${op.id}`}>
             <button
               type="button"
+              className={buttonClass({ variant: "ghost", size: "sm" })}
+              onClick={() => setEditing(false)}
+              disabled={saving}
+            >
+              {t("common.cancel") || "Отмена"}
+            </button>
+            <button
+              type="button"
               className={buttonClass({ variant: "primary", size: "sm" })}
               onClick={handleSave}
               disabled={saving}
@@ -226,14 +234,6 @@ function OperationRow({ op, onDelete, onSave }) {
               {saving
                 ? t("op.saving") || "Сохранение..."
                 : t("common.save") || "Сохранить"}
-            </button>
-            <button
-              type="button"
-              className={buttonClass({ variant: "ghost", size: "sm" })}
-              onClick={() => setEditing(false)}
-              disabled={saving}
-            >
-              {t("common.cancel") || "Отмена"}
             </button>
           </div>
         </div>
