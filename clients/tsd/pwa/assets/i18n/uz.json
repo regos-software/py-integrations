@@ -6,6 +6,7 @@
   "common.nothing": "Hech narsa topilmadi",
   "common.cancel": "Bekor qilish",
   "common.save": "Saqlash",
+  "common.close": "Yopish",
 
   "docs.title": "Xarid hujjatlari",
   "docs.search.placeholder": "Raqam/ta'minotchi bo'yicha qidirish...",
@@ -55,11 +56,26 @@
   "nothing_found": "Hech narsa topilmadi",
   "search_error": "Qidiruv xatosi",
   "camera_open_failed": "Kamerani ochib bo'lmadi",
+  "camera_permission_denied": "Kameraga ruxsat berilmadi",
+  "camera_not_found": "Kamera topilmadi",
+  "camera_not_supported": "Kamera qo'llab-quvvatlanmaydi",
   "select_product_first": "Avval mahsulotni tanlang",
   "fill_required_fields": "Majburiy maydonlarni to'ldiring",
   "op_added": "Operatsiya qo'shildi",
   "save_failed": "Operatsiyani saqlab bo'lmadi",
   "network_error_save": "Saqlash vaqtida tarmoq xatosi",
   "last_purchase_cost_hint": "Tannarx: {cost}",
-  "install_app": "Ilovani o'rnatish"
+  "install_app": "Ilovani o'rnatish",
+  "op.description": "Tavsif",
+  "op.description.placeholder": "Operatsiya uchun izoh (majburiy emas)",
+
+  "qr.share_button": "Sahifa QR-kodini ko'rsatish",
+  "qr.share_title": "Boshqa qurilmada skanerlang",
+  "qr.generating": "QR-kod tayyorlanmoqda...",
+  "qr.generate_failed": "Ushbu sahifa uchun QR-kodni yaratib bo'lmadi",
+  "qr.image_alt": "Ushbu sahifani boshqa qurilmada ochish uchun QR-kod",
+  "qr.copy": "Havolani nusxalash",
+  "qr.copied": "Havola nusxalandi",
+  "qr.copy_failed": "Havolani nusxalab bo'lmadi",
+  "qr.copy_not_supported": "Havolani nusxalash qo'llab-quvvatlanmaydi"
 }

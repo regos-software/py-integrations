@@ -1,8 +1,9 @@
 import asyncio
 import re
 from typing import Optional, Union, Any, Dict
+from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Header, Request, Path, Response
+from fastapi import APIRouter, Header, Query, Request, Path, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.responses import JSONResponse
 
@@ -30,7 +31,7 @@ INTEGRATION_CLASSES = {
     "eskiz_sms": EskizSmsIntegration,
     "regos_telegram_notifier": TelegramBotNotificationIntegration,
     "email_sender": EmailSenderIntegration,
-    "tsd": TsdIntegration,  
+    "tsd": TsdIntegration,
 }
 
 # Служебные заголовки, которые не нужно прокидывать обработчикам
@@ -41,13 +42,18 @@ EXCLUDED_SERVICE_HEADERS = {
     "accept-encoding",
 }
 
+
 def camel_to_snake(name: str) -> str:
     """Преобразует CamelCase → snake_case."""
-    return re.sub(r'(?<!^)(?=[A-Z])', '_', name).lower()
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+
 
 def _sanitize_headers(headers) -> Dict[str, str]:
     """Удаляем служебные заголовки, остальные оставляем как есть."""
-    return {k: v for k, v in headers.items() if k.lower() not in EXCLUDED_SERVICE_HEADERS}
+    return {
+        k: v for k, v in headers.items() if k.lower() not in EXCLUDED_SERVICE_HEADERS
+    }
+
 
 async def _read_body_safely(request: Request) -> Any:
     """Считываем тело: пробуем JSON, затем текст, иначе bytes/None."""
@@ -63,26 +69,30 @@ async def _read_body_safely(request: Request) -> Any:
     except Exception:
         return raw  # bytes
 
+
 # ------------------------------- #
 #          REGOS endpoint         #
 # ------------------------------- #
 
+
 @router.post(
     "/clients/{client}/",
     response_model=Union[IntegrationSuccessResponse, IntegrationErrorResponse],
-    include_in_schema=False
+    include_in_schema=False,
 )
 @router.post(
     "/clients/{client}",
     response_model=Union[IntegrationSuccessResponse, IntegrationErrorResponse],
     tags=["Integration"],
-    summary="Обработка запроса от интеграции"
+    summary="Обработка запроса от интеграции",
 )
 async def handle_integration(
     client: str = Path(..., description="Название интеграции"),
     request_body: IntegrationRequest = ...,
     request: Request = ...,
-    connected_integration_id: Optional[str] = Header(None, alias="connected-integration-id"),
+    connected_integration_id: Optional[str] = Header(
+        None, alias="connected-integration-id"
+    ),
 ):
     logger.info(f"--- Обработка запроса от клиента: {client} ---")
     logger.info(f"Заголовок 'connected-integration-id': {connected_integration_id}")
@@ -93,8 +103,7 @@ async def handle_integration(
         logger.warning(f"Интеграция '{client}' не зарегистрирована.")
         return IntegrationErrorResponse(
             result=IntegrationErrorModel(
-                error=404,
-                description=f"Интеграция '{client}' не найдена"
+                error=404, description=f"Интеграция '{client}' не найдена"
             )
         )
 
@@ -107,8 +116,7 @@ async def handle_integration(
         logger.exception(f"Ошибка при инициализации интеграции '{client}': {e}")
         return IntegrationErrorResponse(
             result=IntegrationErrorModel(
-                error=500,
-                description="Ошибка инициализации интеграции"
+                error=500, description="Ошибка инициализации интеграции"
             )
         )
 
@@ -121,12 +129,14 @@ async def handle_integration(
         return IntegrationErrorResponse(
             result=IntegrationErrorModel(
                 error=400,
-                description=f"Метод '{request_body.action}' не реализован в '{client}'"
+                description=f"Метод '{request_body.action}' не реализован в '{client}'",
             )
         )
 
     try:
-        logger.info(f"Вызов метода '{action_name}' с данными: {type(request_body.data)}")
+        logger.info(
+            f"Вызов метода '{action_name}' с данными: {type(request_body.data)}"
+        )
 
         if isinstance(request_body.data, dict):
             result = await action_method(**request_body.data)
@@ -136,8 +146,7 @@ async def handle_integration(
             logger.error(f"Тип 'data' не поддерживается: {type(request_body.data)}")
             return IntegrationErrorResponse(
                 result=IntegrationErrorModel(
-                    error=400,
-                    description="Неподдерживаемый тип данных в поле 'data'"
+                    error=400, description="Неподдерживаемый тип данных в поле 'data'"
                 )
             )
 
@@ -146,29 +155,28 @@ async def handle_integration(
         return IntegrationSuccessResponse(result=result)
 
     except Exception as e:
-        logger.exception(f"Ошибка при выполнении метода '{action_name}' в '{client}': {e}")
+        logger.exception(
+            f"Ошибка при выполнении метода '{action_name}' в '{client}': {e}"
+        )
         return IntegrationErrorResponse(
             result=IntegrationErrorModel(
-                error=500,
-                description=f"Ошибка во время вызова метода '{action_name}'"
+                error=500, description=f"Ошибка во время вызова метода '{action_name}'"
             )
         )
 
 
-
-@router.get(
-    "/clients/{client}/",
-    include_in_schema=False
-)
+@router.get("/clients/{client}/", include_in_schema=False)
 @router.get(
     "/clients/{client}",
     tags=["Integration"],
-    summary="UI (GET) для интеграции: строго вызывает integration.handle_ui"
+    summary="UI (GET) для интеграции: строго вызывает integration.handle_ui",
 )
 async def handel_ui(
     client: str = Path(..., description="Название интеграции"),
     request: Request = ...,
-    connected_integration_id: Optional[str] = Header(None, alias="connected-integration-id"),
+    connected_integration_id: Optional[str] = Header(
+        None, alias="connected-integration-id"
+    ),
 ) -> Any:
     logger.info(f"[ui] GET UI для '{client}' {request.url}")
     logger.info(f"[ui] Connected-Integration-Id: {connected_integration_id}")
@@ -213,7 +221,10 @@ async def handel_ui(
     if not callable(handler):
         return JSONResponse(
             status_code=400,
-            content={"error": 400, "description": f"У интеграции '{client}' нет метода handle_ui"},
+            content={
+                "error": 400,
+                "description": f"У интеграции '{client}' нет метода handle_ui",
+            },
         )
 
     try:
@@ -224,7 +235,9 @@ async def handel_ui(
             return result
 
         def _looks_like_url(s: str) -> bool:
-            return isinstance(s, str) and (s.startswith("http://") or s.startswith("https://") or "://" in s)
+            return isinstance(s, str) and (
+                s.startswith("http://") or s.startswith("https://") or "://" in s
+            )
 
         payload = getattr(result, "result", result)
         if isinstance(payload, str) and _looks_like_url(payload):
@@ -239,7 +252,11 @@ async def handel_ui(
         if isinstance(result, (dict, list)):
             return JSONResponse(status_code=200, content=result)
         if isinstance(result, str):
-            if result.lstrip().lower().startswith("<!doctype") or result.lstrip().lower().startswith("<html") or "text/html" in accept:
+            if (
+                result.lstrip().lower().startswith("<!doctype")
+                or result.lstrip().lower().startswith("<html")
+                or "text/html" in accept
+            ):
                 return HTMLResponse(result, status_code=200)
             return Response(status_code=200, content=result)
         if isinstance(result, bytes):
@@ -263,28 +280,32 @@ async def handel_ui(
         )
 
 
-
 # ---------------------------------------- #
 #        EXTERNAL → handle_external        #
 # ---------------------------------------- #
+
 
 @router.api_route(
     "/clients/{client}/external",
     methods=["GET", "POST", "PUT", "DELETE"],
     tags=["Integration"],
-    summary="Обработка запроса от внешней системы"
+    summary="Обработка запроса от внешней системы",
 )
 @router.api_route(
     "/clients/{client}/external/",
     methods=["GET", "POST", "PUT", "DELETE"],
-    include_in_schema=False
+    include_in_schema=False,
 )
 async def handle_external(
     client: str = Path(..., description="Название интеграции"),
     request: Request = ...,
-    connected_integration_id: Optional[str] = Header(None, alias="connected-integration-id"),
+    connected_integration_id: Optional[str] = Header(
+        None, alias="connected-integration-id"
+    ),
 ) -> Any:
-    logger.info(f"[external] Обработка внешнего запроса для '{client}' {request.method} {request.url}")
+    logger.info(
+        f"[external] Обработка внешнего запроса для '{client}' {request.method} {request.url}"
+    )
     logger.info(f"[external] Connected-Integration-Id: {connected_integration_id}")
 
     # 1) Класс интеграции
@@ -329,7 +350,10 @@ async def handle_external(
     if not callable(handler):
         return JSONResponse(
             status_code=400,
-            content={"error": 400, "description": f"У интеграции '{client}' нет метода handle_external"},
+            content={
+                "error": 400,
+                "description": f"У интеграции '{client}' нет метода handle_external",
+            },
         )
 
     try:
@@ -337,7 +361,7 @@ async def handle_external(
 
         if isinstance(result, Response):
             return result
-        
+
         # Проксируем ответ «как есть»:
         if isinstance(result, (dict, list)):
             return JSONResponse(status_code=200, content=result)
@@ -348,14 +372,24 @@ async def handle_external(
         return JSONResponse(status_code=200, content={"result": str(result)})
 
     except asyncio.TimeoutError:
-        logger.error(f"[external] Таймаут обработки внешнего запроса для '{client}' (180 сек)")
+        logger.error(
+            f"[external] Таймаут обработки внешнего запроса для '{client}' (180 сек)"
+        )
         return JSONResponse(
             status_code=504,
-            content={"error": 504, "description": "Таймаут обработки внешнего запроса (180 сек)"},
+            content={
+                "error": 504,
+                "description": "Таймаут обработки внешнего запроса (180 сек)",
+            },
         )
     except Exception as e:
-        logger.exception(f"[external] Ошибка при выполнении handle_external в '{client}': {e}")
+        logger.exception(
+            f"[external] Ошибка при выполнении handle_external в '{client}': {e}"
+        )
         return JSONResponse(
             status_code=500,
-            content={"error": 500, "description": "Ошибка во время вызова handle_external"},
+            content={
+                "error": 500,
+                "description": "Ошибка во время вызова handle_external",
+            },
         )

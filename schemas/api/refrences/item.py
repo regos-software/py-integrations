@@ -1,6 +1,6 @@
 from __future__ import annotations
 from enum import Enum
-from typing import Optional, List
+from typing import Any, Dict, Optional, List
 from decimal import Decimal
 from pydantic import BaseModel, Field
 
@@ -8,15 +8,37 @@ from pydantic import BaseModel, Field
 from schemas.api.refrences.brand import Brand
 from schemas.api.refrences.price_type import PriceType
 from schemas.api.refrences.stock import Stock
-from schemas.api.refrences.unit import Unit  
+from schemas.api.refrences.unit import Unit
+
+
 # Если есть полноценные схемы ниже — замени импорты.
-class ItemGroup(BaseModel): pass
-class Department(BaseModel): pass
-class TaxVat(BaseModel): pass
-class Color(BaseModel): pass
-class SizeChart(BaseModel): pass
-class Producer(BaseModel): pass
-class Country(BaseModel): pass
+class ItemGroup(BaseModel):
+    pass
+
+
+class Department(BaseModel):
+    pass
+
+
+class TaxVat(BaseModel):
+    pass
+
+
+class Color(BaseModel):
+    pass
+
+
+class SizeChart(BaseModel):
+    pass
+
+
+class Producer(BaseModel):
+    pass
+
+
+class Country(BaseModel):
+    pass
+
 
 # ---------- базовая номенклатура ----------
 class Item(BaseModel):
@@ -56,14 +78,17 @@ class Item(BaseModel):
     origin: str = "none"
     partner_id: Optional[int] = None
 
+
 # ---------- общие enum/сортировки ----------
 class ItemType(str, Enum):
     Item = "Item"
     Service = "Service"
 
+
 class SortDirection(str, Enum):
     ASC = "ASC"
     DESC = "DESC"
+
 
 # ---------- Search ----------
 class ItemSearchRequest(BaseModel):
@@ -79,10 +104,12 @@ class ItemSearchRequest(BaseModel):
     has_child: Optional[bool] = None
     type: Optional[ItemType] = None
 
+
 # ---------- Get ----------
 class RedefinitionOption(BaseModel):
     language: Optional[str] = None  # например, "RUS"
     app_id: Optional[int] = None
+
 
 class ItemGetRequest(BaseModel):
     ids: Optional[List[int]] = None
@@ -101,6 +128,7 @@ class ItemGetRequest(BaseModel):
     limit: Optional[int] = Field(default=None, ge=1)
     offset: Optional[int] = Field(default=None, ge=0)
 
+
 # ---------- GetExt ----------
 class ItemGetExtSortColumn(str, Enum):
     Name = "Name"
@@ -115,14 +143,17 @@ class ItemGetExtSortColumn(str, Enum):
     TaxVat = "TaxVat"
     Department = "Department"
 
+
 class ItemGetExtSortOrder(BaseModel):
     column: ItemGetExtSortColumn
     direction: SortDirection
+
 
 class ItemGetExtImageSize(str, Enum):
     Large = "Large"
     Medium = "Medium"
     Small = "Small"
+
 
 class ItemGetExtRequest(BaseModel):
     stock_id: Optional[int] = None
@@ -150,16 +181,50 @@ class ItemGetExtRequest(BaseModel):
     limit: Optional[int] = Field(default=None, ge=1)
     offset: Optional[int] = Field(default=None, ge=0)
 
+
 class ItemQuantity(BaseModel):
-    stock: Optional[Stock] = None   
+    stock: Optional[Stock] = None
     common: Optional[Decimal] = None
     allowed: Optional[Decimal] = None
     booked: Optional[Decimal] = None
 
+
 class ItemExt(BaseModel):
     item: Item
     quantity: Optional[ItemQuantity] = None
-    pricetype: Optional[PriceType] = None  
+    pricetype: Optional[PriceType] = None
     price: Optional[Decimal] = None
     last_purchase_cost: Optional[Decimal] = None
     image_url: Optional[str] = None
+
+
+class ItemImportData(BaseModel):
+    index: Optional[str] = None
+    name: str
+    fullname: Optional[str] = None
+    code: Optional[str] = None
+    articul: Optional[str] = None
+    group_path: Optional[str] = None
+    barcodes: Optional[str] = None
+    color_name: Optional[str] = None
+    brand_name: Optional[str] = None
+    producer_name: Optional[str] = None
+    size_name: Optional[str] = None
+    unit_name: Optional[str] = None
+    department_name: Optional[str] = None
+    description: Optional[str] = None
+    vat_name: Optional[str] = None
+    icps: Optional[str] = None
+    labeled: Optional[int] = None
+    package_code: Optional[int] = None
+    parent_code: Optional[int] = None
+
+
+class ItemImportRequest(BaseModel):
+    comparation_value: str
+    group_separator: str = None
+    barcode_separator: str = None
+    group_id: int = None
+    unit_id: int = None
+    vat_value_id: int = None
+    data: List[ItemImportData] = []

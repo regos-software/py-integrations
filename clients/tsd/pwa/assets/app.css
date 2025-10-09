@@ -196,6 +196,74 @@ pre {
 .page-actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
 .hr { height: 1px; background: var(--border); border: 0; margin: 10px 0; }
 
+/* ===== Modal (QR share) ===== */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 9998;
+}
+
+.modal-card {
+  background: var(--card);
+  color: var(--fg);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  width: min(320px, 100%);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.qr-modal-header {
+  align-items: center;
+}
+
+.qr-modal-header h2 {
+  font-size: 18px;
+  margin: 0;
+  flex: 1;
+}
+
+.qr-modal-body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 220px;
+}
+
+.qr-modal-body img {
+  width: 100%;
+  height: auto;
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+}
+
+.qr-url {
+  font-size: 12px;
+  color: var(--muted);
+  word-break: break-word;
+  text-align: center;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.modal-error {
+  color: #ef4444;
+  font-size: 14px;
+  text-align: center;
+}
+
 /* ================================================================== */
 /* ==================== Docs: search row (reusable) ================= */
 /* ================================================================== */
