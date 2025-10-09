@@ -180,6 +180,104 @@ pre {
 .toast.error { background: #ef4444; }
 .toast.show { display: block; }
 
+/* ===== Install banner ===== */
+.install-banner {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  background: var(--card);
+  color: var(--fg);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  border: 1px solid var(--border);
+  padding: 16px 18px;
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  max-width: 520px;
+  width: min(520px, calc(100% - 32px));
+  z-index: 9990;
+}
+
+.install-banner-body {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.install-banner-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.install-banner-text strong {
+  font-size: 16px;
+}
+
+.install-banner-text p {
+  margin: 0;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.install-banner #btn-install {
+  flex: 0 0 auto;
+}
+
+.install-banner-close {
+  background: transparent;
+  border: 0;
+  color: var(--fg);
+  cursor: pointer;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background .15s ease;
+}
+
+.install-banner-close:hover {
+  background: var(--hover);
+}
+
+.install-banner-close:focus-visible {
+  outline: 2px solid rgba(59,130,246,.5);
+}
+
+@media (max-width: 540px) {
+  .install-banner {
+    align-items: stretch;
+    padding: 14px;
+    gap: 12px;
+  }
+
+  .install-banner-body {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+
+  .install-banner-text strong {
+    font-size: 15px;
+  }
+
+  .install-banner #btn-install {
+    width: 100%;
+  }
+
+  .install-banner-close {
+    align-self: flex-end;
+  }
+}
+
 /* ===== Forms ===== */
 .form-vert { display: grid; grid-template-columns: 1fr; gap: 10px; }
 .qty-quick { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -193,7 +291,7 @@ pre {
 /* ===== Meta helpers ===== */
 .meta { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .meta .dot::before { content: "•"; margin: 0 6px; color: var(--muted); }
-.page-actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; }
+.page-actions { margin-top: 10px; display: flex; gap: 8px; flex-wrap: wrap; justify-content: space-between; }
 .hr { height: 1px; background: var(--border); border: 0; margin: 10px 0; }
 
 /* ===== Modal (QR share) ===== */

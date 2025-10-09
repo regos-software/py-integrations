@@ -17,6 +17,7 @@ export default function AppLayout() {
   const [qrImage, setQrImage] = useState("");
   const [qrError, setQrError] = useState(null);
   const [qrCopied, setQrCopied] = useState(false);
+  const [installDismissed, setInstallDismissed] = useState(false);
 
   const { pathname, search = "", hash = "" } = location;
 
@@ -63,6 +64,14 @@ export default function AppLayout() {
   const installLabelRaw = t("install_app");
   const installLabel =
     installLabelRaw === "install_app" ? "Установить" : installLabelRaw;
+  const installHintRaw = t("install.banner_hint");
+  const installHint =
+    installHintRaw === "install.banner_hint"
+      ? "Install the app for quick access"
+      : installHintRaw;
+  const closeLabelRaw = t("common.close");
+  const closeLabel =
+    closeLabelRaw === "common.close" ? "Закрыть" : closeLabelRaw;
 
   const handleCloseQr = useCallback(() => {
     setQrOpen(false);
@@ -76,6 +85,10 @@ export default function AppLayout() {
       setQrCopied(false);
     }
   }, [qrOpen]);
+
+  useEffect(() => {
+    setInstallDismissed(false);
+  }, [pathname]);
 
   const handleOpenQr = useCallback(async () => {
     setQrOpen(true);
@@ -138,7 +151,6 @@ export default function AppLayout() {
         </div>
         <div className="right">
           <Clock />
-          <InstallButton label={installLabel} />
           <div id="regos-login" />
         </div>
       </header>
@@ -147,6 +159,16 @@ export default function AppLayout() {
           <Outlet />
         </div>
       </main>
+      {installDismissed ? null : (
+        <InstallButton
+          label={installLabel}
+          title={installLabel}
+          message={installHint}
+          variant="floating"
+          dismissLabel={closeLabel}
+          onDismiss={() => setInstallDismissed(true)}
+        />
+      )}
       {qrOpen ? (
         <div
           className="modal-backdrop"
@@ -168,8 +190,8 @@ export default function AppLayout() {
                 type="button"
                 className="btn icon"
                 onClick={handleCloseQr}
-                aria-label={t("common.close") || "Закрыть"}
-                title={t("common.close") || "Закрыть"}
+                aria-label={closeLabel}
+                title={closeLabel}
               >
                 <i className="fa-solid fa-xmark" aria-hidden="true" />
               </button>
@@ -210,7 +232,7 @@ export default function AppLayout() {
                 className="btn ghost"
                 onClick={handleCloseQr}
               >
-                {t("common.close") || "Закрыть"}
+                {closeLabel}
               </button>
             </div>
           </div>

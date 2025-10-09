@@ -28942,7 +28942,14 @@ function usePWAInstall() {
 
 // src/components/InstallButton.jsx
 var import_jsx_runtime4 = __toESM(require_jsx_runtime(), 1);
-function InstallButton({ label }) {
+function InstallButton({
+  label,
+  title,
+  message,
+  variant = "inline",
+  onDismiss,
+  dismissLabel
+}) {
   const { canInstall, installed, supported, promptInstall } = usePWAInstall();
   if (installed) return null;
   if (!supported && !canInstall) return null;
@@ -28950,7 +28957,10 @@ function InstallButton({ label }) {
     const { outcome } = await promptInstall();
     console.log("[pwa] user choice:", outcome);
   };
-  return /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)(
+  const ctaLabel = label || "Install";
+  const heading = title || ctaLabel;
+  const closeLabel = dismissLabel || "Close";
+  const button = /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)(
     "button",
     {
       id: "btn-install",
@@ -28959,10 +28969,33 @@ function InstallButton({ label }) {
       onClick: handleClick,
       children: [
         /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("i", { className: "fa-solid fa-download", "aria-hidden": "true" }),
-        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { id: "btn-install-txt", children: label || "Install" })
+        /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("span", { id: "btn-install-txt", children: ctaLabel })
       ]
     }
   );
+  if (variant === "floating") {
+    return /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "install-banner", role: "dialog", "aria-live": "polite", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "install-banner-body", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "install-banner-text", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("strong", { children: heading }),
+          message ? /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("p", { children: message }) : null
+        ] }),
+        button
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(
+        "button",
+        {
+          type: "button",
+          className: "install-banner-close",
+          onClick: () => onDismiss?.(),
+          "aria-label": closeLabel,
+          title: closeLabel,
+          children: /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("i", { className: "fa-solid fa-xmark", "aria-hidden": "true" })
+        }
+      )
+    ] });
+  }
+  return button;
 }
 
 // src/components/LanguageSwitcher.jsx
@@ -29022,6 +29055,7 @@ function AppLayout() {
   const [qrImage, setQrImage] = (0, import_react7.useState)("");
   const [qrError, setQrError] = (0, import_react7.useState)(null);
   const [qrCopied, setQrCopied] = (0, import_react7.useState)(false);
+  const [installDismissed, setInstallDismissed] = (0, import_react7.useState)(false);
   const { pathname, search = "", hash = "" } = location;
   const currentUrl = (0, import_react7.useMemo)(() => {
     if (typeof window !== "undefined" && window.location?.href) {
@@ -29058,6 +29092,10 @@ function AppLayout() {
   const backLabel = backLabelRaw === "nav.back" ? "\u041D\u0430\u0437\u0430\u0434" : backLabelRaw;
   const installLabelRaw = t("install_app");
   const installLabel = installLabelRaw === "install_app" ? "\u0423\u0441\u0442\u0430\u043D\u043E\u0432\u0438\u0442\u044C" : installLabelRaw;
+  const installHintRaw = t("install.banner_hint");
+  const installHint = installHintRaw === "install.banner_hint" ? "Install the app for quick access" : installHintRaw;
+  const closeLabelRaw = t("common.close");
+  const closeLabel = closeLabelRaw === "common.close" ? "\u0417\u0430\u043A\u0440\u044B\u0442\u044C" : closeLabelRaw;
   const handleCloseQr = (0, import_react7.useCallback)(() => {
     setQrOpen(false);
   }, []);
@@ -29069,6 +29107,9 @@ function AppLayout() {
       setQrCopied(false);
     }
   }, [qrOpen]);
+  (0, import_react7.useEffect)(() => {
+    setInstallDismissed(false);
+  }, [pathname]);
   const handleOpenQr = (0, import_react7.useCallback)(async () => {
     setQrOpen(true);
     setQrGenerating(true);
@@ -29124,11 +29165,21 @@ function AppLayout() {
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "right", children: [
         /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(Clock, {}),
-        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(InstallButton, { label: installLabel }),
         /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { id: "regos-login" })
       ] })
     ] }),
     /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("main", { className: "container content", children: /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "card", children: /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(Outlet, {}) }) }),
+    installDismissed ? null : /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+      InstallButton,
+      {
+        label: installLabel,
+        title: installLabel,
+        message: installHint,
+        variant: "floating",
+        dismissLabel: closeLabel,
+        onDismiss: () => setInstallDismissed(true)
+      }
+    ),
     qrOpen ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
       "div",
       {
@@ -29152,8 +29203,8 @@ function AppLayout() {
                     type: "button",
                     className: "btn icon",
                     onClick: handleCloseQr,
-                    "aria-label": t("common.close") || "\u0417\u0430\u043A\u0440\u044B\u0442\u044C",
-                    title: t("common.close") || "\u0417\u0430\u043A\u0440\u044B\u0442\u044C",
+                    "aria-label": closeLabel,
+                    title: closeLabel,
                     children: /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("i", { className: "fa-solid fa-xmark", "aria-hidden": "true" })
                   }
                 )
@@ -29183,7 +29234,7 @@ function AppLayout() {
                     type: "button",
                     className: "btn ghost",
                     onClick: handleCloseQr,
-                    children: t("common.close") || "\u0417\u0430\u043A\u0440\u044B\u0442\u044C"
+                    children: closeLabel
                   }
                 )
               ] })
@@ -60549,7 +60600,7 @@ function OpNewPage() {
     }
     const qtyNumber = toNumber2(quantity);
     const costNumber = toNumber2(cost);
-    if (!qtyNumber || qtyNumber <= 0 || !costNumber || costNumber <= 0) {
+    if (!qtyNumber || qtyNumber <= 0) {
       showToast(t("fill_required_fields") || "\u0417\u0430\u043F\u043E\u043B\u043D\u0438\u0442\u0435 \u043E\u0431\u044F\u0437\u0430\u0442\u0435\u043B\u044C\u043D\u044B\u0435 \u043F\u043E\u043B\u044F", {
         type: "error"
       });
@@ -60684,8 +60735,7 @@ function OpNewPage() {
               event.preventDefault();
               runSearch(queryValue);
             }
-          },
-          onSearch: (event) => runSearch(event.target.value)
+          }
         }
       ),
       /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { id: "product-results", className: "muted", "aria-live": "polite", children: [
@@ -60750,7 +60800,7 @@ function OpNewPage() {
       /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { htmlFor: "cost", children: [
         t("op.cost") || "\u0421\u0442\u043E\u0438\u043C\u043E\u0441\u0442\u044C",
         " ",
-        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "muted", children: "*" })
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "muted" })
       ] }),
       /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
         "input",
@@ -60825,23 +60875,23 @@ function OpNewPage() {
       /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
         "button",
         {
-          id: "btn-op-save",
-          type: "button",
-          className: "btn small",
-          onClick: handleSubmit,
-          disabled: saving,
-          children: saving ? t("op.saving") || "\u0421\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u0438\u0435..." : t("common.save") || "\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C"
-        }
-      ),
-      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
-        "button",
-        {
           id: "btn-op-cancel",
           type: "button",
           className: "btn small ghost",
           onClick: () => navigate(`/doc/${docId}`),
           disabled: saving,
           children: t("common.cancel") || "\u041E\u0442\u043C\u0435\u043D\u0430"
+        }
+      ),
+      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
+        "button",
+        {
+          id: "btn-op-save",
+          type: "button",
+          className: "btn small",
+          onClick: handleSubmit,
+          disabled: saving,
+          children: saving ? t("op.saving") || "\u0421\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u0438\u0435..." : t("common.save") || "\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C"
         }
       )
     ] })

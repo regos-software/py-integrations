@@ -66,6 +66,7 @@
   "network_error_save": "Ошибка сети при сохранении",
   "last_purchase_cost_hint": "Стоимость: {cost}",
   "install_app": "Установить приложение",
+  "install.banner_hint": "Добавьте приложение на устройство для быстрого доступа",
   "op.description": "Описание",
   "op.description.placeholder": "Комментарий к операции",
 

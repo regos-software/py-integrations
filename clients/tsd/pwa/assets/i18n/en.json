@@ -66,6 +66,7 @@
   "network_error_save": "Network error while saving",
   "last_purchase_cost_hint": "Cost: {cost}",
   "install_app": "Install app",
+  "install.banner_hint": "Add this app to your device for quick access",
   "op.description": "Description",
   "op.description.placeholder": "Optional note for this operation",
 

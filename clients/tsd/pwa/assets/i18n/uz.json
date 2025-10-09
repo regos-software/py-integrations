@@ -66,6 +66,7 @@
   "network_error_save": "Saqlash vaqtida tarmoq xatosi",
   "last_purchase_cost_hint": "Tannarx: {cost}",
   "install_app": "Ilovani o'rnatish",
+  "install.banner_hint": "Ilovani qurilmangizga o'rnating va tezroq oching",
   "op.description": "Tavsif",
   "op.description.placeholder": "Operatsiya uchun izoh (majburiy emas)",
 

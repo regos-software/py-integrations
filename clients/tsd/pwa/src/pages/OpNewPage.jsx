@@ -226,7 +226,7 @@ export default function OpNewPage() {
     }
     const qtyNumber = toNumber(quantity);
     const costNumber = toNumber(cost);
-    if (!qtyNumber || qtyNumber <= 0 || !costNumber || costNumber <= 0) {
+    if (!qtyNumber || qtyNumber <= 0) {
       showToast(t("fill_required_fields") || "Заполните обязательные поля", {
         type: "error",
       });
@@ -369,7 +369,6 @@ export default function OpNewPage() {
               runSearch(queryValue);
             }
           }}
-          onSearch={(event) => runSearch(event.target.value)}
         />
         <div id="product-results" className="muted" aria-live="polite">
           {searchStatus === "loading" && (t("searching") || "Поиск...")}
@@ -437,7 +436,7 @@ export default function OpNewPage() {
 
       <div className="stack">
         <label htmlFor="cost">
-          {t("op.cost") || "Стоимость"} <span className="muted">*</span>
+          {t("op.cost") || "Стоимость"} <span className="muted"></span>
         </label>
         <input
           id="cost"
@@ -511,6 +510,15 @@ export default function OpNewPage() {
 
       <div className="page-actions">
         <button
+          id="btn-op-cancel"
+          type="button"
+          className="btn small ghost"
+          onClick={() => navigate(`/doc/${docId}`)}
+          disabled={saving}
+        >
+          {t("common.cancel") || "Отмена"}
+        </button>
+        <button
           id="btn-op-save"
           type="button"
           className="btn small"
@@ -520,15 +528,6 @@ export default function OpNewPage() {
           {saving
             ? t("op.saving") || "Сохранение..."
             : t("common.save") || "Сохранить"}
-        </button>
-        <button
-          id="btn-op-cancel"
-          type="button"
-          className="btn small ghost"
-          onClick={() => navigate(`/doc/${docId}`)}
-          disabled={saving}
-        >
-          {t("common.cancel") || "Отмена"}
         </button>
       </div>
     </section>
