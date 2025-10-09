@@ -28947,6 +28947,12 @@ function badgeClass(extra) {
     extra
   );
 }
+function chipClass(extra) {
+  return cn(
+    "inline-flex items-center justify-center rounded-full border border-slate-300 bg-slate-50 px-3 py-1 text-sm font-semibold text-slate-700 shadow-sm transition hover:bg-slate-100 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700",
+    extra
+  );
+}
 function toastClass(open, type = "success") {
   const palette = type === "error" ? "bg-rose-600 text-white" : type === "info" ? "bg-blue-600 text-white" : "bg-emerald-600 text-white";
   return cn(
@@ -29736,27 +29742,39 @@ function OperationRow({ op, onDelete, onSave }) {
   const { toNumber: toNumber2 } = useApp();
   const [editing, setEditing] = (0, import_react12.useState)(false);
   const [form, setForm] = (0, import_react12.useState)({
-    quantity: op.quantity,
-    cost: op.cost,
-    price: op.price ?? "",
+    quantity: op.quantity != null ? String(op.quantity) : "",
+    cost: op.cost != null ? String(op.cost) : "",
+    price: op.price != null ? String(op.price) : "",
     description: op.description ?? ""
   });
   const [saving, setSaving] = (0, import_react12.useState)(false);
   (0, import_react12.useEffect)(() => {
     setForm({
-      quantity: op.quantity,
-      cost: op.cost,
-      price: op.price ?? "",
+      quantity: op.quantity != null ? String(op.quantity) : "",
+      cost: op.cost != null ? String(op.cost) : "",
+      price: op.price != null ? String(op.price) : "",
       description: op.description ?? ""
     });
   }, [op]);
   const item = op.item || {};
   const barcode = item.base_barcode || (item.barcode_list ? String(item.barcode_list).split(",")[0]?.trim() : "") || item.code || "";
   const code = (item.code ?? "").toString().padStart(6, "0");
-  const unitName = item.unit?.name || t("unit.pcs") || "\u0448\u0442";
+  const unitName = item.unit?.name;
+  const unitPiece = item.unit?.type === "pcs";
   const priceValue = toNumber2(op.price ?? 0);
   const handleFieldChange = (field) => (event) => {
     setForm((prev) => ({ ...prev, [field]: event.target.value }));
+  };
+  const handleQuantityChange = (event) => {
+    console.log("item", item);
+    const nextValue = event.target.value;
+    if (unitPiece) {
+      if (/^\d*$/.test(nextValue)) {
+        setForm((prev) => ({ ...prev, quantity: nextValue }));
+      }
+      return;
+    }
+    setForm((prev) => ({ ...prev, quantity: nextValue }));
   };
   const handleSave = async () => {
     if (!form.quantity || toNumber2(form.quantity) <= 0) {
@@ -29847,9 +29865,10 @@ function OperationRow({ op, onDelete, onSave }) {
               {
                 id: `qty-${op.id}`,
                 type: "number",
-                inputMode: "decimal",
+                inputMode: unitPiece ? "numeric" : "decimal",
+                step: unitPiece ? 1 : "0.01",
                 value: form.quantity,
-                onChange: handleFieldChange("quantity"),
+                onChange: handleQuantityChange,
                 className: inputClass()
               }
             )
@@ -60677,6 +60696,10 @@ var AztecWriter = (
 // src/pages/OpNewPage.jsx
 var import_jsx_runtime12 = __toESM(require_jsx_runtime(), 1);
 var QUICK_QTY = [1, 5, 10, 12];
+var SEARCH_MODES = {
+  SCAN: "scan",
+  NAME: "name"
+};
 var ZXING_FORMATS = [
   BarcodeFormat_default.QR_CODE,
   BarcodeFormat_default.UPC_A,
@@ -60709,6 +60732,9 @@ function OpNewPage() {
   const [picked, setPicked] = (0, import_react13.useState)(null);
   const [saving, setSaving] = (0, import_react13.useState)(false);
   const [scanning, setScanning] = (0, import_react13.useState)(false);
+  const [searchMode, setSearchMode] = (0, import_react13.useState)(SEARCH_MODES.SCAN);
+  const [resultModalOpen, setResultModalOpen] = (0, import_react13.useState)(false);
+  const [resultItems, setResultItems] = (0, import_react13.useState)([]);
   const videoRef = (0, import_react13.useRef)(null);
   const readerRef = (0, import_react13.useRef)(null);
   (0, import_react13.useEffect)(() => {
@@ -60729,46 +60755,79 @@ function OpNewPage() {
     }
     loadDocMeta();
   }, [api2, docId]);
+  const closeResultModal = (0, import_react13.useCallback)(() => {
+    setResultModalOpen(false);
+    setResultItems([]);
+  }, []);
+  const handlePickItem = (0, import_react13.useCallback)(
+    (item) => {
+      setPicked(item);
+      closeResultModal();
+      setSearchStatus("done");
+      window.setTimeout(() => {
+        document.getElementById("qty")?.focus();
+      }, 0);
+    },
+    [closeResultModal]
+  );
   const runSearch = (0, import_react13.useCallback)(
-    async (value) => {
+    async (value, mode = searchMode) => {
       const queryText = value?.trim();
       if (!queryText) return;
       setSearchStatus("loading");
       try {
         const payload = { q: queryText, doc_id: docId };
-        if (docCtx.price_type_id != null)
+        if (docCtx.price_type_id != null) {
           payload.price_type_id = Number(docCtx.price_type_id);
-        if (docCtx.stock_id != null) payload.stock_id = Number(docCtx.stock_id);
+        }
+        if (docCtx.stock_id != null) {
+          payload.stock_id = Number(docCtx.stock_id);
+        }
         const { data } = await api2("product_search", payload);
-        const items = data?.result?.items || [];
-        if (!items.length) {
+        const rawItems = data?.result?.items || [];
+        if (!rawItems.length) {
           setPicked(null);
+          closeResultModal();
           setSearchStatus("empty");
           return;
         }
-        const ext = items[0];
-        const core = ext?.item || {};
-        setPicked({
-          id: Number(core.id ?? core.code),
-          name: core.name || "\u2014",
-          barcode: firstBarcode(core),
-          vat_value: Number(core?.vat?.value ?? 0),
-          last_purchase_cost: ext?.last_purchase_cost ?? null,
-          price: ext?.price != null ? Number(ext.price) : null,
-          quantity_common: ext?.quantity?.common ?? null,
-          unit: core?.unit?.name || "\u0448\u0442"
+        const normalizedItems = rawItems.map((ext) => {
+          const core = ext?.item || {};
+          return {
+            id: Number(core.id ?? core.code),
+            name: core.name || "\u2014",
+            barcode: firstBarcode(core),
+            vat_value: Number(core?.vat?.value ?? 0),
+            last_purchase_cost: ext?.last_purchase_cost ?? null,
+            price: ext?.price != null ? Number(ext.price) : null,
+            quantity_common: ext?.quantity?.common ?? null,
+            unit: core?.unit?.name || "\u0448\u0442",
+            unit_piece: core?.unit?.type === "pcs"
+          };
         });
-        setSearchStatus("done");
-        window.setTimeout(() => {
-          document.getElementById("qty")?.focus();
-        }, 0);
+        if (mode === SEARCH_MODES.NAME && normalizedItems.length > 1) {
+          setResultItems(normalizedItems);
+          setResultModalOpen(true);
+          setSearchStatus("multi");
+          return;
+        }
+        handlePickItem(normalizedItems[0]);
       } catch (err) {
         console.warn("[search] error", err);
         setPicked(null);
+        closeResultModal();
         setSearchStatus("error");
       }
     },
-    [api2, docCtx.price_type_id, docCtx.stock_id, docId]
+    [
+      api2,
+      closeResultModal,
+      docCtx.price_type_id,
+      docCtx.stock_id,
+      docId,
+      handlePickItem,
+      searchMode
+    ]
   );
   const ensureReader = (0, import_react13.useCallback)(async () => {
     if (readerRef.current) return readerRef.current;
@@ -60802,11 +60861,26 @@ function OpNewPage() {
     console.log("Scanner stopped.");
     setScanning(false);
   }, []);
+  const handleModalDismiss = (0, import_react13.useCallback)(() => {
+    closeResultModal();
+    setSearchStatus("idle");
+  }, [closeResultModal]);
   (0, import_react13.useEffect)(() => {
-    document.getElementById("barcode")?.focus();
-  }, []);
+    setSearchStatus("idle");
+    closeResultModal();
+    if (searchMode === SEARCH_MODES.SCAN) {
+      window.setTimeout(() => document.getElementById("barcode")?.focus(), 0);
+    } else {
+      stopScan();
+      window.setTimeout(
+        () => document.getElementById("product-query")?.focus(),
+        0
+      );
+    }
+  }, [searchMode, closeResultModal, stopScan]);
   const startScan = async () => {
     if (scanning) return;
+    if (searchMode !== SEARCH_MODES.SCAN) return;
     try {
       const reader = await ensureReader();
       console.log("reader", reader);
@@ -60826,7 +60900,7 @@ function OpNewPage() {
         if (result) {
           const text = result.getText();
           stopScan();
-          runSearch(text);
+          runSearch(text, SEARCH_MODES.SCAN);
         }
         if (err && !(err.name === "\u041A\u0430\u043C\u0435\u0440\u0430 \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u0430" || err.name === "NotFoundError")) {
         }
@@ -60850,6 +60924,12 @@ function OpNewPage() {
     const costNumber = toNumber2(cost);
     if (!qtyNumber || qtyNumber <= 0) {
       showToast(t("fill_required_fields") || "\u0417\u0430\u043F\u043E\u043B\u043D\u0438\u0442\u0435 \u043E\u0431\u044F\u0437\u0430\u0442\u0435\u043B\u044C\u043D\u044B\u0435 \u043F\u043E\u043B\u044F", {
+        type: "error"
+      });
+      return;
+    }
+    if (picked?.unit_piece && !Number.isInteger(qtyNumber)) {
+      showToast(t("qty.integer_only") || "\u041A\u043E\u043B\u0438\u0447\u0435\u0441\u0442\u0432\u043E \u0434\u043E\u043B\u0436\u043D\u043E \u0431\u044B\u0442\u044C \u0446\u0435\u043B\u044B\u043C", {
         type: "error"
       });
       return;
@@ -60908,68 +60988,107 @@ function OpNewPage() {
     if (picked?.price == null) return null;
     return fmt.money(picked.price);
   }, [fmt, picked]);
-  return /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("section", { className: "stack", id: "op-new", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("h1", { children: t("op.title") || "\u041D\u043E\u0432\u0430\u044F \u043E\u043F\u0435\u0440\u0430\u0446\u0438\u044F" }),
-    /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { id: "scanner", className: `stack${scanning ? "" : " hidden"}`, children: [
+  return /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("section", { className: sectionClass(), id: "op-new", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("h1", { className: "text-2xl font-semibold text-slate-900 dark:text-slate-50", children: t("op.title") || "\u041D\u043E\u0432\u0430\u044F \u043E\u043F\u0435\u0440\u0430\u0446\u0438\u044F" }),
+    /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "flex flex-wrap items-center gap-2", children: [
       /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
-        "video",
+        "button",
         {
-          id: "preview",
-          ref: videoRef,
-          playsInline: true,
-          style: { width: "100%", maxWidth: "400px" }
-        }
-      ),
-      /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "row", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "muted", children: t("scanner.hint") || "\u041D\u0430\u0432\u0435\u0434\u0438 \u043A\u0430\u043C\u0435\u0440\u0443 \u043D\u0430 \u0448\u0442\u0440\u0438\u0445-\u043A\u043E\u0434" }),
-        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
-          "button",
-          {
-            id: "btn-close-scan",
-            type: "button",
-            className: "btn icon",
-            onClick: stopScan,
-            "aria-label": t("common.cancel") || "\u041E\u0442\u043C\u0435\u043D\u0430",
-            title: t("common.cancel") || "\u041E\u0442\u043C\u0435\u043D\u0430",
-            children: /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("i", { className: "fa-solid fa-xmark", "aria-hidden": "true" })
-          }
-        )
-      ] })
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "input-row", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("label", { htmlFor: "barcode", className: "sr-only", children: t("op.scan") || "\u0428\u0442\u0440\u0438\u0445-\u043A\u043E\u0434" }),
-      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
-        "input",
-        {
-          id: "barcode",
-          type: "search",
-          inputMode: "search",
-          value: barcodeValue,
-          placeholder: t("op.barcode.placeholder") || "\u0438\u043B\u0438 \u0432\u0432\u0435\u0434\u0438\u0442\u0435 \u0448\u0442\u0440\u0438\u0445-\u043A\u043E\u0434 \u0438 \u043D\u0430\u0436\u043C\u0438\u0442\u0435 Enter",
-          onChange: (event) => setBarcodeValue(event.target.value),
-          onKeyDown: (event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              runSearch(barcodeValue);
-            }
-          }
+          type: "button",
+          className: buttonClass({
+            variant: searchMode === SEARCH_MODES.SCAN ? "primary" : "ghost",
+            size: "sm"
+          }),
+          onClick: () => setSearchMode(SEARCH_MODES.SCAN),
+          children: t("op.mode.scan") || "\u0421\u043A\u0430\u043D"
         }
       ),
       /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
         "button",
         {
-          id: "btn-scan",
           type: "button",
-          className: "btn icon",
-          onClick: startScan,
-          "aria-label": t("op.scan") || "\u0421\u043A\u0430\u043D \u0448\u0442\u0440\u0438\u0445-\u043A\u043E\u0434\u0430",
-          title: t("op.scan") || "\u0421\u043A\u0430\u043D \u0448\u0442\u0440\u0438\u0445-\u043A\u043E\u0434\u0430",
-          children: /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("i", { className: "fa-solid fa-camera", "aria-hidden": "true" })
+          className: buttonClass({
+            variant: searchMode === SEARCH_MODES.NAME ? "primary" : "ghost",
+            size: "sm"
+          }),
+          onClick: () => setSearchMode(SEARCH_MODES.NAME),
+          children: t("op.mode.name") || "\u041F\u043E\u0438\u0441\u043A \u043F\u043E \u043D\u0430\u0437\u0432\u0430\u043D\u0438\u044E"
         }
       )
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "stack", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("label", { htmlFor: "product-query", children: t("op.search.label") || "\u041F\u043E\u0438\u0441\u043A \u0442\u043E\u0432\u0430\u0440\u0430" }),
+    searchMode === SEARCH_MODES.SCAN && /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)(import_jsx_runtime12.Fragment, { children: [
+      /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)(
+        "div",
+        {
+          id: "scanner",
+          className: cn(
+            scanning ? "space-y-4" : "hidden",
+            cardClass("space-y-4")
+          ),
+          children: [
+            /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
+              "video",
+              {
+                id: "preview",
+                ref: videoRef,
+                playsInline: true,
+                className: "w-full rounded-xl"
+              }
+            ),
+            /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "flex items-center justify-between gap-3", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: mutedTextClass(), children: t("scanner.hint") || "\u041D\u0430\u0432\u0435\u0434\u0438 \u043A\u0430\u043C\u0435\u0440\u0443 \u043D\u0430 \u0448\u0442\u0440\u0438\u0445-\u043A\u043E\u0434" }),
+              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
+                "button",
+                {
+                  id: "btn-close-scan",
+                  type: "button",
+                  className: iconButtonClass(),
+                  onClick: stopScan,
+                  "aria-label": t("common.cancel") || "\u041E\u0442\u043C\u0435\u043D\u0430",
+                  title: t("common.cancel") || "\u041E\u0442\u043C\u0435\u043D\u0430",
+                  children: /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("i", { className: "fa-solid fa-xmark", "aria-hidden": "true" })
+                }
+              )
+            ] })
+          ]
+        }
+      ),
+      /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "flex flex-col gap-3 sm:flex-row sm:items-center", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("label", { htmlFor: "barcode", className: "sr-only", children: t("op.scan") || "\u0428\u0442\u0440\u0438\u0445-\u043A\u043E\u0434" }),
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
+          "input",
+          {
+            id: "barcode",
+            type: "search",
+            inputMode: "search",
+            value: barcodeValue,
+            placeholder: t("op.barcode.placeholder") || "\u0438\u043B\u0438 \u0432\u0432\u0435\u0434\u0438\u0442\u0435 \u0448\u0442\u0440\u0438\u0445-\u043A\u043E\u0434 \u0438 \u043D\u0430\u0436\u043C\u0438\u0442\u0435 Enter",
+            onChange: (event) => setBarcodeValue(event.target.value),
+            onKeyDown: (event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                runSearch(barcodeValue, SEARCH_MODES.SCAN);
+              }
+            },
+            className: inputClass("flex-1")
+          }
+        ),
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
+          "button",
+          {
+            id: "btn-scan",
+            type: "button",
+            className: iconButtonClass(),
+            onClick: startScan,
+            "aria-label": t("op.scan") || "\u0421\u043A\u0430\u043D \u0448\u0442\u0440\u0438\u0445-\u043A\u043E\u0434\u0430",
+            title: t("op.scan") || "\u0421\u043A\u0430\u043D \u0448\u0442\u0440\u0438\u0445-\u043A\u043E\u0434\u0430",
+            children: /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("i", { className: "fa-solid fa-camera", "aria-hidden": "true" })
+          }
+        )
+      ] })
+    ] }),
+    searchMode === SEARCH_MODES.NAME && /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: cardClass("space-y-3"), children: [
+      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("label", { className: labelClass(), htmlFor: "product-query", children: t("op.search.label") || "\u041F\u043E\u0438\u0441\u043A \u0442\u043E\u0432\u0430\u0440\u0430" }),
       /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
         "input",
         {
@@ -60981,151 +61100,192 @@ function OpNewPage() {
           onKeyDown: (event) => {
             if (event.key === "Enter") {
               event.preventDefault();
-              runSearch(queryValue);
+              runSearch(queryValue, SEARCH_MODES.NAME);
             }
-          }
+          },
+          className: inputClass()
         }
       ),
-      /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { id: "product-results", className: "muted", "aria-live": "polite", children: [
-        searchStatus === "loading" && (t("searching") || "\u041F\u043E\u0438\u0441\u043A..."),
-        searchStatus === "empty" && (t("common.nothing") || "\u041D\u0438\u0447\u0435\u0433\u043E \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u043E"),
-        searchStatus === "error" && (t("search_error") || "\u041E\u0448\u0438\u0431\u043A\u0430 \u043F\u043E\u0438\u0441\u043A\u0430")
-      ] })
-    ] }),
-    picked && /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { id: "product-picked", className: "stack", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("strong", { id: "picked-name", children: picked.name }),
-      /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "muted", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { id: "picked-code", children: picked.barcode }),
-        picked.quantity_common != null && /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)(import_jsx_runtime12.Fragment, { children: [
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "dot" }),
-          /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("span", { children: [
-            fmt.number(picked.quantity_common),
-            " ",
-            t("unit.pcs") || "\u0448\u0442"
-          ] })
-        ] })
-      ] }),
-      descriptionPreview && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { id: "picked-desc", className: "muted", children: descriptionPreview })
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "stack", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { htmlFor: "qty", children: [
-        t("op.qty") || "\u041A\u043E\u043B\u0438\u0447\u0435\u0441\u0442\u0432\u043E",
-        " ",
-        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "muted", children: "*" })
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
-        "input",
-        {
-          id: "qty",
-          type: "number",
-          inputMode: "decimal",
-          value: quantity,
-          onChange: (event) => setQuantity(event.target.value),
-          onKeyDown: (event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              document.getElementById("cost")?.focus();
-            }
-          }
-        }
-      ),
-      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "qty-quick", id: "qty-quick", children: QUICK_QTY.map((value) => /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)(
+      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "flex justify-end", children: /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
         "button",
         {
           type: "button",
-          className: "chip",
-          "data-inc": value,
-          onClick: () => setQuantity((prev) => String(toNumber2(prev) + value)),
+          className: buttonClass({ variant: "primary", size: "sm" }),
+          onClick: () => runSearch(queryValue, SEARCH_MODES.NAME),
+          children: t("common.search") || "\u041D\u0430\u0439\u0442\u0438"
+        }
+      ) }),
+      /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)(
+        "div",
+        {
+          id: "product-results",
+          className: mutedTextClass(),
+          "aria-live": "polite",
           children: [
-            "+",
-            value
+            searchStatus === "loading" && (t("searching") || "\u041F\u043E\u0438\u0441\u043A..."),
+            searchStatus === "empty" && (t("common.nothing") || "\u041D\u0438\u0447\u0435\u0433\u043E \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u043E"),
+            searchStatus === "error" && (t("search_error") || "\u041E\u0448\u0438\u0431\u043A\u0430 \u043F\u043E\u0438\u0441\u043A\u0430"),
+            searchStatus === "multi" && (t("op.search.choose_prompt") || "\u041D\u0430\u0439\u0434\u0435\u043D\u043E \u043D\u0435\u0441\u043A\u043E\u043B\u044C\u043A\u043E \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442\u043E\u0432, \u0432\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u0438\u0437 \u0441\u043F\u0438\u0441\u043A\u0430")
           ]
-        },
-        value
-      )) })
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "stack", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { htmlFor: "cost", children: [
-        t("op.cost") || "\u0421\u0442\u043E\u0438\u043C\u043E\u0441\u0442\u044C",
-        " ",
-        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "muted" })
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
-        "input",
-        {
-          id: "cost",
-          type: "number",
-          inputMode: "decimal",
-          value: cost,
-          onChange: (event) => setCost(event.target.value),
-          onKeyDown: (event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              document.getElementById("price")?.focus();
-            }
-          }
-        }
-      ),
-      lpcLabel && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "qty-quick", id: "qty-quick", children: /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
-        "button",
-        {
-          type: "button",
-          id: "cost-hint",
-          className: "chip",
-          onClick: () => setCost(String(picked.last_purchase_cost)),
-          children: lpcLabel
-        }
-      ) })
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "stack", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("label", { htmlFor: "price", children: t("op.price") || "\u0426\u0435\u043D\u0430" }),
-      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
-        "input",
-        {
-          id: "price",
-          type: "number",
-          inputMode: "decimal",
-          value: price,
-          onChange: (event) => setPrice(event.target.value),
-          onKeyDown: (event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              handleSubmit();
-            }
-          }
-        }
-      ),
-      priceLabel && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "qty-quick", id: "qty-quick", children: /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
-        "button",
-        {
-          type: "button",
-          id: "price-hint",
-          className: "chip",
-          onClick: () => setPrice(String(picked.price)),
-          children: priceLabel
-        }
-      ) })
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "stack", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("label", { htmlFor: "description", children: t("op.description") || "\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435" }),
-      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
-        "input",
-        {
-          id: "description",
-          type: "text",
-          value: description,
-          placeholder: t("op.description.placeholder") || "\u041A\u043E\u043C\u043C\u0435\u043D\u0442\u0430\u0440\u0438\u0439 \u043A \u043E\u043F\u0435\u0440\u0430\u0446\u0438\u0438 (\u043D\u0435\u043E\u0431\u044F\u0437.)",
-          onChange: (event) => setDescription(event.target.value)
         }
       )
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "page-actions", children: [
+    picked && /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { id: "product-picked", className: cardClass("space-y-2"), children: [
+      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
+        "strong",
+        {
+          id: "picked-name",
+          className: "text-lg font-semibold text-slate-900 dark:text-slate-50",
+          children: picked.name
+        }
+      ),
+      /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "flex flex-wrap items-center gap-2 text-sm", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { id: "picked-code", className: mutedTextClass(), children: picked.barcode }),
+        picked.quantity_common != null && /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("span", { className: mutedTextClass(), children: [
+          fmt.number(picked.quantity_common),
+          " ",
+          picked.unit
+        ] })
+      ] }),
+      descriptionPreview && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { id: "picked-desc", className: mutedTextClass(), children: descriptionPreview })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: cardClass("space-y-4"), children: [
+      /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "space-y-2", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("label", { className: labelClass(), htmlFor: "qty", children: [
+          t("op.qty") || "\u041A\u043E\u043B\u0438\u0447\u0435\u0441\u0442\u0432\u043E",
+          /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: cn(mutedTextClass(), "ml-1"), children: "*" })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
+          "input",
+          {
+            id: "qty",
+            type: "number",
+            inputMode: picked?.unit_piece ? "numeric" : "decimal",
+            step: picked?.unit_piece ? 1 : "0.01",
+            value: quantity,
+            onChange: (event) => {
+              const nextValue = event.target.value;
+              if (picked?.unit_piece) {
+                if (/^\d*$/.test(nextValue)) {
+                  setQuantity(nextValue);
+                }
+                return;
+              }
+              setQuantity(nextValue);
+            },
+            onKeyDown: (event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                document.getElementById("cost")?.focus();
+              }
+            },
+            className: inputClass()
+          }
+        ),
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "flex flex-wrap gap-2", id: "qty-quick", children: QUICK_QTY.map((value) => /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)(
+          "button",
+          {
+            type: "button",
+            className: chipClass(),
+            "data-inc": value,
+            onClick: () => setQuantity((prev) => {
+              const base = toNumber2(prev);
+              if (picked?.unit_piece) {
+                const normalized = Number.isFinite(base) ? Math.trunc(base) : 0;
+                return String(normalized + value);
+              }
+              return String(base + value);
+            }),
+            children: [
+              "+",
+              value
+            ]
+          },
+          value
+        )) })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "space-y-2", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("label", { className: labelClass(), htmlFor: "cost", children: t("op.cost") || "\u0421\u0442\u043E\u0438\u043C\u043E\u0441\u0442\u044C" }),
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
+          "input",
+          {
+            id: "cost",
+            type: "number",
+            inputMode: "decimal",
+            value: cost,
+            onChange: (event) => setCost(event.target.value),
+            onKeyDown: (event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                document.getElementById("price")?.focus();
+              }
+            },
+            className: inputClass()
+          }
+        ),
+        lpcLabel && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "flex flex-wrap gap-2", id: "cost-hint-wrap", children: /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
+          "button",
+          {
+            type: "button",
+            id: "cost-hint",
+            className: chipClass(),
+            onClick: () => setCost(String(picked.last_purchase_cost)),
+            children: lpcLabel
+          }
+        ) })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "space-y-2", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("label", { className: labelClass(), htmlFor: "price", children: t("op.price") || "\u0426\u0435\u043D\u0430" }),
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
+          "input",
+          {
+            id: "price",
+            type: "number",
+            inputMode: "decimal",
+            value: price,
+            onChange: (event) => setPrice(event.target.value),
+            onKeyDown: (event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                handleSubmit();
+              }
+            },
+            className: inputClass()
+          }
+        ),
+        priceLabel && /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "flex flex-wrap gap-2", id: "price-hint-wrap", children: /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
+          "button",
+          {
+            type: "button",
+            id: "price-hint",
+            className: chipClass(),
+            onClick: () => setPrice(String(picked.price)),
+            children: priceLabel
+          }
+        ) })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "space-y-2", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("label", { className: labelClass(), htmlFor: "description", children: t("op.description") || "\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435" }),
+        /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
+          "input",
+          {
+            id: "description",
+            type: "text",
+            value: description,
+            placeholder: t("op.description.placeholder") || "\u041A\u043E\u043C\u043C\u0435\u043D\u0442\u0430\u0440\u0438\u0439 \u043A \u043E\u043F\u0435\u0440\u0430\u0446\u0438\u0438 (\u043D\u0435\u043E\u0431\u044F\u0437.)",
+            onChange: (event) => setDescription(event.target.value),
+            className: inputClass()
+          }
+        )
+      ] })
+    ] }),
+    /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "flex flex-wrap items-center justify-end gap-3", children: [
       /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
         "button",
         {
           id: "btn-op-cancel",
           type: "button",
-          className: "btn small ghost",
+          className: buttonClass({ variant: "ghost", size: "sm" }),
           onClick: () => navigate(`/doc/${docId}`),
           disabled: saving,
           children: t("common.cancel") || "\u041E\u0442\u043C\u0435\u043D\u0430"
@@ -61136,13 +61296,67 @@ function OpNewPage() {
         {
           id: "btn-op-save",
           type: "button",
-          className: "btn small",
+          className: buttonClass({ variant: "primary", size: "sm" }),
           onClick: handleSubmit,
           disabled: saving,
           children: saving ? t("op.saving") || "\u0421\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u0438\u0435..." : t("common.save") || "\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C"
         }
       )
-    ] })
+    ] }),
+    resultModalOpen ? /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
+      "div",
+      {
+        className: "fixed inset-0 z-50 flex items-center justify-center bg-slate-900/70 px-4 py-6",
+        role: "dialog",
+        "aria-modal": "true",
+        "aria-labelledby": "search-results-title",
+        onClick: handleModalDismiss,
+        children: /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)(
+          "div",
+          {
+            className: cardClass(
+              "relative w-full max-w-lg space-y-4 shadow-xl"
+            ),
+            onClick: (event) => event.stopPropagation(),
+            children: [
+              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
+                "h2",
+                {
+                  id: "search-results-title",
+                  className: "text-lg font-semibold text-slate-900 dark:text-slate-50",
+                  children: t("op.search.choose_prompt") || "\u0412\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u0442\u043E\u0432\u0430\u0440"
+                }
+              ),
+              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "max-h-96 space-y-3 overflow-y-auto pr-1", children: resultItems.map((item) => /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
+                "button",
+                {
+                  type: "button",
+                  className: cardClass(
+                    "w-full text-left transition hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-500 focus-visible:ring-offset-2"
+                  ),
+                  onClick: () => handlePickItem(item),
+                  children: /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "flex flex-col gap-1", children: [
+                    /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "text-sm font-semibold text-slate-900 dark:text-slate-50", children: item.name }),
+                    /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: mutedTextClass(), children: item.barcode }),
+                    item.price != null ? /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: mutedTextClass(), children: fmt.money(item.price) }) : null
+                  ] })
+                },
+                `${item.id}-${item.barcode}`
+              )) }),
+              /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("div", { className: "flex justify-end", children: /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
+                "button",
+                {
+                  type: "button",
+                  className: buttonClass({ variant: "ghost", size: "sm" }),
+                  onClick: handleModalDismiss,
+                  children: t("common.cancel") || "\u041E\u0442\u043C\u0435\u043D\u0430"
+                }
+              ) })
+            ]
+          }
+        )
+      }
+    ) : null
   ] });
 }
 

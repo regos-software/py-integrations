@@ -80,3 +80,9 @@ response = await integration.handle_external({
     "body": {"action": "purchase_list", "params": {"page": 1, "page_size": 10}}
 })
 ```
+
+## Добавить недостающие перевды
+
+```shell
+npm run i18n:scan
+```

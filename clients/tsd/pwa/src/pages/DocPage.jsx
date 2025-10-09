@@ -28,18 +28,18 @@ function OperationRow({ op, onDelete, onSave }) {
   const { toNumber } = useApp();
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState({
-    quantity: op.quantity,
-    cost: op.cost,
-    price: op.price ?? "",
+    quantity: op.quantity != null ? String(op.quantity) : "",
+    cost: op.cost != null ? String(op.cost) : "",
+    price: op.price != null ? String(op.price) : "",
     description: op.description ?? "",
   });
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     setForm({
-      quantity: op.quantity,
-      cost: op.cost,
-      price: op.price ?? "",
+      quantity: op.quantity != null ? String(op.quantity) : "",
+      cost: op.cost != null ? String(op.cost) : "",
+      price: op.price != null ? String(op.price) : "",
       description: op.description ?? "",
     });
   }, [op]);
@@ -53,11 +53,24 @@ function OperationRow({ op, onDelete, onSave }) {
     item.code ||
     "";
   const code = (item.code ?? "").toString().padStart(6, "0");
-  const unitName = item.unit?.name || t("unit.pcs") || "шт";
+  const unitName = item.unit?.name;
+  const unitPiece = item.unit?.type === "pcs";
   const priceValue = toNumber(op.price ?? 0);
 
   const handleFieldChange = (field) => (event) => {
     setForm((prev) => ({ ...prev, [field]: event.target.value }));
+  };
+
+  const handleQuantityChange = (event) => {
+    console.log("item", item);
+    const nextValue = event.target.value;
+    if (unitPiece) {
+      if (/^\d*$/.test(nextValue)) {
+        setForm((prev) => ({ ...prev, quantity: nextValue }));
+      }
+      return;
+    }
+    setForm((prev) => ({ ...prev, quantity: nextValue }));
   };
 
   const handleSave = async () => {
@@ -158,9 +171,10 @@ function OperationRow({ op, onDelete, onSave }) {
             <input
               id={`qty-${op.id}`}
               type="number"
-              inputMode="decimal"
+              inputMode={unitPiece ? "numeric" : "decimal"}
+              step={unitPiece ? 1 : "0.01"}
               value={form.quantity}
-              onChange={handleFieldChange("quantity")}
+              onChange={handleQuantityChange}
               className={inputClass()}
             />
           </div>
