@@ -6,21 +6,10 @@ import React, {
   useState,
 } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { BrowserMultiFormatReader, BarcodeFormat } from "@zxing/browser";
+import { BrowserMultiFormatReader } from "@zxing/library";
 import { useApp } from "../context/AppContext.jsx";
 import { useI18n } from "../context/I18nContext.jsx";
 import { useToast } from "../context/ToastContext.jsx";
-
-const ZXING_FORMATS = [
-  BarcodeFormat.EAN_13,
-  BarcodeFormat.EAN_8,
-  BarcodeFormat.UPC_A,
-  BarcodeFormat.UPC_E,
-  BarcodeFormat.ITF,
-  BarcodeFormat.CODE_128,
-  BarcodeFormat.CODE_39,
-  BarcodeFormat.CODABAR,
-].filter(Boolean);
 
 const QUICK_QTY = [1, 5, 10, 12];
 
@@ -33,25 +22,6 @@ function firstBarcode(item) {
     item?.code ||
     ""
   );
-}
-
-async function listVideoDevices(reader) {
-  const devices = await reader.listVideoInputDevices();
-  return (devices || [])
-    .map((device) => ({
-      deviceId: device.deviceId || device.id,
-      label: device.label || "",
-    }))
-    .filter((device) => device.deviceId);
-}
-
-function pickCamera(devices) {
-  const prefer = [/macro|tele|zoom|close/i, /back|environment|rear/i];
-  for (const pattern of prefer) {
-    const match = devices.find((device) => pattern.test(device.label));
-    if (match) return match.deviceId;
-  }
-  return devices[0]?.deviceId ?? null;
 }
 
 export default function OpNewPage() {
@@ -73,11 +43,8 @@ export default function OpNewPage() {
   const [picked, setPicked] = useState(null);
   const [saving, setSaving] = useState(false);
   const [scanning, setScanning] = useState(false);
-  const [currentDeviceId, setCurrentDeviceId] = useState(null);
-
   const videoRef = useRef(null);
   const readerRef = useRef(null);
-  const controlsRef = useRef(null);
 
   useEffect(() => {
     setAppTitle(t("op.title") || "Новая операция");
@@ -143,110 +110,83 @@ export default function OpNewPage() {
 
   const ensureReader = useCallback(async () => {
     if (readerRef.current) return readerRef.current;
-    const hints = new Map();
-    // if (DecodeHintType.POSSIBLE_FORMATS) {
-    //   hints.set(DecodeHintType.POSSIBLE_FORMATS, ZXING_FORMATS);
-    // }
-    readerRef.current = new BrowserMultiFormatReader(hints, {
-      delayBetweenScanAttempts: 250,
-    });
+    const reader = new BrowserMultiFormatReader();
+    readerRef.current = reader;
     return readerRef.current;
   }, []);
 
   const stopScan = useCallback(() => {
     setScanning(false);
-    try {
-      controlsRef.current?.stop?.();
-      controlsRef.current = null;
-    } catch (err) {
-      console.warn("[scan] stop error", err);
-    }
-    try {
-      readerRef.current?.reset?.();
-    } catch (err) {
-      console.warn("[scan] reset error", err);
-    }
-    const video = videoRef.current;
-    if (video) {
-      try {
-        video.pause?.();
-      } catch {}
-      try {
-        video.srcObject = null;
-      } catch {}
-    }
-  }, []);
+    if (readerRef.current) {
+      console.log("Stopping scanner...");
 
-  useEffect(() => {
-    const visibilityHandler = () => {
-      if (document.hidden) stopScan();
-    };
-    document.addEventListener("visibilitychange", visibilityHandler);
-    window.addEventListener("pagehide", stopScan);
-    return () => {
-      document.removeEventListener("visibilitychange", visibilityHandler);
-      window.removeEventListener("pagehide", stopScan);
-      stopScan();
-    };
-  }, [stopScan]);
+      readerRef.current.reset();
+    }
+    if (videoRef.current?.srcObject) {
+      console.log("Stopping video stream...");
+
+      const tracks = videoRef.current.srcObject.getTracks();
+      tracks.forEach((track) => track.stop());
+      videoRef.current.srcObject = null;
+    }
+    console.log("Scanner stopped.");
+
+    setScanning(false);
+  }, []);
 
   useEffect(() => {
     document.getElementById("barcode")?.focus();
   }, []);
 
-  const startScan = useCallback(async () => {
-    if (
-      window.location.protocol !== "https:" &&
-      window.location.hostname !== "localhost"
-    ) {
-      showToast(t("camera_open_failed") || "Не удалось открыть камеру", {
-        type: "error",
-      });
-      return;
-    }
+  const startScan = async () => {
+    if (scanning) return;
 
     try {
       const reader = await ensureReader();
-      const devices = await listVideoDevices(reader);
-      if (!devices.length) {
-        showToast(t("camera_open_failed") || "Не удалось открыть камеру", {
-          type: "error",
-        });
-        return;
+      console.log("reader", reader);
+
+      const constraints = {
+        video: { facingMode: { ideal: "environment" } },
+      };
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.setAttribute("playsinline", "true");
+        await videoRef.current.play();
       }
-      const selectedDeviceId =
-        currentDeviceId || pickCamera(devices) || devices[0].deviceId;
-      setCurrentDeviceId(selectedDeviceId);
 
-      const controls = await reader.decodeFromVideoDevice(
-        selectedDeviceId,
-        videoRef.current,
-        (result, err) => {
-          if (result?.text) {
-            const code = result.text;
-            setBarcodeValue(code);
-            setQueryValue(code);
-            stopScan();
-            runSearch(code);
-            try {
-              navigator.vibrate?.(35);
-            } catch {}
-          } else if (err && err.name !== "NotFoundException") {
-            console.debug("[ZXing]", err?.name || err);
-          }
-        }
-      );
+      console.log("Video started, starting scan...");
 
-      controlsRef.current = controls;
       setScanning(true);
+
+      reader.decodeFromVideoDevice(null, videoRef.current, (result, err) => {
+        console.log("scan result", { result, err });
+        if (result) {
+          const text = result.getText();
+          stopScan();
+          runSearch(text);
+        }
+        if (
+          err &&
+          !(err.name === "Камера не найдена" || err.name === "NotFoundError")
+        ) {
+          // console.error(err);
+        }
+      });
     } catch (err) {
       console.error("[scan] start error", err);
-      showToast(t("camera_open_failed") || "Не удалось открыть камеру", {
+      const messageKey =
+        err?.name === "NotAllowedError"
+          ? "camera_permission_denied"
+          : err?.name === "NotFoundError" ||
+            err?.name === "OverconstrainedError"
+          ? "camera_not_found"
+          : "camera_open_failed";
+      showToast(t(messageKey) || "Не удалось открыть камеру", {
         type: "error",
       });
-      stopScan();
     }
-  }, [currentDeviceId, ensureReader, runSearch, showToast, stopScan, t]);
+  };
 
   const handleSubmit = async () => {
     if (!picked?.id) {
@@ -328,7 +268,12 @@ export default function OpNewPage() {
       <h1>{t("op.title") || "Новая операция"}</h1>
 
       <div id="scanner" className={`stack${scanning ? "" : " hidden"}`}>
-        <video id="preview" ref={videoRef} playsInline autoPlay muted />
+        <video
+          id="preview"
+          ref={videoRef}
+          playsInline
+          style={{ width: "100%", maxWidth: "400px" }}
+        />
         <div className="row">
           <span className="muted">
             {t("scanner.hint") || "Наведи камеру на штрих-код"}

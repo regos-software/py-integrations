@@ -38,15 +38,21 @@ export default function DocsPage() {
     setLoading(true);
     setError(null);
     try {
+      const searchTerm = debouncedSearch.trim();
       const { data } = await api("purchase_list", {
         page,
         page_size: PAGE_SIZE,
-        query: debouncedSearch,
+        query: searchTerm,
       });
       const received = data?.result?.items || [];
-      const total = data?.result?.total || 0;
+      const total = data?.result?.total;
       setItems(received);
-      setTotalPages(total > 0 ? Math.ceil(total / PAGE_SIZE) : page);
+      if (typeof total === "number") {
+        setTotalPages(Math.max(1, Math.ceil(total / PAGE_SIZE)));
+      } else {
+        const hasMore = received.length === PAGE_SIZE;
+        setTotalPages(hasMore ? page + 1 : page);
+      }
     } catch (err) {
       setError(err);
       setItems([]);
@@ -55,8 +61,22 @@ export default function DocsPage() {
     }
   }, [api, page, debouncedSearch]);
 
+  const updateSearchParams = useCallback(
+    (nextPage, nextQuery = query) => {
+      const normalizedQuery = nextQuery.trim();
+      if (nextPage === page && normalizedQuery === query.trim()) {
+        return;
+      }
+
+      const params = new URLSearchParams();
+      if (nextPage > 1) params.set("page", String(nextPage));
+      if (normalizedQuery) params.set("q", normalizedQuery);
+      setSearchParams(params, { replace: true });
+    },
+    [page, query, setSearchParams]
+  );
+
   useEffect(() => {
-    console.log("helo");
     fetchDocs();
   }, [fetchDocs]);
 
@@ -64,14 +84,7 @@ export default function DocsPage() {
     const trimmed = debouncedSearch.trim();
     if (trimmed === query) return;
     updateSearchParams(1, trimmed);
-  }, [debouncedSearch, query]);
-
-  const updateSearchParams = (nextPage, nextQuery = query) => {
-    const params = new URLSearchParams();
-    if (nextPage > 1) params.set("page", String(nextPage));
-    params.set("q", nextQuery);
-    setSearchParams(params);
-  };
+  }, [debouncedSearch, query, updateSearchParams]);
 
   const handleSearchSubmit = (event) => {
     event.preventDefault();

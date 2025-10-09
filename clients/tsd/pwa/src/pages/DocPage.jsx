@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useApp } from "../context/AppContext.jsx";
 import { useI18n } from "../context/I18nContext.jsx";
@@ -313,17 +313,65 @@ export default function DocPage() {
     return segments.join(" • ");
   }, [doc, t]);
 
+  const backToDocsLabel = useMemo(() => {
+    const preferred = t("docs.back_to_list");
+    if (preferred && preferred !== "docs.back_to_list") return preferred;
+    const fallback = t("nav.back");
+    return fallback === "nav.back" ? "Назад" : fallback;
+  }, [t]);
+
+  const goToDocs = useCallback(() => {
+    navigate("/docs", { replace: true });
+  }, [navigate]);
+
   if (loading) {
-    return <div className="muted">{t("common.loading") || "Загрузка..."}</div>;
+    return (
+      <section className="stack" id="doc">
+        <div className="row row-start">
+          <h1 id="doc-title">
+            {t("doc.title_prefix") || "Документ"} {id}
+          </h1>
+        </div>
+        <div className="muted">{t("common.loading") || "Загрузка..."}</div>
+      </section>
+    );
   }
 
   if (error) {
-    return <div className="muted">{String(error.message || error)}</div>;
+    return (
+      <section className="stack" id="doc">
+        <div className="row row-start">
+          <h1 id="doc-title">
+            {t("doc.title_prefix") || "Документ"} {id}
+          </h1>
+        </div>
+        <div className="muted">{String(error.message || error)}</div>
+        <div className="page-actions">
+          <button type="button" className="btn small" onClick={goToDocs}>
+            {backToDocsLabel}
+          </button>
+        </div>
+      </section>
+    );
   }
 
   if (!doc) {
     return (
-      <div className="muted">{t("common.nothing") || "Ничего не найдено"}</div>
+      <section className="stack" id="doc">
+        <div className="row row-start">
+          <h1 id="doc-title">
+            {t("doc.title_prefix") || "Документ"} {id}
+          </h1>
+        </div>
+        <div className="muted">
+          {t("common.nothing") || "Ничего не найдено"}
+        </div>
+        <div className="page-actions">
+          <button type="button" className="btn small" onClick={goToDocs}>
+            {backToDocsLabel}
+          </button>
+        </div>
+      </section>
     );
   }
 

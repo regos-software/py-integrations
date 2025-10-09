@@ -9,17 +9,20 @@
     "serve": "live-server --port=4173 --no-browser"
   },
   "dependencies": {
-    "@zxing/browser": "^0.1.4",
+    "@zxing/library": "^0.21.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.26.2"
   },
   "devDependencies": {
-    "esbuild": "^0.21.5",
+    "braces": "^3.0.3",
+    "chokidar": "^4.0.3",
+    "esbuild": "^0.25.10",
     "eslint": "^8.57.0",
     "eslint-plugin-jsx-a11y": "^6.8.0",
     "eslint-plugin-react": "^7.34.3",
     "eslint-plugin-react-hooks": "^4.6.0",
-    "live-server": "^1.2.2"
+    "live-server": "^1.2.0",
+    "micromatch": "^4.0.8"
   }
 }

@@ -1107,11 +1107,11 @@ var require_react_development = __commonJS({
           var dispatcher = resolveDispatcher();
           return dispatcher.useLayoutEffect(create, deps);
         }
-        function useCallback8(callback, deps) {
+        function useCallback10(callback, deps) {
           var dispatcher = resolveDispatcher();
           return dispatcher.useCallback(callback, deps);
         }
-        function useMemo9(create, deps) {
+        function useMemo10(create, deps) {
           var dispatcher = resolveDispatcher();
           return dispatcher.useMemo(create, deps);
         }
@@ -1874,7 +1874,7 @@ var require_react_development = __commonJS({
         exports.memo = memo2;
         exports.startTransition = startTransition;
         exports.unstable_act = act;
-        exports.useCallback = useCallback8;
+        exports.useCallback = useCallback10;
         exports.useContext = useContext4;
         exports.useDebugValue = useDebugValue;
         exports.useDeferredValue = useDeferredValue;
@@ -1883,7 +1883,7 @@ var require_react_development = __commonJS({
         exports.useImperativeHandle = useImperativeHandle;
         exports.useInsertionEffect = useInsertionEffect;
         exports.useLayoutEffect = useLayoutEffect3;
-        exports.useMemo = useMemo9;
+        exports.useMemo = useMemo10;
         exports.useReducer = useReducer;
         exports.useRef = useRef4;
         exports.useState = useState11;
@@ -2604,6 +2604,7 @@ var require_react_dom_development = __commonJS({
           }
           switch (typeof value) {
             case "function":
+            // $FlowIssue symbol is perfectly valid here
             case "symbol":
               return true;
             case "boolean": {
@@ -3618,6 +3619,7 @@ var require_react_dom_development = __commonJS({
               return "SuspenseList";
             case TracingMarkerComponent:
               return "TracingMarker";
+            // The display name for this tags come from the user-provided type:
             case ClassComponent:
             case FunctionComponent:
             case IncompleteClassComponent:
@@ -4615,6 +4617,10 @@ var require_react_dom_development = __commonJS({
             return typeof props.is === "string";
           }
           switch (tagName) {
+            // These are reserved SVG and MathML elements.
+            // We don't mind this list too much because we expect it to never grow.
+            // The alternative is to track the namespace in a few places which is convoluted.
+            // https://w3c.github.io/webcomponents/spec/custom/#custom-elements-core-concepts
             case "annotation-xml":
             case "color-profile":
             case "font-face":
@@ -7444,6 +7450,7 @@ var require_react_dom_development = __commonJS({
         }
         function getEventPriority(domEventName) {
           switch (domEventName) {
+            // Used by SimpleEventPlugin:
             case "cancel":
             case "click":
             case "close":
@@ -7479,14 +7486,20 @@ var require_react_dom_development = __commonJS({
             case "touchend":
             case "touchstart":
             case "volumechange":
+            // Used by polyfills:
+            // eslint-disable-next-line no-fallthrough
             case "change":
             case "selectionchange":
             case "textInput":
             case "compositionstart":
             case "compositionend":
             case "compositionupdate":
+            // Only enableCreateEventHandleAPI:
+            // eslint-disable-next-line no-fallthrough
             case "beforeblur":
             case "afterblur":
+            // Not used by React but could be by user code:
+            // eslint-disable-next-line no-fallthrough
             case "beforeinput":
             case "blur":
             case "fullscreenchange":
@@ -7511,6 +7524,8 @@ var require_react_dom_development = __commonJS({
             case "toggle":
             case "touchmove":
             case "wheel":
+            // Not used by React but could be by user code:
+            // eslint-disable-next-line no-fallthrough
             case "mouseenter":
             case "mouseleave":
             case "pointerenter":
@@ -8696,6 +8711,7 @@ var require_react_dom_development = __commonJS({
         function extractEvents$3(dispatchQueue, domEventName, targetInst, nativeEvent, nativeEventTarget, eventSystemFlags, targetContainer) {
           var targetNode = targetInst ? getNodeFromInstance(targetInst) : window;
           switch (domEventName) {
+            // Track the input node that has focus.
             case "focusin":
               if (isTextInputElement(targetNode) || targetNode.contentEditable === "true") {
                 activeElement$1 = targetNode;
@@ -8708,6 +8724,8 @@ var require_react_dom_development = __commonJS({
               activeElementInst$1 = null;
               lastSelection = null;
               break;
+            // Don't fire the event while the user is dragging. This matches the
+            // semantics of the native select event.
             case "mousedown":
               mouseDown = true;
               break;
@@ -8717,10 +8735,20 @@ var require_react_dom_development = __commonJS({
               mouseDown = false;
               constructSelectEvent(dispatchQueue, nativeEvent, nativeEventTarget);
               break;
+            // Chrome and IE fire non-standard event when selection is changed (and
+            // sometimes when it hasn't). IE's event fires out of order with respect
+            // to key and input events on deletion, so we discard it.
+            //
+            // Firefox doesn't support selectionchange, so check selection status
+            // after each key entry. The selection changes after keydown and before
+            // keyup, but we check on keydown as well in the case of holding down a
+            // key, when multiple keydown events are fired but only one keyup is.
+            // This is also our approach for IE handling, for the reason above.
             case "selectionchange":
               if (skipSelectionChangeEvent) {
                 break;
               }
+            // falls through
             case "keydown":
             case "keyup":
               constructSelectEvent(dispatchQueue, nativeEvent, nativeEventTarget);
@@ -8803,6 +8831,7 @@ var require_react_dom_development = __commonJS({
               if (getEventCharCode(nativeEvent) === 0) {
                 return;
               }
+            /* falls through */
             case "keydown":
             case "keyup":
               SyntheticEventCtor = SyntheticKeyboardEvent;
@@ -8823,11 +8852,14 @@ var require_react_dom_development = __commonJS({
               if (nativeEvent.button === 2) {
                 return;
               }
+            /* falls through */
             case "auxclick":
             case "dblclick":
             case "mousedown":
             case "mousemove":
             case "mouseup":
+            // TODO: Disabled elements should not respond to mouse events
+            /* falls through */
             case "mouseout":
             case "mouseover":
             case "contextmenu":
@@ -9741,6 +9773,8 @@ var require_react_dom_development = __commonJS({
             for (var _i = 0; _i < attributes.length; _i++) {
               var name = attributes[_i].name.toLowerCase();
               switch (name) {
+                // Controlled attributes are not validated
+                // TODO: Only ignore them on controlled tags.
                 case "value":
                   break;
                 case "checked":
@@ -10008,24 +10042,37 @@ var require_react_dom_development = __commonJS({
           };
           var isTagValidWithParent = function(tag, parentTag) {
             switch (parentTag) {
+              // https://html.spec.whatwg.org/multipage/syntax.html#parsing-main-inselect
               case "select":
                 return tag === "option" || tag === "optgroup" || tag === "#text";
               case "optgroup":
                 return tag === "option" || tag === "#text";
+              // Strictly speaking, seeing an <option> doesn't mean we're in a <select>
+              // but
               case "option":
                 return tag === "#text";
+              // https://html.spec.whatwg.org/multipage/syntax.html#parsing-main-intd
+              // https://html.spec.whatwg.org/multipage/syntax.html#parsing-main-incaption
+              // No special behavior since these rules fall back to "in body" mode for
+              // all except special table nodes which cause bad parsing behavior anyway.
+              // https://html.spec.whatwg.org/multipage/syntax.html#parsing-main-intr
               case "tr":
                 return tag === "th" || tag === "td" || tag === "style" || tag === "script" || tag === "template";
+              // https://html.spec.whatwg.org/multipage/syntax.html#parsing-main-intbody
               case "tbody":
               case "thead":
               case "tfoot":
                 return tag === "tr" || tag === "style" || tag === "script" || tag === "template";
+              // https://html.spec.whatwg.org/multipage/syntax.html#parsing-main-incolgroup
               case "colgroup":
                 return tag === "col" || tag === "template";
+              // https://html.spec.whatwg.org/multipage/syntax.html#parsing-main-intable
               case "table":
                 return tag === "caption" || tag === "colgroup" || tag === "tbody" || tag === "tfoot" || tag === "thead" || tag === "style" || tag === "script" || tag === "template";
+              // https://html.spec.whatwg.org/multipage/syntax.html#parsing-main-inhead
               case "head":
                 return tag === "base" || tag === "basefont" || tag === "bgsound" || tag === "link" || tag === "meta" || tag === "title" || tag === "noscript" || tag === "noframes" || tag === "style" || tag === "script" || tag === "template";
+              // https://html.spec.whatwg.org/multipage/semantics.html#the-html-element
               case "html":
                 return tag === "head" || tag === "body" || tag === "frameset";
               case "frameset":
@@ -12984,6 +13031,7 @@ var require_react_dom_development = __commonJS({
             case CaptureUpdate: {
               workInProgress2.flags = workInProgress2.flags & ~ShouldCapture | DidCapture;
             }
+            // Intentional fallthrough
             case UpdateState: {
               var _payload = update.payload;
               var partialState;
@@ -19301,6 +19349,7 @@ var require_react_dom_development = __commonJS({
               insertOrAppendPlacementNodeIntoContainer(finishedWork, _before, _parent);
               break;
             }
+            // eslint-disable-next-line-no-fallthrough
             default:
               throw new Error("Invalid host parent fiber. This error is likely caused by a bug in React. Please file an issue.");
           }
@@ -19400,6 +19449,7 @@ var require_react_dom_development = __commonJS({
                 safelyDetachRef(deletedFiber, nearestMountedAncestor);
               }
             }
+            // eslint-disable-next-line-no-fallthrough
             case HostText: {
               {
                 var prevHostParent = hostParent;
@@ -20661,6 +20711,9 @@ var require_react_dom_development = __commonJS({
             case RootFatalErrored: {
               throw new Error("Root did not complete. This is a bug in React.");
             }
+            // Flow knows about invariant, so it complains if I add a break
+            // statement, but eslint doesn't know about invariant, so it complains
+            // if I do. eslint-disable-next-line no-fallthrough
             case RootErrored: {
               commitRoot(root3, workInProgressRootRecoverableErrors, workInProgressTransitions);
               break;
@@ -22306,10 +22359,15 @@ var require_react_dom_development = __commonJS({
               case REACT_OFFSCREEN_TYPE:
                 return createFiberFromOffscreen(pendingProps, mode, lanes, key);
               case REACT_LEGACY_HIDDEN_TYPE:
+              // eslint-disable-next-line no-fallthrough
               case REACT_SCOPE_TYPE:
+              // eslint-disable-next-line no-fallthrough
               case REACT_CACHE_TYPE:
+              // eslint-disable-next-line no-fallthrough
               case REACT_TRACING_MARKER_TYPE:
+              // eslint-disable-next-line no-fallthrough
               case REACT_DEBUG_TRACING_MODE_TYPE:
+              // eslint-disable-next-line no-fallthrough
               default: {
                 if (typeof type === "object" && type !== null) {
                   switch (type.$$typeof) {
@@ -25522,13 +25580,13 @@ function _renderMatches(matches, parentMatches, dataRouterState, future) {
     }) : getChildren();
   }, null);
 }
-var DataRouterHook = /* @__PURE__ */ function(DataRouterHook3) {
+var DataRouterHook = /* @__PURE__ */ (function(DataRouterHook3) {
   DataRouterHook3["UseBlocker"] = "useBlocker";
   DataRouterHook3["UseRevalidator"] = "useRevalidator";
   DataRouterHook3["UseNavigateStable"] = "useNavigate";
   return DataRouterHook3;
-}(DataRouterHook || {});
-var DataRouterStateHook = /* @__PURE__ */ function(DataRouterStateHook3) {
+})(DataRouterHook || {});
+var DataRouterStateHook = /* @__PURE__ */ (function(DataRouterStateHook3) {
   DataRouterStateHook3["UseBlocker"] = "useBlocker";
   DataRouterStateHook3["UseLoaderData"] = "useLoaderData";
   DataRouterStateHook3["UseActionData"] = "useActionData";
@@ -25540,7 +25598,7 @@ var DataRouterStateHook = /* @__PURE__ */ function(DataRouterStateHook3) {
   DataRouterStateHook3["UseNavigateStable"] = "useNavigate";
   DataRouterStateHook3["UseRouteId"] = "useRouteId";
   return DataRouterStateHook3;
-}(DataRouterStateHook || {});
+})(DataRouterStateHook || {});
 function getDataRouterConsoleError(hookName) {
   return hookName + " must be used within a data router.  See https://reactrouter.com/v6/routers/picking-a-router.";
 }
@@ -26885,10 +26943,32 @@ function AppLayout() {
   (0, import_react7.useEffect)(() => {
     registerSW2();
   }, [registerSW2]);
-  const showBack = location.pathname !== "/home";
-  const handleBack = () => {
-    navigate(-1);
-  };
+  const { pathname } = location;
+  const fallbackPath = (0, import_react7.useMemo)(() => {
+    if (pathname.startsWith("/doc/") && pathname.endsWith("/op/new")) {
+      return pathname.replace(/\/op\/new\/?$/, "");
+    }
+    if (pathname.startsWith("/doc/")) {
+      return "/docs";
+    }
+    if (pathname.startsWith("/docs")) {
+      return "/home";
+    }
+    return "/home";
+  }, [pathname]);
+  const showBack = pathname !== "/home";
+  const handleBack = (0, import_react7.useCallback)(() => {
+    const canGoBack = typeof window !== "undefined" && window.history?.state?.idx > 0;
+    if (canGoBack) {
+      navigate(-1);
+      return;
+    }
+    if (pathname !== fallbackPath) {
+      navigate(fallbackPath, { replace: true });
+    } else {
+      navigate("/home", { replace: true });
+    }
+  }, [navigate, pathname, fallbackPath]);
   const backLabelRaw = t("nav.back");
   const backLabel = backLabelRaw === "nav.back" ? "\u041D\u0430\u0437\u0430\u0434" : backLabelRaw;
   const installLabelRaw = t("install_app");
@@ -27068,15 +27148,21 @@ function DocsPage() {
     setLoading(true);
     setError(null);
     try {
+      const searchTerm = debouncedSearch.trim();
       const { data } = await api2("purchase_list", {
         page,
         page_size: PAGE_SIZE,
-        query: debouncedSearch
+        query: searchTerm
       });
       const received = data?.result?.items || [];
-      const total = data?.result?.total || 0;
+      const total = data?.result?.total;
       setItems(received);
-      setTotalPages(total > 0 ? Math.ceil(total / PAGE_SIZE) : page);
+      if (typeof total === "number") {
+        setTotalPages(Math.max(1, Math.ceil(total / PAGE_SIZE)));
+      } else {
+        const hasMore = received.length === PAGE_SIZE;
+        setTotalPages(hasMore ? page + 1 : page);
+      }
     } catch (err) {
       setError(err);
       setItems([]);
@@ -27084,21 +27170,27 @@ function DocsPage() {
       setLoading(false);
     }
   }, [api2, page, debouncedSearch]);
+  const updateSearchParams = (0, import_react11.useCallback)(
+    (nextPage, nextQuery = query) => {
+      const normalizedQuery = nextQuery.trim();
+      if (nextPage === page && normalizedQuery === query.trim()) {
+        return;
+      }
+      const params = new URLSearchParams();
+      if (nextPage > 1) params.set("page", String(nextPage));
+      if (normalizedQuery) params.set("q", normalizedQuery);
+      setSearchParams(params, { replace: true });
+    },
+    [page, query, setSearchParams]
+  );
   (0, import_react11.useEffect)(() => {
-    console.log("helo");
     fetchDocs();
   }, [fetchDocs]);
   (0, import_react11.useEffect)(() => {
     const trimmed = debouncedSearch.trim();
     if (trimmed === query) return;
     updateSearchParams(1, trimmed);
-  }, [debouncedSearch, query]);
-  const updateSearchParams = (nextPage, nextQuery = query) => {
-    const params = new URLSearchParams();
-    if (nextPage > 1) params.set("page", String(nextPage));
-    params.set("q", nextQuery);
-    setSearchParams(params);
-  };
+  }, [debouncedSearch, query, updateSearchParams]);
   const handleSearchSubmit = (event) => {
     event.preventDefault();
     updateSearchParams(1, inputValue.trim());
@@ -27517,14 +27609,46 @@ function DocPage() {
     }
     return segments.join(" \u2022 ");
   }, [doc, t]);
+  const backToDocsLabel = (0, import_react12.useMemo)(() => {
+    const preferred = t("docs.back_to_list");
+    if (preferred && preferred !== "docs.back_to_list") return preferred;
+    const fallback = t("nav.back");
+    return fallback === "nav.back" ? "\u041D\u0430\u0437\u0430\u0434" : fallback;
+  }, [t]);
+  const goToDocs = (0, import_react12.useCallback)(() => {
+    navigate("/docs", { replace: true });
+  }, [navigate]);
   if (loading) {
-    return /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "muted", children: t("common.loading") || "\u0417\u0430\u0433\u0440\u0443\u0437\u043A\u0430..." });
+    return /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("section", { className: "stack", id: "doc", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "row row-start", children: /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("h1", { id: "doc-title", children: [
+        t("doc.title_prefix") || "\u0414\u043E\u043A\u0443\u043C\u0435\u043D\u0442",
+        " ",
+        id
+      ] }) }),
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "muted", children: t("common.loading") || "\u0417\u0430\u0433\u0440\u0443\u0437\u043A\u0430..." })
+    ] });
   }
   if (error) {
-    return /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "muted", children: String(error.message || error) });
+    return /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("section", { className: "stack", id: "doc", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "row row-start", children: /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("h1", { id: "doc-title", children: [
+        t("doc.title_prefix") || "\u0414\u043E\u043A\u0443\u043C\u0435\u043D\u0442",
+        " ",
+        id
+      ] }) }),
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "muted", children: String(error.message || error) }),
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "page-actions", children: /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("button", { type: "button", className: "btn small", onClick: goToDocs, children: backToDocsLabel }) })
+    ] });
   }
   if (!doc) {
-    return /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "muted", children: t("common.nothing") || "\u041D\u0438\u0447\u0435\u0433\u043E \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u043E" });
+    return /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("section", { className: "stack", id: "doc", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "row row-start", children: /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("h1", { id: "doc-title", children: [
+        t("doc.title_prefix") || "\u0414\u043E\u043A\u0443\u043C\u0435\u043D\u0442",
+        " ",
+        id
+      ] }) }),
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "muted", children: t("common.nothing") || "\u041D\u0438\u0447\u0435\u0433\u043E \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u043E" }),
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "page-actions", children: /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("button", { type: "button", className: "btn small", onClick: goToDocs, children: backToDocsLabel }) })
+    ] });
   }
   const metaParts = [
     unixToLocal2(doc.date),
@@ -27580,7 +27704,7 @@ function fixStack(target, fn) {
   var captureStackTrace = Error.captureStackTrace;
   captureStackTrace && captureStackTrace(target, fn);
 }
-var __extends = /* @__PURE__ */ function() {
+var __extends = /* @__PURE__ */ (function() {
   var _extendStatics = function extendStatics(d, b) {
     _extendStatics = Object.setPrototypeOf || {
       __proto__: []
@@ -27601,8 +27725,8 @@ var __extends = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
-var CustomError = function(_super) {
+})();
+var CustomError = (function(_super) {
   __extends(CustomError2, _super);
   function CustomError2(message, options) {
     var _newTarget = this.constructor;
@@ -27617,10 +27741,10 @@ var CustomError = function(_super) {
     return _this;
   }
   return CustomError2;
-}(Error);
+})(Error);
 
 // node_modules/@zxing/library/esm/core/Exception.js
-var __extends2 = /* @__PURE__ */ function() {
+var __extends2 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -27636,10 +27760,10 @@ var __extends2 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var Exception = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends2(Exception2, _super);
     function Exception2(message) {
       if (message === void 0) {
@@ -27655,12 +27779,12 @@ var Exception = (
     };
     Exception2.kind = "Exception";
     return Exception2;
-  }(CustomError)
+  })(CustomError)
 );
 var Exception_default = Exception;
 
 // node_modules/@zxing/library/esm/core/ArgumentException.js
-var __extends3 = /* @__PURE__ */ function() {
+var __extends3 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -27676,22 +27800,22 @@ var __extends3 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var ArgumentException = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends3(ArgumentException2, _super);
     function ArgumentException2() {
       return _super !== null && _super.apply(this, arguments) || this;
     }
     ArgumentException2.kind = "ArgumentException";
     return ArgumentException2;
-  }(Exception_default)
+  })(Exception_default)
 );
 var ArgumentException_default = ArgumentException;
 
 // node_modules/@zxing/library/esm/core/IllegalArgumentException.js
-var __extends4 = /* @__PURE__ */ function() {
+var __extends4 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -27707,24 +27831,24 @@ var __extends4 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var IllegalArgumentException = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends4(IllegalArgumentException2, _super);
     function IllegalArgumentException2() {
       return _super !== null && _super.apply(this, arguments) || this;
     }
     IllegalArgumentException2.kind = "IllegalArgumentException";
     return IllegalArgumentException2;
-  }(Exception_default)
+  })(Exception_default)
 );
 var IllegalArgumentException_default = IllegalArgumentException;
 
 // node_modules/@zxing/library/esm/core/BinaryBitmap.js
 var BinaryBitmap = (
   /** @class */
-  function() {
+  (function() {
     function BinaryBitmap2(binarizer) {
       this.binarizer = binarizer;
       if (binarizer === null) {
@@ -27772,12 +27896,12 @@ var BinaryBitmap = (
       }
     };
     return BinaryBitmap2;
-  }()
+  })()
 );
 var BinaryBitmap_default = BinaryBitmap;
 
 // node_modules/@zxing/library/esm/core/ChecksumException.js
-var __extends5 = /* @__PURE__ */ function() {
+var __extends5 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -27793,10 +27917,10 @@ var __extends5 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var ChecksumException = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends5(ChecksumException2, _super);
     function ChecksumException2() {
       return _super !== null && _super.apply(this, arguments) || this;
@@ -27806,14 +27930,14 @@ var ChecksumException = (
     };
     ChecksumException2.kind = "ChecksumException";
     return ChecksumException2;
-  }(Exception_default)
+  })(Exception_default)
 );
 var ChecksumException_default = ChecksumException;
 
 // node_modules/@zxing/library/esm/core/Binarizer.js
 var Binarizer = (
   /** @class */
-  function() {
+  (function() {
     function Binarizer2(source) {
       this.source = source;
     }
@@ -27827,14 +27951,14 @@ var Binarizer = (
       return this.source.getHeight();
     };
     return Binarizer2;
-  }()
+  })()
 );
 var Binarizer_default = Binarizer;
 
 // node_modules/@zxing/library/esm/core/util/System.js
 var System = (
   /** @class */
-  function() {
+  (function() {
     function System2() {
     }
     System2.arraycopy = function(src, srcPos, dest, destPos, length) {
@@ -27846,12 +27970,12 @@ var System = (
       return Date.now();
     };
     return System2;
-  }()
+  })()
 );
 var System_default = System;
 
 // node_modules/@zxing/library/esm/core/IndexOutOfBoundsException.js
-var __extends6 = /* @__PURE__ */ function() {
+var __extends6 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -27867,22 +27991,22 @@ var __extends6 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var IndexOutOfBoundsException = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends6(IndexOutOfBoundsException2, _super);
     function IndexOutOfBoundsException2() {
       return _super !== null && _super.apply(this, arguments) || this;
     }
     IndexOutOfBoundsException2.kind = "IndexOutOfBoundsException";
     return IndexOutOfBoundsException2;
-  }(Exception_default)
+  })(Exception_default)
 );
 var IndexOutOfBoundsException_default = IndexOutOfBoundsException;
 
 // node_modules/@zxing/library/esm/core/ArrayIndexOutOfBoundsException.js
-var __extends7 = /* @__PURE__ */ function() {
+var __extends7 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -27898,10 +28022,10 @@ var __extends7 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var ArrayIndexOutOfBoundsException = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends7(ArrayIndexOutOfBoundsException2, _super);
     function ArrayIndexOutOfBoundsException2(index, message) {
       if (index === void 0) {
@@ -27917,7 +28041,7 @@ var ArrayIndexOutOfBoundsException = (
     }
     ArrayIndexOutOfBoundsException2.kind = "ArrayIndexOutOfBoundsException";
     return ArrayIndexOutOfBoundsException2;
-  }(IndexOutOfBoundsException_default)
+  })(IndexOutOfBoundsException_default)
 );
 var ArrayIndexOutOfBoundsException_default = ArrayIndexOutOfBoundsException;
 
@@ -27935,7 +28059,7 @@ var __values = function(o) {
 };
 var Arrays = (
   /** @class */
-  function() {
+  (function() {
     function Arrays2() {
     }
     Arrays2.fill = function(a, val) {
@@ -28067,14 +28191,14 @@ var Arrays = (
       return a - b;
     };
     return Arrays2;
-  }()
+  })()
 );
 var Arrays_default = Arrays;
 
 // node_modules/@zxing/library/esm/core/util/Integer.js
 var Integer = (
   /** @class */
-  function() {
+  (function() {
     function Integer2() {
     }
     Integer2.numberOfTrailingZeros = function(i) {
@@ -28154,14 +28278,14 @@ var Integer = (
     Integer2.MIN_VALUE_32_BITS = -2147483648;
     Integer2.MAX_VALUE = Number.MAX_SAFE_INTEGER;
     return Integer2;
-  }()
+  })()
 );
 var Integer_default = Integer;
 
 // node_modules/@zxing/library/esm/core/common/BitArray.js
 var BitArray = (
   /** @class */
-  function() {
+  (function() {
     function BitArray2(size, bits) {
       if (void 0 === size) {
         this.size = 0;
@@ -28394,7 +28518,7 @@ var BitArray = (
       return result;
     };
     return BitArray2;
-  }()
+  })()
 );
 var BitArray_default = BitArray;
 
@@ -28417,7 +28541,7 @@ var DecodeHintType;
 var DecodeHintType_default = DecodeHintType;
 
 // node_modules/@zxing/library/esm/core/FormatException.js
-var __extends8 = /* @__PURE__ */ function() {
+var __extends8 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -28433,10 +28557,10 @@ var __extends8 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var FormatException = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends8(FormatException2, _super);
     function FormatException2() {
       return _super !== null && _super.apply(this, arguments) || this;
@@ -28446,7 +28570,7 @@ var FormatException = (
     };
     FormatException2.kind = "FormatException";
     return FormatException2;
-  }(Exception_default)
+  })(Exception_default)
 );
 var FormatException_default = FormatException;
 
@@ -28494,7 +28618,7 @@ var CharacterSetValueIdentifiers;
 })(CharacterSetValueIdentifiers || (CharacterSetValueIdentifiers = {}));
 var CharacterSetECI = (
   /** @class */
-  function() {
+  (function() {
     function CharacterSetECI2(valueIdentifier, valuesParam, name) {
       var e_1, _a2;
       var otherEncodingNames = [];
@@ -28595,12 +28719,12 @@ var CharacterSetECI = (
     CharacterSetECI2.GB18030 = new CharacterSetECI2(CharacterSetValueIdentifiers.GB18030, 29, "GB18030", "GB2312", "EUC_CN", "GBK");
     CharacterSetECI2.EUC_KR = new CharacterSetECI2(CharacterSetValueIdentifiers.EUC_KR, 30, "EUC_KR", "EUC-KR");
     return CharacterSetECI2;
-  }()
+  })()
 );
 var CharacterSetECI_default = CharacterSetECI;
 
 // node_modules/@zxing/library/esm/core/UnsupportedOperationException.js
-var __extends9 = /* @__PURE__ */ function() {
+var __extends9 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -28616,24 +28740,24 @@ var __extends9 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var UnsupportedOperationException = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends9(UnsupportedOperationException2, _super);
     function UnsupportedOperationException2() {
       return _super !== null && _super.apply(this, arguments) || this;
     }
     UnsupportedOperationException2.kind = "UnsupportedOperationException";
     return UnsupportedOperationException2;
-  }(Exception_default)
+  })(Exception_default)
 );
 var UnsupportedOperationException_default = UnsupportedOperationException;
 
 // node_modules/@zxing/library/esm/core/util/StringEncoding.js
 var StringEncoding = (
   /** @class */
-  function() {
+  (function() {
     function StringEncoding2() {
     }
     StringEncoding2.decode = function(bytes, encoding) {
@@ -28702,14 +28826,14 @@ var StringEncoding = (
       return new Uint8Array(uintArray);
     };
     return StringEncoding2;
-  }()
+  })()
 );
 var StringEncoding_default = StringEncoding;
 
 // node_modules/@zxing/library/esm/core/common/StringUtils.js
 var StringUtils = (
   /** @class */
-  function() {
+  (function() {
     function StringUtils2() {
     }
     StringUtils2.castAsNonUtf8Char = function(code, encoding) {
@@ -28905,14 +29029,14 @@ var StringUtils = (
     StringUtils2.PLATFORM_DEFAULT_ENCODING = StringUtils2.UTF8;
     StringUtils2.ASSUME_SHIFT_JIS = false;
     return StringUtils2;
-  }()
+  })()
 );
 var StringUtils_default = StringUtils;
 
 // node_modules/@zxing/library/esm/core/util/StringBuilder.js
 var StringBuilder = (
   /** @class */
-  function() {
+  (function() {
     function StringBuilder2(value) {
       if (value === void 0) {
         value = "";
@@ -28964,14 +29088,14 @@ var StringBuilder = (
       this.value = this.value.substring(0, n) + c + this.value.substring(n);
     };
     return StringBuilder2;
-  }()
+  })()
 );
 var StringBuilder_default = StringBuilder;
 
 // node_modules/@zxing/library/esm/core/common/BitMatrix.js
 var BitMatrix = (
   /** @class */
-  function() {
+  (function() {
     function BitMatrix2(width, height, rowSize, bits) {
       this.width = width;
       this.height = height;
@@ -29281,12 +29405,12 @@ var BitMatrix = (
       return new BitMatrix2(this.width, this.height, this.rowSize, this.bits.slice());
     };
     return BitMatrix2;
-  }()
+  })()
 );
 var BitMatrix_default = BitMatrix;
 
 // node_modules/@zxing/library/esm/core/NotFoundException.js
-var __extends10 = /* @__PURE__ */ function() {
+var __extends10 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -29302,10 +29426,10 @@ var __extends10 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var NotFoundException = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends10(NotFoundException2, _super);
     function NotFoundException2() {
       return _super !== null && _super.apply(this, arguments) || this;
@@ -29315,12 +29439,12 @@ var NotFoundException = (
     };
     NotFoundException2.kind = "NotFoundException";
     return NotFoundException2;
-  }(Exception_default)
+  })(Exception_default)
 );
 var NotFoundException_default = NotFoundException;
 
 // node_modules/@zxing/library/esm/core/common/GlobalHistogramBinarizer.js
-var __extends11 = /* @__PURE__ */ function() {
+var __extends11 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -29336,10 +29460,10 @@ var __extends11 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var GlobalHistogramBinarizer = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends11(GlobalHistogramBinarizer2, _super);
     function GlobalHistogramBinarizer2(source) {
       var _this = _super.call(this, source) || this;
@@ -29472,12 +29596,12 @@ var GlobalHistogramBinarizer = (
     GlobalHistogramBinarizer2.LUMINANCE_BUCKETS = 1 << GlobalHistogramBinarizer2.LUMINANCE_BITS;
     GlobalHistogramBinarizer2.EMPTY = Uint8ClampedArray.from([0]);
     return GlobalHistogramBinarizer2;
-  }(Binarizer_default)
+  })(Binarizer_default)
 );
 var GlobalHistogramBinarizer_default = GlobalHistogramBinarizer;
 
 // node_modules/@zxing/library/esm/core/common/HybridBinarizer.js
-var __extends12 = /* @__PURE__ */ function() {
+var __extends12 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -29493,10 +29617,10 @@ var __extends12 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var HybridBinarizer = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends12(HybridBinarizer2, _super);
     function HybridBinarizer2(source) {
       var _this = _super.call(this, source) || this;
@@ -29627,14 +29751,14 @@ var HybridBinarizer = (
     HybridBinarizer2.MINIMUM_DIMENSION = HybridBinarizer2.BLOCK_SIZE * 5;
     HybridBinarizer2.MIN_DYNAMIC_RANGE = 24;
     return HybridBinarizer2;
-  }(GlobalHistogramBinarizer_default)
+  })(GlobalHistogramBinarizer_default)
 );
 var HybridBinarizer_default = HybridBinarizer;
 
 // node_modules/@zxing/library/esm/core/LuminanceSource.js
 var LuminanceSource = (
   /** @class */
-  function() {
+  (function() {
     function LuminanceSource2(width, height) {
       this.width = width;
       this.height = height;
@@ -29684,12 +29808,12 @@ var LuminanceSource = (
       return result.toString();
     };
     return LuminanceSource2;
-  }()
+  })()
 );
 var LuminanceSource_default = LuminanceSource;
 
 // node_modules/@zxing/library/esm/core/InvertedLuminanceSource.js
-var __extends13 = /* @__PURE__ */ function() {
+var __extends13 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -29705,10 +29829,10 @@ var __extends13 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var InvertedLuminanceSource = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends13(InvertedLuminanceSource2, _super);
     function InvertedLuminanceSource2(delegate) {
       var _this = _super.call(this, delegate.getWidth(), delegate.getHeight()) || this;
@@ -29753,12 +29877,12 @@ var InvertedLuminanceSource = (
       return new InvertedLuminanceSource2(this.delegate.rotateCounterClockwise45());
     };
     return InvertedLuminanceSource2;
-  }(LuminanceSource_default)
+  })(LuminanceSource_default)
 );
 var InvertedLuminanceSource_default = InvertedLuminanceSource;
 
 // node_modules/@zxing/library/esm/browser/HTMLCanvasElementLuminanceSource.js
-var __extends14 = /* @__PURE__ */ function() {
+var __extends14 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -29774,35 +29898,35 @@ var __extends14 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var HTMLCanvasElementLuminanceSource = (
   /** @class */
-  function(_super) {
-    __extends14(HTMLCanvasElementLuminanceSource3, _super);
-    function HTMLCanvasElementLuminanceSource3(canvas, doAutoInvert) {
+  (function(_super) {
+    __extends14(HTMLCanvasElementLuminanceSource2, _super);
+    function HTMLCanvasElementLuminanceSource2(canvas, doAutoInvert) {
       if (doAutoInvert === void 0) {
         doAutoInvert = false;
       }
       var _this = _super.call(this, canvas.width, canvas.height) || this;
       _this.canvas = canvas;
       _this.tempCanvasElement = null;
-      _this.buffer = HTMLCanvasElementLuminanceSource3.makeBufferFromCanvasImageData(canvas, doAutoInvert);
+      _this.buffer = HTMLCanvasElementLuminanceSource2.makeBufferFromCanvasImageData(canvas, doAutoInvert);
       return _this;
     }
-    HTMLCanvasElementLuminanceSource3.makeBufferFromCanvasImageData = function(canvas, doAutoInvert) {
+    HTMLCanvasElementLuminanceSource2.makeBufferFromCanvasImageData = function(canvas, doAutoInvert) {
       if (doAutoInvert === void 0) {
         doAutoInvert = false;
       }
       var imageData = canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height);
-      return HTMLCanvasElementLuminanceSource3.toGrayscaleBuffer(imageData.data, canvas.width, canvas.height, doAutoInvert);
+      return HTMLCanvasElementLuminanceSource2.toGrayscaleBuffer(imageData.data, canvas.width, canvas.height, doAutoInvert);
     };
-    HTMLCanvasElementLuminanceSource3.toGrayscaleBuffer = function(imageBuffer, width, height, doAutoInvert) {
+    HTMLCanvasElementLuminanceSource2.toGrayscaleBuffer = function(imageBuffer, width, height, doAutoInvert) {
       if (doAutoInvert === void 0) {
         doAutoInvert = false;
       }
       var grayscaleBuffer = new Uint8ClampedArray(width * height);
-      HTMLCanvasElementLuminanceSource3.FRAME_INDEX = !HTMLCanvasElementLuminanceSource3.FRAME_INDEX;
-      if (HTMLCanvasElementLuminanceSource3.FRAME_INDEX || !doAutoInvert) {
+      HTMLCanvasElementLuminanceSource2.FRAME_INDEX = !HTMLCanvasElementLuminanceSource2.FRAME_INDEX;
+      if (HTMLCanvasElementLuminanceSource2.FRAME_INDEX || !doAutoInvert) {
         for (var i = 0, j = 0, length_1 = imageBuffer.length; i < length_1; i += 4, j++) {
           var gray = void 0;
           var alpha = imageBuffer[i + 3];
@@ -29833,7 +29957,7 @@ var HTMLCanvasElementLuminanceSource = (
       }
       return grayscaleBuffer;
     };
-    HTMLCanvasElementLuminanceSource3.prototype.getRow = function(y, row) {
+    HTMLCanvasElementLuminanceSource2.prototype.getRow = function(y, row) {
       if (y < 0 || y >= this.getHeight()) {
         throw new IllegalArgumentException_default("Requested row is outside the image: " + y);
       }
@@ -29849,28 +29973,28 @@ var HTMLCanvasElementLuminanceSource = (
       }
       return row;
     };
-    HTMLCanvasElementLuminanceSource3.prototype.getMatrix = function() {
+    HTMLCanvasElementLuminanceSource2.prototype.getMatrix = function() {
       return this.buffer;
     };
-    HTMLCanvasElementLuminanceSource3.prototype.isCropSupported = function() {
+    HTMLCanvasElementLuminanceSource2.prototype.isCropSupported = function() {
       return true;
     };
-    HTMLCanvasElementLuminanceSource3.prototype.crop = function(left, top, width, height) {
+    HTMLCanvasElementLuminanceSource2.prototype.crop = function(left, top, width, height) {
       _super.prototype.crop.call(this, left, top, width, height);
       return this;
     };
-    HTMLCanvasElementLuminanceSource3.prototype.isRotateSupported = function() {
+    HTMLCanvasElementLuminanceSource2.prototype.isRotateSupported = function() {
       return true;
     };
-    HTMLCanvasElementLuminanceSource3.prototype.rotateCounterClockwise = function() {
+    HTMLCanvasElementLuminanceSource2.prototype.rotateCounterClockwise = function() {
       this.rotate(-90);
       return this;
     };
-    HTMLCanvasElementLuminanceSource3.prototype.rotateCounterClockwise45 = function() {
+    HTMLCanvasElementLuminanceSource2.prototype.rotateCounterClockwise45 = function() {
       this.rotate(-45);
       return this;
     };
-    HTMLCanvasElementLuminanceSource3.prototype.getTempCanvasElement = function() {
+    HTMLCanvasElementLuminanceSource2.prototype.getTempCanvasElement = function() {
       if (null === this.tempCanvasElement) {
         var tempCanvasElement = this.canvas.ownerDocument.createElement("canvas");
         tempCanvasElement.width = this.canvas.width;
@@ -29879,10 +30003,10 @@ var HTMLCanvasElementLuminanceSource = (
       }
       return this.tempCanvasElement;
     };
-    HTMLCanvasElementLuminanceSource3.prototype.rotate = function(angle) {
+    HTMLCanvasElementLuminanceSource2.prototype.rotate = function(angle) {
       var tempCanvasElement = this.getTempCanvasElement();
       var tempContext = tempCanvasElement.getContext("2d");
-      var angleRadians = angle * HTMLCanvasElementLuminanceSource3.DEGREE_TO_RADIANS;
+      var angleRadians = angle * HTMLCanvasElementLuminanceSource2.DEGREE_TO_RADIANS;
       var width = this.canvas.width;
       var height = this.canvas.height;
       var newWidth = Math.ceil(Math.abs(Math.cos(angleRadians)) * width + Math.abs(Math.sin(angleRadians)) * height);
@@ -29892,22 +30016,22 @@ var HTMLCanvasElementLuminanceSource = (
       tempContext.translate(newWidth / 2, newHeight / 2);
       tempContext.rotate(angleRadians);
       tempContext.drawImage(this.canvas, width / -2, height / -2);
-      this.buffer = HTMLCanvasElementLuminanceSource3.makeBufferFromCanvasImageData(tempCanvasElement);
+      this.buffer = HTMLCanvasElementLuminanceSource2.makeBufferFromCanvasImageData(tempCanvasElement);
       return this;
     };
-    HTMLCanvasElementLuminanceSource3.prototype.invert = function() {
+    HTMLCanvasElementLuminanceSource2.prototype.invert = function() {
       return new InvertedLuminanceSource_default(this);
     };
-    HTMLCanvasElementLuminanceSource3.DEGREE_TO_RADIANS = Math.PI / 180;
-    HTMLCanvasElementLuminanceSource3.FRAME_INDEX = true;
-    return HTMLCanvasElementLuminanceSource3;
-  }(LuminanceSource_default)
+    HTMLCanvasElementLuminanceSource2.DEGREE_TO_RADIANS = Math.PI / 180;
+    HTMLCanvasElementLuminanceSource2.FRAME_INDEX = true;
+    return HTMLCanvasElementLuminanceSource2;
+  })(LuminanceSource_default)
 );
 
 // node_modules/@zxing/library/esm/browser/VideoInputDevice.js
 var VideoInputDevice = (
   /** @class */
-  function() {
+  (function() {
     function VideoInputDevice2(deviceId, label, groupId) {
       this.deviceId = deviceId;
       this.label = label;
@@ -29923,7 +30047,7 @@ var VideoInputDevice = (
       };
     };
     return VideoInputDevice2;
-  }()
+  })()
 );
 
 // node_modules/@zxing/library/esm/browser/BrowserCodeReader.js
@@ -30036,8 +30160,8 @@ var __values3 = function(o) {
 };
 var BrowserCodeReader = (
   /** @class */
-  function() {
-    function BrowserCodeReader3(reader, timeBetweenScansMillis, _hints) {
+  (function() {
+    function BrowserCodeReader2(reader, timeBetweenScansMillis, _hints) {
       if (timeBetweenScansMillis === void 0) {
         timeBetweenScansMillis = 500;
       }
@@ -30048,7 +30172,7 @@ var BrowserCodeReader = (
       this._stopAsyncDecode = false;
       this._timeBetweenDecodingAttempts = 0;
     }
-    Object.defineProperty(BrowserCodeReader3.prototype, "hasNavigator", {
+    Object.defineProperty(BrowserCodeReader2.prototype, "hasNavigator", {
       /**
        * If navigator is present.
        */
@@ -30058,7 +30182,7 @@ var BrowserCodeReader = (
       enumerable: false,
       configurable: true
     });
-    Object.defineProperty(BrowserCodeReader3.prototype, "isMediaDevicesSuported", {
+    Object.defineProperty(BrowserCodeReader2.prototype, "isMediaDevicesSuported", {
       /**
        * If mediaDevices under navigator is supported.
        */
@@ -30068,7 +30192,7 @@ var BrowserCodeReader = (
       enumerable: false,
       configurable: true
     });
-    Object.defineProperty(BrowserCodeReader3.prototype, "canEnumerateDevices", {
+    Object.defineProperty(BrowserCodeReader2.prototype, "canEnumerateDevices", {
       /**
        * If enumerateDevices under navigator is supported.
        */
@@ -30078,7 +30202,7 @@ var BrowserCodeReader = (
       enumerable: false,
       configurable: true
     });
-    Object.defineProperty(BrowserCodeReader3.prototype, "timeBetweenDecodingAttempts", {
+    Object.defineProperty(BrowserCodeReader2.prototype, "timeBetweenDecodingAttempts", {
       /** Time between two decoding tries in milli seconds. */
       get: function() {
         return this._timeBetweenDecodingAttempts;
@@ -30094,7 +30218,7 @@ var BrowserCodeReader = (
       enumerable: false,
       configurable: true
     });
-    Object.defineProperty(BrowserCodeReader3.prototype, "hints", {
+    Object.defineProperty(BrowserCodeReader2.prototype, "hints", {
       /**
        * Sets the hints.
        */
@@ -30110,7 +30234,7 @@ var BrowserCodeReader = (
       enumerable: false,
       configurable: true
     });
-    BrowserCodeReader3.prototype.listVideoInputDevices = function() {
+    BrowserCodeReader2.prototype.listVideoInputDevices = function() {
       return __awaiter(this, void 0, void 0, function() {
         var devices, videoDevices, devices_1, devices_1_1, device, kind, deviceId, label, groupId, videoDevice;
         var e_1, _a2;
@@ -30154,7 +30278,7 @@ var BrowserCodeReader = (
         });
       });
     };
-    BrowserCodeReader3.prototype.getVideoInputDevices = function() {
+    BrowserCodeReader2.prototype.getVideoInputDevices = function() {
       return __awaiter(this, void 0, void 0, function() {
         var devices;
         return __generator(this, function(_a2) {
@@ -30170,7 +30294,7 @@ var BrowserCodeReader = (
         });
       });
     };
-    BrowserCodeReader3.prototype.findDeviceById = function(deviceId) {
+    BrowserCodeReader2.prototype.findDeviceById = function(deviceId) {
       return __awaiter(this, void 0, void 0, function() {
         var devices;
         return __generator(this, function(_a2) {
@@ -30189,7 +30313,7 @@ var BrowserCodeReader = (
         });
       });
     };
-    BrowserCodeReader3.prototype.decodeFromInputVideoDevice = function(deviceId, videoSource) {
+    BrowserCodeReader2.prototype.decodeFromInputVideoDevice = function(deviceId, videoSource) {
       return __awaiter(this, void 0, void 0, function() {
         return __generator(this, function(_a2) {
           switch (_a2.label) {
@@ -30201,7 +30325,7 @@ var BrowserCodeReader = (
         });
       });
     };
-    BrowserCodeReader3.prototype.decodeOnceFromVideoDevice = function(deviceId, videoSource) {
+    BrowserCodeReader2.prototype.decodeOnceFromVideoDevice = function(deviceId, videoSource) {
       return __awaiter(this, void 0, void 0, function() {
         var videoConstraints, constraints;
         return __generator(this, function(_a2) {
@@ -30221,7 +30345,7 @@ var BrowserCodeReader = (
         });
       });
     };
-    BrowserCodeReader3.prototype.decodeOnceFromConstraints = function(constraints, videoSource) {
+    BrowserCodeReader2.prototype.decodeOnceFromConstraints = function(constraints, videoSource) {
       return __awaiter(this, void 0, void 0, function() {
         var stream;
         return __generator(this, function(_a2) {
@@ -30237,7 +30361,7 @@ var BrowserCodeReader = (
         });
       });
     };
-    BrowserCodeReader3.prototype.decodeOnceFromStream = function(stream, videoSource) {
+    BrowserCodeReader2.prototype.decodeOnceFromStream = function(stream, videoSource) {
       return __awaiter(this, void 0, void 0, function() {
         var video, result;
         return __generator(this, function(_a2) {
@@ -30255,7 +30379,7 @@ var BrowserCodeReader = (
         });
       });
     };
-    BrowserCodeReader3.prototype.decodeFromInputVideoDeviceContinuously = function(deviceId, videoSource, callbackFn) {
+    BrowserCodeReader2.prototype.decodeFromInputVideoDeviceContinuously = function(deviceId, videoSource, callbackFn) {
       return __awaiter(this, void 0, void 0, function() {
         return __generator(this, function(_a2) {
           switch (_a2.label) {
@@ -30267,7 +30391,7 @@ var BrowserCodeReader = (
         });
       });
     };
-    BrowserCodeReader3.prototype.decodeFromVideoDevice = function(deviceId, videoSource, callbackFn) {
+    BrowserCodeReader2.prototype.decodeFromVideoDevice = function(deviceId, videoSource, callbackFn) {
       return __awaiter(this, void 0, void 0, function() {
         var videoConstraints, constraints;
         return __generator(this, function(_a2) {
@@ -30286,7 +30410,7 @@ var BrowserCodeReader = (
         });
       });
     };
-    BrowserCodeReader3.prototype.decodeFromConstraints = function(constraints, videoSource, callbackFn) {
+    BrowserCodeReader2.prototype.decodeFromConstraints = function(constraints, videoSource, callbackFn) {
       return __awaiter(this, void 0, void 0, function() {
         var stream;
         return __generator(this, function(_a2) {
@@ -30302,7 +30426,7 @@ var BrowserCodeReader = (
         });
       });
     };
-    BrowserCodeReader3.prototype.decodeFromStream = function(stream, videoSource, callbackFn) {
+    BrowserCodeReader2.prototype.decodeFromStream = function(stream, videoSource, callbackFn) {
       return __awaiter(this, void 0, void 0, function() {
         var video;
         return __generator(this, function(_a2) {
@@ -30319,13 +30443,13 @@ var BrowserCodeReader = (
         });
       });
     };
-    BrowserCodeReader3.prototype.stopAsyncDecode = function() {
+    BrowserCodeReader2.prototype.stopAsyncDecode = function() {
       this._stopAsyncDecode = true;
     };
-    BrowserCodeReader3.prototype.stopContinuousDecode = function() {
+    BrowserCodeReader2.prototype.stopContinuousDecode = function() {
       this._stopContinuousDecode = true;
     };
-    BrowserCodeReader3.prototype.attachStreamToVideo = function(stream, videoSource) {
+    BrowserCodeReader2.prototype.attachStreamToVideo = function(stream, videoSource) {
       return __awaiter(this, void 0, void 0, function() {
         var videoElement;
         return __generator(this, function(_a2) {
@@ -30343,7 +30467,7 @@ var BrowserCodeReader = (
         });
       });
     };
-    BrowserCodeReader3.prototype.playVideoOnLoadAsync = function(videoElement) {
+    BrowserCodeReader2.prototype.playVideoOnLoadAsync = function(videoElement) {
       var _this = this;
       return new Promise(function(resolve, reject) {
         return _this.playVideoOnLoad(videoElement, function() {
@@ -30351,7 +30475,7 @@ var BrowserCodeReader = (
         });
       });
     };
-    BrowserCodeReader3.prototype.playVideoOnLoad = function(element, callbackFn) {
+    BrowserCodeReader2.prototype.playVideoOnLoad = function(element, callbackFn) {
       var _this = this;
       this.videoEndedListener = function() {
         return _this.stopStreams();
@@ -30364,10 +30488,10 @@ var BrowserCodeReader = (
       element.addEventListener("playing", callbackFn);
       this.tryPlayVideo(element);
     };
-    BrowserCodeReader3.prototype.isVideoPlaying = function(video) {
+    BrowserCodeReader2.prototype.isVideoPlaying = function(video) {
       return video.currentTime > 0 && !video.paused && !video.ended && video.readyState > 2;
     };
-    BrowserCodeReader3.prototype.tryPlayVideo = function(videoElement) {
+    BrowserCodeReader2.prototype.tryPlayVideo = function(videoElement) {
       return __awaiter(this, void 0, void 0, function() {
         var _a2;
         return __generator(this, function(_b) {
@@ -30400,7 +30524,7 @@ var BrowserCodeReader = (
         });
       });
     };
-    BrowserCodeReader3.prototype.getMediaElement = function(mediaElementId, type) {
+    BrowserCodeReader2.prototype.getMediaElement = function(mediaElementId, type) {
       var mediaElement = document.getElementById(mediaElementId);
       if (!mediaElement) {
         throw new ArgumentException_default("element with id '" + mediaElementId + "' not found");
@@ -30410,7 +30534,7 @@ var BrowserCodeReader = (
       }
       return mediaElement;
     };
-    BrowserCodeReader3.prototype.decodeFromImage = function(source, url) {
+    BrowserCodeReader2.prototype.decodeFromImage = function(source, url) {
       if (!source && !url) {
         throw new ArgumentException_default("either imageElement with a src set or an url must be provided");
       }
@@ -30419,7 +30543,7 @@ var BrowserCodeReader = (
       }
       return this.decodeFromImageElement(source);
     };
-    BrowserCodeReader3.prototype.decodeFromVideo = function(source, url) {
+    BrowserCodeReader2.prototype.decodeFromVideo = function(source, url) {
       if (!source && !url) {
         throw new ArgumentException_default("Either an element with a src set or an URL must be provided");
       }
@@ -30428,7 +30552,7 @@ var BrowserCodeReader = (
       }
       return this.decodeFromVideoElement(source);
     };
-    BrowserCodeReader3.prototype.decodeFromVideoContinuously = function(source, url, callbackFn) {
+    BrowserCodeReader2.prototype.decodeFromVideoContinuously = function(source, url, callbackFn) {
       if (void 0 === source && void 0 === url) {
         throw new ArgumentException_default("Either an element with a src set or an URL must be provided");
       }
@@ -30437,7 +30561,7 @@ var BrowserCodeReader = (
       }
       return this.decodeFromVideoElementContinuously(source, callbackFn);
     };
-    BrowserCodeReader3.prototype.decodeFromImageElement = function(source) {
+    BrowserCodeReader2.prototype.decodeFromImageElement = function(source) {
       if (!source) {
         throw new ArgumentException_default("An image element must be provided.");
       }
@@ -30452,15 +30576,15 @@ var BrowserCodeReader = (
       }
       return task;
     };
-    BrowserCodeReader3.prototype.decodeFromVideoElement = function(source) {
+    BrowserCodeReader2.prototype.decodeFromVideoElement = function(source) {
       var element = this._decodeFromVideoElementSetup(source);
       return this._decodeOnLoadVideo(element);
     };
-    BrowserCodeReader3.prototype.decodeFromVideoElementContinuously = function(source, callbackFn) {
+    BrowserCodeReader2.prototype.decodeFromVideoElementContinuously = function(source, callbackFn) {
       var element = this._decodeFromVideoElementSetup(source);
       return this._decodeOnLoadVideoContinuously(element, callbackFn);
     };
-    BrowserCodeReader3.prototype._decodeFromVideoElementSetup = function(source) {
+    BrowserCodeReader2.prototype._decodeFromVideoElementSetup = function(source) {
       if (!source) {
         throw new ArgumentException_default("A video element must be provided.");
       }
@@ -30469,7 +30593,7 @@ var BrowserCodeReader = (
       this.videoElement = element;
       return element;
     };
-    BrowserCodeReader3.prototype.decodeFromImageUrl = function(url) {
+    BrowserCodeReader2.prototype.decodeFromImageUrl = function(url) {
       if (!url) {
         throw new ArgumentException_default("An URL must be provided.");
       }
@@ -30480,7 +30604,7 @@ var BrowserCodeReader = (
       element.src = url;
       return decodeTask;
     };
-    BrowserCodeReader3.prototype.decodeFromVideoUrl = function(url) {
+    BrowserCodeReader2.prototype.decodeFromVideoUrl = function(url) {
       if (!url) {
         throw new ArgumentException_default("An URL must be provided.");
       }
@@ -30490,7 +30614,7 @@ var BrowserCodeReader = (
       element.src = url;
       return decodeTask;
     };
-    BrowserCodeReader3.prototype.decodeFromVideoUrlContinuously = function(url, callbackFn) {
+    BrowserCodeReader2.prototype.decodeFromVideoUrlContinuously = function(url, callbackFn) {
       if (!url) {
         throw new ArgumentException_default("An URL must be provided.");
       }
@@ -30500,7 +30624,7 @@ var BrowserCodeReader = (
       element.src = url;
       return decodeTask;
     };
-    BrowserCodeReader3.prototype._decodeOnLoadImage = function(element) {
+    BrowserCodeReader2.prototype._decodeOnLoadImage = function(element) {
       var _this = this;
       return new Promise(function(resolve, reject) {
         _this.imageLoadedListener = function() {
@@ -30509,7 +30633,7 @@ var BrowserCodeReader = (
         element.addEventListener("load", _this.imageLoadedListener);
       });
     };
-    BrowserCodeReader3.prototype._decodeOnLoadVideo = function(videoElement) {
+    BrowserCodeReader2.prototype._decodeOnLoadVideo = function(videoElement) {
       return __awaiter(this, void 0, void 0, function() {
         return __generator(this, function(_a2) {
           switch (_a2.label) {
@@ -30524,7 +30648,7 @@ var BrowserCodeReader = (
         });
       });
     };
-    BrowserCodeReader3.prototype._decodeOnLoadVideoContinuously = function(videoElement, callbackFn) {
+    BrowserCodeReader2.prototype._decodeOnLoadVideoContinuously = function(videoElement, callbackFn) {
       return __awaiter(this, void 0, void 0, function() {
         return __generator(this, function(_a2) {
           switch (_a2.label) {
@@ -30541,7 +30665,7 @@ var BrowserCodeReader = (
         });
       });
     };
-    BrowserCodeReader3.prototype.isImageLoaded = function(img) {
+    BrowserCodeReader2.prototype.isImageLoaded = function(img) {
       if (!img.complete) {
         return false;
       }
@@ -30550,7 +30674,7 @@ var BrowserCodeReader = (
       }
       return true;
     };
-    BrowserCodeReader3.prototype.prepareImageElement = function(imageSource) {
+    BrowserCodeReader2.prototype.prepareImageElement = function(imageSource) {
       var imageElement;
       if (typeof imageSource === "undefined") {
         imageElement = document.createElement("img");
@@ -30565,7 +30689,7 @@ var BrowserCodeReader = (
       }
       return imageElement;
     };
-    BrowserCodeReader3.prototype.prepareVideoElement = function(videoSource) {
+    BrowserCodeReader2.prototype.prepareVideoElement = function(videoSource) {
       var videoElement;
       if (!videoSource && typeof document !== "undefined") {
         videoElement = document.createElement("video");
@@ -30583,7 +30707,7 @@ var BrowserCodeReader = (
       videoElement.setAttribute("playsinline", "true");
       return videoElement;
     };
-    BrowserCodeReader3.prototype.decodeOnce = function(element, retryIfNotFound, retryIfChecksumOrFormatError) {
+    BrowserCodeReader2.prototype.decodeOnce = function(element, retryIfNotFound, retryIfChecksumOrFormatError) {
       var _this = this;
       if (retryIfNotFound === void 0) {
         retryIfNotFound = true;
@@ -30615,7 +30739,7 @@ var BrowserCodeReader = (
         return loop(resolve, reject);
       });
     };
-    BrowserCodeReader3.prototype.decodeContinuously = function(element, callbackFn) {
+    BrowserCodeReader2.prototype.decodeContinuously = function(element, callbackFn) {
       var _this = this;
       this._stopContinuousDecode = false;
       var loop = function() {
@@ -30638,11 +30762,11 @@ var BrowserCodeReader = (
       };
       loop();
     };
-    BrowserCodeReader3.prototype.decode = function(element) {
+    BrowserCodeReader2.prototype.decode = function(element) {
       var binaryBitmap = this.createBinaryBitmap(element);
       return this.decodeBitmap(binaryBitmap);
     };
-    BrowserCodeReader3.prototype.createBinaryBitmap = function(mediaElement) {
+    BrowserCodeReader2.prototype.createBinaryBitmap = function(mediaElement) {
       var ctx = this.getCaptureCanvasContext(mediaElement);
       var doAutoInvert = false;
       if (mediaElement instanceof HTMLVideoElement) {
@@ -30656,7 +30780,7 @@ var BrowserCodeReader = (
       var hybridBinarizer = new HybridBinarizer_default(luminanceSource);
       return new BinaryBitmap_default(hybridBinarizer);
     };
-    BrowserCodeReader3.prototype.getCaptureCanvasContext = function(mediaElement) {
+    BrowserCodeReader2.prototype.getCaptureCanvasContext = function(mediaElement) {
       if (!this.captureCanvasContext) {
         var elem = this.getCaptureCanvas(mediaElement);
         var ctx = void 0;
@@ -30669,14 +30793,14 @@ var BrowserCodeReader = (
       }
       return this.captureCanvasContext;
     };
-    BrowserCodeReader3.prototype.getCaptureCanvas = function(mediaElement) {
+    BrowserCodeReader2.prototype.getCaptureCanvas = function(mediaElement) {
       if (!this.captureCanvas) {
         var elem = this.createCaptureCanvas(mediaElement);
         this.captureCanvas = elem;
       }
       return this.captureCanvas;
     };
-    BrowserCodeReader3.prototype.drawFrameOnCanvas = function(srcElement, dimensions, canvasElementContext) {
+    BrowserCodeReader2.prototype.drawFrameOnCanvas = function(srcElement, dimensions, canvasElementContext) {
       if (dimensions === void 0) {
         dimensions = {
           sx: 0,
@@ -30694,7 +30818,7 @@ var BrowserCodeReader = (
       }
       canvasElementContext.drawImage(srcElement, dimensions.sx, dimensions.sy, dimensions.sWidth, dimensions.sHeight, dimensions.dx, dimensions.dy, dimensions.dWidth, dimensions.dHeight);
     };
-    BrowserCodeReader3.prototype.drawImageOnCanvas = function(srcElement, dimensions, canvasElementContext) {
+    BrowserCodeReader2.prototype.drawImageOnCanvas = function(srcElement, dimensions, canvasElementContext) {
       if (dimensions === void 0) {
         dimensions = {
           sx: 0,
@@ -30712,10 +30836,10 @@ var BrowserCodeReader = (
       }
       canvasElementContext.drawImage(srcElement, dimensions.sx, dimensions.sy, dimensions.sWidth, dimensions.sHeight, dimensions.dx, dimensions.dy, dimensions.dWidth, dimensions.dHeight);
     };
-    BrowserCodeReader3.prototype.decodeBitmap = function(binaryBitmap) {
+    BrowserCodeReader2.prototype.decodeBitmap = function(binaryBitmap) {
       return this.reader.decode(binaryBitmap, this._hints);
     };
-    BrowserCodeReader3.prototype.createCaptureCanvas = function(mediaElement) {
+    BrowserCodeReader2.prototype.createCaptureCanvas = function(mediaElement) {
       if (typeof document === "undefined") {
         this._destroyCaptureCanvas();
         return null;
@@ -30738,7 +30862,7 @@ var BrowserCodeReader = (
       canvasElement.height = height;
       return canvasElement;
     };
-    BrowserCodeReader3.prototype.stopStreams = function() {
+    BrowserCodeReader2.prototype.stopStreams = function() {
       if (this.stream) {
         this.stream.getVideoTracks().forEach(function(t) {
           return t.stop();
@@ -30752,13 +30876,13 @@ var BrowserCodeReader = (
         this.stopContinuousDecode();
       }
     };
-    BrowserCodeReader3.prototype.reset = function() {
+    BrowserCodeReader2.prototype.reset = function() {
       this.stopStreams();
       this._destroyVideoElement();
       this._destroyImageElement();
       this._destroyCaptureCanvas();
     };
-    BrowserCodeReader3.prototype._destroyVideoElement = function() {
+    BrowserCodeReader2.prototype._destroyVideoElement = function() {
       if (!this.videoElement) {
         return;
       }
@@ -30774,7 +30898,7 @@ var BrowserCodeReader = (
       this.cleanVideoSource(this.videoElement);
       this.videoElement = void 0;
     };
-    BrowserCodeReader3.prototype._destroyImageElement = function() {
+    BrowserCodeReader2.prototype._destroyImageElement = function() {
       if (!this.imageElement) {
         return;
       }
@@ -30785,18 +30909,18 @@ var BrowserCodeReader = (
       this.imageElement.removeAttribute("src");
       this.imageElement = void 0;
     };
-    BrowserCodeReader3.prototype._destroyCaptureCanvas = function() {
+    BrowserCodeReader2.prototype._destroyCaptureCanvas = function() {
       this.captureCanvasContext = void 0;
       this.captureCanvas = void 0;
     };
-    BrowserCodeReader3.prototype.addVideoSource = function(videoElement, stream) {
+    BrowserCodeReader2.prototype.addVideoSource = function(videoElement, stream) {
       try {
         videoElement.srcObject = stream;
       } catch (err) {
         videoElement.src = URL.createObjectURL(stream);
       }
     };
-    BrowserCodeReader3.prototype.cleanVideoSource = function(videoElement) {
+    BrowserCodeReader2.prototype.cleanVideoSource = function(videoElement) {
       try {
         videoElement.srcObject = null;
       } catch (err) {
@@ -30804,14 +30928,14 @@ var BrowserCodeReader = (
       }
       this.videoElement.removeAttribute("src");
     };
-    return BrowserCodeReader3;
-  }()
+    return BrowserCodeReader2;
+  })()
 );
 
 // node_modules/@zxing/library/esm/core/Result.js
 var Result = (
   /** @class */
-  function() {
+  (function() {
     function Result3(text, rawBytes, numBits, resultPoints, format, timestamp) {
       if (numBits === void 0) {
         numBits = rawBytes == null ? 0 : 8 * rawBytes.length;
@@ -30892,7 +31016,7 @@ var Result = (
       return this.text;
     };
     return Result3;
-  }()
+  })()
 );
 var Result_default = Result;
 
@@ -30939,7 +31063,7 @@ var ResultMetadataType_default = ResultMetadataType;
 // node_modules/@zxing/library/esm/core/common/DecoderResult.js
 var DecoderResult = (
   /** @class */
-  function() {
+  (function() {
     function DecoderResult2(rawBytes, text, byteSegments, ecLevel, structuredAppendSequenceNumber, structuredAppendParity) {
       if (structuredAppendSequenceNumber === void 0) {
         structuredAppendSequenceNumber = -1;
@@ -31001,14 +31125,14 @@ var DecoderResult = (
       return this.structuredAppendSequenceNumber;
     };
     return DecoderResult2;
-  }()
+  })()
 );
 var DecoderResult_default = DecoderResult;
 
 // node_modules/@zxing/library/esm/core/common/reedsolomon/AbstractGenericGF.js
 var AbstractGenericGF = (
   /** @class */
-  function() {
+  (function() {
     function AbstractGenericGF2() {
     }
     AbstractGenericGF2.prototype.exp = function(a) {
@@ -31024,14 +31148,14 @@ var AbstractGenericGF = (
       return a ^ b;
     };
     return AbstractGenericGF2;
-  }()
+  })()
 );
 var AbstractGenericGF_default = AbstractGenericGF;
 
 // node_modules/@zxing/library/esm/core/common/reedsolomon/GenericGFPoly.js
 var GenericGFPoly = (
   /** @class */
-  function() {
+  (function() {
     function GenericGFPoly2(field, coefficients) {
       if (coefficients.length === 0) {
         throw new IllegalArgumentException_default();
@@ -31224,12 +31348,12 @@ var GenericGFPoly = (
       return result;
     };
     return GenericGFPoly2;
-  }()
+  })()
 );
 var GenericGFPoly_default = GenericGFPoly;
 
 // node_modules/@zxing/library/esm/core/ArithmeticException.js
-var __extends15 = /* @__PURE__ */ function() {
+var __extends15 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -31245,22 +31369,22 @@ var __extends15 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var ArithmeticException = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends15(ArithmeticException2, _super);
     function ArithmeticException2() {
       return _super !== null && _super.apply(this, arguments) || this;
     }
     ArithmeticException2.kind = "ArithmeticException";
     return ArithmeticException2;
-  }(Exception_default)
+  })(Exception_default)
 );
 var ArithmeticException_default = ArithmeticException;
 
 // node_modules/@zxing/library/esm/core/common/reedsolomon/GenericGF.js
-var __extends16 = /* @__PURE__ */ function() {
+var __extends16 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -31276,10 +31400,10 @@ var __extends16 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var GenericGF = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends16(GenericGF2, _super);
     function GenericGF2(primitive, size, generatorBase) {
       var _this = _super.call(this) || this;
@@ -31356,12 +31480,12 @@ var GenericGF = (
     GenericGF2.AZTEC_DATA_8 = GenericGF2.DATA_MATRIX_FIELD_256;
     GenericGF2.MAXICODE_FIELD_64 = GenericGF2.AZTEC_DATA_6;
     return GenericGF2;
-  }(AbstractGenericGF_default)
+  })(AbstractGenericGF_default)
 );
 var GenericGF_default = GenericGF;
 
 // node_modules/@zxing/library/esm/core/ReedSolomonException.js
-var __extends17 = /* @__PURE__ */ function() {
+var __extends17 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -31377,22 +31501,22 @@ var __extends17 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var ReedSolomonException = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends17(ReedSolomonException2, _super);
     function ReedSolomonException2() {
       return _super !== null && _super.apply(this, arguments) || this;
     }
     ReedSolomonException2.kind = "ReedSolomonException";
     return ReedSolomonException2;
-  }(Exception_default)
+  })(Exception_default)
 );
 var ReedSolomonException_default = ReedSolomonException;
 
 // node_modules/@zxing/library/esm/core/IllegalStateException.js
-var __extends18 = /* @__PURE__ */ function() {
+var __extends18 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -31408,24 +31532,24 @@ var __extends18 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var IllegalStateException = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends18(IllegalStateException2, _super);
     function IllegalStateException2() {
       return _super !== null && _super.apply(this, arguments) || this;
     }
     IllegalStateException2.kind = "IllegalStateException";
     return IllegalStateException2;
-  }(Exception_default)
+  })(Exception_default)
 );
 var IllegalStateException_default = IllegalStateException;
 
 // node_modules/@zxing/library/esm/core/common/reedsolomon/ReedSolomonDecoder.js
 var ReedSolomonDecoder = (
   /** @class */
-  function() {
+  (function() {
     function ReedSolomonDecoder2(field) {
       this.field = field;
     }
@@ -31542,7 +31666,7 @@ var ReedSolomonDecoder = (
       return result;
     };
     return ReedSolomonDecoder2;
-  }()
+  })()
 );
 var ReedSolomonDecoder_default = ReedSolomonDecoder;
 
@@ -31558,7 +31682,7 @@ var Table;
 })(Table || (Table = {}));
 var Decoder = (
   /** @class */
-  function() {
+  (function() {
     function Decoder4() {
     }
     Decoder4.prototype.decode = function(detectorResult) {
@@ -31937,14 +32061,14 @@ var Decoder = (
       "CTRL_US"
     ];
     return Decoder4;
-  }()
+  })()
 );
 var Decoder_default = Decoder;
 
 // node_modules/@zxing/library/esm/core/common/detector/MathUtils.js
 var MathUtils = (
   /** @class */
-  function() {
+  (function() {
     function MathUtils2() {
     }
     MathUtils2.round = function(d) {
@@ -31976,14 +32100,14 @@ var MathUtils = (
       return count;
     };
     return MathUtils2;
-  }()
+  })()
 );
 var MathUtils_default = MathUtils;
 
 // node_modules/@zxing/library/esm/core/util/Float.js
 var Float = (
   /** @class */
-  function() {
+  (function() {
     function Float2() {
     }
     Float2.floatToIntBits = function(f) {
@@ -31991,14 +32115,14 @@ var Float = (
     };
     Float2.MAX_VALUE = Number.MAX_SAFE_INTEGER;
     return Float2;
-  }()
+  })()
 );
 var Float_default = Float;
 
 // node_modules/@zxing/library/esm/core/ResultPoint.js
 var ResultPoint = (
   /** @class */
-  function() {
+  (function() {
     function ResultPoint2(x, y) {
       this.x = x;
       this.y = y;
@@ -32060,14 +32184,14 @@ var ResultPoint = (
       return (pointC.x - bX) * (pointA.y - bY) - (pointC.y - bY) * (pointA.x - bX);
     };
     return ResultPoint2;
-  }()
+  })()
 );
 var ResultPoint_default = ResultPoint;
 
 // node_modules/@zxing/library/esm/core/common/DetectorResult.js
 var DetectorResult = (
   /** @class */
-  function() {
+  (function() {
     function DetectorResult2(bits, points) {
       this.bits = bits;
       this.points = points;
@@ -32079,12 +32203,12 @@ var DetectorResult = (
       return this.points;
     };
     return DetectorResult2;
-  }()
+  })()
 );
 var DetectorResult_default = DetectorResult;
 
 // node_modules/@zxing/library/esm/core/aztec/AztecDetectorResult.js
-var __extends19 = /* @__PURE__ */ function() {
+var __extends19 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -32100,10 +32224,10 @@ var __extends19 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var AztecDetectorResult = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends19(AztecDetectorResult2, _super);
     function AztecDetectorResult2(bits, points, compact, nbDatablocks, nbLayers) {
       var _this = _super.call(this, bits, points) || this;
@@ -32122,14 +32246,14 @@ var AztecDetectorResult = (
       return this.compact;
     };
     return AztecDetectorResult2;
-  }(DetectorResult_default)
+  })(DetectorResult_default)
 );
 var AztecDetectorResult_default = AztecDetectorResult;
 
 // node_modules/@zxing/library/esm/core/common/detector/WhiteRectangleDetector.js
 var WhiteRectangleDetector = (
   /** @class */
-  function() {
+  (function() {
     function WhiteRectangleDetector2(image, initSize, x, y) {
       this.image = image;
       this.height = image.getHeight();
@@ -32327,14 +32451,14 @@ var WhiteRectangleDetector = (
     WhiteRectangleDetector2.INIT_SIZE = 10;
     WhiteRectangleDetector2.CORR = 1;
     return WhiteRectangleDetector2;
-  }()
+  })()
 );
 var WhiteRectangleDetector_default = WhiteRectangleDetector;
 
 // node_modules/@zxing/library/esm/core/common/GridSampler.js
 var GridSampler = (
   /** @class */
-  function() {
+  (function() {
     function GridSampler2() {
     }
     GridSampler2.checkAndNudgePoints = function(image, points) {
@@ -32388,14 +32512,14 @@ var GridSampler = (
       }
     };
     return GridSampler2;
-  }()
+  })()
 );
 var GridSampler_default = GridSampler;
 
 // node_modules/@zxing/library/esm/core/common/PerspectiveTransform.js
 var PerspectiveTransform = (
   /** @class */
-  function() {
+  (function() {
     function PerspectiveTransform2(a11, a21, a31, a12, a22, a32, a13, a23, a33) {
       this.a11 = a11;
       this.a21 = a21;
@@ -32476,12 +32600,12 @@ var PerspectiveTransform = (
       return new PerspectiveTransform2(this.a11 * other.a11 + this.a21 * other.a12 + this.a31 * other.a13, this.a11 * other.a21 + this.a21 * other.a22 + this.a31 * other.a23, this.a11 * other.a31 + this.a21 * other.a32 + this.a31 * other.a33, this.a12 * other.a11 + this.a22 * other.a12 + this.a32 * other.a13, this.a12 * other.a21 + this.a22 * other.a22 + this.a32 * other.a23, this.a12 * other.a31 + this.a22 * other.a32 + this.a32 * other.a33, this.a13 * other.a11 + this.a23 * other.a12 + this.a33 * other.a13, this.a13 * other.a21 + this.a23 * other.a22 + this.a33 * other.a23, this.a13 * other.a31 + this.a23 * other.a32 + this.a33 * other.a33);
     };
     return PerspectiveTransform2;
-  }()
+  })()
 );
 var PerspectiveTransform_default = PerspectiveTransform;
 
 // node_modules/@zxing/library/esm/core/common/DefaultGridSampler.js
-var __extends20 = /* @__PURE__ */ function() {
+var __extends20 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -32497,10 +32621,10 @@ var __extends20 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var DefaultGridSampler = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends20(DefaultGridSampler2, _super);
     function DefaultGridSampler2() {
       return _super !== null && _super.apply(this, arguments) || this;
@@ -32537,14 +32661,14 @@ var DefaultGridSampler = (
       return bits;
     };
     return DefaultGridSampler2;
-  }(GridSampler_default)
+  })(GridSampler_default)
 );
 var DefaultGridSampler_default = DefaultGridSampler;
 
 // node_modules/@zxing/library/esm/core/common/GridSamplerInstance.js
 var GridSamplerInstance = (
   /** @class */
-  function() {
+  (function() {
     function GridSamplerInstance2() {
     }
     GridSamplerInstance2.setGridSampler = function(newGridSampler) {
@@ -32555,14 +32679,14 @@ var GridSamplerInstance = (
     };
     GridSamplerInstance2.gridSampler = new DefaultGridSampler_default();
     return GridSamplerInstance2;
-  }()
+  })()
 );
 var GridSamplerInstance_default = GridSamplerInstance;
 
 // node_modules/@zxing/library/esm/core/aztec/detector/Detector.js
 var Point = (
   /** @class */
-  function() {
+  (function() {
     function Point2(x, y) {
       this.x = x;
       this.y = y;
@@ -32577,11 +32701,11 @@ var Point = (
       return this.y;
     };
     return Point2;
-  }()
+  })()
 );
 var Detector = (
   /** @class */
-  function() {
+  (function() {
     function Detector5(image) {
       this.EXPECTED_CORNER_BITS = new Int32Array([
         3808,
@@ -32904,14 +33028,14 @@ var Detector = (
       return 4 * this.nbLayers + 2 * (Integer_default.truncDivision(this.nbLayers - 4, 8) + 1) + 15;
     };
     return Detector5;
-  }()
+  })()
 );
 var Detector_default = Detector;
 
 // node_modules/@zxing/library/esm/core/aztec/AztecReader.js
 var AztecReader = (
   /** @class */
-  function() {
+  (function() {
     function AztecReader2() {
     }
     AztecReader2.prototype.decode = function(image, hints) {
@@ -32967,12 +33091,12 @@ var AztecReader = (
     AztecReader2.prototype.reset = function() {
     };
     return AztecReader2;
-  }()
+  })()
 );
 var AztecReader_default = AztecReader;
 
 // node_modules/@zxing/library/esm/browser/BrowserAztecCodeReader.js
-var __extends21 = /* @__PURE__ */ function() {
+var __extends21 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -32988,25 +33112,25 @@ var __extends21 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var BrowserAztecCodeReader = (
   /** @class */
-  function(_super) {
-    __extends21(BrowserAztecCodeReader3, _super);
-    function BrowserAztecCodeReader3(timeBetweenScansMillis) {
+  (function(_super) {
+    __extends21(BrowserAztecCodeReader2, _super);
+    function BrowserAztecCodeReader2(timeBetweenScansMillis) {
       if (timeBetweenScansMillis === void 0) {
         timeBetweenScansMillis = 500;
       }
       return _super.call(this, new AztecReader_default(), timeBetweenScansMillis) || this;
     }
-    return BrowserAztecCodeReader3;
-  }(BrowserCodeReader)
+    return BrowserAztecCodeReader2;
+  })(BrowserCodeReader)
 );
 
 // node_modules/@zxing/library/esm/core/oned/OneDReader.js
 var OneDReader = (
   /** @class */
-  function() {
+  (function() {
     function OneDReader2() {
     }
     OneDReader2.prototype.decode = function(image, hints) {
@@ -33166,12 +33290,12 @@ var OneDReader = (
       return totalVariance / total;
     };
     return OneDReader2;
-  }()
+  })()
 );
 var OneDReader_default = OneDReader;
 
 // node_modules/@zxing/library/esm/core/oned/Code128Reader.js
-var __extends22 = /* @__PURE__ */ function() {
+var __extends22 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -33187,10 +33311,10 @@ var __extends22 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var Code128Reader = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends22(Code128Reader2, _super);
     function Code128Reader2() {
       return _super !== null && _super.apply(this, arguments) || this;
@@ -33613,12 +33737,12 @@ var Code128Reader = (
     Code128Reader2.CODE_START_C = 105;
     Code128Reader2.CODE_STOP = 106;
     return Code128Reader2;
-  }(OneDReader_default)
+  })(OneDReader_default)
 );
 var Code128Reader_default = Code128Reader;
 
 // node_modules/@zxing/library/esm/core/oned/Code39Reader.js
-var __extends23 = /* @__PURE__ */ function() {
+var __extends23 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -33634,7 +33758,7 @@ var __extends23 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var __values4 = function(o) {
   var s = typeof Symbol === "function" && Symbol.iterator, m = s && o[s], i = 0;
   if (m) return m.call(o);
@@ -33648,7 +33772,7 @@ var __values4 = function(o) {
 };
 var Code39Reader = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends23(Code39Reader2, _super);
     function Code39Reader2(usingCheckDigit, extendedMode) {
       if (usingCheckDigit === void 0) {
@@ -33944,12 +34068,12 @@ var Code39Reader = (
     ];
     Code39Reader2.ASTERISK_ENCODING = 148;
     return Code39Reader2;
-  }(OneDReader_default)
+  })(OneDReader_default)
 );
 var Code39Reader_default = Code39Reader;
 
 // node_modules/@zxing/library/esm/core/oned/Code93Reader.js
-var __extends24 = /* @__PURE__ */ function() {
+var __extends24 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -33965,7 +34089,7 @@ var __extends24 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var __values5 = function(o) {
   var s = typeof Symbol === "function" && Symbol.iterator, m = s && o[s], i = 0;
   if (m) return m.call(o);
@@ -33979,7 +34103,7 @@ var __values5 = function(o) {
 };
 var Code93Reader = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends24(Code93Reader2, _super);
     function Code93Reader2() {
       var _this = _super.call(this) || this;
@@ -34260,12 +34384,12 @@ var Code93Reader = (
     ];
     Code93Reader2.ASTERISK_ENCODING = Code93Reader2.CHARACTER_ENCODINGS[47];
     return Code93Reader2;
-  }(OneDReader_default)
+  })(OneDReader_default)
 );
 var Code93Reader_default = Code93Reader;
 
 // node_modules/@zxing/library/esm/core/oned/ITFReader.js
-var __extends25 = /* @__PURE__ */ function() {
+var __extends25 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -34281,7 +34405,7 @@ var __extends25 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var __values6 = function(o) {
   var s = typeof Symbol === "function" && Symbol.iterator, m = s && o[s], i = 0;
   if (m) return m.call(o);
@@ -34295,7 +34419,7 @@ var __values6 = function(o) {
 };
 var ITFReader = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends25(ITFReader2, _super);
     function ITFReader2() {
       var _this = _super !== null && _super.apply(this, arguments) || this;
@@ -34512,12 +34636,12 @@ var ITFReader = (
       // 3x
     ];
     return ITFReader2;
-  }(OneDReader_default)
+  })(OneDReader_default)
 );
 var ITFReader_default = ITFReader;
 
 // node_modules/@zxing/library/esm/core/oned/AbstractUPCEANReader.js
-var __extends26 = /* @__PURE__ */ function() {
+var __extends26 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -34533,10 +34657,10 @@ var __extends26 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var AbstractUPCEANReader = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends26(AbstractUPCEANReader2, _super);
     function AbstractUPCEANReader2() {
       var _this = _super !== null && _super.apply(this, arguments) || this;
@@ -34665,7 +34789,7 @@ var AbstractUPCEANReader = (
       Int32Array.from([3, 1, 1, 2])
     ];
     return AbstractUPCEANReader2;
-  }(OneDReader_default)
+  })(OneDReader_default)
 );
 var AbstractUPCEANReader_default = AbstractUPCEANReader;
 
@@ -34683,7 +34807,7 @@ var __values7 = function(o) {
 };
 var UPCEANExtension5Support = (
   /** @class */
-  function() {
+  (function() {
     function UPCEANExtension5Support2() {
       this.CHECK_DIGIT_ENCODINGS = [24, 20, 18, 17, 12, 6, 3, 10, 9, 5];
       this.decodeMiddleCounters = Int32Array.from([0, 0, 0, 0]);
@@ -34810,7 +34934,7 @@ var UPCEANExtension5Support = (
       return currency + unitsString + "." + hundredthsString;
     };
     return UPCEANExtension5Support2;
-  }()
+  })()
 );
 var UPCEANExtension5Support_default = UPCEANExtension5Support;
 
@@ -34828,7 +34952,7 @@ var __values8 = function(o) {
 };
 var UPCEANExtension2Support = (
   /** @class */
-  function() {
+  (function() {
     function UPCEANExtension2Support2() {
       this.decodeMiddleCounters = Int32Array.from([0, 0, 0, 0]);
       this.decodeRowStringBuffer = "";
@@ -34898,14 +35022,14 @@ var UPCEANExtension2Support = (
       return /* @__PURE__ */ new Map([[ResultMetadataType_default.ISSUE_NUMBER, parseInt(raw)]]);
     };
     return UPCEANExtension2Support2;
-  }()
+  })()
 );
 var UPCEANExtension2Support_default = UPCEANExtension2Support;
 
 // node_modules/@zxing/library/esm/core/oned/UPCEANExtensionSupport.js
 var UPCEANExtensionSupport = (
   /** @class */
-  function() {
+  (function() {
     function UPCEANExtensionSupport2() {
     }
     UPCEANExtensionSupport2.decodeRow = function(rowNumber, row, rowOffset) {
@@ -34920,12 +35044,12 @@ var UPCEANExtensionSupport = (
     };
     UPCEANExtensionSupport2.EXTENSION_START_PATTERN = Int32Array.from([1, 1, 2]);
     return UPCEANExtensionSupport2;
-  }()
+  })()
 );
 var UPCEANExtensionSupport_default = UPCEANExtensionSupport;
 
 // node_modules/@zxing/library/esm/core/oned/UPCEANReader.js
-var __extends27 = /* @__PURE__ */ function() {
+var __extends27 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -34941,10 +35065,10 @@ var __extends27 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var UPCEANReader = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends27(UPCEANReader2, _super);
     function UPCEANReader2() {
       var _this = _super.call(this) || this;
@@ -35058,12 +35182,12 @@ var UPCEANReader = (
       return UPCEANReader2.findGuardPattern(row, endStart, false, UPCEANReader2.START_END_PATTERN, new Int32Array(UPCEANReader2.START_END_PATTERN.length).fill(0));
     };
     return UPCEANReader2;
-  }(AbstractUPCEANReader_default)
+  })(AbstractUPCEANReader_default)
 );
 var UPCEANReader_default = UPCEANReader;
 
 // node_modules/@zxing/library/esm/core/oned/EAN13Reader.js
-var __extends28 = /* @__PURE__ */ function() {
+var __extends28 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -35079,7 +35203,7 @@ var __extends28 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var __values9 = function(o) {
   var s = typeof Symbol === "function" && Symbol.iterator, m = s && o[s], i = 0;
   if (m) return m.call(o);
@@ -35093,7 +35217,7 @@ var __values9 = function(o) {
 };
 var EAN13Reader = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends28(EAN13Reader2, _super);
     function EAN13Reader2() {
       var _this = _super.call(this) || this;
@@ -35168,12 +35292,12 @@ var EAN13Reader = (
     };
     EAN13Reader2.FIRST_DIGIT_ENCODINGS = [0, 11, 13, 14, 19, 25, 28, 21, 22, 26];
     return EAN13Reader2;
-  }(UPCEANReader_default)
+  })(UPCEANReader_default)
 );
 var EAN13Reader_default = EAN13Reader;
 
 // node_modules/@zxing/library/esm/core/oned/EAN8Reader.js
-var __extends29 = /* @__PURE__ */ function() {
+var __extends29 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -35189,7 +35313,7 @@ var __extends29 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var __values10 = function(o) {
   var s = typeof Symbol === "function" && Symbol.iterator, m = s && o[s], i = 0;
   if (m) return m.call(o);
@@ -35203,7 +35327,7 @@ var __values10 = function(o) {
 };
 var EAN8Reader = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends29(EAN8Reader2, _super);
     function EAN8Reader2() {
       var _this = _super.call(this) || this;
@@ -35263,12 +35387,12 @@ var EAN8Reader = (
       return BarcodeFormat_default.EAN_8;
     };
     return EAN8Reader2;
-  }(UPCEANReader_default)
+  })(UPCEANReader_default)
 );
 var EAN8Reader_default = EAN8Reader;
 
 // node_modules/@zxing/library/esm/core/oned/UPCAReader.js
-var __extends30 = /* @__PURE__ */ function() {
+var __extends30 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -35284,10 +35408,10 @@ var __extends30 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var UPCAReader = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends30(UPCAReader2, _super);
     function UPCAReader2() {
       var _this = _super !== null && _super.apply(this, arguments) || this;
@@ -35322,12 +35446,12 @@ var UPCAReader = (
       this.ean13Reader.reset();
     };
     return UPCAReader2;
-  }(UPCEANReader_default)
+  })(UPCEANReader_default)
 );
 var UPCAReader_default = UPCAReader;
 
 // node_modules/@zxing/library/esm/core/oned/UPCEReader.js
-var __extends31 = /* @__PURE__ */ function() {
+var __extends31 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -35343,7 +35467,7 @@ var __extends31 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var __values11 = function(o) {
   var s = typeof Symbol === "function" && Symbol.iterator, m = s && o[s], i = 0;
   if (m) return m.call(o);
@@ -35357,7 +35481,7 @@ var __values11 = function(o) {
 };
 var UPCEReader = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends31(UPCEReader2, _super);
     function UPCEReader2() {
       var _this = _super.call(this) || this;
@@ -35473,12 +35597,12 @@ var UPCEReader = (
       Int32Array.from([7, 11, 13, 14, 19, 25, 28, 21, 22, 1])
     ];
     return UPCEReader2;
-  }(UPCEANReader_default)
+  })(UPCEANReader_default)
 );
 var UPCEReader_default = UPCEReader;
 
 // node_modules/@zxing/library/esm/core/oned/MultiFormatUPCEANReader.js
-var __extends32 = /* @__PURE__ */ function() {
+var __extends32 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -35494,7 +35618,7 @@ var __extends32 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var __values12 = function(o) {
   var s = typeof Symbol === "function" && Symbol.iterator, m = s && o[s], i = 0;
   if (m) return m.call(o);
@@ -35508,7 +35632,7 @@ var __values12 = function(o) {
 };
 var MultiFormatUPCEANReader = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends32(MultiFormatUPCEANReader2, _super);
     function MultiFormatUPCEANReader2(hints) {
       var _this = _super.call(this) || this;
@@ -35586,12 +35710,12 @@ var MultiFormatUPCEANReader = (
       }
     };
     return MultiFormatUPCEANReader2;
-  }(OneDReader_default)
+  })(OneDReader_default)
 );
 var MultiFormatUPCEANReader_default = MultiFormatUPCEANReader;
 
 // node_modules/@zxing/library/esm/core/oned/CodaBarReader.js
-var __extends33 = /* @__PURE__ */ function() {
+var __extends33 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -35607,10 +35731,10 @@ var __extends33 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var CodaBarReader = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends33(CodaBarReader2, _super);
     function CodaBarReader2() {
       var _this = _super !== null && _super.apply(this, arguments) || this;
@@ -35697,12 +35821,12 @@ var CodaBarReader = (
       return reg.test(src);
     };
     return CodaBarReader2;
-  }(OneDReader_default)
+  })(OneDReader_default)
 );
 var CodaBarReader_default = CodaBarReader;
 
 // node_modules/@zxing/library/esm/core/oned/rss/AbstractRSSReader.js
-var __extends34 = /* @__PURE__ */ function() {
+var __extends34 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -35718,7 +35842,7 @@ var __extends34 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var __values13 = function(o) {
   var s = typeof Symbol === "function" && Symbol.iterator, m = s && o[s], i = 0;
   if (m) return m.call(o);
@@ -35732,7 +35856,7 @@ var __values13 = function(o) {
 };
 var AbstractRSSReader = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends34(AbstractRSSReader2, _super);
     function AbstractRSSReader2() {
       var _this = _super.call(this) || this;
@@ -35831,14 +35955,14 @@ var AbstractRSSReader = (
     AbstractRSSReader2.MIN_FINDER_PATTERN_RATIO = 9.5 / 12;
     AbstractRSSReader2.MAX_FINDER_PATTERN_RATIO = 12.5 / 14;
     return AbstractRSSReader2;
-  }(OneDReader_default)
+  })(OneDReader_default)
 );
 var AbstractRSSReader_default = AbstractRSSReader;
 
 // node_modules/@zxing/library/esm/core/oned/rss/DataCharacter.js
 var DataCharacter = (
   /** @class */
-  function() {
+  (function() {
     function DataCharacter2(value, checksumPortion) {
       this.value = value;
       this.checksumPortion = checksumPortion;
@@ -35863,14 +35987,14 @@ var DataCharacter = (
       return this.value ^ this.checksumPortion;
     };
     return DataCharacter2;
-  }()
+  })()
 );
 var DataCharacter_default = DataCharacter;
 
 // node_modules/@zxing/library/esm/core/oned/rss/FinderPattern.js
 var FinderPattern = (
   /** @class */
-  function() {
+  (function() {
     function FinderPattern3(value, startEnd, start, end, rowNumber) {
       this.value = value;
       this.startEnd = startEnd;
@@ -35900,7 +36024,7 @@ var FinderPattern = (
       return this.value;
     };
     return FinderPattern3;
-  }()
+  })()
 );
 var FinderPattern_default = FinderPattern;
 
@@ -35918,7 +36042,7 @@ var __values14 = function(o) {
 };
 var RSSUtils = (
   /** @class */
-  function() {
+  (function() {
     function RSSUtils2() {
     }
     RSSUtils2.getRSSvalue = function(widths, maxWidth, noNarrow) {
@@ -35989,14 +36113,14 @@ var RSSUtils = (
       return val;
     };
     return RSSUtils2;
-  }()
+  })()
 );
 var RSSUtils_default = RSSUtils;
 
 // node_modules/@zxing/library/esm/core/oned/rss/expanded/BitArrayBuilder.js
 var BitArrayBuilder = (
   /** @class */
-  function() {
+  (function() {
     function BitArrayBuilder2() {
     }
     BitArrayBuilder2.buildBitArray = function(pairs) {
@@ -36037,14 +36161,14 @@ var BitArrayBuilder = (
       return binary;
     };
     return BitArrayBuilder2;
-  }()
+  })()
 );
 var BitArrayBuilder_default = BitArrayBuilder;
 
 // node_modules/@zxing/library/esm/core/oned/rss/expanded/decoders/BlockParsedResult.js
 var BlockParsedResult = (
   /** @class */
-  function() {
+  (function() {
     function BlockParsedResult2(finished, decodedInformation) {
       if (decodedInformation) {
         this.decodedInformation = null;
@@ -36060,14 +36184,14 @@ var BlockParsedResult = (
       return this.finished;
     };
     return BlockParsedResult2;
-  }()
+  })()
 );
 var BlockParsedResult_default = BlockParsedResult;
 
 // node_modules/@zxing/library/esm/core/oned/rss/expanded/decoders/DecodedObject.js
 var DecodedObject = (
   /** @class */
-  function() {
+  (function() {
     function DecodedObject2(newPosition) {
       this.newPosition = newPosition;
     }
@@ -36075,12 +36199,12 @@ var DecodedObject = (
       return this.newPosition;
     };
     return DecodedObject2;
-  }()
+  })()
 );
 var DecodedObject_default = DecodedObject;
 
 // node_modules/@zxing/library/esm/core/oned/rss/expanded/decoders/DecodedChar.js
-var __extends35 = /* @__PURE__ */ function() {
+var __extends35 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -36096,10 +36220,10 @@ var __extends35 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var DecodedChar = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends35(DecodedChar2, _super);
     function DecodedChar2(newPosition, value) {
       var _this = _super.call(this, newPosition) || this;
@@ -36114,12 +36238,12 @@ var DecodedChar = (
     };
     DecodedChar2.FNC1 = "$";
     return DecodedChar2;
-  }(DecodedObject_default)
+  })(DecodedObject_default)
 );
 var DecodedChar_default = DecodedChar;
 
 // node_modules/@zxing/library/esm/core/oned/rss/expanded/decoders/DecodedInformation.js
-var __extends36 = /* @__PURE__ */ function() {
+var __extends36 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -36135,10 +36259,10 @@ var __extends36 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var DecodedInformation = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends36(DecodedInformation2, _super);
     function DecodedInformation2(newPosition, newString, remainingValue) {
       var _this = _super.call(this, newPosition) || this;
@@ -36162,12 +36286,12 @@ var DecodedInformation = (
       return this.remainingValue;
     };
     return DecodedInformation2;
-  }(DecodedObject_default)
+  })(DecodedObject_default)
 );
 var DecodedInformation_default = DecodedInformation;
 
 // node_modules/@zxing/library/esm/core/oned/rss/expanded/decoders/DecodedNumeric.js
-var __extends37 = /* @__PURE__ */ function() {
+var __extends37 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -36183,10 +36307,10 @@ var __extends37 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var DecodedNumeric = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends37(DecodedNumeric2, _super);
     function DecodedNumeric2(newPosition, firstDigit, secondDigit) {
       var _this = _super.call(this, newPosition) || this;
@@ -36217,7 +36341,7 @@ var DecodedNumeric = (
     };
     DecodedNumeric2.FNC1 = 10;
     return DecodedNumeric2;
-  }(DecodedObject_default)
+  })(DecodedObject_default)
 );
 var DecodedNumeric_default = DecodedNumeric;
 
@@ -36235,7 +36359,7 @@ var __values15 = function(o) {
 };
 var FieldParser = (
   /** @class */
-  function() {
+  (function() {
     function FieldParser2() {
     }
     FieldParser2.parseFieldsInGeneralPurpose = function(rawInformation) {
@@ -36497,14 +36621,14 @@ var FieldParser = (
       ["8200", FieldParser2.VARIABLE_LENGTH, 70]
     ];
     return FieldParser2;
-  }()
+  })()
 );
 var FieldParser_default = FieldParser;
 
 // node_modules/@zxing/library/esm/core/oned/rss/expanded/decoders/GeneralAppIdDecoder.js
 var GeneralAppIdDecoder = (
   /** @class */
-  function() {
+  (function() {
     function GeneralAppIdDecoder2(information) {
       this.buffer = new StringBuilder_default();
       this.information = information;
@@ -36865,14 +36989,14 @@ var GeneralAppIdDecoder = (
       return true;
     };
     return GeneralAppIdDecoder2;
-  }()
+  })()
 );
 var GeneralAppIdDecoder_default = GeneralAppIdDecoder;
 
 // node_modules/@zxing/library/esm/core/oned/rss/expanded/decoders/AbstractExpandedDecoder.js
 var AbstractExpandedDecoder = (
   /** @class */
-  function() {
+  (function() {
     function AbstractExpandedDecoder2(information) {
       this.information = information;
       this.generalDecoder = new GeneralAppIdDecoder_default(information);
@@ -36884,12 +37008,12 @@ var AbstractExpandedDecoder = (
       return this.generalDecoder;
     };
     return AbstractExpandedDecoder2;
-  }()
+  })()
 );
 var AbstractExpandedDecoder_default = AbstractExpandedDecoder;
 
 // node_modules/@zxing/library/esm/core/oned/rss/expanded/decoders/AI01decoder.js
-var __extends38 = /* @__PURE__ */ function() {
+var __extends38 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -36905,10 +37029,10 @@ var __extends38 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var AI01decoder = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends38(AI01decoder2, _super);
     function AI01decoder2(information) {
       return _super.call(this, information) || this;
@@ -36946,12 +37070,12 @@ var AI01decoder = (
     };
     AI01decoder2.GTIN_SIZE = 40;
     return AI01decoder2;
-  }(AbstractExpandedDecoder_default)
+  })(AbstractExpandedDecoder_default)
 );
 var AI01decoder_default = AI01decoder;
 
 // node_modules/@zxing/library/esm/core/oned/rss/expanded/decoders/AI01AndOtherAIs.js
-var __extends39 = /* @__PURE__ */ function() {
+var __extends39 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -36967,10 +37091,10 @@ var __extends39 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var AI01AndOtherAIs = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends39(AI01AndOtherAIs2, _super);
     function AI01AndOtherAIs2(information) {
       return _super.call(this, information) || this;
@@ -36986,12 +37110,12 @@ var AI01AndOtherAIs = (
     };
     AI01AndOtherAIs2.HEADER_SIZE = 1 + 1 + 2;
     return AI01AndOtherAIs2;
-  }(AI01decoder_default)
+  })(AI01decoder_default)
 );
 var AI01AndOtherAIs_default = AI01AndOtherAIs;
 
 // node_modules/@zxing/library/esm/core/oned/rss/expanded/decoders/AnyAIDecoder.js
-var __extends40 = /* @__PURE__ */ function() {
+var __extends40 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -37007,10 +37131,10 @@ var __extends40 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var AnyAIDecoder = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends40(AnyAIDecoder2, _super);
     function AnyAIDecoder2(information) {
       return _super.call(this, information) || this;
@@ -37021,12 +37145,12 @@ var AnyAIDecoder = (
     };
     AnyAIDecoder2.HEADER_SIZE = 2 + 1 + 2;
     return AnyAIDecoder2;
-  }(AbstractExpandedDecoder_default)
+  })(AbstractExpandedDecoder_default)
 );
 var AnyAIDecoder_default = AnyAIDecoder;
 
 // node_modules/@zxing/library/esm/core/oned/rss/expanded/decoders/AI01weightDecoder.js
-var __extends41 = /* @__PURE__ */ function() {
+var __extends41 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -37042,10 +37166,10 @@ var __extends41 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var AI01weightDecoder = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends41(AI01weightDecoder2, _super);
     function AI01weightDecoder2(information) {
       return _super.call(this, information) || this;
@@ -37064,12 +37188,12 @@ var AI01weightDecoder = (
       buf.append(weightNumeric);
     };
     return AI01weightDecoder2;
-  }(AI01decoder_default)
+  })(AI01decoder_default)
 );
 var AI01weightDecoder_default = AI01weightDecoder;
 
 // node_modules/@zxing/library/esm/core/oned/rss/expanded/decoders/AI013x0xDecoder.js
-var __extends42 = /* @__PURE__ */ function() {
+var __extends42 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -37085,10 +37209,10 @@ var __extends42 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var AI013x0xDecoder = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends42(AI013x0xDecoder2, _super);
     function AI013x0xDecoder2(information) {
       return _super.call(this, information) || this;
@@ -37105,12 +37229,12 @@ var AI013x0xDecoder = (
     AI013x0xDecoder2.HEADER_SIZE = 4 + 1;
     AI013x0xDecoder2.WEIGHT_SIZE = 15;
     return AI013x0xDecoder2;
-  }(AI01weightDecoder_default)
+  })(AI01weightDecoder_default)
 );
 var AI013x0xDecoder_default = AI013x0xDecoder;
 
 // node_modules/@zxing/library/esm/core/oned/rss/expanded/decoders/AI013103decoder.js
-var __extends43 = /* @__PURE__ */ function() {
+var __extends43 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -37126,10 +37250,10 @@ var __extends43 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var AI013103decoder = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends43(AI013103decoder2, _super);
     function AI013103decoder2(information) {
       return _super.call(this, information) || this;
@@ -37141,12 +37265,12 @@ var AI013103decoder = (
       return weight;
     };
     return AI013103decoder2;
-  }(AI013x0xDecoder_default)
+  })(AI013x0xDecoder_default)
 );
 var AI013103decoder_default = AI013103decoder;
 
 // node_modules/@zxing/library/esm/core/oned/rss/expanded/decoders/AI01320xDecoder.js
-var __extends44 = /* @__PURE__ */ function() {
+var __extends44 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -37162,10 +37286,10 @@ var __extends44 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var AI01320xDecoder = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends44(AI01320xDecoder2, _super);
     function AI01320xDecoder2(information) {
       return _super.call(this, information) || this;
@@ -37184,12 +37308,12 @@ var AI01320xDecoder = (
       return weight - 1e4;
     };
     return AI01320xDecoder2;
-  }(AI013x0xDecoder_default)
+  })(AI013x0xDecoder_default)
 );
 var AI01320xDecoder_default = AI01320xDecoder;
 
 // node_modules/@zxing/library/esm/core/oned/rss/expanded/decoders/AI01392xDecoder.js
-var __extends45 = /* @__PURE__ */ function() {
+var __extends45 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -37205,10 +37329,10 @@ var __extends45 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var AI01392xDecoder = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends45(AI01392xDecoder2, _super);
     function AI01392xDecoder2(information) {
       return _super.call(this, information) || this;
@@ -37230,12 +37354,12 @@ var AI01392xDecoder = (
     AI01392xDecoder2.HEADER_SIZE = 5 + 1 + 2;
     AI01392xDecoder2.LAST_DIGIT_SIZE = 2;
     return AI01392xDecoder2;
-  }(AI01decoder_default)
+  })(AI01decoder_default)
 );
 var AI01392xDecoder_default = AI01392xDecoder;
 
 // node_modules/@zxing/library/esm/core/oned/rss/expanded/decoders/AI01393xDecoder.js
-var __extends46 = /* @__PURE__ */ function() {
+var __extends46 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -37251,10 +37375,10 @@ var __extends46 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var AI01393xDecoder = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends46(AI01393xDecoder2, _super);
     function AI01393xDecoder2(information) {
       return _super.call(this, information) || this;
@@ -37285,12 +37409,12 @@ var AI01393xDecoder = (
     AI01393xDecoder2.LAST_DIGIT_SIZE = 2;
     AI01393xDecoder2.FIRST_THREE_DIGITS_SIZE = 10;
     return AI01393xDecoder2;
-  }(AI01decoder_default)
+  })(AI01decoder_default)
 );
 var AI01393xDecoder_default = AI01393xDecoder;
 
 // node_modules/@zxing/library/esm/core/oned/rss/expanded/decoders/AI013x0x1xDecoder.js
-var __extends47 = /* @__PURE__ */ function() {
+var __extends47 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -37306,10 +37430,10 @@ var __extends47 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var AI013x0x1xDecoder = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends47(AI013x0x1xDecoder2, _super);
     function AI013x0x1xDecoder2(information, firstAIdigits, dateCode) {
       var _this = _super.call(this, information) || this;
@@ -37366,7 +37490,7 @@ var AI013x0x1xDecoder = (
     AI013x0x1xDecoder2.WEIGHT_SIZE = 20;
     AI013x0x1xDecoder2.DATE_SIZE = 16;
     return AI013x0x1xDecoder2;
-  }(AI01weightDecoder_default)
+  })(AI01weightDecoder_default)
 );
 var AI013x0x1xDecoder_default = AI013x0x1xDecoder;
 
@@ -37421,7 +37545,7 @@ function createDecoder(information) {
 // node_modules/@zxing/library/esm/core/oned/rss/expanded/ExpandedPair.js
 var ExpandedPair = (
   /** @class */
-  function() {
+  (function() {
     function ExpandedPair2(leftChar, rightChar, finderPatter, mayBeLast) {
       this.leftchar = leftChar;
       this.rightchar = rightChar;
@@ -37460,14 +37584,14 @@ var ExpandedPair = (
       return value;
     };
     return ExpandedPair2;
-  }()
+  })()
 );
 var ExpandedPair_default = ExpandedPair;
 
 // node_modules/@zxing/library/esm/core/oned/rss/expanded/ExpandedRow.js
 var ExpandedRow = (
   /** @class */
-  function() {
+  (function() {
     function ExpandedRow2(pairs, rowNumber, wasReversed) {
       this.pairs = pairs;
       this.rowNumber = rowNumber;
@@ -37508,12 +37632,12 @@ var ExpandedRow = (
       return result;
     };
     return ExpandedRow2;
-  }()
+  })()
 );
 var ExpandedRow_default = ExpandedRow;
 
 // node_modules/@zxing/library/esm/core/oned/rss/expanded/RSSExpandedReader.js
-var __extends48 = /* @__PURE__ */ function() {
+var __extends48 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -37529,7 +37653,7 @@ var __extends48 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var __values16 = function(o) {
   var s = typeof Symbol === "function" && Symbol.iterator, m = s && o[s], i = 0;
   if (m) return m.call(o);
@@ -37543,7 +37667,7 @@ var __values16 = function(o) {
 };
 var RSSExpandedReader = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends48(RSSExpandedReader2, _super);
     function RSSExpandedReader2() {
       var _this = _super !== null && _super.apply(this, arguments) || this;
@@ -38295,12 +38419,12 @@ var RSSExpandedReader = (
     ];
     RSSExpandedReader2.MAX_PAIRS = 11;
     return RSSExpandedReader2;
-  }(AbstractRSSReader_default)
+  })(AbstractRSSReader_default)
 );
 var RSSExpandedReader_default = RSSExpandedReader;
 
 // node_modules/@zxing/library/esm/core/oned/rss/Pair.js
-var __extends49 = /* @__PURE__ */ function() {
+var __extends49 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -38316,10 +38440,10 @@ var __extends49 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var Pair = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends49(Pair2, _super);
     function Pair2(value, checksumPortion, finderPattern) {
       var _this = _super.call(this, value, checksumPortion) || this;
@@ -38337,12 +38461,12 @@ var Pair = (
       this.count++;
     };
     return Pair2;
-  }(DataCharacter_default)
+  })(DataCharacter_default)
 );
 var Pair_default = Pair;
 
 // node_modules/@zxing/library/esm/core/oned/rss/RSS14Reader.js
-var __extends50 = /* @__PURE__ */ function() {
+var __extends50 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -38358,7 +38482,7 @@ var __extends50 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var __values17 = function(o) {
   var s = typeof Symbol === "function" && Symbol.iterator, m = s && o[s], i = 0;
   if (m) return m.call(o);
@@ -38372,7 +38496,7 @@ var __values17 = function(o) {
 };
 var RSS14Reader = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends50(RSS14Reader2, _super);
     function RSS14Reader2() {
       var _this = _super !== null && _super.apply(this, arguments) || this;
@@ -38761,12 +38885,12 @@ var RSS14Reader = (
       Int32Array.from([1, 3, 9, 1])
     ];
     return RSS14Reader2;
-  }(AbstractRSSReader_default)
+  })(AbstractRSSReader_default)
 );
 var RSS14Reader_default = RSS14Reader;
 
 // node_modules/@zxing/library/esm/core/oned/MultiFormatOneDReader.js
-var __extends51 = /* @__PURE__ */ function() {
+var __extends51 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -38782,10 +38906,10 @@ var __extends51 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var MultiFormatOneDReader = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends51(MultiFormatOneDReader2, _super);
     function MultiFormatOneDReader2(hints) {
       var _this = _super.call(this) || this;
@@ -38846,12 +38970,12 @@ var MultiFormatOneDReader = (
       });
     };
     return MultiFormatOneDReader2;
-  }(OneDReader_default)
+  })(OneDReader_default)
 );
 var MultiFormatOneDReader_default = MultiFormatOneDReader;
 
 // node_modules/@zxing/library/esm/browser/BrowserBarcodeReader.js
-var __extends52 = /* @__PURE__ */ function() {
+var __extends52 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -38867,10 +38991,10 @@ var __extends52 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var BrowserBarcodeReader = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends52(BrowserBarcodeReader2, _super);
     function BrowserBarcodeReader2(timeBetweenScansMillis, hints) {
       if (timeBetweenScansMillis === void 0) {
@@ -38879,7 +39003,7 @@ var BrowserBarcodeReader = (
       return _super.call(this, new MultiFormatOneDReader_default(hints), timeBetweenScansMillis, hints) || this;
     }
     return BrowserBarcodeReader2;
-  }(BrowserCodeReader)
+  })(BrowserCodeReader)
 );
 
 // node_modules/@zxing/library/esm/core/datamatrix/decoder/Version.js
@@ -38896,7 +39020,7 @@ var __values18 = function(o) {
 };
 var ECBlocks = (
   /** @class */
-  function() {
+  (function() {
     function ECBlocks3(ecCodewords, ecBlocks1, ecBlocks2) {
       this.ecCodewords = ecCodewords;
       this.ecBlocks = [ecBlocks1];
@@ -38909,11 +39033,11 @@ var ECBlocks = (
       return this.ecBlocks;
     };
     return ECBlocks3;
-  }()
+  })()
 );
 var ECB = (
   /** @class */
-  function() {
+  (function() {
     function ECB3(count, dataCodewords) {
       this.count = count;
       this.dataCodewords = dataCodewords;
@@ -38925,11 +39049,11 @@ var ECB = (
       return this.dataCodewords;
     };
     return ECB3;
-  }()
+  })()
 );
 var Version = (
   /** @class */
-  function() {
+  (function() {
     function Version3(versionNumber, symbolSizeRows, symbolSizeColumns, dataRegionSizeRows, dataRegionSizeColumns, ecBlocks) {
       var e_1, _a2;
       this.versionNumber = versionNumber;
@@ -39040,14 +39164,14 @@ var Version = (
     };
     Version3.VERSIONS = Version3.buildVersions();
     return Version3;
-  }()
+  })()
 );
 var Version_default = Version;
 
 // node_modules/@zxing/library/esm/core/datamatrix/decoder/BitMatrixParser.js
 var BitMatrixParser = (
   /** @class */
-  function() {
+  (function() {
     function BitMatrixParser3(bitMatrix) {
       var dimension = bitMatrix.getHeight();
       if (dimension < 8 || dimension > 144 || (dimension & 1) !== 0) {
@@ -39343,7 +39467,7 @@ var BitMatrixParser = (
       return bitMatrixWithoutAlignment;
     };
     return BitMatrixParser3;
-  }()
+  })()
 );
 var BitMatrixParser_default = BitMatrixParser;
 
@@ -39361,7 +39485,7 @@ var __values19 = function(o) {
 };
 var DataBlock = (
   /** @class */
-  function() {
+  (function() {
     function DataBlock3(numDataCodewords, codewords) {
       this.numDataCodewords = numDataCodewords;
       this.codewords = codewords;
@@ -39439,14 +39563,14 @@ var DataBlock = (
       return this.codewords;
     };
     return DataBlock3;
-  }()
+  })()
 );
 var DataBlock_default = DataBlock;
 
 // node_modules/@zxing/library/esm/core/common/BitSource.js
 var BitSource = (
   /** @class */
-  function() {
+  (function() {
     function BitSource2(bytes) {
       this.bytes = bytes;
       this.byteOffset = 0;
@@ -39500,7 +39624,7 @@ var BitSource = (
       return 8 * (this.bytes.length - this.byteOffset) - this.bitOffset;
     };
     return BitSource2;
-  }()
+  })()
 );
 var BitSource_default = BitSource;
 
@@ -39517,7 +39641,7 @@ var Mode;
 })(Mode || (Mode = {}));
 var DecodedBitStreamParser = (
   /** @class */
-  function() {
+  (function() {
     function DecodedBitStreamParser4() {
     }
     DecodedBitStreamParser4.decode = function(bytes) {
@@ -39587,6 +39711,7 @@ var DecodedBitStreamParser = (
               result.append(String.fromCharCode(29));
               break;
             case 233:
+            // Structured Append
             case 234:
               break;
             case 235:
@@ -40030,7 +40155,7 @@ var DecodedBitStreamParser = (
       String.fromCharCode(127)
     ];
     return DecodedBitStreamParser4;
-  }()
+  })()
 );
 var DecodedBitStreamParser_default = DecodedBitStreamParser;
 
@@ -40048,7 +40173,7 @@ var __values20 = function(o) {
 };
 var Decoder2 = (
   /** @class */
-  function() {
+  (function() {
     function Decoder4() {
       this.rsDecoder = new ReedSolomonDecoder_default(GenericGF_default.DATA_MATRIX_FIELD_256);
     }
@@ -40098,14 +40223,14 @@ var Decoder2 = (
       }
     };
     return Decoder4;
-  }()
+  })()
 );
 var Decoder_default2 = Decoder2;
 
 // node_modules/@zxing/library/esm/core/datamatrix/detector/Detector.js
 var Detector2 = (
   /** @class */
-  function() {
+  (function() {
     function Detector5(image) {
       this.image = image;
       this.rectangleDetector = new WhiteRectangleDetector_default(this.image);
@@ -40324,14 +40449,14 @@ var Detector2 = (
       return transitions;
     };
     return Detector5;
-  }()
+  })()
 );
 var Detector_default2 = Detector2;
 
 // node_modules/@zxing/library/esm/core/datamatrix/DataMatrixReader.js
 var DataMatrixReader = (
   /** @class */
-  function() {
+  (function() {
     function DataMatrixReader2() {
       this.decoder = new Decoder_default2();
     }
@@ -40412,12 +40537,12 @@ var DataMatrixReader = (
     };
     DataMatrixReader2.NO_POINTS = [];
     return DataMatrixReader2;
-  }()
+  })()
 );
 var DataMatrixReader_default = DataMatrixReader;
 
 // node_modules/@zxing/library/esm/browser/BrowserDatamatrixCodeReader.js
-var __extends53 = /* @__PURE__ */ function() {
+var __extends53 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -40433,19 +40558,19 @@ var __extends53 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var BrowserDatamatrixCodeReader = (
   /** @class */
-  function(_super) {
-    __extends53(BrowserDatamatrixCodeReader3, _super);
-    function BrowserDatamatrixCodeReader3(timeBetweenScansMillis) {
+  (function(_super) {
+    __extends53(BrowserDatamatrixCodeReader2, _super);
+    function BrowserDatamatrixCodeReader2(timeBetweenScansMillis) {
       if (timeBetweenScansMillis === void 0) {
         timeBetweenScansMillis = 500;
       }
       return _super.call(this, new DataMatrixReader_default(), timeBetweenScansMillis) || this;
     }
-    return BrowserDatamatrixCodeReader3;
-  }(BrowserCodeReader)
+    return BrowserDatamatrixCodeReader2;
+  })(BrowserCodeReader)
 );
 
 // node_modules/@zxing/library/esm/core/qrcode/decoder/ErrorCorrectionLevel.js
@@ -40458,7 +40583,7 @@ var ErrorCorrectionLevelValues;
 })(ErrorCorrectionLevelValues || (ErrorCorrectionLevelValues = {}));
 var ErrorCorrectionLevel = (
   /** @class */
-  function() {
+  (function() {
     function ErrorCorrectionLevel2(value, stringValue, bits) {
       this.value = value;
       this.stringValue = stringValue;
@@ -40509,7 +40634,7 @@ var ErrorCorrectionLevel = (
     ErrorCorrectionLevel2.Q = new ErrorCorrectionLevel2(ErrorCorrectionLevelValues.Q, "Q", 3);
     ErrorCorrectionLevel2.H = new ErrorCorrectionLevel2(ErrorCorrectionLevelValues.H, "H", 2);
     return ErrorCorrectionLevel2;
-  }()
+  })()
 );
 var ErrorCorrectionLevel_default = ErrorCorrectionLevel;
 
@@ -40527,7 +40652,7 @@ var __values21 = function(o) {
 };
 var FormatInformation = (
   /** @class */
-  function() {
+  (function() {
     function FormatInformation2(formatInfo) {
       this.errorCorrectionLevel = ErrorCorrectionLevel_default.forBits(formatInfo >> 3 & 3);
       this.dataMask = /*(byte) */
@@ -40633,7 +40758,7 @@ var FormatInformation = (
       Int32Array.from([11245, 31])
     ];
     return FormatInformation2;
-  }()
+  })()
 );
 var FormatInformation_default = FormatInformation;
 
@@ -40651,7 +40776,7 @@ var __values22 = function(o) {
 };
 var ECBlocks2 = (
   /** @class */
-  function() {
+  (function() {
     function ECBlocks3(ecCodewordsPerBlock) {
       var ecBlocks = [];
       for (var _i = 1; _i < arguments.length; _i++) {
@@ -40690,14 +40815,14 @@ var ECBlocks2 = (
       return this.ecBlocks;
     };
     return ECBlocks3;
-  }()
+  })()
 );
 var ECBlocks_default = ECBlocks2;
 
 // node_modules/@zxing/library/esm/core/qrcode/decoder/ECB.js
 var ECB2 = (
   /** @class */
-  function() {
+  (function() {
     function ECB3(count, dataCodewords) {
       this.count = count;
       this.dataCodewords = dataCodewords;
@@ -40709,7 +40834,7 @@ var ECB2 = (
       return this.dataCodewords;
     };
     return ECB3;
-  }()
+  })()
 );
 var ECB_default = ECB2;
 
@@ -40727,7 +40852,7 @@ var __values23 = function(o) {
 };
 var Version2 = (
   /** @class */
-  function() {
+  (function() {
     function Version3(versionNumber, alignmentPatternCenters) {
       var e_1, _a2;
       var ecBlocks = [];
@@ -40912,7 +41037,7 @@ var Version2 = (
       new Version3(40, Int32Array.from([6, 30, 58, 86, 114, 142, 170]), new ECBlocks_default(30, new ECB_default(19, 118), new ECB_default(6, 119)), new ECBlocks_default(28, new ECB_default(18, 47), new ECB_default(31, 48)), new ECBlocks_default(30, new ECB_default(34, 24), new ECB_default(34, 25)), new ECBlocks_default(30, new ECB_default(20, 15), new ECB_default(61, 16)))
     ];
     return Version3;
-  }()
+  })()
 );
 var Version_default2 = Version2;
 
@@ -40930,7 +41055,7 @@ var DataMaskValues;
 })(DataMaskValues || (DataMaskValues = {}));
 var DataMask = (
   /** @class */
-  function() {
+  (function() {
     function DataMask2(value, isMasked) {
       this.value = value;
       this.isMasked = isMasked;
@@ -40998,14 +41123,14 @@ var DataMask = (
       })]
     ]);
     return DataMask2;
-  }()
+  })()
 );
 var DataMask_default = DataMask;
 
 // node_modules/@zxing/library/esm/core/qrcode/decoder/BitMatrixParser.js
 var BitMatrixParser2 = (
   /** @class */
-  function() {
+  (function() {
     function BitMatrixParser3(bitMatrix) {
       var dimension = bitMatrix.getHeight();
       if (dimension < 21 || (dimension & 3) !== 1) {
@@ -41146,7 +41271,7 @@ var BitMatrixParser2 = (
       }
     };
     return BitMatrixParser3;
-  }()
+  })()
 );
 var BitMatrixParser_default2 = BitMatrixParser2;
 
@@ -41164,7 +41289,7 @@ var __values24 = function(o) {
 };
 var DataBlock2 = (
   /** @class */
-  function() {
+  (function() {
     function DataBlock3(numDataCodewords, codewords) {
       this.numDataCodewords = numDataCodewords;
       this.codewords = codewords;
@@ -41247,7 +41372,7 @@ var DataBlock2 = (
       return this.codewords;
     };
     return DataBlock3;
-  }()
+  })()
 );
 var DataBlock_default2 = DataBlock2;
 
@@ -41267,7 +41392,7 @@ var ModeValues;
 })(ModeValues || (ModeValues = {}));
 var Mode2 = (
   /** @class */
-  function() {
+  (function() {
     function Mode5(value, stringValue, characterCountBitsForVersions, bits) {
       this.value = value;
       this.stringValue = stringValue;
@@ -41324,14 +41449,14 @@ var Mode2 = (
     Mode5.FNC1_SECOND_POSITION = new Mode5(ModeValues.FNC1_SECOND_POSITION, "FNC1_SECOND_POSITION", Int32Array.from([0, 0, 0]), 9);
     Mode5.HANZI = new Mode5(ModeValues.HANZI, "HANZI", Int32Array.from([8, 10, 12]), 13);
     return Mode5;
-  }()
+  })()
 );
 var Mode_default = Mode2;
 
 // node_modules/@zxing/library/esm/core/qrcode/decoder/DecodedBitStreamParser.js
 var DecodedBitStreamParser2 = (
   /** @class */
-  function() {
+  (function() {
     function DecodedBitStreamParser4() {
     }
     DecodedBitStreamParser4.decode = function(bytes, version, ecLevel, hints) {
@@ -41569,14 +41694,14 @@ var DecodedBitStreamParser2 = (
     DecodedBitStreamParser4.ALPHANUMERIC_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:";
     DecodedBitStreamParser4.GB2312_SUBSET = 1;
     return DecodedBitStreamParser4;
-  }()
+  })()
 );
 var DecodedBitStreamParser_default2 = DecodedBitStreamParser2;
 
 // node_modules/@zxing/library/esm/core/qrcode/decoder/QRCodeDecoderMetaData.js
 var QRCodeDecoderMetaData = (
   /** @class */
-  function() {
+  (function() {
     function QRCodeDecoderMetaData2(mirrored) {
       this.mirrored = mirrored;
     }
@@ -41592,7 +41717,7 @@ var QRCodeDecoderMetaData = (
       points[2] = bottomLeft;
     };
     return QRCodeDecoderMetaData2;
-  }()
+  })()
 );
 var QRCodeDecoderMetaData_default = QRCodeDecoderMetaData;
 
@@ -41610,7 +41735,7 @@ var __values25 = function(o) {
 };
 var Decoder3 = (
   /** @class */
-  function() {
+  (function() {
     function Decoder4() {
       this.rsDecoder = new ReedSolomonDecoder_default(GenericGF_default.QR_CODE_FIELD_256);
     }
@@ -41698,12 +41823,12 @@ var Decoder3 = (
       }
     };
     return Decoder4;
-  }()
+  })()
 );
 var Decoder_default3 = Decoder3;
 
 // node_modules/@zxing/library/esm/core/qrcode/detector/AlignmentPattern.js
-var __extends54 = /* @__PURE__ */ function() {
+var __extends54 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -41719,10 +41844,10 @@ var __extends54 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var AlignmentPattern = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends54(AlignmentPattern2, _super);
     function AlignmentPattern2(posX, posY, estimatedModuleSize) {
       var _this = _super.call(this, posX, posY) || this;
@@ -41743,7 +41868,7 @@ var AlignmentPattern = (
       return new AlignmentPattern2(combinedX, combinedY, combinedModuleSize);
     };
     return AlignmentPattern2;
-  }(ResultPoint_default)
+  })(ResultPoint_default)
 );
 var AlignmentPattern_default = AlignmentPattern;
 
@@ -41761,7 +41886,7 @@ var __values26 = function(o) {
 };
 var AlignmentPatternFinder = (
   /** @class */
-  function() {
+  (function() {
     function AlignmentPatternFinder2(image, startX, startY, width, height, moduleSize, resultPointCallback) {
       this.image = image;
       this.startX = startX;
@@ -41925,12 +42050,12 @@ var AlignmentPatternFinder = (
       return null;
     };
     return AlignmentPatternFinder2;
-  }()
+  })()
 );
 var AlignmentPatternFinder_default = AlignmentPatternFinder;
 
 // node_modules/@zxing/library/esm/core/qrcode/detector/FinderPattern.js
-var __extends55 = /* @__PURE__ */ function() {
+var __extends55 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -41946,10 +42071,10 @@ var __extends55 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var FinderPattern2 = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends55(FinderPattern3, _super);
     function FinderPattern3(posX, posY, estimatedModuleSize, count) {
       var _this = _super.call(this, posX, posY) || this;
@@ -41981,14 +42106,14 @@ var FinderPattern2 = (
       return new FinderPattern3(combinedX, combinedY, combinedModuleSize, combinedCount);
     };
     return FinderPattern3;
-  }(ResultPoint_default)
+  })(ResultPoint_default)
 );
 var FinderPattern_default2 = FinderPattern2;
 
 // node_modules/@zxing/library/esm/core/qrcode/detector/FinderPatternInfo.js
 var FinderPatternInfo = (
   /** @class */
-  function() {
+  (function() {
     function FinderPatternInfo2(patternCenters) {
       this.bottomLeft = patternCenters[0];
       this.topLeft = patternCenters[1];
@@ -42004,7 +42129,7 @@ var FinderPatternInfo = (
       return this.topRight;
     };
     return FinderPatternInfo2;
-  }()
+  })()
 );
 var FinderPatternInfo_default = FinderPatternInfo;
 
@@ -42022,7 +42147,7 @@ var __values27 = function(o) {
 };
 var FinderPatternFinder = (
   /** @class */
-  function() {
+  (function() {
     function FinderPatternFinder2(image, resultPointCallback) {
       this.image = image;
       this.resultPointCallback = resultPointCallback;
@@ -42529,14 +42654,14 @@ var FinderPatternFinder = (
     FinderPatternFinder2.MIN_SKIP = 3;
     FinderPatternFinder2.MAX_MODULES = 57;
     return FinderPatternFinder2;
-  }()
+  })()
 );
 var FinderPatternFinder_default = FinderPatternFinder;
 
 // node_modules/@zxing/library/esm/core/qrcode/detector/Detector.js
 var Detector3 = (
   /** @class */
-  function() {
+  (function() {
     function Detector5(image) {
       this.image = image;
     }
@@ -42628,9 +42753,11 @@ var Detector3 = (
       var tlblCentersDimension = MathUtils_default.round(ResultPoint_default.distance(topLeft, bottomLeft) / moduleSize);
       var dimension = Math.floor((tltrCentersDimension + tlblCentersDimension) / 2) + 7;
       switch (dimension & 3) {
+        // mod 4
         case 0:
           dimension++;
           break;
+        // 1? do nothing
         case 2:
           dimension--;
           break;
@@ -42762,14 +42889,14 @@ var Detector3 = (
       return alignmentFinder.find();
     };
     return Detector5;
-  }()
+  })()
 );
 var Detector_default3 = Detector3;
 
 // node_modules/@zxing/library/esm/core/qrcode/QRCodeReader.js
 var QRCodeReader = (
   /** @class */
-  function() {
+  (function() {
     function QRCodeReader2() {
       this.decoder = new Decoder_default3();
     }
@@ -42895,7 +43022,7 @@ var QRCodeReader = (
     };
     QRCodeReader2.NO_POINTS = new Array();
     return QRCodeReader2;
-  }()
+  })()
 );
 var QRCodeReader_default = QRCodeReader;
 
@@ -42913,7 +43040,7 @@ var __values28 = function(o) {
 };
 var PDF417Common = (
   /** @class */
-  function() {
+  (function() {
     function PDF417Common2() {
     }
     PDF417Common2.prototype.PDF417Common = function() {
@@ -48538,14 +48665,14 @@ var PDF417Common = (
       1700
     ]);
     return PDF417Common2;
-  }()
+  })()
 );
 var PDF417Common_default = PDF417Common;
 
 // node_modules/@zxing/library/esm/core/pdf417/detector/PDF417DetectorResult.js
 var PDF417DetectorResult = (
   /** @class */
-  function() {
+  (function() {
     function PDF417DetectorResult2(bits, points) {
       this.bits = bits;
       this.points = points;
@@ -48557,7 +48684,7 @@ var PDF417DetectorResult = (
       return this.points;
     };
     return PDF417DetectorResult2;
-  }()
+  })()
 );
 var PDF417DetectorResult_default = PDF417DetectorResult;
 
@@ -48575,7 +48702,7 @@ var __values29 = function(o) {
 };
 var Detector4 = (
   /** @class */
-  function() {
+  (function() {
     function Detector5() {
     }
     Detector5.detectMultiple = function(image, hints, multiple) {
@@ -48783,7 +48910,7 @@ var Detector4 = (
     Detector5.ROW_STEP = 5;
     Detector5.BARCODE_MIN_HEIGHT = 10;
     return Detector5;
-  }()
+  })()
 );
 var Detector_default4 = Detector4;
 
@@ -48801,7 +48928,7 @@ var __values30 = function(o) {
 };
 var ModulusPoly = (
   /** @class */
-  function() {
+  (function() {
     function ModulusPoly2(field, coefficients) {
       if (coefficients.length === 0) {
         throw new IllegalArgumentException_default();
@@ -49031,14 +49158,14 @@ var ModulusPoly = (
       return result.toString();
     };
     return ModulusPoly2;
-  }()
+  })()
 );
 var ModulusPoly_default = ModulusPoly;
 
 // node_modules/@zxing/library/esm/core/pdf417/decoder/ec/ModulusBase.js
 var ModulusBase = (
   /** @class */
-  function() {
+  (function() {
     function ModulusBase2() {
     }
     ModulusBase2.prototype.add = function(a, b) {
@@ -49075,12 +49202,12 @@ var ModulusBase = (
       return o === this;
     };
     return ModulusBase2;
-  }()
+  })()
 );
 var ModulusBase_default = ModulusBase;
 
 // node_modules/@zxing/library/esm/core/pdf417/decoder/ec/ModulusGF.js
-var __extends56 = /* @__PURE__ */ function() {
+var __extends56 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -49096,10 +49223,10 @@ var __extends56 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var ModulusGF = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends56(ModulusGF2, _super);
     function ModulusGF2(modulus, generator) {
       var _this = _super.call(this) || this;
@@ -49140,7 +49267,7 @@ var ModulusGF = (
     };
     ModulusGF2.PDF417_GF = new ModulusGF2(PDF417Common_default.NUMBER_OF_CODEWORDS, 3);
     return ModulusGF2;
-  }(ModulusBase_default)
+  })(ModulusBase_default)
 );
 var ModulusGF_default = ModulusGF;
 
@@ -49158,7 +49285,7 @@ var __values31 = function(o) {
 };
 var ErrorCorrection = (
   /** @class */
-  function() {
+  (function() {
     function ErrorCorrection3() {
       this.field = ModulusGF_default.PDF417_GF;
     }
@@ -49283,14 +49410,14 @@ var ErrorCorrection = (
       return result;
     };
     return ErrorCorrection3;
-  }()
+  })()
 );
 var ErrorCorrection_default = ErrorCorrection;
 
 // node_modules/@zxing/library/esm/core/pdf417/decoder/BoundingBox.js
 var BoundingBox = (
   /** @class */
-  function() {
+  (function() {
     function BoundingBox2(image, topLeft, bottomLeft, topRight, bottomRight) {
       if (image instanceof BoundingBox2) {
         this.constructor_2(image);
@@ -49399,14 +49526,14 @@ var BoundingBox = (
       return this.bottomRight;
     };
     return BoundingBox2;
-  }()
+  })()
 );
 var BoundingBox_default = BoundingBox;
 
 // node_modules/@zxing/library/esm/core/pdf417/decoder/BarcodeMetadata.js
 var BarcodeMetadata = (
   /** @class */
-  function() {
+  (function() {
     function BarcodeMetadata2(columnCount, rowCountUpperPart, rowCountLowerPart, errorCorrectionLevel) {
       this.columnCount = columnCount;
       this.errorCorrectionLevel = errorCorrectionLevel;
@@ -49430,14 +49557,14 @@ var BarcodeMetadata = (
       return this.rowCountLowerPart;
     };
     return BarcodeMetadata2;
-  }()
+  })()
 );
 var BarcodeMetadata_default = BarcodeMetadata;
 
 // node_modules/@zxing/library/esm/core/util/Formatter.js
 var Formatter = (
   /** @class */
-  function() {
+  (function() {
     function Formatter2() {
       this.buffer = "";
     }
@@ -49495,7 +49622,7 @@ var Formatter = (
       return this.buffer;
     };
     return Formatter2;
-  }()
+  })()
 );
 var Formatter_default = Formatter;
 
@@ -49513,7 +49640,7 @@ var __values32 = function(o) {
 };
 var DetectionResultColumn = (
   /** @class */
-  function() {
+  (function() {
     function DetectionResultColumn2(boundingBox) {
       this.boundingBox = new BoundingBox_default(boundingBox);
       this.codewords = new Array(boundingBox.getMaxY() - boundingBox.getMinY() + 1);
@@ -49582,7 +49709,7 @@ var DetectionResultColumn = (
     };
     DetectionResultColumn2.MAX_NEARBY_DISTANCE = 5;
     return DetectionResultColumn2;
-  }()
+  })()
 );
 var DetectionResultColumn_default = DetectionResultColumn;
 
@@ -49617,7 +49744,7 @@ var __read = function(o, n) {
 };
 var BarcodeValue = (
   /** @class */
-  function() {
+  (function() {
     function BarcodeValue2() {
       this.values = /* @__PURE__ */ new Map();
     }
@@ -49671,12 +49798,12 @@ var BarcodeValue = (
       return this.values.get(value);
     };
     return BarcodeValue2;
-  }()
+  })()
 );
 var BarcodeValue_default = BarcodeValue;
 
 // node_modules/@zxing/library/esm/core/pdf417/decoder/DetectionResultRowIndicatorColumn.js
-var __extends57 = /* @__PURE__ */ function() {
+var __extends57 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -49692,7 +49819,7 @@ var __extends57 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var __values34 = function(o) {
   var s = typeof Symbol === "function" && Symbol.iterator, m = s && o[s], i = 0;
   if (m) return m.call(o);
@@ -49706,7 +49833,7 @@ var __values34 = function(o) {
 };
 var DetectionResultRowIndicatorColumn = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends57(DetectionResultRowIndicatorColumn2, _super);
     function DetectionResultRowIndicatorColumn2(boundingBox, isLeft) {
       var _this = _super.call(this, boundingBox) || this;
@@ -49928,7 +50055,7 @@ var DetectionResultRowIndicatorColumn = (
       return "IsLeft: " + this._isLeft + "\n" + _super.prototype.toString.call(this);
     };
     return DetectionResultRowIndicatorColumn2;
-  }(DetectionResultColumn_default)
+  })(DetectionResultColumn_default)
 );
 var DetectionResultRowIndicatorColumn_default = DetectionResultRowIndicatorColumn;
 
@@ -49946,7 +50073,7 @@ var __values35 = function(o) {
 };
 var DetectionResult = (
   /** @class */
-  function() {
+  (function() {
     function DetectionResult2(barcodeMetadata, boundingBox) {
       this.ADJUST_ROW_NUMBER_SKIP = 2;
       this.barcodeMetadata = barcodeMetadata;
@@ -50183,14 +50310,14 @@ var DetectionResult = (
       return formatter.toString();
     };
     return DetectionResult2;
-  }()
+  })()
 );
 var DetectionResult_default = DetectionResult;
 
 // node_modules/@zxing/library/esm/core/pdf417/decoder/Codeword.js
 var Codeword = (
   /** @class */
-  function() {
+  (function() {
     function Codeword2(startX, endX, bucket, value) {
       this.rowNumber = Codeword2.BARCODE_ROW_UNKNOWN;
       this.startX = Math.trunc(startX);
@@ -50233,14 +50360,14 @@ var Codeword = (
     };
     Codeword2.BARCODE_ROW_UNKNOWN = -1;
     return Codeword2;
-  }()
+  })()
 );
 var Codeword_default = Codeword;
 
 // node_modules/@zxing/library/esm/core/pdf417/decoder/PDF417CodewordDecoder.js
 var PDF417CodewordDecoder = (
   /** @class */
-  function() {
+  (function() {
     function PDF417CodewordDecoder2() {
     }
     PDF417CodewordDecoder2.initialize = function() {
@@ -50335,14 +50462,14 @@ var PDF417CodewordDecoder = (
       return x = new Array(PDF417Common_default.BARS_IN_MODULE);
     });
     return PDF417CodewordDecoder2;
-  }()
+  })()
 );
 var PDF417CodewordDecoder_default = PDF417CodewordDecoder;
 
 // node_modules/@zxing/library/esm/core/pdf417/PDF417ResultMetadata.js
 var PDF417ResultMetadata = (
   /** @class */
-  function() {
+  (function() {
     function PDF417ResultMetadata2() {
       this.segmentCount = -1;
       this.fileSize = -1;
@@ -50416,14 +50543,14 @@ var PDF417ResultMetadata = (
       this.timestamp = timestamp;
     };
     return PDF417ResultMetadata2;
-  }()
+  })()
 );
 var PDF417ResultMetadata_default = PDF417ResultMetadata;
 
 // node_modules/@zxing/library/esm/core/util/Long.js
 var Long = (
   /** @class */
-  function() {
+  (function() {
     function Long2() {
     }
     Long2.parseLong = function(num, radix) {
@@ -50433,12 +50560,12 @@ var Long = (
       return parseInt(num, radix);
     };
     return Long2;
-  }()
+  })()
 );
 var Long_default = Long;
 
 // node_modules/@zxing/library/esm/core/NullPointerException.js
-var __extends58 = /* @__PURE__ */ function() {
+var __extends58 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -50454,24 +50581,24 @@ var __extends58 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var NullPointerException = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends58(NullPointerException2, _super);
     function NullPointerException2() {
       return _super !== null && _super.apply(this, arguments) || this;
     }
     NullPointerException2.kind = "NullPointerException";
     return NullPointerException2;
-  }(Exception_default)
+  })(Exception_default)
 );
 var NullPointerException_default = NullPointerException;
 
 // node_modules/@zxing/library/esm/core/util/OutputStream.js
 var OutputStream = (
   /** @class */
-  function() {
+  (function() {
     function OutputStream2() {
     }
     OutputStream2.prototype.writeBytes = function(b) {
@@ -50494,12 +50621,12 @@ var OutputStream = (
     OutputStream2.prototype.close = function() {
     };
     return OutputStream2;
-  }()
+  })()
 );
 var OutputStream_default = OutputStream;
 
 // node_modules/@zxing/library/esm/core/OutOfMemoryError.js
-var __extends59 = /* @__PURE__ */ function() {
+var __extends59 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -50515,21 +50642,21 @@ var __extends59 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var OutOfMemoryError = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends59(OutOfMemoryError2, _super);
     function OutOfMemoryError2() {
       return _super !== null && _super.apply(this, arguments) || this;
     }
     return OutOfMemoryError2;
-  }(Exception_default)
+  })(Exception_default)
 );
 var OutOfMemoryError_default = OutOfMemoryError;
 
 // node_modules/@zxing/library/esm/core/util/ByteArrayOutputStream.js
-var __extends60 = /* @__PURE__ */ function() {
+var __extends60 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -50545,10 +50672,10 @@ var __extends60 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var ByteArrayOutputStream = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends60(ByteArrayOutputStream2, _super);
     function ByteArrayOutputStream2(size) {
       if (size === void 0) {
@@ -50634,7 +50761,7 @@ var ByteArrayOutputStream = (
     ByteArrayOutputStream2.prototype.close = function() {
     };
     return ByteArrayOutputStream2;
-  }(OutputStream_default)
+  })(OutputStream_default)
 );
 var ByteArrayOutputStream_default = ByteArrayOutputStream;
 
@@ -50682,7 +50809,7 @@ function getEXP900() {
 }
 var DecodedBitStreamParser3 = (
   /** @class */
-  function() {
+  (function() {
     function DecodedBitStreamParser4() {
     }
     DecodedBitStreamParser4.decode = function(codewords, ecLevel) {
@@ -51189,7 +51316,7 @@ var DecodedBitStreamParser3 = (
     DecodedBitStreamParser4.EXP900 = getBigIntConstructor() ? getEXP900() : [];
     DecodedBitStreamParser4.NUMBER_OF_SEQUENCE_CODEWORDS = 2;
     return DecodedBitStreamParser4;
-  }()
+  })()
 );
 var DecodedBitStreamParser_default3 = DecodedBitStreamParser3;
 
@@ -51207,7 +51334,7 @@ var __values36 = function(o) {
 };
 var PDF417ScanningDecoder = (
   /** @class */
-  function() {
+  (function() {
     function PDF417ScanningDecoder2() {
     }
     PDF417ScanningDecoder2.decode = function(image, imageTopLeft, imageBottomLeft, imageTopRight, imageBottomRight, minCodewordWidth, maxCodewordWidth) {
@@ -51708,7 +51835,7 @@ var PDF417ScanningDecoder = (
     PDF417ScanningDecoder2.MAX_EC_CODEWORDS = 512;
     PDF417ScanningDecoder2.errorCorrection = new ErrorCorrection_default();
     return PDF417ScanningDecoder2;
-  }()
+  })()
 );
 var PDF417ScanningDecoder_default = PDF417ScanningDecoder;
 
@@ -51726,7 +51853,7 @@ var __values37 = function(o) {
 };
 var PDF417Reader = (
   /** @class */
-  function() {
+  (function() {
     function PDF417Reader2() {
     }
     PDF417Reader2.prototype.decode = function(image, hints) {
@@ -51802,12 +51929,12 @@ var PDF417Reader = (
     PDF417Reader2.prototype.reset = function() {
     };
     return PDF417Reader2;
-  }()
+  })()
 );
 var PDF417Reader_default = PDF417Reader;
 
 // node_modules/@zxing/library/esm/core/ReaderException.js
-var __extends61 = /* @__PURE__ */ function() {
+var __extends61 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -51823,17 +51950,17 @@ var __extends61 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var ReaderException = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends61(ReaderException2, _super);
     function ReaderException2() {
       return _super !== null && _super.apply(this, arguments) || this;
     }
     ReaderException2.kind = "ReaderException";
     return ReaderException2;
-  }(Exception_default)
+  })(Exception_default)
 );
 var ReaderException_default = ReaderException;
 
@@ -51851,7 +51978,7 @@ var __values38 = function(o) {
 };
 var MultiFormatReader = (
   /** @class */
-  function() {
+  (function() {
     function MultiFormatReader2() {
     }
     MultiFormatReader2.prototype.decode = function(image, hints) {
@@ -51953,12 +52080,12 @@ var MultiFormatReader = (
       throw new NotFoundException_default("No MultiFormat Readers were able to detect the code.");
     };
     return MultiFormatReader2;
-  }()
+  })()
 );
 var MultiFormatReader_default = MultiFormatReader;
 
 // node_modules/@zxing/library/esm/browser/BrowserMultiFormatReader.js
-var __extends62 = /* @__PURE__ */ function() {
+var __extends62 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -51974,12 +52101,12 @@ var __extends62 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var BrowserMultiFormatReader = (
   /** @class */
-  function(_super) {
-    __extends62(BrowserMultiFormatReader3, _super);
-    function BrowserMultiFormatReader3(hints, timeBetweenScansMillis) {
+  (function(_super) {
+    __extends62(BrowserMultiFormatReader2, _super);
+    function BrowserMultiFormatReader2(hints, timeBetweenScansMillis) {
       if (hints === void 0) {
         hints = null;
       }
@@ -51992,15 +52119,15 @@ var BrowserMultiFormatReader = (
       _this = _super.call(this, reader, timeBetweenScansMillis) || this;
       return _this;
     }
-    BrowserMultiFormatReader3.prototype.decodeBitmap = function(binaryBitmap) {
+    BrowserMultiFormatReader2.prototype.decodeBitmap = function(binaryBitmap) {
       return this.reader.decodeWithState(binaryBitmap);
     };
-    return BrowserMultiFormatReader3;
-  }(BrowserCodeReader)
+    return BrowserMultiFormatReader2;
+  })(BrowserCodeReader)
 );
 
 // node_modules/@zxing/library/esm/browser/BrowserPDF417Reader.js
-var __extends63 = /* @__PURE__ */ function() {
+var __extends63 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -52016,23 +52143,23 @@ var __extends63 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var BrowserPDF417Reader = (
   /** @class */
-  function(_super) {
-    __extends63(BrowserPDF417Reader3, _super);
-    function BrowserPDF417Reader3(timeBetweenScansMillis) {
+  (function(_super) {
+    __extends63(BrowserPDF417Reader2, _super);
+    function BrowserPDF417Reader2(timeBetweenScansMillis) {
       if (timeBetweenScansMillis === void 0) {
         timeBetweenScansMillis = 500;
       }
       return _super.call(this, new PDF417Reader_default(), timeBetweenScansMillis) || this;
     }
-    return BrowserPDF417Reader3;
-  }(BrowserCodeReader)
+    return BrowserPDF417Reader2;
+  })(BrowserCodeReader)
 );
 
 // node_modules/@zxing/library/esm/browser/BrowserQRCodeReader.js
-var __extends64 = /* @__PURE__ */ function() {
+var __extends64 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -52048,19 +52175,19 @@ var __extends64 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var BrowserQRCodeReader = (
   /** @class */
-  function(_super) {
-    __extends64(BrowserQRCodeReader3, _super);
-    function BrowserQRCodeReader3(timeBetweenScansMillis) {
+  (function(_super) {
+    __extends64(BrowserQRCodeReader2, _super);
+    function BrowserQRCodeReader2(timeBetweenScansMillis) {
       if (timeBetweenScansMillis === void 0) {
         timeBetweenScansMillis = 500;
       }
       return _super.call(this, new QRCodeReader_default(), timeBetweenScansMillis) || this;
     }
-    return BrowserQRCodeReader3;
-  }(BrowserCodeReader)
+    return BrowserQRCodeReader2;
+  })(BrowserCodeReader)
 );
 
 // node_modules/@zxing/library/esm/core/EncodeHintType.js
@@ -52086,7 +52213,7 @@ var EncodeHintType_default = EncodeHintType;
 // node_modules/@zxing/library/esm/core/common/reedsolomon/ReedSolomonEncoder.js
 var ReedSolomonEncoder = (
   /** @class */
-  function() {
+  (function() {
     function ReedSolomonEncoder2(field) {
       this.field = field;
       this.cachedGenerators = [];
@@ -52127,14 +52254,14 @@ var ReedSolomonEncoder = (
       System_default.arraycopy(coefficients, 0, toEncode, dataBytes + numZeroCoefficients, coefficients.length);
     };
     return ReedSolomonEncoder2;
-  }()
+  })()
 );
 var ReedSolomonEncoder_default = ReedSolomonEncoder;
 
 // node_modules/@zxing/library/esm/core/qrcode/encoder/MaskUtil.js
 var MaskUtil = (
   /** @class */
-  function() {
+  (function() {
     function MaskUtil2() {
     }
     MaskUtil2.applyMaskPenaltyRule1 = function(matrix) {
@@ -52278,7 +52405,7 @@ var MaskUtil = (
     MaskUtil2.N3 = 40;
     MaskUtil2.N4 = 10;
     return MaskUtil2;
-  }()
+  })()
 );
 var MaskUtil_default = MaskUtil;
 
@@ -52296,7 +52423,7 @@ var __values39 = function(o) {
 };
 var ByteMatrix = (
   /** @class */
-  function() {
+  (function() {
     function ByteMatrix2(width, height) {
       this.width = width;
       this.height = height;
@@ -52386,14 +52513,14 @@ var ByteMatrix = (
       return result.toString();
     };
     return ByteMatrix2;
-  }()
+  })()
 );
 var ByteMatrix_default = ByteMatrix;
 
 // node_modules/@zxing/library/esm/core/qrcode/encoder/QRCode.js
 var QRCode = (
   /** @class */
-  function() {
+  (function() {
     function QRCode2() {
       this.maskPattern = -1;
     }
@@ -52452,12 +52579,12 @@ var QRCode = (
     };
     QRCode2.NUM_MASK_PATTERNS = 8;
     return QRCode2;
-  }()
+  })()
 );
 var QRCode_default = QRCode;
 
 // node_modules/@zxing/library/esm/core/WriterException.js
-var __extends65 = /* @__PURE__ */ function() {
+var __extends65 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -52473,24 +52600,24 @@ var __extends65 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var WriterException = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends65(WriterException2, _super);
     function WriterException2() {
       return _super !== null && _super.apply(this, arguments) || this;
     }
     WriterException2.kind = "WriterException";
     return WriterException2;
-  }(Exception_default)
+  })(Exception_default)
 );
 var WriterException_default = WriterException;
 
 // node_modules/@zxing/library/esm/core/qrcode/encoder/MatrixUtil.js
 var MatrixUtil = (
   /** @class */
-  function() {
+  (function() {
     function MatrixUtil2() {
     }
     MatrixUtil2.clearMatrix = function(matrix) {
@@ -52786,14 +52913,14 @@ var MatrixUtil = (
     MatrixUtil2.TYPE_INFO_POLY = 1335;
     MatrixUtil2.TYPE_INFO_MASK_PATTERN = 21522;
     return MatrixUtil2;
-  }()
+  })()
 );
 var MatrixUtil_default = MatrixUtil;
 
 // node_modules/@zxing/library/esm/core/qrcode/encoder/BlockPair.js
 var BlockPair = (
   /** @class */
-  function() {
+  (function() {
     function BlockPair2(dataBytes, errorCorrectionBytes) {
       this.dataBytes = dataBytes;
       this.errorCorrectionBytes = errorCorrectionBytes;
@@ -52805,7 +52932,7 @@ var BlockPair = (
       return this.errorCorrectionBytes;
     };
     return BlockPair2;
-  }()
+  })()
 );
 var BlockPair_default = BlockPair;
 
@@ -52823,7 +52950,7 @@ var __values40 = function(o) {
 };
 var Encoder = (
   /** @class */
-  function() {
+  (function() {
     function Encoder3() {
     }
     Encoder3.calculateMaskPenalty = function(matrix) {
@@ -53323,17 +53450,17 @@ var Encoder = (
     ]);
     Encoder3.DEFAULT_BYTE_MODE_ENCODING = CharacterSetECI_default.UTF8.getName();
     return Encoder3;
-  }()
+  })()
 );
 var Encoder_default = Encoder;
 
 // node_modules/@zxing/library/esm/browser/BrowserQRCodeSvgWriter.js
 var BrowserQRCodeSvgWriter = (
   /** @class */
-  function() {
-    function BrowserQRCodeSvgWriter3() {
+  (function() {
+    function BrowserQRCodeSvgWriter2() {
     }
-    BrowserQRCodeSvgWriter3.prototype.write = function(contents, width, height, hints) {
+    BrowserQRCodeSvgWriter2.prototype.write = function(contents, width, height, hints) {
       if (hints === void 0) {
         hints = null;
       }
@@ -53344,7 +53471,7 @@ var BrowserQRCodeSvgWriter = (
         throw new IllegalArgumentException_default("Requested dimensions are too small: " + width + "x" + height);
       }
       var errorCorrectionLevel = ErrorCorrectionLevel_default.L;
-      var quietZone = BrowserQRCodeSvgWriter3.QUIET_ZONE_SIZE;
+      var quietZone = BrowserQRCodeSvgWriter2.QUIET_ZONE_SIZE;
       if (hints !== null) {
         if (void 0 !== hints.get(EncodeHintType_default.ERROR_CORRECTION)) {
           errorCorrectionLevel = ErrorCorrectionLevel_default.fromString(hints.get(EncodeHintType_default.ERROR_CORRECTION).toString());
@@ -53356,7 +53483,7 @@ var BrowserQRCodeSvgWriter = (
       var code = Encoder_default.encode(contents, errorCorrectionLevel, hints);
       return this.renderResult(code, width, height, quietZone);
     };
-    BrowserQRCodeSvgWriter3.prototype.writeToDom = function(containerElement, contents, width, height, hints) {
+    BrowserQRCodeSvgWriter2.prototype.writeToDom = function(containerElement, contents, width, height, hints) {
       if (hints === void 0) {
         hints = null;
       }
@@ -53367,7 +53494,7 @@ var BrowserQRCodeSvgWriter = (
       if (containerElement)
         containerElement.appendChild(svgElement);
     };
-    BrowserQRCodeSvgWriter3.prototype.renderResult = function(code, width, height, quietZone) {
+    BrowserQRCodeSvgWriter2.prototype.renderResult = function(code, width, height, quietZone) {
       var input = code.getMatrix();
       if (input === null) {
         throw new IllegalStateException_default();
@@ -53392,14 +53519,14 @@ var BrowserQRCodeSvgWriter = (
       }
       return svgElement;
     };
-    BrowserQRCodeSvgWriter3.prototype.createSVGElement = function(w, h) {
-      var svgElement = document.createElementNS(BrowserQRCodeSvgWriter3.SVG_NS, "svg");
+    BrowserQRCodeSvgWriter2.prototype.createSVGElement = function(w, h) {
+      var svgElement = document.createElementNS(BrowserQRCodeSvgWriter2.SVG_NS, "svg");
       svgElement.setAttributeNS(null, "height", w.toString());
       svgElement.setAttributeNS(null, "width", h.toString());
       return svgElement;
     };
-    BrowserQRCodeSvgWriter3.prototype.createSvgRectElement = function(x, y, w, h) {
-      var rect = document.createElementNS(BrowserQRCodeSvgWriter3.SVG_NS, "rect");
+    BrowserQRCodeSvgWriter2.prototype.createSvgRectElement = function(x, y, w, h) {
+      var rect = document.createElementNS(BrowserQRCodeSvgWriter2.SVG_NS, "rect");
       rect.setAttributeNS(null, "x", x.toString());
       rect.setAttributeNS(null, "y", y.toString());
       rect.setAttributeNS(null, "height", w.toString());
@@ -53407,16 +53534,16 @@ var BrowserQRCodeSvgWriter = (
       rect.setAttributeNS(null, "fill", "#000000");
       return rect;
     };
-    BrowserQRCodeSvgWriter3.QUIET_ZONE_SIZE = 4;
-    BrowserQRCodeSvgWriter3.SVG_NS = "http://www.w3.org/2000/svg";
-    return BrowserQRCodeSvgWriter3;
-  }()
+    BrowserQRCodeSvgWriter2.QUIET_ZONE_SIZE = 4;
+    BrowserQRCodeSvgWriter2.SVG_NS = "http://www.w3.org/2000/svg";
+    return BrowserQRCodeSvgWriter2;
+  })()
 );
 
 // node_modules/@zxing/library/esm/core/qrcode/QRCodeWriter.js
 var QRCodeWriter = (
   /** @class */
-  function() {
+  (function() {
     function QRCodeWriter2() {
     }
     QRCodeWriter2.prototype.encode = function(contents, format, width, height, hints) {
@@ -53468,33 +53595,69 @@ var QRCodeWriter = (
     };
     QRCodeWriter2.QUIET_ZONE_SIZE = 4;
     return QRCodeWriter2;
-  }()
+  })()
 );
 var QRCodeWriter_default = QRCodeWriter;
 
 // node_modules/@zxing/library/esm/core/MultiFormatWriter.js
 var MultiFormatWriter = (
   /** @class */
-  function() {
+  (function() {
     function MultiFormatWriter2() {
     }
     MultiFormatWriter2.prototype.encode = function(contents, format, width, height, hints) {
       var writer;
       switch (format) {
+        // case BarcodeFormat.EAN_8:
+        //   writer = new EAN8Writer()
+        //   break
+        // case BarcodeFormat.UPC_E:
+        //   writer = new UPCEWriter()
+        //   break
+        // case BarcodeFormat.EAN_13:
+        //   writer = new EAN13Writer()
+        //   break
+        // case BarcodeFormat.UPC_A:
+        //   writer = new UPCAWriter()
+        //   break
         case BarcodeFormat_default.QR_CODE:
           writer = new QRCodeWriter_default();
           break;
+        // case BarcodeFormat.CODE_39:
+        //   writer = new Code39Writer()
+        //   break
+        // case BarcodeFormat.CODE_93:
+        //   writer = new Code93Writer()
+        //   break
+        // case BarcodeFormat.CODE_128:
+        //   writer = new Code128Writer()
+        //   break
+        // case BarcodeFormat.ITF:
+        //   writer = new ITFWriter()
+        //   break
+        // case BarcodeFormat.PDF_417:
+        //   writer = new PDF417Writer()
+        //   break
+        // case BarcodeFormat.CODABAR:
+        //   writer = new CodaBarWriter()
+        //   break
+        // case BarcodeFormat.DATA_MATRIX:
+        //   writer = new DataMatrixWriter()
+        //   break
+        // case BarcodeFormat.AZTEC:
+        //   writer = new AztecWriter()
+        //   break
         default:
           throw new IllegalArgumentException_default("No encoder available for format " + format);
       }
       return writer.encode(contents, format, width, height, hints);
     };
     return MultiFormatWriter2;
-  }()
+  })()
 );
 
 // node_modules/@zxing/library/esm/core/PlanarYUVLuminanceSource.js
-var __extends66 = /* @__PURE__ */ function() {
+var __extends66 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -53510,10 +53673,10 @@ var __extends66 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var PlanarYUVLuminanceSource = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends66(PlanarYUVLuminanceSource2, _super);
     function PlanarYUVLuminanceSource2(yuvData, dataWidth, dataHeight, left, top, width, height, reverseHorizontal) {
       var _this = _super.call(this, width, height) || this;
@@ -53606,11 +53769,11 @@ var PlanarYUVLuminanceSource = (
     };
     PlanarYUVLuminanceSource2.THUMBNAIL_SCALE_FACTOR = 2;
     return PlanarYUVLuminanceSource2;
-  }(LuminanceSource_default)
+  })(LuminanceSource_default)
 );
 
 // node_modules/@zxing/library/esm/core/RGBLuminanceSource.js
-var __extends67 = /* @__PURE__ */ function() {
+var __extends67 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -53626,10 +53789,10 @@ var __extends67 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var RGBLuminanceSource = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends67(RGBLuminanceSource2, _super);
     function RGBLuminanceSource2(luminances, width, height, dataWidth, dataHeight, left, top) {
       var _this = _super.call(this, width, height) || this;
@@ -53711,11 +53874,11 @@ var RGBLuminanceSource = (
       return new InvertedLuminanceSource_default(this);
     };
     return RGBLuminanceSource2;
-  }(LuminanceSource_default)
+  })(LuminanceSource_default)
 );
 
 // node_modules/@zxing/library/esm/core/util/Charset.js
-var __extends68 = /* @__PURE__ */ function() {
+var __extends68 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -53731,10 +53894,10 @@ var __extends68 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var Charset = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends68(Charset2, _super);
     function Charset2() {
       return _super !== null && _super.apply(this, arguments) || this;
@@ -53743,26 +53906,26 @@ var Charset = (
       return this.getCharacterSetECIByName(name);
     };
     return Charset2;
-  }(CharacterSetECI_default)
+  })(CharacterSetECI_default)
 );
 var Charset_default = Charset;
 
 // node_modules/@zxing/library/esm/core/util/StandardCharsets.js
 var StandardCharsets = (
   /** @class */
-  function() {
+  (function() {
     function StandardCharsets2() {
     }
     StandardCharsets2.ISO_8859_1 = CharacterSetECI_default.ISO8859_1;
     return StandardCharsets2;
-  }()
+  })()
 );
 var StandardCharsets_default = StandardCharsets;
 
 // node_modules/@zxing/library/esm/core/datamatrix/encoder/DefaultPlacement.js
 var DefaultPlacement = (
   /** @class */
-  function() {
+  (function() {
     function DefaultPlacement2(codewords, numcols, numrows) {
       this.codewords = codewords;
       this.numcols = numcols;
@@ -53893,7 +54056,7 @@ var DefaultPlacement = (
       this.module(1, this.numcols - 1, pos, 8);
     };
     return DefaultPlacement2;
-  }()
+  })()
 );
 var DefaultPlacement_default = DefaultPlacement;
 
@@ -54395,7 +54558,7 @@ var BASE256_ENCODATION = 5;
 // node_modules/@zxing/library/esm/core/datamatrix/encoder/ErrorCorrection.js
 var ErrorCorrection2 = (
   /** @class */
-  function() {
+  (function() {
     function ErrorCorrection3() {
     }
     ErrorCorrection3.encodeECC200 = function(codewords, symbolInfo) {
@@ -54469,14 +54632,14 @@ var ErrorCorrection2 = (
       }).join("");
     };
     return ErrorCorrection3;
-  }()
+  })()
 );
 var ErrorCorrection_default2 = ErrorCorrection2;
 
 // node_modules/@zxing/library/esm/core/datamatrix/encoder/ASCIIEncoder.js
 var ASCIIEncoder = (
   /** @class */
-  function() {
+  (function() {
     function ASCIIEncoder2() {
     }
     ASCIIEncoder2.prototype.getEncodingMode = function() {
@@ -54533,13 +54696,13 @@ var ASCIIEncoder = (
       throw new Error("not digits: " + digit1 + digit2);
     };
     return ASCIIEncoder2;
-  }()
+  })()
 );
 
 // node_modules/@zxing/library/esm/core/datamatrix/encoder/Base256Encoder.js
 var Base256Encoder = (
   /** @class */
-  function() {
+  (function() {
     function Base256Encoder2() {
     }
     Base256Encoder2.prototype.getEncodingMode = function() {
@@ -54587,13 +54750,13 @@ var Base256Encoder = (
       }
     };
     return Base256Encoder2;
-  }()
+  })()
 );
 
 // node_modules/@zxing/library/esm/core/datamatrix/encoder/C40Encoder.js
 var C40Encoder = (
   /** @class */
-  function() {
+  (function() {
     function C40Encoder2() {
     }
     C40Encoder2.prototype.getEncodingMode = function() {
@@ -54763,13 +54926,13 @@ var C40Encoder = (
       return result.toString();
     };
     return C40Encoder2;
-  }()
+  })()
 );
 
 // node_modules/@zxing/library/esm/core/datamatrix/encoder/EdifactEncoder.js
 var EdifactEncoder = (
   /** @class */
-  function() {
+  (function() {
     function EdifactEncoder2() {
     }
     EdifactEncoder2.prototype.getEncodingMode = function() {
@@ -54873,11 +55036,11 @@ var EdifactEncoder = (
       return res.toString();
     };
     return EdifactEncoder2;
-  }()
+  })()
 );
 
 // node_modules/@zxing/library/esm/core/datamatrix/encoder/SymbolInfo.js
-var __extends69 = /* @__PURE__ */ function() {
+var __extends69 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -54893,7 +55056,7 @@ var __extends69 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var __values41 = function(o) {
   var s = typeof Symbol === "function" && Symbol.iterator, m = s && o[s], i = 0;
   if (m) return m.call(o);
@@ -54907,7 +55070,7 @@ var __values41 = function(o) {
 };
 var SymbolInfo = (
   /** @class */
-  function() {
+  (function() {
     function SymbolInfo2(rectangular, dataCapacity, errorCodewords, matrixWidth, matrixHeight, dataRegions, rsBlockData, rsBlockError) {
       if (rsBlockData === void 0) {
         rsBlockData = 0;
@@ -55034,12 +55197,12 @@ var SymbolInfo = (
       return this.rsBlockError;
     };
     return SymbolInfo2;
-  }()
+  })()
 );
 var SymbolInfo_default = SymbolInfo;
 var DataMatrixSymbolInfo144 = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends69(DataMatrixSymbolInfo1442, _super);
     function DataMatrixSymbolInfo1442() {
       return _super.call(this, false, 1558, 620, 22, 22, 36, -1, 62) || this;
@@ -55051,7 +55214,7 @@ var DataMatrixSymbolInfo144 = (
       return index <= 8 ? 156 : 155;
     };
     return DataMatrixSymbolInfo1442;
-  }(SymbolInfo)
+  })(SymbolInfo)
 );
 var PROD_SYMBOLS = [
   new SymbolInfo(false, 3, 5, 8, 8, 1),
@@ -55095,7 +55258,7 @@ var PROD_SYMBOLS = [
 // node_modules/@zxing/library/esm/core/datamatrix/encoder/EncoderContext.js
 var EncoderContext = (
   /** @class */
-  function() {
+  (function() {
     function EncoderContext2(msg) {
       this.msg = msg;
       this.pos = 0;
@@ -55180,11 +55343,11 @@ var EncoderContext = (
       this.symbolInfo = null;
     };
     return EncoderContext2;
-  }()
+  })()
 );
 
 // node_modules/@zxing/library/esm/core/datamatrix/encoder/X12Encoder.js
-var __extends70 = /* @__PURE__ */ function() {
+var __extends70 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -55200,10 +55363,10 @@ var __extends70 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var X12Encoder = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends70(X12Encoder2, _super);
     function X12Encoder2() {
       return _super !== null && _super.apply(this, arguments) || this;
@@ -55268,11 +55431,11 @@ var X12Encoder = (
       }
     };
     return X12Encoder2;
-  }(C40Encoder)
+  })(C40Encoder)
 );
 
 // node_modules/@zxing/library/esm/core/datamatrix/encoder/TextEncoder.js
-var __extends71 = /* @__PURE__ */ function() {
+var __extends71 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -55288,10 +55451,10 @@ var __extends71 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var TextEncoder2 = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends71(TextEncoder3, _super);
     function TextEncoder3() {
       return _super !== null && _super.apply(this, arguments) || this;
@@ -55353,13 +55516,13 @@ var TextEncoder2 = (
       return len;
     };
     return TextEncoder3;
-  }(C40Encoder)
+  })(C40Encoder)
 );
 
 // node_modules/@zxing/library/esm/core/datamatrix/encoder/HighLevelEncoder.js
 var HighLevelEncoder = (
   /** @class */
-  function() {
+  (function() {
     function HighLevelEncoder3() {
     }
     HighLevelEncoder3.randomize253State = function(codewordPosition) {
@@ -55642,7 +55805,7 @@ var HighLevelEncoder = (
       throw new Error("Illegal character: " + singleCharacter + " (0x" + hex + ")");
     };
     return HighLevelEncoder3;
-  }()
+  })()
 );
 var HighLevelEncoder_default = HighLevelEncoder;
 
@@ -55660,7 +55823,7 @@ var __values42 = function(o) {
 };
 var CharsetEncoder = (
   /** @class */
-  function() {
+  (function() {
     function CharsetEncoder2(charset) {
       this.charset = charset;
       this.name = charset.name;
@@ -55673,11 +55836,11 @@ var CharsetEncoder = (
       }
     };
     return CharsetEncoder2;
-  }()
+  })()
 );
 var ECIEncoderSet = (
   /** @class */
-  function() {
+  (function() {
     function ECIEncoderSet2(stringToEncode, priorityCharset, fnc1) {
       var e_1, _a2, e_2, _b, e_3, _c;
       this.ENCODERS = [
@@ -55818,14 +55981,14 @@ var ECIEncoderSet = (
       return StringEncoding_default.encode(StringUtils_default.getCharAt(c), this.encoders[encoderIndex].name);
     };
     return ECIEncoderSet2;
-  }()
+  })()
 );
 
 // node_modules/@zxing/library/esm/core/common/MinimalECIInput.js
 var COST_PER_ECI = 3;
 var MinimalECIInput = (
   /** @class */
-  function() {
+  (function() {
     function MinimalECIInput2(stringToEncode, priorityCharset, fnc1) {
       this.fnc1 = fnc1;
       var encoderSet = new ECIEncoderSet(stringToEncode, priorityCharset, fnc1);
@@ -55969,11 +56132,11 @@ var MinimalECIInput = (
       return ints;
     };
     return MinimalECIInput2;
-  }()
+  })()
 );
 var InputEdge = (
   /** @class */
-  function() {
+  (function() {
     function InputEdge2(c, encoderSet, encoderIndex, previous, fnc1) {
       this.c = c;
       this.encoderSet = encoderSet;
@@ -55995,11 +56158,11 @@ var InputEdge = (
       return this.c === 1e3;
     };
     return InputEdge2;
-  }()
+  })()
 );
 
 // node_modules/@zxing/library/esm/core/datamatrix/encoder/MinimalEncoder.js
-var __extends72 = /* @__PURE__ */ function() {
+var __extends72 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -56015,7 +56178,7 @@ var __extends72 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var __values43 = function(o) {
   var s = typeof Symbol === "function" && Symbol.iterator, m = s && o[s], i = 0;
   if (m) return m.call(o);
@@ -56088,7 +56251,7 @@ var C40_SHIFT2_CHARS = [
 ];
 var MinimalEncoder = (
   /** @class */
-  function() {
+  (function() {
     function MinimalEncoder2() {
     }
     MinimalEncoder2.isExtendedASCII = function(ch, fnc1) {
@@ -56263,11 +56426,11 @@ var MinimalEncoder = (
       return new Result2(edges[inputLength][minimalJ]);
     };
     return MinimalEncoder2;
-  }()
+  })()
 );
 var Result2 = (
   /** @class */
-  function() {
+  (function() {
     function Result3(solution) {
       var input = solution.input;
       var size = 0;
@@ -56345,11 +56508,11 @@ var Result2 = (
       return this.bytes;
     };
     return Result3;
-  }()
+  })()
 );
 var Edge = (
   /** @class */
-  function() {
+  (function() {
     function Edge2(input, mode, fromPosition, characterLength, previous) {
       this.input = input;
       this.mode = mode;
@@ -56779,11 +56942,11 @@ var Edge = (
       }
     };
     return Edge2;
-  }()
+  })()
 );
 var Input = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends72(Input2, _super);
     function Input2(stringToEncode, priorityCharset, fnc1, shape, macroId) {
       var _this = _super.call(this, stringToEncode, priorityCharset, fnc1) || this;
@@ -56798,13 +56961,13 @@ var Input = (
       return this.shape;
     };
     return Input2;
-  }(MinimalECIInput)
+  })(MinimalECIInput)
 );
 
 // node_modules/@zxing/library/esm/core/datamatrix/DataMatrixWriter.js
 var DataMatrixWriter = (
   /** @class */
-  function() {
+  (function() {
     function DataMatrixWriter2() {
     }
     DataMatrixWriter2.prototype.encode = function(contents, format, width, height, hints) {
@@ -56924,13 +57087,13 @@ var DataMatrixWriter = (
       return output;
     };
     return DataMatrixWriter2;
-  }()
+  })()
 );
 
 // node_modules/@zxing/library/esm/core/aztec/encoder/AztecCode.js
 var AztecCode = (
   /** @class */
-  function() {
+  (function() {
     function AztecCode2() {
     }
     AztecCode2.prototype.isCompact = function() {
@@ -56964,14 +57127,14 @@ var AztecCode = (
       this.matrix = matrix;
     };
     return AztecCode2;
-  }()
+  })()
 );
 var AztecCode_default = AztecCode;
 
 // node_modules/@zxing/library/esm/core/util/Collections.js
 var Collections = (
   /** @class */
-  function() {
+  (function() {
     function Collections2() {
     }
     Collections2.singletonList = function(item) {
@@ -56981,14 +57144,14 @@ var Collections = (
       return collection.sort(comparator)[0];
     };
     return Collections2;
-  }()
+  })()
 );
 var Collections_default = Collections;
 
 // node_modules/@zxing/library/esm/core/aztec/encoder/Token.js
 var Token = (
   /** @class */
-  function() {
+  (function() {
     function Token2(previous) {
       this.previous = previous;
     }
@@ -56996,12 +57159,12 @@ var Token = (
       return this.previous;
     };
     return Token2;
-  }()
+  })()
 );
 var Token_default = Token;
 
 // node_modules/@zxing/library/esm/core/aztec/encoder/SimpleToken.js
-var __extends73 = /* @__PURE__ */ function() {
+var __extends73 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -57017,10 +57180,10 @@ var __extends73 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var SimpleToken = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends73(SimpleToken2, _super);
     function SimpleToken2(previous, value, bitCount) {
       var _this = _super.call(this, previous) || this;
@@ -57044,12 +57207,12 @@ var SimpleToken = (
       return "<" + Integer_default.toBinaryString(value | 1 << this.bitCount).substring(1) + ">";
     };
     return SimpleToken2;
-  }(Token_default)
+  })(Token_default)
 );
 var SimpleToken_default = SimpleToken;
 
 // node_modules/@zxing/library/esm/core/aztec/encoder/BinaryShiftToken.js
-var __extends74 = /* @__PURE__ */ function() {
+var __extends74 = /* @__PURE__ */ (function() {
   var extendStatics = function(d, b) {
     extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
       d2.__proto__ = b2;
@@ -57065,10 +57228,10 @@ var __extends74 = /* @__PURE__ */ function() {
     }
     d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
   };
-}();
+})();
 var BinaryShiftToken = (
   /** @class */
-  function(_super) {
+  (function(_super) {
     __extends74(BinaryShiftToken2, _super);
     function BinaryShiftToken2(previous, binaryShiftStart, binaryShiftByteCount) {
       var _this = _super.call(this, previous, 0, 0) || this;
@@ -57098,7 +57261,7 @@ var BinaryShiftToken = (
       return "<" + this.binaryShiftStart + "::" + (this.binaryShiftStart + this.binaryShiftByteCount - 1) + ">";
     };
     return BinaryShiftToken2;
-  }(SimpleToken_default)
+  })(SimpleToken_default)
 );
 var BinaryShiftToken_default = BinaryShiftToken;
 
@@ -57220,7 +57383,7 @@ var __values45 = function(o) {
 };
 var State = (
   /** @class */
-  function() {
+  (function() {
     function State2(token, mode, binaryBytes, bitCount) {
       this.token = token;
       this.mode = mode;
@@ -57332,7 +57495,7 @@ var State = (
     };
     State2.INITIAL_STATE = new State2(EMPTY_TOKEN, MODE_UPPER, 0, 0);
     return State2;
-  }()
+  })()
 );
 var State_default = State;
 
@@ -57450,7 +57613,7 @@ var __values46 = function(o) {
 };
 var HighLevelEncoder2 = (
   /** @class */
-  function() {
+  (function() {
     function HighLevelEncoder3(text) {
       this.text = text;
     }
@@ -57617,7 +57780,7 @@ var HighLevelEncoder2 = (
       return result;
     };
     return HighLevelEncoder3;
-  }()
+  })()
 );
 var HighLevelEncoder_default2 = HighLevelEncoder2;
 
@@ -57635,7 +57798,7 @@ var __values47 = function(o) {
 };
 var Encoder2 = (
   /** @class */
-  function() {
+  (function() {
     function Encoder3() {
     }
     Encoder3.encodeBytes = function(data) {
@@ -57943,14 +58106,14 @@ var Encoder2 = (
       12
     ]);
     return Encoder3;
-  }()
+  })()
 );
 var Encoder_default2 = Encoder2;
 
 // node_modules/@zxing/library/esm/core/aztec/AztecWriter.js
 var AztecWriter = (
   /** @class */
-  function() {
+  (function() {
     function AztecWriter2() {
     }
     AztecWriter2.prototype.encode = function(contents, format, width, height) {
@@ -58003,1624 +58166,14 @@ var AztecWriter = (
       return output;
     };
     return AztecWriter2;
-  }()
-);
-
-// node_modules/@zxing/browser/esm/common/HTMLCanvasElementLuminanceSource.js
-var __extends75 = /* @__PURE__ */ function() {
-  var extendStatics = function(d, b) {
-    extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
-      d2.__proto__ = b2;
-    } || function(d2, b2) {
-      for (var p in b2) if (Object.prototype.hasOwnProperty.call(b2, p)) d2[p] = b2[p];
-    };
-    return extendStatics(d, b);
-  };
-  return function(d, b) {
-    if (typeof b !== "function" && b !== null)
-      throw new TypeError("Class extends value " + String(b) + " is not a constructor or null");
-    extendStatics(d, b);
-    function __() {
-      this.constructor = d;
-    }
-    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
-  };
-}();
-var HTMLCanvasElementLuminanceSource2 = (
-  /** @class */
-  function(_super) {
-    __extends75(HTMLCanvasElementLuminanceSource3, _super);
-    function HTMLCanvasElementLuminanceSource3(canvas) {
-      var _this = _super.call(this, canvas.width, canvas.height) || this;
-      _this.canvas = canvas;
-      _this.tempCanvasElement = null;
-      _this.buffer = HTMLCanvasElementLuminanceSource3.makeBufferFromCanvasImageData(canvas);
-      return _this;
-    }
-    HTMLCanvasElementLuminanceSource3.makeBufferFromCanvasImageData = function(canvas) {
-      var canvasCtx;
-      try {
-        canvasCtx = canvas.getContext("2d", { willReadFrequently: true });
-      } catch (e) {
-        canvasCtx = canvas.getContext("2d");
-      }
-      if (!canvasCtx) {
-        throw new Error("Couldn't get canvas context.");
-      }
-      var imageData = canvasCtx.getImageData(0, 0, canvas.width, canvas.height);
-      return HTMLCanvasElementLuminanceSource3.toGrayscaleBuffer(imageData.data, canvas.width, canvas.height);
-    };
-    HTMLCanvasElementLuminanceSource3.toGrayscaleBuffer = function(imageBuffer, width, height) {
-      var grayscaleBuffer = new Uint8ClampedArray(width * height);
-      for (var i = 0, j = 0, length_1 = imageBuffer.length; i < length_1; i += 4, j++) {
-        var gray = void 0;
-        var alpha = imageBuffer[i + 3];
-        if (alpha === 0) {
-          gray = 255;
-        } else {
-          var pixelR = imageBuffer[i];
-          var pixelG = imageBuffer[i + 1];
-          var pixelB = imageBuffer[i + 2];
-          gray = 306 * pixelR + 601 * pixelG + 117 * pixelB + 512 >> 10;
-        }
-        grayscaleBuffer[j] = gray;
-      }
-      return grayscaleBuffer;
-    };
-    HTMLCanvasElementLuminanceSource3.prototype.getRow = function(y, row) {
-      if (y < 0 || y >= this.getHeight()) {
-        throw new IllegalArgumentException_default("Requested row is outside the image: " + y);
-      }
-      var width = this.getWidth();
-      var start = y * width;
-      if (row === null) {
-        row = this.buffer.slice(start, start + width);
-      } else {
-        if (row.length < width) {
-          row = new Uint8ClampedArray(width);
-        }
-        row.set(this.buffer.slice(start, start + width));
-      }
-      return row;
-    };
-    HTMLCanvasElementLuminanceSource3.prototype.getMatrix = function() {
-      return this.buffer;
-    };
-    HTMLCanvasElementLuminanceSource3.prototype.isCropSupported = function() {
-      return true;
-    };
-    HTMLCanvasElementLuminanceSource3.prototype.crop = function(left, top, width, height) {
-      _super.prototype.crop.call(this, left, top, width, height);
-      return this;
-    };
-    HTMLCanvasElementLuminanceSource3.prototype.isRotateSupported = function() {
-      return true;
-    };
-    HTMLCanvasElementLuminanceSource3.prototype.rotateCounterClockwise = function() {
-      this.rotate(-90);
-      return this;
-    };
-    HTMLCanvasElementLuminanceSource3.prototype.rotateCounterClockwise45 = function() {
-      this.rotate(-45);
-      return this;
-    };
-    HTMLCanvasElementLuminanceSource3.prototype.invert = function() {
-      return new InvertedLuminanceSource_default(this);
-    };
-    HTMLCanvasElementLuminanceSource3.prototype.getTempCanvasElement = function() {
-      if (null === this.tempCanvasElement) {
-        var tempCanvasElement = this.canvas.ownerDocument.createElement("canvas");
-        tempCanvasElement.width = this.canvas.width;
-        tempCanvasElement.height = this.canvas.height;
-        this.tempCanvasElement = tempCanvasElement;
-      }
-      return this.tempCanvasElement;
-    };
-    HTMLCanvasElementLuminanceSource3.prototype.rotate = function(angle) {
-      var tempCanvasElement = this.getTempCanvasElement();
-      if (!tempCanvasElement) {
-        throw new Error("Could not create a Canvas element.");
-      }
-      var angleRadians = angle * HTMLCanvasElementLuminanceSource3.DEGREE_TO_RADIANS;
-      var width = this.canvas.width;
-      var height = this.canvas.height;
-      var newWidth = Math.ceil(Math.abs(Math.cos(angleRadians)) * width + Math.abs(Math.sin(angleRadians)) * height);
-      var newHeight = Math.ceil(Math.abs(Math.sin(angleRadians)) * width + Math.abs(Math.cos(angleRadians)) * height);
-      tempCanvasElement.width = newWidth;
-      tempCanvasElement.height = newHeight;
-      var tempContext = tempCanvasElement.getContext("2d");
-      if (!tempContext) {
-        throw new Error("Could not create a Canvas Context element.");
-      }
-      tempContext.translate(newWidth / 2, newHeight / 2);
-      tempContext.rotate(angleRadians);
-      tempContext.drawImage(this.canvas, width / -2, height / -2);
-      this.buffer = HTMLCanvasElementLuminanceSource3.makeBufferFromCanvasImageData(tempCanvasElement);
-      return this;
-    };
-    HTMLCanvasElementLuminanceSource3.DEGREE_TO_RADIANS = Math.PI / 180;
-    return HTMLCanvasElementLuminanceSource3;
-  }(LuminanceSource_default)
-);
-
-// node_modules/@zxing/browser/esm/common/navigator-utils.js
-function hasNavigator() {
-  return typeof navigator !== "undefined";
-}
-function isMediaDevicesSupported() {
-  return hasNavigator() && !!navigator.mediaDevices;
-}
-function canEnumerateDevices() {
-  return !!(isMediaDevicesSupported() && navigator.mediaDevices.enumerateDevices);
-}
-
-// node_modules/@zxing/browser/esm/readers/BrowserCodeReader.js
-var __assign = function() {
-  __assign = Object.assign || function(t) {
-    for (var s, i = 1, n = arguments.length; i < n; i++) {
-      s = arguments[i];
-      for (var p in s) if (Object.prototype.hasOwnProperty.call(s, p))
-        t[p] = s[p];
-    }
-    return t;
-  };
-  return __assign.apply(this, arguments);
-};
-var __awaiter2 = function(thisArg, _arguments, P, generator) {
-  function adopt(value) {
-    return value instanceof P ? value : new P(function(resolve) {
-      resolve(value);
-    });
-  }
-  return new (P || (P = Promise))(function(resolve, reject) {
-    function fulfilled(value) {
-      try {
-        step(generator.next(value));
-      } catch (e) {
-        reject(e);
-      }
-    }
-    function rejected(value) {
-      try {
-        step(generator["throw"](value));
-      } catch (e) {
-        reject(e);
-      }
-    }
-    function step(result) {
-      result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
-    }
-    step((generator = generator.apply(thisArg, _arguments || [])).next());
-  });
-};
-var __generator2 = function(thisArg, body) {
-  var _ = { label: 0, sent: function() {
-    if (t[0] & 1) throw t[1];
-    return t[1];
-  }, trys: [], ops: [] }, f, y, t, g;
-  return g = { next: verb(0), "throw": verb(1), "return": verb(2) }, typeof Symbol === "function" && (g[Symbol.iterator] = function() {
-    return this;
-  }), g;
-  function verb(n) {
-    return function(v) {
-      return step([n, v]);
-    };
-  }
-  function step(op) {
-    if (f) throw new TypeError("Generator is already executing.");
-    while (_) try {
-      if (f = 1, y && (t = op[0] & 2 ? y["return"] : op[0] ? y["throw"] || ((t = y["return"]) && t.call(y), 0) : y.next) && !(t = t.call(y, op[1])).done) return t;
-      if (y = 0, t) op = [op[0] & 2, t.value];
-      switch (op[0]) {
-        case 0:
-        case 1:
-          t = op;
-          break;
-        case 4:
-          _.label++;
-          return { value: op[1], done: false };
-        case 5:
-          _.label++;
-          y = op[1];
-          op = [0];
-          continue;
-        case 7:
-          op = _.ops.pop();
-          _.trys.pop();
-          continue;
-        default:
-          if (!(t = _.trys, t = t.length > 0 && t[t.length - 1]) && (op[0] === 6 || op[0] === 2)) {
-            _ = 0;
-            continue;
-          }
-          if (op[0] === 3 && (!t || op[1] > t[0] && op[1] < t[3])) {
-            _.label = op[1];
-            break;
-          }
-          if (op[0] === 6 && _.label < t[1]) {
-            _.label = t[1];
-            t = op;
-            break;
-          }
-          if (t && _.label < t[2]) {
-            _.label = t[2];
-            _.ops.push(op);
-            break;
-          }
-          if (t[2]) _.ops.pop();
-          _.trys.pop();
-          continue;
-      }
-      op = body.call(thisArg, _);
-    } catch (e) {
-      op = [6, e];
-      y = 0;
-    } finally {
-      f = t = 0;
-    }
-    if (op[0] & 5) throw op[1];
-    return { value: op[0] ? op[1] : void 0, done: true };
-  }
-};
-var __values48 = function(o) {
-  var s = typeof Symbol === "function" && Symbol.iterator, m = s && o[s], i = 0;
-  if (m) return m.call(o);
-  if (o && typeof o.length === "number") return {
-    next: function() {
-      if (o && i >= o.length) o = void 0;
-      return { value: o && o[i++], done: !o };
-    }
-  };
-  throw new TypeError(s ? "Object is not iterable." : "Symbol.iterator is not defined.");
-};
-var defaultOptions = {
-  delayBetweenScanAttempts: 500,
-  delayBetweenScanSuccess: 500,
-  tryPlayVideoTimeout: 5e3
-};
-var BrowserCodeReader2 = (
-  /** @class */
-  function() {
-    function BrowserCodeReader3(reader, hints, options) {
-      if (hints === void 0) {
-        hints = /* @__PURE__ */ new Map();
-      }
-      if (options === void 0) {
-        options = {};
-      }
-      this.reader = reader;
-      this.hints = hints;
-      this.options = __assign(__assign({}, defaultOptions), options);
-    }
-    Object.defineProperty(BrowserCodeReader3.prototype, "possibleFormats", {
-      /**
-       * Allows to change the possible formats the decoder should
-       * search for while scanning some image. Useful for changing
-       * the possible formats during BrowserCodeReader::scan.
-       */
-      set: function(formats) {
-        this.hints.set(DecodeHintType_default.POSSIBLE_FORMATS, formats);
-      },
-      enumerable: false,
-      configurable: true
-    });
-    BrowserCodeReader3.addVideoSource = function(videoElement, stream) {
-      try {
-        videoElement.srcObject = stream;
-      } catch (err) {
-        console.error("got interrupted by new loading request");
-      }
-    };
-    BrowserCodeReader3.mediaStreamSetTorch = function(track, onOff) {
-      return __awaiter2(this, void 0, void 0, function() {
-        return __generator2(this, function(_a2) {
-          switch (_a2.label) {
-            case 0:
-              return [4, track.applyConstraints({
-                advanced: [{
-                  fillLightMode: onOff ? "flash" : "off",
-                  torch: onOff ? true : false
-                }]
-              })];
-            case 1:
-              _a2.sent();
-              return [
-                2
-                /*return*/
-              ];
-          }
-        });
-      });
-    };
-    BrowserCodeReader3.mediaStreamIsTorchCompatible = function(params) {
-      var e_1, _a2;
-      var tracks = params.getVideoTracks();
-      try {
-        for (var tracks_1 = __values48(tracks), tracks_1_1 = tracks_1.next(); !tracks_1_1.done; tracks_1_1 = tracks_1.next()) {
-          var track = tracks_1_1.value;
-          if (BrowserCodeReader3.mediaStreamIsTorchCompatibleTrack(track)) {
-            return true;
-          }
-        }
-      } catch (e_1_1) {
-        e_1 = { error: e_1_1 };
-      } finally {
-        try {
-          if (tracks_1_1 && !tracks_1_1.done && (_a2 = tracks_1.return)) _a2.call(tracks_1);
-        } finally {
-          if (e_1) throw e_1.error;
-        }
-      }
-      return false;
-    };
-    BrowserCodeReader3.mediaStreamIsTorchCompatibleTrack = function(track) {
-      try {
-        var capabilities = track.getCapabilities();
-        return "torch" in capabilities;
-      } catch (err) {
-        console.error(err);
-        console.warn("Your browser may be not fully compatible with WebRTC and/or ImageCapture specs. Torch will not be available.");
-        return false;
-      }
-    };
-    BrowserCodeReader3.isVideoPlaying = function(video) {
-      return video.currentTime > 0 && !video.paused && video.readyState > 2;
-    };
-    BrowserCodeReader3.getMediaElement = function(mediaElementId, type) {
-      var mediaElement = document.getElementById(mediaElementId);
-      if (!mediaElement) {
-        throw new ArgumentException_default("element with id '".concat(mediaElementId, "' not found"));
-      }
-      if (mediaElement.nodeName.toLowerCase() !== type.toLowerCase()) {
-        throw new ArgumentException_default("element with id '".concat(mediaElementId, "' must be an ").concat(type, " element"));
-      }
-      return mediaElement;
-    };
-    BrowserCodeReader3.createVideoElement = function(videoThingy) {
-      if (videoThingy instanceof HTMLVideoElement) {
-        return videoThingy;
-      }
-      if (typeof videoThingy === "string") {
-        return BrowserCodeReader3.getMediaElement(videoThingy, "video");
-      }
-      if (!videoThingy && typeof document !== "undefined") {
-        var videoElement = document.createElement("video");
-        videoElement.width = 200;
-        videoElement.height = 200;
-        return videoElement;
-      }
-      throw new Error("Couldn't get videoElement from videoSource!");
-    };
-    BrowserCodeReader3.prepareImageElement = function(imageSource) {
-      if (imageSource instanceof HTMLImageElement) {
-        return imageSource;
-      }
-      if (typeof imageSource === "string") {
-        return BrowserCodeReader3.getMediaElement(imageSource, "img");
-      }
-      if (typeof imageSource === "undefined") {
-        var imageElement = document.createElement("img");
-        imageElement.width = 200;
-        imageElement.height = 200;
-        return imageElement;
-      }
-      throw new Error("Couldn't get imageElement from imageSource!");
-    };
-    BrowserCodeReader3.prepareVideoElement = function(videoElem) {
-      var videoElement = BrowserCodeReader3.createVideoElement(videoElem);
-      videoElement.setAttribute("autoplay", "true");
-      videoElement.setAttribute("muted", "true");
-      videoElement.setAttribute("playsinline", "true");
-      return videoElement;
-    };
-    BrowserCodeReader3.isImageLoaded = function(img) {
-      if (!img.complete) {
-        return false;
-      }
-      if (img.naturalWidth === 0) {
-        return false;
-      }
-      return true;
-    };
-    BrowserCodeReader3.createBinaryBitmapFromCanvas = function(canvas) {
-      var luminanceSource = new HTMLCanvasElementLuminanceSource2(canvas);
-      var hybridBinarizer = new HybridBinarizer_default(luminanceSource);
-      return new BinaryBitmap_default(hybridBinarizer);
-    };
-    BrowserCodeReader3.drawImageOnCanvas = function(canvasElementContext, srcElement) {
-      canvasElementContext.drawImage(srcElement, 0, 0);
-    };
-    BrowserCodeReader3.getMediaElementDimensions = function(mediaElement) {
-      if (mediaElement instanceof HTMLVideoElement) {
-        return {
-          height: mediaElement.videoHeight,
-          width: mediaElement.videoWidth
-        };
-      }
-      if (mediaElement instanceof HTMLImageElement) {
-        return {
-          height: mediaElement.naturalHeight || mediaElement.height,
-          width: mediaElement.naturalWidth || mediaElement.width
-        };
-      }
-      throw new Error("Couldn't find the Source's dimensions!");
-    };
-    BrowserCodeReader3.createCaptureCanvas = function(mediaElement) {
-      if (!mediaElement) {
-        throw new ArgumentException_default("Cannot create a capture canvas without a media element.");
-      }
-      if (typeof document === "undefined") {
-        throw new Error(`The page "Document" is undefined, make sure you're running in a browser.`);
-      }
-      var canvasElement = document.createElement("canvas");
-      var _a2 = BrowserCodeReader3.getMediaElementDimensions(mediaElement), width = _a2.width, height = _a2.height;
-      canvasElement.style.width = width + "px";
-      canvasElement.style.height = height + "px";
-      canvasElement.width = width;
-      canvasElement.height = height;
-      return canvasElement;
-    };
-    BrowserCodeReader3.tryPlayVideo = function(videoElement) {
-      return __awaiter2(this, void 0, void 0, function() {
-        var error_1;
-        return __generator2(this, function(_a2) {
-          switch (_a2.label) {
-            case 0:
-              if (videoElement === null || videoElement === void 0 ? void 0 : videoElement.ended) {
-                console.error("Trying to play video that has ended.");
-                return [2, false];
-              }
-              if (BrowserCodeReader3.isVideoPlaying(videoElement)) {
-                console.warn("Trying to play video that is already playing.");
-                return [2, true];
-              }
-              _a2.label = 1;
-            case 1:
-              _a2.trys.push([1, 3, , 4]);
-              return [4, videoElement.play()];
-            case 2:
-              _a2.sent();
-              return [2, true];
-            case 3:
-              error_1 = _a2.sent();
-              console.warn("It was not possible to play the video.", error_1);
-              return [2, false];
-            case 4:
-              return [
-                2
-                /*return*/
-              ];
-          }
-        });
-      });
-    };
-    BrowserCodeReader3.createCanvasFromMediaElement = function(mediaElement) {
-      var canvas = BrowserCodeReader3.createCaptureCanvas(mediaElement);
-      var ctx = canvas.getContext("2d");
-      if (!ctx) {
-        throw new Error("Couldn't find Canvas 2D Context.");
-      }
-      BrowserCodeReader3.drawImageOnCanvas(ctx, mediaElement);
-      return canvas;
-    };
-    BrowserCodeReader3.createBinaryBitmapFromMediaElem = function(mediaElement) {
-      var canvas = BrowserCodeReader3.createCanvasFromMediaElement(mediaElement);
-      return BrowserCodeReader3.createBinaryBitmapFromCanvas(canvas);
-    };
-    BrowserCodeReader3.destroyImageElement = function(imageElement) {
-      imageElement.src = "";
-      imageElement.removeAttribute("src");
-      imageElement = void 0;
-    };
-    BrowserCodeReader3.listVideoInputDevices = function() {
-      return __awaiter2(this, void 0, void 0, function() {
-        var devices, videoDevices, devices_1, devices_1_1, device, kind, deviceId, label, groupId, videoDevice;
-        var e_2, _a2;
-        return __generator2(this, function(_b) {
-          switch (_b.label) {
-            case 0:
-              if (!hasNavigator()) {
-                throw new Error("Can't enumerate devices, navigator is not present.");
-              }
-              if (!canEnumerateDevices()) {
-                throw new Error("Can't enumerate devices, method not supported.");
-              }
-              return [4, navigator.mediaDevices.enumerateDevices()];
-            case 1:
-              devices = _b.sent();
-              videoDevices = [];
-              try {
-                for (devices_1 = __values48(devices), devices_1_1 = devices_1.next(); !devices_1_1.done; devices_1_1 = devices_1.next()) {
-                  device = devices_1_1.value;
-                  kind = device.kind === "video" ? "videoinput" : device.kind;
-                  if (kind !== "videoinput") {
-                    continue;
-                  }
-                  deviceId = device.deviceId || device.id;
-                  label = device.label || "Video device ".concat(videoDevices.length + 1);
-                  groupId = device.groupId;
-                  videoDevice = { deviceId, label, kind, groupId };
-                  videoDevices.push(videoDevice);
-                }
-              } catch (e_2_1) {
-                e_2 = { error: e_2_1 };
-              } finally {
-                try {
-                  if (devices_1_1 && !devices_1_1.done && (_a2 = devices_1.return)) _a2.call(devices_1);
-                } finally {
-                  if (e_2) throw e_2.error;
-                }
-              }
-              return [2, videoDevices];
-          }
-        });
-      });
-    };
-    BrowserCodeReader3.findDeviceById = function(deviceId) {
-      return __awaiter2(this, void 0, void 0, function() {
-        var devices;
-        return __generator2(this, function(_a2) {
-          switch (_a2.label) {
-            case 0:
-              return [4, BrowserCodeReader3.listVideoInputDevices()];
-            case 1:
-              devices = _a2.sent();
-              if (!devices) {
-                return [
-                  2
-                  /*return*/
-                ];
-              }
-              return [2, devices.find(function(x) {
-                return x.deviceId === deviceId;
-              })];
-          }
-        });
-      });
-    };
-    BrowserCodeReader3.cleanVideoSource = function(videoElement) {
-      if (!videoElement) {
-        return;
-      }
-      try {
-        videoElement.srcObject = null;
-      } catch (err) {
-        videoElement.src = "";
-      }
-      if (videoElement) {
-        videoElement.removeAttribute("src");
-      }
-    };
-    BrowserCodeReader3.releaseAllStreams = function() {
-      if (BrowserCodeReader3.streamTracker.length !== 0) {
-        BrowserCodeReader3.streamTracker.forEach(function(mediaStream) {
-          mediaStream.getTracks().forEach(function(track) {
-            return track.stop();
-          });
-        });
-      }
-      BrowserCodeReader3.streamTracker = [];
-    };
-    BrowserCodeReader3.playVideoOnLoadAsync = function(element, timeout) {
-      return __awaiter2(this, void 0, void 0, function() {
-        var isPlaying;
-        return __generator2(this, function(_a2) {
-          switch (_a2.label) {
-            case 0:
-              return [4, BrowserCodeReader3.tryPlayVideo(element)];
-            case 1:
-              isPlaying = _a2.sent();
-              if (isPlaying) {
-                return [2, true];
-              }
-              return [2, new Promise(function(resolve, reject) {
-                var timeoutId = setTimeout(function() {
-                  if (BrowserCodeReader3.isVideoPlaying(element)) {
-                    return;
-                  }
-                  reject(false);
-                  element.removeEventListener("canplay", videoCanPlayListener);
-                }, timeout);
-                var videoCanPlayListener = function() {
-                  BrowserCodeReader3.tryPlayVideo(element).then(function(hasPlayed) {
-                    clearTimeout(timeoutId);
-                    element.removeEventListener("canplay", videoCanPlayListener);
-                    resolve(hasPlayed);
-                  });
-                };
-                element.addEventListener("canplay", videoCanPlayListener);
-              })];
-          }
-        });
-      });
-    };
-    BrowserCodeReader3.attachStreamToVideo = function(stream, preview, previewPlayTimeout) {
-      if (previewPlayTimeout === void 0) {
-        previewPlayTimeout = 5e3;
-      }
-      return __awaiter2(this, void 0, void 0, function() {
-        var videoElement;
-        return __generator2(this, function(_a2) {
-          switch (_a2.label) {
-            case 0:
-              videoElement = BrowserCodeReader3.prepareVideoElement(preview);
-              BrowserCodeReader3.addVideoSource(videoElement, stream);
-              return [4, BrowserCodeReader3.playVideoOnLoadAsync(videoElement, previewPlayTimeout)];
-            case 1:
-              _a2.sent();
-              return [2, videoElement];
-          }
-        });
-      });
-    };
-    BrowserCodeReader3._waitImageLoad = function(element) {
-      return new Promise(function(resolve, reject) {
-        var timeout = 1e4;
-        var timeoutId = setTimeout(function() {
-          if (BrowserCodeReader3.isImageLoaded(element)) {
-            return;
-          }
-          element.removeEventListener("load", imageLoadedListener);
-          reject();
-        }, timeout);
-        var imageLoadedListener = function() {
-          clearTimeout(timeoutId);
-          element.removeEventListener("load", imageLoadedListener);
-          resolve();
-        };
-        element.addEventListener("load", imageLoadedListener);
-      });
-    };
-    BrowserCodeReader3.checkCallbackFnOrThrow = function(callbackFn) {
-      if (!callbackFn) {
-        throw new ArgumentException_default("`callbackFn` is a required parameter, you cannot capture results without it.");
-      }
-    };
-    BrowserCodeReader3.disposeMediaStream = function(stream) {
-      stream.getVideoTracks().forEach(function(x) {
-        return x.stop();
-      });
-      stream = void 0;
-    };
-    BrowserCodeReader3.prototype.decode = function(element) {
-      var canvas = BrowserCodeReader3.createCanvasFromMediaElement(element);
-      return this.decodeFromCanvas(canvas);
-    };
-    BrowserCodeReader3.prototype.decodeBitmap = function(binaryBitmap) {
-      return this.reader.decode(binaryBitmap, this.hints);
-    };
-    BrowserCodeReader3.prototype.decodeFromCanvas = function(canvas) {
-      var binaryBitmap = BrowserCodeReader3.createBinaryBitmapFromCanvas(canvas);
-      return this.decodeBitmap(binaryBitmap);
-    };
-    BrowserCodeReader3.prototype.decodeFromImageElement = function(source) {
-      return __awaiter2(this, void 0, void 0, function() {
-        var element;
-        return __generator2(this, function(_a2) {
-          switch (_a2.label) {
-            case 0:
-              if (!source) {
-                throw new ArgumentException_default("An image element must be provided.");
-              }
-              element = BrowserCodeReader3.prepareImageElement(source);
-              return [4, this._decodeOnLoadImage(element)];
-            case 1:
-              return [2, _a2.sent()];
-          }
-        });
-      });
-    };
-    BrowserCodeReader3.prototype.decodeFromImageUrl = function(url) {
-      return __awaiter2(this, void 0, void 0, function() {
-        var element;
-        return __generator2(this, function(_a2) {
-          switch (_a2.label) {
-            case 0:
-              if (!url) {
-                throw new ArgumentException_default("An URL must be provided.");
-              }
-              element = BrowserCodeReader3.prepareImageElement();
-              element.src = url;
-              _a2.label = 1;
-            case 1:
-              _a2.trys.push([1, , 3, 4]);
-              return [4, this.decodeFromImageElement(element)];
-            case 2:
-              return [2, _a2.sent()];
-            case 3:
-              BrowserCodeReader3.destroyImageElement(element);
-              return [
-                7
-                /*endfinally*/
-              ];
-            case 4:
-              return [
-                2
-                /*return*/
-              ];
-          }
-        });
-      });
-    };
-    BrowserCodeReader3.prototype.decodeFromConstraints = function(constraints, previewElem, callbackFn) {
-      return __awaiter2(this, void 0, void 0, function() {
-        var stream, error_2;
-        return __generator2(this, function(_a2) {
-          switch (_a2.label) {
-            case 0:
-              BrowserCodeReader3.checkCallbackFnOrThrow(callbackFn);
-              return [4, this.getUserMedia(constraints)];
-            case 1:
-              stream = _a2.sent();
-              _a2.label = 2;
-            case 2:
-              _a2.trys.push([2, 4, , 5]);
-              return [4, this.decodeFromStream(stream, previewElem, callbackFn)];
-            case 3:
-              return [2, _a2.sent()];
-            case 4:
-              error_2 = _a2.sent();
-              BrowserCodeReader3.disposeMediaStream(stream);
-              throw error_2;
-            case 5:
-              return [
-                2
-                /*return*/
-              ];
-          }
-        });
-      });
-    };
-    BrowserCodeReader3.prototype.decodeFromStream = function(stream, preview, callbackFn) {
-      return __awaiter2(this, void 0, void 0, function() {
-        var timeout, video, finalizeCallback, originalControls, videoTracks, controls, isTorchAvailable, torchTrack_1, switchTorch_1;
-        var _this = this;
-        return __generator2(this, function(_a2) {
-          switch (_a2.label) {
-            case 0:
-              BrowserCodeReader3.checkCallbackFnOrThrow(callbackFn);
-              timeout = this.options.tryPlayVideoTimeout;
-              return [4, BrowserCodeReader3.attachStreamToVideo(stream, preview, timeout)];
-            case 1:
-              video = _a2.sent();
-              finalizeCallback = function() {
-                BrowserCodeReader3.disposeMediaStream(stream);
-                BrowserCodeReader3.cleanVideoSource(video);
-              };
-              originalControls = this.scan(video, callbackFn, finalizeCallback);
-              videoTracks = stream.getVideoTracks();
-              controls = __assign(__assign({}, originalControls), { stop: function() {
-                originalControls.stop();
-              }, streamVideoConstraintsApply: function(constraints, trackFilter) {
-                return __awaiter2(this, void 0, void 0, function() {
-                  var tracks, tracks_2, tracks_2_1, track, e_3_1;
-                  var e_3, _a3;
-                  return __generator2(this, function(_b) {
-                    switch (_b.label) {
-                      case 0:
-                        tracks = trackFilter ? videoTracks.filter(trackFilter) : videoTracks;
-                        _b.label = 1;
-                      case 1:
-                        _b.trys.push([1, 6, 7, 8]);
-                        tracks_2 = __values48(tracks), tracks_2_1 = tracks_2.next();
-                        _b.label = 2;
-                      case 2:
-                        if (!!tracks_2_1.done) return [3, 5];
-                        track = tracks_2_1.value;
-                        return [4, track.applyConstraints(constraints)];
-                      case 3:
-                        _b.sent();
-                        _b.label = 4;
-                      case 4:
-                        tracks_2_1 = tracks_2.next();
-                        return [3, 2];
-                      case 5:
-                        return [3, 8];
-                      case 6:
-                        e_3_1 = _b.sent();
-                        e_3 = { error: e_3_1 };
-                        return [3, 8];
-                      case 7:
-                        try {
-                          if (tracks_2_1 && !tracks_2_1.done && (_a3 = tracks_2.return)) _a3.call(tracks_2);
-                        } finally {
-                          if (e_3) throw e_3.error;
-                        }
-                        return [
-                          7
-                          /*endfinally*/
-                        ];
-                      case 8:
-                        return [
-                          2
-                          /*return*/
-                        ];
-                    }
-                  });
-                });
-              }, streamVideoConstraintsGet: function(trackFilter) {
-                return videoTracks.find(trackFilter).getConstraints();
-              }, streamVideoSettingsGet: function(trackFilter) {
-                return videoTracks.find(trackFilter).getSettings();
-              }, streamVideoCapabilitiesGet: function(trackFilter) {
-                return videoTracks.find(trackFilter).getCapabilities();
-              } });
-              isTorchAvailable = BrowserCodeReader3.mediaStreamIsTorchCompatible(stream);
-              if (isTorchAvailable) {
-                torchTrack_1 = videoTracks === null || videoTracks === void 0 ? void 0 : videoTracks.find(function(t) {
-                  return BrowserCodeReader3.mediaStreamIsTorchCompatibleTrack(t);
-                });
-                switchTorch_1 = function(onOff) {
-                  return __awaiter2(_this, void 0, void 0, function() {
-                    return __generator2(this, function(_a3) {
-                      switch (_a3.label) {
-                        case 0:
-                          return [4, BrowserCodeReader3.mediaStreamSetTorch(torchTrack_1, onOff)];
-                        case 1:
-                          _a3.sent();
-                          return [
-                            2
-                            /*return*/
-                          ];
-                      }
-                    });
-                  });
-                };
-                controls.switchTorch = switchTorch_1;
-                controls.stop = function() {
-                  return __awaiter2(_this, void 0, void 0, function() {
-                    return __generator2(this, function(_a3) {
-                      switch (_a3.label) {
-                        case 0:
-                          originalControls.stop();
-                          return [4, switchTorch_1(false)];
-                        case 1:
-                          _a3.sent();
-                          return [
-                            2
-                            /*return*/
-                          ];
-                      }
-                    });
-                  });
-                };
-              }
-              return [2, controls];
-          }
-        });
-      });
-    };
-    BrowserCodeReader3.prototype.decodeFromVideoDevice = function(deviceId, previewElem, callbackFn) {
-      return __awaiter2(this, void 0, void 0, function() {
-        var videoConstraints, constraints;
-        return __generator2(this, function(_a2) {
-          switch (_a2.label) {
-            case 0:
-              BrowserCodeReader3.checkCallbackFnOrThrow(callbackFn);
-              if (!deviceId) {
-                videoConstraints = { facingMode: "environment" };
-              } else {
-                videoConstraints = { deviceId: { exact: deviceId } };
-              }
-              constraints = { video: videoConstraints };
-              return [4, this.decodeFromConstraints(constraints, previewElem, callbackFn)];
-            case 1:
-              return [2, _a2.sent()];
-          }
-        });
-      });
-    };
-    BrowserCodeReader3.prototype.decodeFromVideoElement = function(source, callbackFn) {
-      return __awaiter2(this, void 0, void 0, function() {
-        var element, timeout;
-        return __generator2(this, function(_a2) {
-          switch (_a2.label) {
-            case 0:
-              BrowserCodeReader3.checkCallbackFnOrThrow(callbackFn);
-              if (!source) {
-                throw new ArgumentException_default("A video element must be provided.");
-              }
-              element = BrowserCodeReader3.prepareVideoElement(source);
-              timeout = this.options.tryPlayVideoTimeout;
-              return [4, BrowserCodeReader3.playVideoOnLoadAsync(element, timeout)];
-            case 1:
-              _a2.sent();
-              return [2, this.scan(element, callbackFn)];
-          }
-        });
-      });
-    };
-    BrowserCodeReader3.prototype.decodeFromVideoUrl = function(url, callbackFn) {
-      return __awaiter2(this, void 0, void 0, function() {
-        var element, finalizeCallback, timeout, controls;
-        return __generator2(this, function(_a2) {
-          switch (_a2.label) {
-            case 0:
-              BrowserCodeReader3.checkCallbackFnOrThrow(callbackFn);
-              if (!url) {
-                throw new ArgumentException_default("An URL must be provided.");
-              }
-              element = BrowserCodeReader3.prepareVideoElement();
-              element.src = url;
-              finalizeCallback = function() {
-                BrowserCodeReader3.cleanVideoSource(element);
-              };
-              timeout = this.options.tryPlayVideoTimeout;
-              return [4, BrowserCodeReader3.playVideoOnLoadAsync(element, timeout)];
-            case 1:
-              _a2.sent();
-              controls = this.scan(element, callbackFn, finalizeCallback);
-              return [2, controls];
-          }
-        });
-      });
-    };
-    BrowserCodeReader3.prototype.decodeOnceFromConstraints = function(constraints, videoSource) {
-      return __awaiter2(this, void 0, void 0, function() {
-        var stream;
-        return __generator2(this, function(_a2) {
-          switch (_a2.label) {
-            case 0:
-              return [4, this.getUserMedia(constraints)];
-            case 1:
-              stream = _a2.sent();
-              return [4, this.decodeOnceFromStream(stream, videoSource)];
-            case 2:
-              return [2, _a2.sent()];
-          }
-        });
-      });
-    };
-    BrowserCodeReader3.prototype.decodeOnceFromStream = function(stream, preview) {
-      return __awaiter2(this, void 0, void 0, function() {
-        var receivedPreview, video, result;
-        return __generator2(this, function(_a2) {
-          switch (_a2.label) {
-            case 0:
-              receivedPreview = Boolean(preview);
-              return [4, BrowserCodeReader3.attachStreamToVideo(stream, preview)];
-            case 1:
-              video = _a2.sent();
-              _a2.label = 2;
-            case 2:
-              _a2.trys.push([2, , 4, 5]);
-              return [4, this.scanOneResult(video)];
-            case 3:
-              result = _a2.sent();
-              return [2, result];
-            case 4:
-              if (!receivedPreview) {
-                BrowserCodeReader3.cleanVideoSource(video);
-              }
-              return [
-                7
-                /*endfinally*/
-              ];
-            case 5:
-              return [
-                2
-                /*return*/
-              ];
-          }
-        });
-      });
-    };
-    BrowserCodeReader3.prototype.decodeOnceFromVideoDevice = function(deviceId, videoSource) {
-      return __awaiter2(this, void 0, void 0, function() {
-        var videoConstraints, constraints;
-        return __generator2(this, function(_a2) {
-          switch (_a2.label) {
-            case 0:
-              if (!deviceId) {
-                videoConstraints = { facingMode: "environment" };
-              } else {
-                videoConstraints = { deviceId: { exact: deviceId } };
-              }
-              constraints = { video: videoConstraints };
-              return [4, this.decodeOnceFromConstraints(constraints, videoSource)];
-            case 1:
-              return [2, _a2.sent()];
-          }
-        });
-      });
-    };
-    BrowserCodeReader3.prototype.decodeOnceFromVideoElement = function(source) {
-      return __awaiter2(this, void 0, void 0, function() {
-        var element, timeout;
-        return __generator2(this, function(_a2) {
-          switch (_a2.label) {
-            case 0:
-              if (!source) {
-                throw new ArgumentException_default("A video element must be provided.");
-              }
-              element = BrowserCodeReader3.prepareVideoElement(source);
-              timeout = this.options.tryPlayVideoTimeout;
-              return [4, BrowserCodeReader3.playVideoOnLoadAsync(element, timeout)];
-            case 1:
-              _a2.sent();
-              return [4, this.scanOneResult(element)];
-            case 2:
-              return [2, _a2.sent()];
-          }
-        });
-      });
-    };
-    BrowserCodeReader3.prototype.decodeOnceFromVideoUrl = function(url) {
-      return __awaiter2(this, void 0, void 0, function() {
-        var element, task;
-        return __generator2(this, function(_a2) {
-          switch (_a2.label) {
-            case 0:
-              if (!url) {
-                throw new ArgumentException_default("An URL must be provided.");
-              }
-              element = BrowserCodeReader3.prepareVideoElement();
-              element.src = url;
-              task = this.decodeOnceFromVideoElement(element);
-              _a2.label = 1;
-            case 1:
-              _a2.trys.push([1, , 3, 4]);
-              return [4, task];
-            case 2:
-              return [2, _a2.sent()];
-            case 3:
-              BrowserCodeReader3.cleanVideoSource(element);
-              return [
-                7
-                /*endfinally*/
-              ];
-            case 4:
-              return [
-                2
-                /*return*/
-              ];
-          }
-        });
-      });
-    };
-    BrowserCodeReader3.prototype.scanOneResult = function(element, retryIfNotFound, retryIfChecksumError, retryIfFormatError) {
-      var _this = this;
-      if (retryIfNotFound === void 0) {
-        retryIfNotFound = true;
-      }
-      if (retryIfChecksumError === void 0) {
-        retryIfChecksumError = true;
-      }
-      if (retryIfFormatError === void 0) {
-        retryIfFormatError = true;
-      }
-      return new Promise(function(resolve, reject) {
-        _this.scan(element, function(result, error, controls) {
-          if (result) {
-            resolve(result);
-            controls.stop();
-            return;
-          }
-          if (error) {
-            if (error instanceof NotFoundException_default && retryIfNotFound) {
-              return;
-            }
-            if (error instanceof ChecksumException_default && retryIfChecksumError) {
-              return;
-            }
-            if (error instanceof FormatException_default && retryIfFormatError) {
-              return;
-            }
-            controls.stop();
-            reject(error);
-          }
-        });
-      });
-    };
-    BrowserCodeReader3.prototype.scan = function(element, callbackFn, finalizeCallback) {
-      var _this = this;
-      BrowserCodeReader3.checkCallbackFnOrThrow(callbackFn);
-      var captureCanvas = BrowserCodeReader3.createCaptureCanvas(element);
-      var captureCanvasContext;
-      try {
-        captureCanvasContext = captureCanvas.getContext("2d", { willReadFrequently: true });
-      } catch (e) {
-        captureCanvasContext = captureCanvas.getContext("2d");
-      }
-      if (!captureCanvasContext) {
-        throw new Error("Couldn't create canvas for visual element scan.");
-      }
-      var disposeCanvas = function() {
-        captureCanvasContext = void 0;
-        captureCanvas = void 0;
-      };
-      var stopScan = false;
-      var lastTimeoutId;
-      var stop = function() {
-        stopScan = true;
-        clearTimeout(lastTimeoutId);
-        disposeCanvas();
-        if (finalizeCallback) {
-          finalizeCallback();
-        }
-      };
-      var controls = { stop };
-      var loop = function() {
-        if (stopScan) {
-          return;
-        }
-        try {
-          BrowserCodeReader3.drawImageOnCanvas(captureCanvasContext, element);
-          var result = _this.decodeFromCanvas(captureCanvas);
-          callbackFn(result, void 0, controls);
-          lastTimeoutId = setTimeout(loop, _this.options.delayBetweenScanSuccess);
-        } catch (error) {
-          callbackFn(void 0, error, controls);
-          var isChecksumError = error instanceof ChecksumException_default;
-          var isFormatError = error instanceof FormatException_default;
-          var isNotFound = error instanceof NotFoundException_default;
-          if (isChecksumError || isFormatError || isNotFound) {
-            lastTimeoutId = setTimeout(loop, _this.options.delayBetweenScanAttempts);
-            return;
-          }
-          disposeCanvas();
-          if (finalizeCallback) {
-            finalizeCallback(error);
-          }
-        }
-      };
-      loop();
-      return controls;
-    };
-    BrowserCodeReader3.prototype._decodeOnLoadImage = function(element) {
-      return __awaiter2(this, void 0, void 0, function() {
-        var isImageLoaded;
-        return __generator2(this, function(_a2) {
-          switch (_a2.label) {
-            case 0:
-              isImageLoaded = BrowserCodeReader3.isImageLoaded(element);
-              if (!!isImageLoaded) return [3, 2];
-              return [4, BrowserCodeReader3._waitImageLoad(element)];
-            case 1:
-              _a2.sent();
-              _a2.label = 2;
-            case 2:
-              return [2, this.decode(element)];
-          }
-        });
-      });
-    };
-    BrowserCodeReader3.prototype.getUserMedia = function(constraints) {
-      return __awaiter2(this, void 0, void 0, function() {
-        var stream;
-        return __generator2(this, function(_a2) {
-          switch (_a2.label) {
-            case 0:
-              return [4, navigator.mediaDevices.getUserMedia(constraints)];
-            case 1:
-              stream = _a2.sent();
-              BrowserCodeReader3.streamTracker.push(stream);
-              return [2, stream];
-          }
-        });
-      });
-    };
-    BrowserCodeReader3.streamTracker = [];
-    return BrowserCodeReader3;
-  }()
-);
-
-// node_modules/@zxing/browser/esm/readers/BrowserAztecCodeReader.js
-var __extends76 = /* @__PURE__ */ function() {
-  var extendStatics = function(d, b) {
-    extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
-      d2.__proto__ = b2;
-    } || function(d2, b2) {
-      for (var p in b2) if (Object.prototype.hasOwnProperty.call(b2, p)) d2[p] = b2[p];
-    };
-    return extendStatics(d, b);
-  };
-  return function(d, b) {
-    if (typeof b !== "function" && b !== null)
-      throw new TypeError("Class extends value " + String(b) + " is not a constructor or null");
-    extendStatics(d, b);
-    function __() {
-      this.constructor = d;
-    }
-    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
-  };
-}();
-var BrowserAztecCodeReader2 = (
-  /** @class */
-  function(_super) {
-    __extends76(BrowserAztecCodeReader3, _super);
-    function BrowserAztecCodeReader3(hints, options) {
-      return _super.call(this, new AztecReader_default(), hints, options) || this;
-    }
-    return BrowserAztecCodeReader3;
-  }(BrowserCodeReader2)
-);
-
-// node_modules/@zxing/browser/esm/readers/BrowserMultiFormatOneDReader.js
-var __extends77 = /* @__PURE__ */ function() {
-  var extendStatics = function(d, b) {
-    extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
-      d2.__proto__ = b2;
-    } || function(d2, b2) {
-      for (var p in b2) if (Object.prototype.hasOwnProperty.call(b2, p)) d2[p] = b2[p];
-    };
-    return extendStatics(d, b);
-  };
-  return function(d, b) {
-    if (typeof b !== "function" && b !== null)
-      throw new TypeError("Class extends value " + String(b) + " is not a constructor or null");
-    extendStatics(d, b);
-    function __() {
-      this.constructor = d;
-    }
-    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
-  };
-}();
-var BrowserMultiFormatOneDReader = (
-  /** @class */
-  function(_super) {
-    __extends77(BrowserMultiFormatOneDReader2, _super);
-    function BrowserMultiFormatOneDReader2(hints, options) {
-      return _super.call(this, new MultiFormatOneDReader_default(hints), hints, options) || this;
-    }
-    return BrowserMultiFormatOneDReader2;
-  }(BrowserCodeReader2)
-);
-
-// node_modules/@zxing/browser/esm/readers/BrowserDatamatrixCodeReader.js
-var __extends78 = /* @__PURE__ */ function() {
-  var extendStatics = function(d, b) {
-    extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
-      d2.__proto__ = b2;
-    } || function(d2, b2) {
-      for (var p in b2) if (Object.prototype.hasOwnProperty.call(b2, p)) d2[p] = b2[p];
-    };
-    return extendStatics(d, b);
-  };
-  return function(d, b) {
-    if (typeof b !== "function" && b !== null)
-      throw new TypeError("Class extends value " + String(b) + " is not a constructor or null");
-    extendStatics(d, b);
-    function __() {
-      this.constructor = d;
-    }
-    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
-  };
-}();
-var BrowserDatamatrixCodeReader2 = (
-  /** @class */
-  function(_super) {
-    __extends78(BrowserDatamatrixCodeReader3, _super);
-    function BrowserDatamatrixCodeReader3(hints, options) {
-      return _super.call(this, new DataMatrixReader_default(), hints, options) || this;
-    }
-    return BrowserDatamatrixCodeReader3;
-  }(BrowserCodeReader2)
-);
-
-// node_modules/@zxing/browser/esm/readers/BrowserMultiFormatReader.js
-var __extends79 = /* @__PURE__ */ function() {
-  var extendStatics = function(d, b) {
-    extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
-      d2.__proto__ = b2;
-    } || function(d2, b2) {
-      for (var p in b2) if (Object.prototype.hasOwnProperty.call(b2, p)) d2[p] = b2[p];
-    };
-    return extendStatics(d, b);
-  };
-  return function(d, b) {
-    if (typeof b !== "function" && b !== null)
-      throw new TypeError("Class extends value " + String(b) + " is not a constructor or null");
-    extendStatics(d, b);
-    function __() {
-      this.constructor = d;
-    }
-    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
-  };
-}();
-var BrowserMultiFormatReader2 = (
-  /** @class */
-  function(_super) {
-    __extends79(BrowserMultiFormatReader3, _super);
-    function BrowserMultiFormatReader3(hints, options) {
-      var _this = this;
-      var reader = new MultiFormatReader_default();
-      reader.setHints(hints);
-      _this = _super.call(this, reader, hints, options) || this;
-      _this.reader = reader;
-      return _this;
-    }
-    Object.defineProperty(BrowserMultiFormatReader3.prototype, "possibleFormats", {
-      set: function(formats) {
-        this.hints.set(DecodeHintType_default.POSSIBLE_FORMATS, formats);
-        this.reader.setHints(this.hints);
-      },
-      enumerable: false,
-      configurable: true
-    });
-    BrowserMultiFormatReader3.prototype.decodeBitmap = function(binaryBitmap) {
-      return this.reader.decodeWithState(binaryBitmap);
-    };
-    BrowserMultiFormatReader3.prototype.setHints = function(hints) {
-      this.hints = hints;
-      this.reader.setHints(this.hints);
-    };
-    return BrowserMultiFormatReader3;
-  }(BrowserCodeReader2)
-);
-
-// node_modules/@zxing/browser/esm/readers/BrowserPDF417Reader.js
-var __extends80 = /* @__PURE__ */ function() {
-  var extendStatics = function(d, b) {
-    extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
-      d2.__proto__ = b2;
-    } || function(d2, b2) {
-      for (var p in b2) if (Object.prototype.hasOwnProperty.call(b2, p)) d2[p] = b2[p];
-    };
-    return extendStatics(d, b);
-  };
-  return function(d, b) {
-    if (typeof b !== "function" && b !== null)
-      throw new TypeError("Class extends value " + String(b) + " is not a constructor or null");
-    extendStatics(d, b);
-    function __() {
-      this.constructor = d;
-    }
-    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
-  };
-}();
-var BrowserPDF417Reader2 = (
-  /** @class */
-  function(_super) {
-    __extends80(BrowserPDF417Reader3, _super);
-    function BrowserPDF417Reader3(hints, options) {
-      return _super.call(this, new PDF417Reader_default(), hints, options) || this;
-    }
-    return BrowserPDF417Reader3;
-  }(BrowserCodeReader2)
-);
-
-// node_modules/@zxing/browser/esm/readers/BrowserQRCodeReader.js
-var __extends81 = /* @__PURE__ */ function() {
-  var extendStatics = function(d, b) {
-    extendStatics = Object.setPrototypeOf || { __proto__: [] } instanceof Array && function(d2, b2) {
-      d2.__proto__ = b2;
-    } || function(d2, b2) {
-      for (var p in b2) if (Object.prototype.hasOwnProperty.call(b2, p)) d2[p] = b2[p];
-    };
-    return extendStatics(d, b);
-  };
-  return function(d, b) {
-    if (typeof b !== "function" && b !== null)
-      throw new TypeError("Class extends value " + String(b) + " is not a constructor or null");
-    extendStatics(d, b);
-    function __() {
-      this.constructor = d;
-    }
-    d.prototype = b === null ? Object.create(b) : (__.prototype = b.prototype, new __());
-  };
-}();
-var BrowserQRCodeReader2 = (
-  /** @class */
-  function(_super) {
-    __extends81(BrowserQRCodeReader3, _super);
-    function BrowserQRCodeReader3(hints, options) {
-      return _super.call(this, new QRCodeReader_default(), hints, options) || this;
-    }
-    return BrowserQRCodeReader3;
-  }(BrowserCodeReader2)
-);
-
-// node_modules/@zxing/browser/esm/writers/BrowserCodeSvgWriter.js
-var svgNs = "http://www.w3.org/2000/svg";
-var BrowserCodeSvgWriter = (
-  /** @class */
-  function() {
-    function BrowserCodeSvgWriter2(containerElement) {
-      if (typeof containerElement === "string") {
-        var container2 = document.getElementById(containerElement);
-        if (!container2) {
-          throw new Error("Could not find a Container element with '".concat(containerElement, "'."));
-        }
-        this.containerElement = container2;
-      } else {
-        this.containerElement = containerElement;
-      }
-    }
-    BrowserCodeSvgWriter2.prototype.write = function(contents, width, height, hints) {
-      if (contents.length === 0) {
-        throw new IllegalArgumentException_default("Found empty contents");
-      }
-      if (width < 0 || height < 0) {
-        throw new IllegalArgumentException_default("Requested dimensions are too small: " + width + "x" + height);
-      }
-      var quietZone = hints && hints.get(EncodeHintType_default.MARGIN) !== void 0 ? Number.parseInt(hints.get(EncodeHintType_default.MARGIN).toString(), 10) : BrowserCodeSvgWriter2.QUIET_ZONE_SIZE;
-      var code = this.encode(hints, contents);
-      return this.renderResult(code, width, height, quietZone);
-    };
-    BrowserCodeSvgWriter2.prototype.createSVGElement = function(w, h) {
-      var el = document.createElementNS(BrowserCodeSvgWriter2.SVG_NS, "svg");
-      el.setAttributeNS(svgNs, "width", h.toString());
-      el.setAttributeNS(svgNs, "height", w.toString());
-      return el;
-    };
-    BrowserCodeSvgWriter2.prototype.createSvgPathPlaceholderElement = function(w, h) {
-      var el = document.createElementNS(BrowserCodeSvgWriter2.SVG_NS, "path");
-      el.setAttributeNS(svgNs, "d", "M0 0h".concat(w, "v").concat(h, "H0z"));
-      el.setAttributeNS(svgNs, "fill", "none");
-      return el;
-    };
-    BrowserCodeSvgWriter2.prototype.createSvgRectElement = function(x, y, w, h) {
-      var el = document.createElementNS(BrowserCodeSvgWriter2.SVG_NS, "rect");
-      el.setAttributeNS(svgNs, "x", x.toString());
-      el.setAttributeNS(svgNs, "y", y.toString());
-      el.setAttributeNS(svgNs, "height", w.toString());
-      el.setAttributeNS(svgNs, "width", h.toString());
-      el.setAttributeNS(svgNs, "fill", "#000000");
-      return el;
-    };
-    BrowserCodeSvgWriter2.prototype.encode = function(hints, contents) {
-      var errorCorrectionLevel = ErrorCorrectionLevel_default.L;
-      if (hints && hints.get(EncodeHintType_default.ERROR_CORRECTION) !== void 0) {
-        var correctionStr = hints.get(EncodeHintType_default.ERROR_CORRECTION).toString();
-        errorCorrectionLevel = ErrorCorrectionLevel_default.fromString(correctionStr);
-      }
-      var code = Encoder_default.encode(contents, errorCorrectionLevel, hints);
-      return code;
-    };
-    BrowserCodeSvgWriter2.prototype.renderResult = function(code, width, height, quietZone) {
-      var input = code.getMatrix();
-      if (input === null) {
-        throw new IllegalStateException_default();
-      }
-      var inputWidth = input.getWidth();
-      var inputHeight = input.getHeight();
-      var qrWidth = inputWidth + quietZone * 2;
-      var qrHeight = inputHeight + quietZone * 2;
-      var outputWidth = Math.max(width, qrWidth);
-      var outputHeight = Math.max(height, qrHeight);
-      var multiple = Math.min(Math.floor(outputWidth / qrWidth), Math.floor(outputHeight / qrHeight));
-      var leftPadding = Math.floor((outputWidth - inputWidth * multiple) / 2);
-      var topPadding = Math.floor((outputHeight - inputHeight * multiple) / 2);
-      var svgElement = this.createSVGElement(outputWidth, outputHeight);
-      var placeholder = this.createSvgPathPlaceholderElement(width, height);
-      svgElement.appendChild(placeholder);
-      this.containerElement.appendChild(svgElement);
-      for (var inputY = 0, outputY = topPadding; inputY < inputHeight; inputY++, outputY += multiple) {
-        for (var inputX = 0, outputX = leftPadding; inputX < inputWidth; inputX++, outputX += multiple) {
-          if (input.get(inputX, inputY) === 1) {
-            var svgRectElement = this.createSvgRectElement(outputX, outputY, multiple, multiple);
-            svgElement.appendChild(svgRectElement);
-          }
-        }
-      }
-      return svgElement;
-    };
-    BrowserCodeSvgWriter2.QUIET_ZONE_SIZE = 4;
-    BrowserCodeSvgWriter2.SVG_NS = "http://www.w3.org/2000/svg";
-    return BrowserCodeSvgWriter2;
-  }()
-);
-
-// node_modules/@zxing/browser/esm/writers/BrowserQRCodeSvgWriter.js
-var svgNs2 = "http://www.w3.org/2000/svg";
-var BrowserQRCodeSvgWriter2 = (
-  /** @class */
-  function() {
-    function BrowserQRCodeSvgWriter3() {
-    }
-    BrowserQRCodeSvgWriter3.prototype.write = function(contents, width, height, hints) {
-      if (contents.length === 0) {
-        throw new IllegalArgumentException_default("Found empty contents");
-      }
-      if (width < 0 || height < 0) {
-        throw new IllegalArgumentException_default("Requested dimensions are too small: " + width + "x" + height);
-      }
-      var errorCorrectionLevel = ErrorCorrectionLevel_default.L;
-      var quietZone = BrowserQRCodeSvgWriter3.QUIET_ZONE_SIZE;
-      if (hints) {
-        if (void 0 !== hints.get(EncodeHintType_default.ERROR_CORRECTION)) {
-          var correctionStr = hints.get(EncodeHintType_default.ERROR_CORRECTION).toString();
-          errorCorrectionLevel = ErrorCorrectionLevel_default.fromString(correctionStr);
-        }
-        if (void 0 !== hints.get(EncodeHintType_default.MARGIN)) {
-          quietZone = Number.parseInt(hints.get(EncodeHintType_default.MARGIN).toString(), 10);
-        }
-      }
-      var code = Encoder_default.encode(contents, errorCorrectionLevel, hints);
-      return this.renderResult(code, width, height, quietZone);
-    };
-    BrowserQRCodeSvgWriter3.prototype.writeToDom = function(containerElement, contents, width, height, hints) {
-      if (typeof containerElement === "string") {
-        var targetEl = document.querySelector(containerElement);
-        if (!targetEl) {
-          throw new Error("Could no find the target HTML element.");
-        }
-        containerElement = targetEl;
-      }
-      var svgElement = this.write(contents, width, height, hints);
-      if (containerElement instanceof HTMLElement) {
-        containerElement.appendChild(svgElement);
-      }
-    };
-    BrowserQRCodeSvgWriter3.prototype.renderResult = function(code, width, height, quietZone) {
-      var input = code.getMatrix();
-      if (input === null) {
-        throw new IllegalStateException_default();
-      }
-      var inputWidth = input.getWidth();
-      var inputHeight = input.getHeight();
-      var qrWidth = inputWidth + quietZone * 2;
-      var qrHeight = inputHeight + quietZone * 2;
-      var outputWidth = Math.max(width, qrWidth);
-      var outputHeight = Math.max(height, qrHeight);
-      var multiple = Math.min(Math.floor(outputWidth / qrWidth), Math.floor(outputHeight / qrHeight));
-      var leftPadding = Math.floor((outputWidth - inputWidth * multiple) / 2);
-      var topPadding = Math.floor((outputHeight - inputHeight * multiple) / 2);
-      var svgElement = this.createSVGElement(outputWidth, outputHeight);
-      for (var inputY = 0, outputY = topPadding; inputY < inputHeight; inputY++, outputY += multiple) {
-        for (var inputX = 0, outputX = leftPadding; inputX < inputWidth; inputX++, outputX += multiple) {
-          if (input.get(inputX, inputY) === 1) {
-            var svgRectElement = this.createSvgRectElement(outputX, outputY, multiple, multiple);
-            svgElement.appendChild(svgRectElement);
-          }
-        }
-      }
-      return svgElement;
-    };
-    BrowserQRCodeSvgWriter3.prototype.createSVGElement = function(w, h) {
-      var svgElement = document.createElementNS(svgNs2, "svg");
-      var width = w.toString();
-      var height = h.toString();
-      svgElement.setAttribute("height", height);
-      svgElement.setAttribute("width", width);
-      svgElement.setAttribute("viewBox", "0 0 " + width + " " + height);
-      return svgElement;
-    };
-    BrowserQRCodeSvgWriter3.prototype.createSvgRectElement = function(x, y, w, h) {
-      var rect = document.createElementNS(svgNs2, "rect");
-      rect.setAttribute("x", x.toString());
-      rect.setAttribute("y", y.toString());
-      rect.setAttribute("height", w.toString());
-      rect.setAttribute("width", h.toString());
-      rect.setAttribute("fill", "#000000");
-      return rect;
-    };
-    BrowserQRCodeSvgWriter3.QUIET_ZONE_SIZE = 4;
-    return BrowserQRCodeSvgWriter3;
-  }()
+  })()
 );
 
 // src/pages/OpNewPage.jsx
 var import_jsx_runtime12 = __toESM(require_jsx_runtime(), 1);
-var ZXING_FORMATS = [
-  BarcodeFormat_default.EAN_13,
-  BarcodeFormat_default.EAN_8,
-  BarcodeFormat_default.UPC_A,
-  BarcodeFormat_default.UPC_E,
-  BarcodeFormat_default.ITF,
-  BarcodeFormat_default.CODE_128,
-  BarcodeFormat_default.CODE_39,
-  BarcodeFormat_default.CODABAR
-].filter(Boolean);
 var QUICK_QTY = [1, 5, 10, 12];
 function firstBarcode(item) {
   return item?.base_barcode || (item?.barcode_list ? String(item.barcode_list).split(",")[0]?.trim() : "") || item?.code || "";
-}
-async function listVideoDevices(reader) {
-  const devices = await reader.listVideoInputDevices();
-  return (devices || []).map((device) => ({
-    deviceId: device.deviceId || device.id,
-    label: device.label || ""
-  })).filter((device) => device.deviceId);
-}
-function pickCamera(devices) {
-  const prefer = [/macro|tele|zoom|close/i, /back|environment|rear/i];
-  for (const pattern of prefer) {
-    const match = devices.find((device) => pattern.test(device.label));
-    if (match) return match.deviceId;
-  }
-  return devices[0]?.deviceId ?? null;
 }
 function OpNewPage() {
   const { id } = useParams();
@@ -59640,10 +58193,8 @@ function OpNewPage() {
   const [picked, setPicked] = (0, import_react13.useState)(null);
   const [saving, setSaving] = (0, import_react13.useState)(false);
   const [scanning, setScanning] = (0, import_react13.useState)(false);
-  const [currentDeviceId, setCurrentDeviceId] = (0, import_react13.useState)(null);
   const videoRef = (0, import_react13.useRef)(null);
   const readerRef = (0, import_react13.useRef)(null);
-  const controlsRef = (0, import_react13.useRef)(null);
   (0, import_react13.useEffect)(() => {
     setAppTitle2(t("op.title") || "\u041D\u043E\u0432\u0430\u044F \u043E\u043F\u0435\u0440\u0430\u0446\u0438\u044F");
   }, [locale, setAppTitle2, t]);
@@ -59705,99 +58256,62 @@ function OpNewPage() {
   );
   const ensureReader = (0, import_react13.useCallback)(async () => {
     if (readerRef.current) return readerRef.current;
-    const hints = /* @__PURE__ */ new Map();
-    readerRef.current = new BrowserMultiFormatReader2(hints, {
-      delayBetweenScanAttempts: 250
-    });
+    const reader = new BrowserMultiFormatReader();
+    readerRef.current = reader;
     return readerRef.current;
   }, []);
   const stopScan = (0, import_react13.useCallback)(() => {
     setScanning(false);
-    try {
-      controlsRef.current?.stop?.();
-      controlsRef.current = null;
-    } catch (err) {
-      console.warn("[scan] stop error", err);
+    if (readerRef.current) {
+      console.log("Stopping scanner...");
+      readerRef.current.reset();
     }
-    try {
-      readerRef.current?.reset?.();
-    } catch (err) {
-      console.warn("[scan] reset error", err);
+    if (videoRef.current?.srcObject) {
+      console.log("Stopping video stream...");
+      const tracks = videoRef.current.srcObject.getTracks();
+      tracks.forEach((track) => track.stop());
+      videoRef.current.srcObject = null;
     }
-    const video = videoRef.current;
-    if (video) {
-      try {
-        video.pause?.();
-      } catch {
-      }
-      try {
-        video.srcObject = null;
-      } catch {
-      }
-    }
+    console.log("Scanner stopped.");
+    setScanning(false);
   }, []);
-  (0, import_react13.useEffect)(() => {
-    const visibilityHandler = () => {
-      if (document.hidden) stopScan();
-    };
-    document.addEventListener("visibilitychange", visibilityHandler);
-    window.addEventListener("pagehide", stopScan);
-    return () => {
-      document.removeEventListener("visibilitychange", visibilityHandler);
-      window.removeEventListener("pagehide", stopScan);
-      stopScan();
-    };
-  }, [stopScan]);
   (0, import_react13.useEffect)(() => {
     document.getElementById("barcode")?.focus();
   }, []);
-  const startScan = (0, import_react13.useCallback)(async () => {
-    if (window.location.protocol !== "https:" && window.location.hostname !== "localhost") {
-      showToast(t("camera_open_failed") || "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043E\u0442\u043A\u0440\u044B\u0442\u044C \u043A\u0430\u043C\u0435\u0440\u0443", {
-        type: "error"
-      });
-      return;
-    }
+  const startScan = async () => {
+    if (scanning) return;
     try {
       const reader = await ensureReader();
-      const devices = await listVideoDevices(reader);
-      if (!devices.length) {
-        showToast(t("camera_open_failed") || "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043E\u0442\u043A\u0440\u044B\u0442\u044C \u043A\u0430\u043C\u0435\u0440\u0443", {
-          type: "error"
-        });
-        return;
+      console.log("reader", reader);
+      const constraints = {
+        video: { facingMode: { ideal: "environment" } }
+      };
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.setAttribute("playsinline", "true");
+        await videoRef.current.play();
       }
-      const selectedDeviceId = currentDeviceId || pickCamera(devices) || devices[0].deviceId;
-      setCurrentDeviceId(selectedDeviceId);
-      const controls = await reader.decodeFromVideoDevice(
-        selectedDeviceId,
-        videoRef.current,
-        (result, err) => {
-          if (result?.text) {
-            const code = result.text;
-            setBarcodeValue(code);
-            setQueryValue(code);
-            stopScan();
-            runSearch(code);
-            try {
-              navigator.vibrate?.(35);
-            } catch {
-            }
-          } else if (err && err.name !== "NotFoundException") {
-            console.debug("[ZXing]", err?.name || err);
-          }
-        }
-      );
-      controlsRef.current = controls;
+      console.log("Video started, starting scan...");
       setScanning(true);
+      reader.decodeFromVideoDevice(null, videoRef.current, (result, err) => {
+        console.log("scan result", { result, err });
+        if (result) {
+          const text = result.getText();
+          stopScan();
+          runSearch(text);
+        }
+        if (err && !(err.name === "\u041A\u0430\u043C\u0435\u0440\u0430 \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u0430" || err.name === "NotFoundError")) {
+        }
+      });
     } catch (err) {
       console.error("[scan] start error", err);
-      showToast(t("camera_open_failed") || "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043E\u0442\u043A\u0440\u044B\u0442\u044C \u043A\u0430\u043C\u0435\u0440\u0443", {
+      const messageKey = err?.name === "NotAllowedError" ? "camera_permission_denied" : err?.name === "NotFoundError" || err?.name === "OverconstrainedError" ? "camera_not_found" : "camera_open_failed";
+      showToast(t(messageKey) || "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u043E\u0442\u043A\u0440\u044B\u0442\u044C \u043A\u0430\u043C\u0435\u0440\u0443", {
         type: "error"
       });
-      stopScan();
     }
-  }, [currentDeviceId, ensureReader, runSearch, showToast, stopScan, t]);
+  };
   const handleSubmit = async () => {
     if (!picked?.id) {
       showToast(t("select_product_first") || "\u0421\u043D\u0430\u0447\u0430\u043B\u0430 \u0432\u044B\u0431\u0435\u0440\u0438\u0442\u0435 \u0442\u043E\u0432\u0430\u0440", {
@@ -59870,7 +58384,15 @@ function OpNewPage() {
   return /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("section", { className: "stack", id: "op-new", children: [
     /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("h1", { children: t("op.title") || "\u041D\u043E\u0432\u0430\u044F \u043E\u043F\u0435\u0440\u0430\u0446\u0438\u044F" }),
     /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { id: "scanner", className: `stack${scanning ? "" : " hidden"}`, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("video", { id: "preview", ref: videoRef, playsInline: true, autoPlay: true, muted: true }),
+      /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
+        "video",
+        {
+          id: "preview",
+          ref: videoRef,
+          playsInline: true,
+          style: { width: "100%", maxWidth: "400px" }
+        }
+      ),
       /* @__PURE__ */ (0, import_jsx_runtime12.jsxs)("div", { className: "row", children: [
         /* @__PURE__ */ (0, import_jsx_runtime12.jsx)("span", { className: "muted", children: t("scanner.hint") || "\u041D\u0430\u0432\u0435\u0434\u0438 \u043A\u0430\u043C\u0435\u0440\u0443 \u043D\u0430 \u0448\u0442\u0440\u0438\u0445-\u043A\u043E\u0434" }),
         /* @__PURE__ */ (0, import_jsx_runtime12.jsx)(
