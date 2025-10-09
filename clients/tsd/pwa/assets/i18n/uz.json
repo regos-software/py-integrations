@@ -77,5 +77,6 @@
   "qr.copy": "Havolani nusxalash",
   "qr.copied": "Havola nusxalandi",
   "qr.copy_failed": "Havolani nusxalab bo'lmadi",
-  "qr.copy_not_supported": "Havolani nusxalash qo'llab-quvvatlanmaydi"
+  "qr.copy_not_supported": "Havolani nusxalash qo'llab-quvvatlanmaydi",
+  "scanner.hint": "Kamerani shtrix-kodga qarating"
 }

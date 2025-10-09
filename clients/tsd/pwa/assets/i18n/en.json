@@ -77,5 +77,6 @@
   "qr.copy": "Copy link",
   "qr.copied": "Link copied",
   "qr.copy_failed": "Failed to copy the link",
-  "qr.copy_not_supported": "Copying the link is not supported"
+  "qr.copy_not_supported": "Copying the link is not supported",
+  "scanner.hint": "Point the camera at the barcode"
 }

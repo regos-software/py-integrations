@@ -183,12 +183,12 @@ pre {
 /* ===== Forms ===== */
 .form-vert { display: grid; grid-template-columns: 1fr; gap: 10px; }
 .qty-quick { display: flex; flex-wrap: wrap; gap: 8px; }
-.qty-quick .chip {
+.chip {
   display: inline-flex; align-items: center; justify-content: center;
   padding: 6px 10px; border-radius: 999px; border: 1px solid var(--border);
   background: var(--hover); color: var(--fg); font-size: 14px; cursor: pointer;
 }
-.qty-quick .chip:active { transform: translateY(1px); }
+.chip:active { transform: translateY(1px); }
 
 /* ===== Meta helpers ===== */
 .meta { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }

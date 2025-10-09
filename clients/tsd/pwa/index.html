@@ -1,34 +1,16 @@
 <!doctype html>
-<html lang="ru">
+<html>
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover" />
-    <meta name="theme-color" content="#111827" />
-    <meta name="format-detection" content="telephone=no" />
-    <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <title>TSD • Закупки</title>
-
-    <!-- PWA -->
-    <link rel="manifest" href="?pwa=manifest" />
-    <link rel="icon" href="?assets=icon-192.png" sizes="192x192" />
-    <link rel="icon" href="?assets=icon-512.png" sizes="512x512" />
-    <link rel="apple-touch-icon" href="?assets=icon-192.png" />
-
-    <!-- Styles -->
+    <link rel="manifest" href="?assets=manifest.json" />
     <link rel="stylesheet" href="?assets=app.css" />
-
-    <!-- Font Awesome (icons) -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" referrerpolicy="no-referrer" />
-
-    <!-- REGOS OAuth SDK (инициализация — вызывается из React) -->
-    <script src="https://auth.regos.uz/widget/regos-oauth-sdk.js" defer></script>
+    <meta name="theme-color" content="#000000" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>TSD</title>
   </head>
   <body>
-    <div id="root" role="application"></div>
+    <div id="root"></div>
     <script type="module" src="?assets=app.js"></script>
-    <noscript>
-      <div class="card">Нужен JavaScript</div>
-    </noscript>
   </body>
 </html>

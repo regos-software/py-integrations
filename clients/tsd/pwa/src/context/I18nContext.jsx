@@ -30,8 +30,8 @@ function resolveInitialLocale() {
   return normLocale(fromQuery || stored || nav);
 }
 
-async function fetchMessages(assetUrl, locale) {
-  const url = assetUrl(`i18n/${locale}.json`);
+async function fetchMessages(locale) {
+  const url = `?assets=i18n/${locale}.json`;
   const res = await fetch(url, { cache: "no-cache" });
   if (!res.ok) {
     throw new Error(`i18n: unable to load ${locale}`);
@@ -59,7 +59,7 @@ export function I18nProvider({ children }) {
   const load = useCallback(
     async (lc) => {
       const normalized = normLocale(lc);
-      const loaded = await fetchMessages(assetUrl, normalized);
+      const loaded = await fetchMessages(normalized);
       setMessages(loaded);
       setLocale(normalized);
       document.documentElement.lang = normalized;
@@ -68,7 +68,7 @@ export function I18nProvider({ children }) {
       setAppTitle(title);
       document.dispatchEvent(new CustomEvent("i18n:change"));
     },
-    [assetUrl, setAppTitle]
+    [setAppTitle]
   );
 
   useEffect(() => {

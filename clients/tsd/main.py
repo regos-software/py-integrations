@@ -179,7 +179,6 @@ class TsdIntegration(ClientBase):
                     }
                 )
 
-            # --- один документ + операции (ЕДИНСТВЕННАЯ ветка purchase_get) ---
             if action == "purchase_get":
                 raw_id = params.get("doc_id")
                 if raw_id is None:
@@ -205,7 +204,6 @@ class TsdIntegration(ClientBase):
                     }
                 )
 
-            # --- операции документа ---
             if action == "purchase_ops_get":
                 try:
                     doc_id = int(params.get("doc_id"))
@@ -297,23 +295,12 @@ class TsdIntegration(ClientBase):
 
                 # выполняем поиск: сперва расширенный (GetExt), затем — мягкий откат
                 async with RegosAPI(connected_integration_id=ci) as api:
-                    try:
-                        # Новый путь: расширенные карточки с учётом склада/типа цены
-                        items = await api.refrences.item.search_and_get_ext(
-                            q,
-                            stock_id=stock_id,
-                            price_type_id=price_type_id,
-                            limit=limit,
-                        )
-                    except AttributeError:
-                        # Если метода нет (старый клиент) — откатываемся
-                        try:
-                            items = await api.refrences.item.search_and_get(
-                                q, price_type_id=price_type_id, stock_id=stock_id
-                            )
-                        except TypeError:
-                            # Совсем старый интерфейс: только по строке
-                            items = await api.refrences.item.search_and_get(q)
+                    items = await api.refrences.item.search_and_get_ext(
+                        q,
+                        stock_id=stock_id,
+                        price_type_id=price_type_id,
+                        limit=limit,
+                    )
 
                 return {"result": {"items": jsonable_encoder(items)}}
 
@@ -358,72 +345,14 @@ class TsdIntegration(ClientBase):
                 )
             return FileResponse(str(file_path), media_type=mt)
 
-        # service worker
-        if str(query.get("pwa", "")).lower() == "sw":
-            sw_path = self.PWA_DIR / "sw.js"
-            if not sw_path.exists():
-                return Response("sw.js not found", status_code=404)
-            return FileResponse(str(sw_path), media_type="application/javascript")
-
-        # manifest (ОТНОСИТЕЛЬНЫЕ пути!)
-        if str(query.get("pwa", "")).lower() == "manifest":
-            # определяем текущий путь без query (?pwa=manifest)
-            base_path = str(envelope.get("path") or "").rstrip("/")
-
-            # формируем динамические пути для start_url и scope
-            manifest = {
-                "name": "TSD",
-                "short_name": "TSD",
-                "start_url": base_path,
-                "scope": f"{base_path}/",
-                "display": "standalone",
-                "background_color": "#f7fafc",
-                "theme_color": "#111827",
-                "icons": [
-                    {
-                        "src": "?asset=icon-192.png",
-                        "sizes": "192x192",
-                        "type": "image/png",
-                    },
-                    {
-                        "src": "?asset=icon-512.png",
-                        "sizes": "512x512",
-                        "type": "image/png",
-                    },
-                    {
-                        "src": "?asset=icon-512-maskable.png",
-                        "sizes": "512x512",
-                        "type": "image/png",
-                        "purpose": "maskable any",
-                    },
-                ],
-            }
-
-            return Response(
-                json.dumps(manifest, ensure_ascii=False),
-                media_type="application/manifest+json",
-            )
-
-        # index.html (+ window.__CI__)
         index_path = self.PWA_DIR / "index.html"
-        if not index_path.exists():
-            return Response("index.html not found", status_code=500)
 
-        try:
-            html = index_path.read_text(encoding="utf-8")
-        except Exception:
-            return FileResponse(str(index_path), media_type="text/html; charset=utf-8")
-
+        html = index_path.read_text(encoding="utf-8")
         inject = ""
         if token:
             safe_token = json.dumps(str(token))
             inject = f"<script>window.__CI__={safe_token};</script>"
-
-        lower = html.lower()
-        if "</body>" in lower:
-            pos = lower.rfind("</body>")
-            html = html[:pos] + inject + html[pos:]
-        else:
-            html += inject
+        pos = html.rfind("</body>")
+        html = html[:pos] + inject + html[pos:]
 
         return HTMLResponse(html, status_code=200)

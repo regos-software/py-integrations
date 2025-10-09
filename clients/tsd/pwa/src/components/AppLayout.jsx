@@ -9,7 +9,6 @@ import NavBackButton from "./NavBackButton.jsx";
 import QRCode from "qrcode";
 
 export default function AppLayout() {
-  const { registerSW } = useApp();
   const { t } = useI18n();
   const location = useLocation();
   const navigate = useNavigate();
@@ -19,18 +18,13 @@ export default function AppLayout() {
   const [qrError, setQrError] = useState(null);
   const [qrCopied, setQrCopied] = useState(false);
 
-  useEffect(() => {
-    registerSW();
-  }, [registerSW]);
-
   const { pathname, search = "", hash = "" } = location;
 
   const currentUrl = useMemo(() => {
-    const suffix = `${pathname}${search || ""}${hash || ""}`;
-    if (typeof window === "undefined" || !window.location?.origin) {
-      return suffix;
+    if (typeof window !== "undefined" && window.location?.href) {
+      return window.location.href;
     }
-    return `${window.location.origin}${suffix}`;
+    return `${pathname}${search || ""}${hash || ""}`;
   }, [hash, pathname, search]);
 
   const fallbackPath = useMemo(() => {

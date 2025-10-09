@@ -453,14 +453,16 @@ export default function OpNewPage() {
           }}
         />
         {lpcLabel && (
-          <button
-            type="button"
-            id="cost-hint"
-            className="btn secondary"
-            onClick={() => setCost(String(picked.last_purchase_cost))}
-          >
-            {lpcLabel}
-          </button>
+          <div className="qty-quick" id="qty-quick">
+            <button
+              type="button"
+              id="cost-hint"
+              className="chip"
+              onClick={() => setCost(String(picked.last_purchase_cost))}
+            >
+              {lpcLabel}
+            </button>
+          </div>
         )}
       </div>
 
@@ -480,14 +482,16 @@ export default function OpNewPage() {
           }}
         />
         {priceLabel && (
-          <button
-            type="button"
-            id="price-hint"
-            className="btn secondary"
-            onClick={() => setPrice(String(picked.price))}
-          >
-            {priceLabel}
-          </button>
+          <div className="qty-quick" id="qty-quick">
+            <button
+              type="button"
+              id="price-hint"
+              className="chip"
+              onClick={() => setPrice(String(picked.price))}
+            >
+              {priceLabel}
+            </button>
+          </div>
         )}
       </div>
 

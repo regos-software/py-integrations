@@ -1,47 +1,15 @@
-import React, { useCallback, useEffect, useState } from "react";
-import { isStandalone } from "../lib/api.js";
+import { usePWAInstall } from "../hooks/usePWAInstall.js";
 
 export default function InstallButton({ label }) {
-  const [promptEvent, setPromptEvent] = useState(null);
-  const [visible, setVisible] = useState(false);
+  const { canInstall, installed, supported, promptInstall } = usePWAInstall();
 
-  useEffect(() => {
-    if (isStandalone()) return undefined;
+  if (installed) return null; // already installed
+  if (!supported && !canInstall) return null; // no prompt available yet
 
-    const handler = (event) => {
-      event.preventDefault();
-      setPromptEvent(event);
-      setVisible(true);
-    };
-
-    const installed = () => {
-      setPromptEvent(null);
-      setVisible(false);
-    };
-
-    window.addEventListener("beforeinstallprompt", handler);
-    window.addEventListener("appinstalled", installed);
-
-    return () => {
-      window.removeEventListener("beforeinstallprompt", handler);
-      window.removeEventListener("appinstalled", installed);
-    };
-  }, []);
-
-  const handleClick = useCallback(async () => {
-    if (!promptEvent) return;
-    setVisible(false);
-    promptEvent.prompt();
-    try {
-      await promptEvent.userChoice;
-    } finally {
-      setPromptEvent(null);
-    }
-  }, [promptEvent]);
-
-  if (!visible || isStandalone()) {
-    return null;
-  }
+  const handleClick = async () => {
+    const { outcome } = await promptInstall();
+    console.log("[pwa] user choice:", outcome);
+  };
 
   return (
     <button
