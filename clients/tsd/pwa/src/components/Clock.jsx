@@ -17,7 +17,11 @@ export default function Clock() {
   }, []);
 
   return (
-    <span id="now" className="time" aria-live="polite">
+    <span
+      id="now"
+      className="font-mono text-sm font-semibold text-slate-600 dark:text-slate-300"
+      aria-live="polite"
+    >
       {time}
     </span>
   );

@@ -4,9 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node esbuild.config.mjs --watch",
-    "build": "node esbuild.config.mjs",
-    "serve": "live-server --port=4173 --no-browser"
+    "dev": "concurrently \"npm:css:watch\" \"node esbuild.config.mjs --watch\"",
+    "build": "npm run css:build && node esbuild.config.mjs",
+    "serve": "live-server --port=4173 --no-browser",
+    "css:build": "tailwindcss -i ./src/styles.css -o ./assets/app.css --minify",
+    "css:watch": "tailwindcss -i ./src/styles.css -o ./assets/app.css --watch"
   },
   "dependencies": {
     "@zxing/library": "^0.21.3",
@@ -24,6 +26,8 @@
     "eslint-plugin-react": "^7.34.3",
     "eslint-plugin-react-hooks": "^4.6.0",
     "live-server": "^1.2.0",
-    "micromatch": "^4.0.8"
+    "micromatch": "^4.0.8",
+    "concurrently": "^8.2.2",
+    "tailwindcss": "^3.4.14"
   }
 }

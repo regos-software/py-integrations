@@ -1,4 +1,5 @@
 import React, { createContext, useCallback, useMemo, useState } from "react";
+import { toastClass } from "../lib/ui";
 
 const ToastContext = createContext({
   showToast: () => {},
@@ -33,9 +34,7 @@ export function ToastProvider({ children }) {
       {children}
       <div
         id="toast"
-        className={`toast${toast ? " show" : ""}${
-          toast?.type === "error" ? " error" : ""
-        }`}
+        className={toastClass(Boolean(toast), toast?.type)}
         role="status"
         aria-live="polite"
       >

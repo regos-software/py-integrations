@@ -1,4 +1,11 @@
 import { usePWAInstall } from "../hooks/usePWAInstall.js";
+import {
+  buttonClass,
+  cardClass,
+  iconButtonClass,
+  mutedTextClass,
+} from "../lib/ui";
+import { cn } from "../lib/utils";
 
 export default function InstallButton({
   label,
@@ -26,7 +33,7 @@ export default function InstallButton({
     <button
       id="btn-install"
       type="button"
-      className="btn small"
+      className={buttonClass({ variant: "primary", size: "sm" })}
       onClick={handleClick}
     >
       <i className="fa-solid fa-download" aria-hidden="true" />
@@ -36,23 +43,40 @@ export default function InstallButton({
 
   if (variant === "floating") {
     return (
-      <div className="install-banner" role="dialog" aria-live="polite">
-        <div className="install-banner-body">
-          <div className="install-banner-text">
-            <strong>{heading}</strong>
-            {message ? <p>{message}</p> : null}
+      <div
+        className={cardClass(
+          "fixed bottom-6 left-1/2 z-40 w-[min(520px,calc(100vw-32px))] -translate-x-1/2 space-y-4 shadow-xl"
+        )}
+        role="dialog"
+        aria-live="polite"
+      >
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:gap-6">
+          <div className="flex-1 space-y-1">
+            <p className="text-sm font-semibold text-slate-900 dark:text-slate-50">
+              {heading}
+            </p>
+            {message ? (
+              <p className={cn(mutedTextClass(), "leading-relaxed")}>
+                {message}
+              </p>
+            ) : null}
           </div>
-          {button}
+          <div className="flex shrink-0 items-center gap-3">
+            {button}
+            <button
+              type="button"
+              className={cn(
+                iconButtonClass({ variant: "ghost" }),
+                "text-slate-500 dark:text-slate-300"
+              )}
+              onClick={() => onDismiss?.()}
+              aria-label={closeLabel}
+              title={closeLabel}
+            >
+              <i className="fa-solid fa-xmark" aria-hidden="true" />
+            </button>
+          </div>
         </div>
-        <button
-          type="button"
-          className="install-banner-close"
-          onClick={() => onDismiss?.()}
-          aria-label={closeLabel}
-          title={closeLabel}
-        >
-          <i className="fa-solid fa-xmark" aria-hidden="true" />
-        </button>
       </div>
     );
   }

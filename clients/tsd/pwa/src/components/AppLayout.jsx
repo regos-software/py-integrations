@@ -1,7 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
-import { useApp } from "../context/AppContext.jsx";
 import { useI18n } from "../context/I18nContext.jsx";
+import {
+  buttonClass,
+  cardClass,
+  iconButtonClass,
+  mutedTextClass,
+} from "../lib/ui";
+import { cn } from "../lib/utils";
 import Clock from "./Clock.jsx";
 import InstallButton from "./InstallButton.jsx";
 import LanguageSwitcher from "./LanguageSwitcher.jsx";
@@ -130,16 +136,16 @@ export default function AppLayout() {
   }, [currentUrl, t]);
 
   return (
-    <div className="app-shell">
-      <header className="appbar">
-        <div className="left">
+    <div className="relative min-h-screen bg-slate-100 text-slate-900 transition dark:bg-slate-900 dark:text-slate-100">
+      <header className="sticky top-0 z-40 mx-auto mt-4 flex w-full max-w-5xl items-center justify-between gap-3 rounded-3xl border border-slate-200 bg-white/85 px-4 py-3 shadow-sm backdrop-blur dark:border-slate-700 dark:bg-slate-900/80 sm:px-6">
+        <div className="flex items-center gap-3">
           {showBack ? (
             <NavBackButton onClick={handleBack} label={backLabel} />
           ) : null}
           <LanguageSwitcher />
           <button
             type="button"
-            className="btn icon"
+            className={iconButtonClass({ variant: "ghost" })}
             onClick={handleOpenQr}
             aria-label={
               t("qr.share_button") || "Показать QR-код текущей страницы"
@@ -149,13 +155,13 @@ export default function AppLayout() {
             <i className="fa-solid fa-qrcode" aria-hidden="true" />
           </button>
         </div>
-        <div className="right">
+        <div className="flex items-center gap-3">
           <Clock />
-          <div id="regos-login" />
+          <div id="regos-login" className="hidden md:block" />
         </div>
       </header>
-      <main className="container content">
-        <div className="card">
+      <main className="mx-auto mt-6 w-full max-w-5xl px-4 pb-32 sm:px-6">
+        <div className={cardClass("min-h-[60vh]")}>
           <Outlet />
         </div>
       </main>
@@ -171,24 +177,29 @@ export default function AppLayout() {
       )}
       {qrOpen ? (
         <div
-          className="modal-backdrop"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/70 px-4 py-6"
           role="presentation"
           onClick={handleCloseQr}
         >
           <div
-            className="modal-card"
+            className={cardClass(
+              "relative w-full max-w-sm space-y-5 p-6 shadow-xl"
+            )}
             role="dialog"
             aria-modal="true"
             aria-labelledby="qr-modal-title"
             onClick={(event) => event.stopPropagation()}
           >
-            <div className="row qr-modal-header">
-              <h2 id="qr-modal-title">
+            <div className="flex items-start justify-between gap-3">
+              <h2
+                id="qr-modal-title"
+                className="text-lg font-semibold text-slate-900 dark:text-slate-50"
+              >
                 {t("qr.share_title") || "Сканируйте на другом устройстве"}
               </h2>
               <button
                 type="button"
-                className="btn icon"
+                className={iconButtonClass({ variant: "ghost" })}
                 onClick={handleCloseQr}
                 aria-label={closeLabel}
                 title={closeLabel}
@@ -196,13 +207,13 @@ export default function AppLayout() {
                 <i className="fa-solid fa-xmark" aria-hidden="true" />
               </button>
             </div>
-            <div className="qr-modal-body">
+            <div className="flex min-h-[220px] items-center justify-center overflow-hidden rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-4 dark:border-slate-600 dark:bg-slate-800">
               {qrGenerating ? (
-                <p className="muted">
+                <p className={mutedTextClass()}>
                   {t("qr.generating") || "Готовим QR-код..."}
                 </p>
               ) : qrError ? (
-                <p className="modal-error">{qrError}</p>
+                <p className="text-sm font-medium text-rose-500">{qrError}</p>
               ) : (
                 <img
                   src={qrImage}
@@ -210,31 +221,42 @@ export default function AppLayout() {
                     t("qr.image_alt") ||
                     "QR-код для открытия этой страницы на другом устройстве"
                   }
+                  className="h-auto w-full"
                 />
               )}
             </div>
-            <p className="qr-url" aria-live="polite">
+            <p
+              className={cn(mutedTextClass(), "break-words text-center")}
+              aria-live="polite"
+            >
               {currentUrl}
             </p>
-            <div className="modal-actions">
-              <button
-                type="button"
-                className="btn secondary"
-                onClick={handleCopyLink}
-                disabled={qrGenerating}
-              >
+            <button
+              type="button"
+              className={cn(
+                buttonClass({ variant: "primary", size: "sm", block: true }),
+                "justify-center"
+              )}
+              onClick={handleCopyLink}
+              disabled={qrGenerating}
+            >
+              <i className="fa-solid fa-copy" aria-hidden="true" />
+              <span>
                 {qrCopied
                   ? t("qr.copied") || "Ссылка скопирована"
                   : t("qr.copy") || "Скопировать ссылку"}
-              </button>
-              <button
-                type="button"
-                className="btn ghost"
-                onClick={handleCloseQr}
-              >
-                {closeLabel}
-              </button>
-            </div>
+              </span>
+            </button>
+            <button
+              type="button"
+              className={cn(
+                buttonClass({ variant: "ghost", size: "sm", block: true }),
+                "justify-center"
+              )}
+              onClick={handleCloseQr}
+            >
+              {closeLabel}
+            </button>
           </div>
         </div>
       ) : null}

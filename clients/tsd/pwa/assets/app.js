@@ -28644,6 +28644,9 @@ function useViewTransitionState(to, opts) {
 // src/components/AppLayout.jsx
 var import_react7 = __toESM(require_react(), 1);
 
+// src/context/I18nContext.jsx
+var import_react2 = __toESM(require_react(), 1);
+
 // src/context/AppContext.jsx
 var import_react = __toESM(require_react(), 1);
 
@@ -28680,13 +28683,16 @@ async function api(action, params = {}) {
 // src/lib/utils.js
 function esc(value) {
   if (value == null) return "";
-  return String(value).replace(/[&<>"']/g, (m) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;"
-  })[m]);
+  return String(value).replace(
+    /[&<>"']/g,
+    (m) => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;"
+    })[m]
+  );
 }
 function fmtNum(value, options = {}) {
   const v = Number(value ?? 0);
@@ -28716,7 +28722,12 @@ function unixToLocal(ts) {
   if (!ts) return "";
   const d = new Date(Number(ts) * 1e3);
   const pad = (n) => String(n).padStart(2, "0");
-  return `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()} ${pad(
+    d.getHours()
+  )}:${pad(d.getMinutes())}`;
+}
+function cn(...classes) {
+  return classes.flat().filter(Boolean).join(" ");
 }
 
 // src/context/AppContext.jsx
@@ -28758,7 +28769,6 @@ function useApp() {
 }
 
 // src/context/I18nContext.jsx
-var import_react2 = __toESM(require_react(), 1);
 var import_jsx_runtime2 = __toESM(require_jsx_runtime(), 1);
 var SUPPORTED = ["ru", "en", "uz"];
 var STORAGE_KEY = "tsd_locale";
@@ -28880,6 +28890,72 @@ function useI18n() {
   return ctx;
 }
 
+// src/lib/ui.js
+var BUTTON_VARIANTS = {
+  primary: "bg-slate-900 text-white hover:bg-slate-800 focus-visible:ring-slate-500 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-white/90",
+  secondary: "bg-slate-100 text-slate-900 hover:bg-slate-200 focus-visible:ring-slate-500 dark:bg-slate-800 dark:text-slate-100 dark:hover:bg-slate-700",
+  ghost: "border border-slate-300 text-slate-700 hover:bg-slate-100 focus-visible:ring-slate-400 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-700",
+  danger: "bg-rose-600 text-white hover:bg-rose-500 focus-visible:ring-rose-400",
+  subtle: "bg-slate-50 text-slate-700 hover:bg-slate-100 focus-visible:ring-slate-400 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+};
+var BUTTON_SIZES = {
+  md: "px-4 py-2 text-sm",
+  sm: "px-3 py-2 text-sm",
+  lg: "px-5 py-3 text-base",
+  icon: "h-10 w-10 p-0"
+};
+var BUTTON_BASE = "inline-flex items-center justify-center gap-2 rounded-xl font-semibold transition duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-offset-transparent disabled:cursor-not-allowed disabled:opacity-50";
+function buttonClass({
+  variant = "primary",
+  size = "md",
+  block = false
+} = {}) {
+  const variantClass = BUTTON_VARIANTS[variant] ?? BUTTON_VARIANTS.primary;
+  const sizeClass = BUTTON_SIZES[size] ?? BUTTON_SIZES.md;
+  return cn(BUTTON_BASE, variantClass, sizeClass, block && "w-full");
+}
+function iconButtonClass({ variant = "ghost" } = {}) {
+  return buttonClass({ variant, size: "icon" });
+}
+function mutedTextClass() {
+  return "text-sm text-slate-500 dark:text-slate-400";
+}
+function cardClass(extra) {
+  return cn(
+    "rounded-2xl border border-slate-200 bg-white/90 p-4 shadow-sm backdrop-blur dark:border-slate-700 dark:bg-slate-800/80 sm:p-6",
+    extra
+  );
+}
+function sectionClass(extra) {
+  return cn("flex flex-col gap-6", extra);
+}
+function listClass(extra) {
+  return cn("flex flex-col gap-4", extra);
+}
+function inputClass(extra) {
+  return cn(
+    "w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm transition focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-500 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-100",
+    extra
+  );
+}
+function labelClass(extra) {
+  return cn("text-sm font-medium text-slate-700 dark:text-slate-100", extra);
+}
+function badgeClass(extra) {
+  return cn(
+    "inline-flex items-center rounded-full border border-slate-300 bg-slate-100 px-2.5 py-1 text-xs font-semibold uppercase tracking-wide text-slate-700 dark:border-slate-600 dark:bg-slate-700 dark:text-slate-200",
+    extra
+  );
+}
+function toastClass(open, type = "success") {
+  const palette = type === "error" ? "bg-rose-600 text-white" : type === "info" ? "bg-blue-600 text-white" : "bg-emerald-600 text-white";
+  return cn(
+    "pointer-events-none fixed bottom-6 left-1/2 z-50 w-[min(420px,90vw)] -translate-x-1/2 rounded-xl px-4 py-3 text-sm font-medium shadow-lg transition duration-200",
+    palette,
+    open ? "opacity-100 translate-y-0" : "translate-y-4 opacity-0"
+  );
+}
+
 // src/components/Clock.jsx
 var import_react3 = __toESM(require_react(), 1);
 var import_jsx_runtime3 = __toESM(require_jsx_runtime(), 1);
@@ -28896,7 +28972,15 @@ function Clock() {
     const id = window.setInterval(() => setTime(formatTime(/* @__PURE__ */ new Date())), 1e3);
     return () => window.clearInterval(id);
   }, []);
-  return /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { id: "now", className: "time", "aria-live": "polite", children: time });
+  return /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+    "span",
+    {
+      id: "now",
+      className: "font-mono text-sm font-semibold text-slate-600 dark:text-slate-300",
+      "aria-live": "polite",
+      children: time
+    }
+  );
 }
 
 // src/hooks/usePWAInstall.js
@@ -28965,7 +29049,7 @@ function InstallButton({
     {
       id: "btn-install",
       type: "button",
-      className: "btn small",
+      className: buttonClass({ variant: "primary", size: "sm" }),
       onClick: handleClick,
       children: [
         /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("i", { className: "fa-solid fa-download", "aria-hidden": "true" }),
@@ -28974,26 +29058,39 @@ function InstallButton({
     }
   );
   if (variant === "floating") {
-    return /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "install-banner", role: "dialog", "aria-live": "polite", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "install-banner-body", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "install-banner-text", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("strong", { children: heading }),
-          message ? /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("p", { children: message }) : null
-        ] }),
-        button
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(
-        "button",
-        {
-          type: "button",
-          className: "install-banner-close",
-          onClick: () => onDismiss?.(),
-          "aria-label": closeLabel,
-          title: closeLabel,
-          children: /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("i", { className: "fa-solid fa-xmark", "aria-hidden": "true" })
-        }
-      )
-    ] });
+    return /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(
+      "div",
+      {
+        className: cardClass(
+          "fixed bottom-6 left-1/2 z-40 w-[min(520px,calc(100vw-32px))] -translate-x-1/2 space-y-4 shadow-xl"
+        ),
+        role: "dialog",
+        "aria-live": "polite",
+        children: /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "flex flex-col gap-4 sm:flex-row sm:items-center sm:gap-6", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "flex-1 space-y-1", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("p", { className: "text-sm font-semibold text-slate-900 dark:text-slate-50", children: heading }),
+            message ? /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("p", { className: cn(mutedTextClass(), "leading-relaxed"), children: message }) : null
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime4.jsxs)("div", { className: "flex shrink-0 items-center gap-3", children: [
+            button,
+            /* @__PURE__ */ (0, import_jsx_runtime4.jsx)(
+              "button",
+              {
+                type: "button",
+                className: cn(
+                  iconButtonClass({ variant: "ghost" }),
+                  "text-slate-500 dark:text-slate-300"
+                ),
+                onClick: () => onDismiss?.(),
+                "aria-label": closeLabel,
+                title: closeLabel,
+                children: /* @__PURE__ */ (0, import_jsx_runtime4.jsx)("i", { className: "fa-solid fa-xmark", "aria-hidden": "true" })
+              }
+            )
+          ] })
+        ] })
+      }
+    );
   }
   return button;
 }
@@ -29008,13 +29105,15 @@ var OPTIONS = [
 ];
 function LanguageSwitcher() {
   const { locale, setLocale } = useI18n();
-  return /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { className: "lang-switcher", children: [
+  return /* @__PURE__ */ (0, import_jsx_runtime5.jsxs)("div", { className: "flex items-center", children: [
     /* @__PURE__ */ (0, import_jsx_runtime5.jsx)("label", { className: "sr-only", htmlFor: "lang-select", children: "Language" }),
     /* @__PURE__ */ (0, import_jsx_runtime5.jsx)(
       "select",
       {
         id: "lang-select",
-        className: "lang-select",
+        className: inputClass(
+          "h-10 w-[84px] min-w-[84px] uppercase font-semibold tracking-wide"
+        ),
         value: locale,
         onChange: (event) => setLocale(event.target.value),
         "aria-label": "Language",
@@ -29034,7 +29133,7 @@ function NavBackButton({ onClick, label }) {
     {
       id: "nav-back",
       type: "button",
-      className: "btn icon clear",
+      className: iconButtonClass({ variant: "ghost" }),
       "aria-label": label || "\u041D\u0430\u0437\u0430\u0434",
       title: label || "\u041D\u0430\u0437\u0430\u0434",
       onClick,
@@ -29146,16 +29245,16 @@ function AppLayout() {
       setQrError(t("qr.copy_failed") || "\u041D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0441\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0441\u0441\u044B\u043B\u043A\u0443");
     }
   }, [currentUrl, t]);
-  return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "app-shell", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("header", { className: "appbar", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "left", children: [
+  return /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "relative min-h-screen bg-slate-100 text-slate-900 transition dark:bg-slate-900 dark:text-slate-100", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("header", { className: "sticky top-0 z-40 mx-auto mt-4 flex w-full max-w-5xl items-center justify-between gap-3 rounded-3xl border border-slate-200 bg-white/85 px-4 py-3 shadow-sm backdrop-blur dark:border-slate-700 dark:bg-slate-900/80 sm:px-6", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "flex items-center gap-3", children: [
         showBack ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(NavBackButton, { onClick: handleBack, label: backLabel }) : null,
         /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(LanguageSwitcher, {}),
         /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
           "button",
           {
             type: "button",
-            className: "btn icon",
+            className: iconButtonClass({ variant: "ghost" }),
             onClick: handleOpenQr,
             "aria-label": t("qr.share_button") || "\u041F\u043E\u043A\u0430\u0437\u0430\u0442\u044C QR-\u043A\u043E\u0434 \u0442\u0435\u043A\u0443\u0449\u0435\u0439 \u0441\u0442\u0440\u0430\u043D\u0438\u0446\u044B",
             title: t("qr.share_button") || "\u041F\u043E\u043A\u0430\u0437\u0430\u0442\u044C QR-\u043A\u043E\u0434 \u0442\u0435\u043A\u0443\u0449\u0435\u0439 \u0441\u0442\u0440\u0430\u043D\u0438\u0446\u044B",
@@ -29163,12 +29262,12 @@ function AppLayout() {
           }
         )
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "right", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "flex items-center gap-3", children: [
         /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(Clock, {}),
-        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { id: "regos-login" })
+        /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { id: "regos-login", className: "hidden md:block" })
       ] })
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("main", { className: "container content", children: /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "card", children: /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(Outlet, {}) }) }),
+    /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("main", { className: "mx-auto mt-6 w-full max-w-5xl px-4 pb-32 sm:px-6", children: /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: cardClass("min-h-[60vh]"), children: /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(Outlet, {}) }) }),
     installDismissed ? null : /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
       InstallButton,
       {
@@ -29183,25 +29282,34 @@ function AppLayout() {
     qrOpen ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
       "div",
       {
-        className: "modal-backdrop",
+        className: "fixed inset-0 z-50 flex items-center justify-center bg-slate-900/70 px-4 py-6",
         role: "presentation",
         onClick: handleCloseQr,
         children: /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(
           "div",
           {
-            className: "modal-card",
+            className: cardClass(
+              "relative w-full max-w-sm space-y-5 p-6 shadow-xl"
+            ),
             role: "dialog",
             "aria-modal": "true",
             "aria-labelledby": "qr-modal-title",
             onClick: (event) => event.stopPropagation(),
             children: [
-              /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "row qr-modal-header", children: [
-                /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("h2", { id: "qr-modal-title", children: t("qr.share_title") || "\u0421\u043A\u0430\u043D\u0438\u0440\u0443\u0439\u0442\u0435 \u043D\u0430 \u0434\u0440\u0443\u0433\u043E\u043C \u0443\u0441\u0442\u0440\u043E\u0439\u0441\u0442\u0432\u0435" }),
+              /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "flex items-start justify-between gap-3", children: [
+                /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+                  "h2",
+                  {
+                    id: "qr-modal-title",
+                    className: "text-lg font-semibold text-slate-900 dark:text-slate-50",
+                    children: t("qr.share_title") || "\u0421\u043A\u0430\u043D\u0438\u0440\u0443\u0439\u0442\u0435 \u043D\u0430 \u0434\u0440\u0443\u0433\u043E\u043C \u0443\u0441\u0442\u0440\u043E\u0439\u0441\u0442\u0432\u0435"
+                  }
+                ),
                 /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
                   "button",
                   {
                     type: "button",
-                    className: "btn icon",
+                    className: iconButtonClass({ variant: "ghost" }),
                     onClick: handleCloseQr,
                     "aria-label": closeLabel,
                     title: closeLabel,
@@ -29209,35 +29317,50 @@ function AppLayout() {
                   }
                 )
               ] }),
-              /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "qr-modal-body", children: qrGenerating ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("p", { className: "muted", children: t("qr.generating") || "\u0413\u043E\u0442\u043E\u0432\u0438\u043C QR-\u043A\u043E\u0434..." }) : qrError ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("p", { className: "modal-error", children: qrError }) : /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+              /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("div", { className: "flex min-h-[220px] items-center justify-center overflow-hidden rounded-2xl border border-dashed border-slate-200 bg-slate-50 p-4 dark:border-slate-600 dark:bg-slate-800", children: qrGenerating ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("p", { className: mutedTextClass(), children: t("qr.generating") || "\u0413\u043E\u0442\u043E\u0432\u0438\u043C QR-\u043A\u043E\u0434..." }) : qrError ? /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("p", { className: "text-sm font-medium text-rose-500", children: qrError }) : /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
                 "img",
                 {
                   src: qrImage,
-                  alt: t("qr.image_alt") || "QR-\u043A\u043E\u0434 \u0434\u043B\u044F \u043E\u0442\u043A\u0440\u044B\u0442\u0438\u044F \u044D\u0442\u043E\u0439 \u0441\u0442\u0440\u0430\u043D\u0438\u0446\u044B \u043D\u0430 \u0434\u0440\u0443\u0433\u043E\u043C \u0443\u0441\u0442\u0440\u043E\u0439\u0441\u0442\u0432\u0435"
+                  alt: t("qr.image_alt") || "QR-\u043A\u043E\u0434 \u0434\u043B\u044F \u043E\u0442\u043A\u0440\u044B\u0442\u0438\u044F \u044D\u0442\u043E\u0439 \u0441\u0442\u0440\u0430\u043D\u0438\u0446\u044B \u043D\u0430 \u0434\u0440\u0443\u0433\u043E\u043C \u0443\u0441\u0442\u0440\u043E\u0439\u0441\u0442\u0432\u0435",
+                  className: "h-auto w-full"
                 }
               ) }),
-              /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("p", { className: "qr-url", "aria-live": "polite", children: currentUrl }),
-              /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)("div", { className: "modal-actions", children: [
-                /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
-                  "button",
-                  {
-                    type: "button",
-                    className: "btn secondary",
-                    onClick: handleCopyLink,
-                    disabled: qrGenerating,
-                    children: qrCopied ? t("qr.copied") || "\u0421\u0441\u044B\u043B\u043A\u0430 \u0441\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u0430" : t("qr.copy") || "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0441\u0441\u044B\u043B\u043A\u0443"
-                  }
-                ),
-                /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
-                  "button",
-                  {
-                    type: "button",
-                    className: "btn ghost",
-                    onClick: handleCloseQr,
-                    children: closeLabel
-                  }
-                )
-              ] })
+              /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+                "p",
+                {
+                  className: cn(mutedTextClass(), "break-words text-center"),
+                  "aria-live": "polite",
+                  children: currentUrl
+                }
+              ),
+              /* @__PURE__ */ (0, import_jsx_runtime7.jsxs)(
+                "button",
+                {
+                  type: "button",
+                  className: cn(
+                    buttonClass({ variant: "primary", size: "sm", block: true }),
+                    "justify-center"
+                  ),
+                  onClick: handleCopyLink,
+                  disabled: qrGenerating,
+                  children: [
+                    /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("i", { className: "fa-solid fa-copy", "aria-hidden": "true" }),
+                    /* @__PURE__ */ (0, import_jsx_runtime7.jsx)("span", { children: qrCopied ? t("qr.copied") || "\u0421\u0441\u044B\u043B\u043A\u0430 \u0441\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u043D\u0430" : t("qr.copy") || "\u0421\u043A\u043E\u043F\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u0441\u0441\u044B\u043B\u043A\u0443" })
+                  ]
+                }
+              ),
+              /* @__PURE__ */ (0, import_jsx_runtime7.jsx)(
+                "button",
+                {
+                  type: "button",
+                  className: cn(
+                    buttonClass({ variant: "ghost", size: "sm", block: true }),
+                    "justify-center"
+                  ),
+                  onClick: handleCloseQr,
+                  children: closeLabel
+                }
+              )
             ]
           }
         )
@@ -29283,7 +29406,7 @@ function ToastProvider({ children }) {
       "div",
       {
         id: "toast",
-        className: `toast${toast ? " show" : ""}${toast?.type === "error" ? " error" : ""}`,
+        className: toastClass(Boolean(toast), toast?.type),
         role: "status",
         "aria-live": "polite",
         children: toast?.message || ""
@@ -29314,45 +29437,60 @@ function HomePage() {
   const soonLabelRaw = t("soon");
   const soonLabel = soonLabelRaw === "soon" ? "\u0421\u043A\u043E\u0440\u043E" : soonLabelRaw || "\u0421\u043A\u043E\u0440\u043E";
   const soon = () => showToast(soonLabel, { duration: 1500, type: "info" });
-  return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("section", { className: "stack", id: "home", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("h1", { id: "home-title", children: t("main_menu") === "main_menu" ? "\u0413\u043B\u0430\u0432\u043D\u043E\u0435 \u043C\u0435\u043D\u044E" : t("main_menu") || "\u0413\u043B\u0430\u0432\u043D\u043E\u0435 \u043C\u0435\u043D\u044E" }),
-    /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "stack", children: [
+  return /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("section", { className: sectionClass(), id: "home", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
+      "h1",
+      {
+        id: "home-title",
+        className: "text-2xl font-semibold text-slate-900 dark:text-slate-50",
+        children: t("main_menu") === "main_menu" ? "\u0413\u043B\u0430\u0432\u043D\u043E\u0435 \u043C\u0435\u043D\u044E" : t("main_menu") || "\u0413\u043B\u0430\u0432\u043D\u043E\u0435 \u043C\u0435\u043D\u044E"
+      }
+    ),
+    /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "flex flex-col gap-4", children: [
       /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
         "button",
         {
           id: "btn-doc-purchase",
           type: "button",
-          className: "btn block",
+          className: buttonClass({
+            variant: "primary",
+            size: "lg",
+            block: true
+          }),
           onClick: () => navigate("/docs"),
           children: /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { id: "btn-doc-purchase-txt", children: t("doc_purchase") === "doc_purchase" ? "\u041F\u043E\u0441\u0442\u0443\u043F\u043B\u0435\u043D\u0438\u0435 \u043E\u0442 \u043A\u043E\u043D\u0442\u0440\u0430\u0433\u0435\u043D\u0442\u0430" : t("doc_purchase") || "\u041F\u043E\u0441\u0442\u0443\u043F\u043B\u0435\u043D\u0438\u0435 \u043E\u0442 \u043A\u043E\u043D\u0442\u0440\u0430\u0433\u0435\u043D\u0442\u0430" })
         }
       ),
-      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
+      ["doc_sales", "doc_inventory"].map((key) => /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
         "button",
         {
-          id: "btn-doc-sales",
+          id: key === "doc_sales" ? "btn-doc-sales" : "btn-doc-inventory",
           type: "button",
-          className: "btn block ghost",
+          className: buttonClass({
+            variant: "ghost",
+            size: "lg",
+            block: true
+          }),
           onClick: soon,
-          children: /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "row", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { id: "btn-doc-sales-txt", children: t("doc_sales") === "doc_sales" ? "\u041E\u0442\u0433\u0440\u0443\u0437\u043A\u0430 \u043A\u043E\u043D\u0442\u0440\u0430\u0433\u0435\u043D\u0442\u0443" : t("doc_sales") || "\u041E\u0442\u0433\u0440\u0443\u0437\u043A\u0430 \u043A\u043E\u043D\u0442\u0440\u0430\u0433\u0435\u043D\u0442\u0443" }),
-            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "pill", id: "pill-sales", children: soonLabel })
+          children: /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "flex w-full items-center justify-between gap-3", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { id: `${key}-txt`, className: "text-left", children: t(key) === key ? key === "doc_sales" ? "\u041E\u0442\u0433\u0440\u0443\u0437\u043A\u0430 \u043A\u043E\u043D\u0442\u0440\u0430\u0433\u0435\u043D\u0442\u0443" : "\u0418\u043D\u0432\u0435\u043D\u0442\u0430\u0440\u0438\u0437\u0430\u0446\u0438\u044F" : t(key) || (key === "doc_sales" ? "\u041E\u0442\u0433\u0440\u0443\u0437\u043A\u0430 \u043A\u043E\u043D\u0442\u0440\u0430\u0433\u0435\u043D\u0442\u0443" : "\u0418\u043D\u0432\u0435\u043D\u0442\u0430\u0440\u0438\u0437\u0430\u0446\u0438\u044F") }),
+            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
+              "span",
+              {
+                className: cn(
+                  badgeClass(
+                    "bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200"
+                  ),
+                  "uppercase"
+                ),
+                id: key === "doc_sales" ? "pill-sales" : "pill-inventory",
+                children: soonLabel
+              }
+            )
           ] })
-        }
-      ),
-      /* @__PURE__ */ (0, import_jsx_runtime9.jsx)(
-        "button",
-        {
-          id: "btn-doc-inventory",
-          type: "button",
-          className: "btn block ghost",
-          onClick: soon,
-          children: /* @__PURE__ */ (0, import_jsx_runtime9.jsxs)("div", { className: "row", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { id: "btn-doc-inventory-txt", children: t("doc_inventory") === "doc_inventory" ? "\u0418\u043D\u0432\u0435\u043D\u0442\u0430\u0440\u0438\u0437\u0430\u0446\u0438\u044F" : t("doc_inventory") || "\u0418\u043D\u0432\u0435\u043D\u0442\u0430\u0440\u0438\u0437\u0430\u0446\u0438\u044F" }),
-            /* @__PURE__ */ (0, import_jsx_runtime9.jsx)("span", { className: "pill", id: "pill-inventory", children: soonLabel })
-          ] })
-        }
-      )
+        },
+        key
+      ))
     ] })
   ] });
 }
@@ -29485,45 +29623,61 @@ function DocsPage() {
     const value = t("nav.next");
     return value === "nav.next" ? "\u0412\u043F\u0435\u0440\u0451\u0434" : value;
   }, [t]);
-  return /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("section", { className: "stack", id: "docs", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { className: "row row-start", children: /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("h1", { id: "docs-title", children: t("docs.title") || "\u0414\u043E\u043A\u0443\u043C\u0435\u043D\u0442\u044B \u0437\u0430\u043A\u0443\u043F\u043A\u0438" }) }),
-    /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("form", { className: "input-row", onSubmit: handleSearchSubmit, role: "search", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(
-        "input",
-        {
-          id: "search-docs",
-          type: "search",
-          value: inputValue,
-          placeholder: t("docs.search.placeholder") || "\u041F\u043E\u0438\u0441\u043A \u043F\u043E \u043D\u043E\u043C\u0435\u0440\u0443 / \u043F\u043E\u0441\u0442\u0430\u0432\u0449\u0438\u043A\u0443...",
-          onChange: (event) => setInputValue(event.target.value)
-        }
-      ),
-      /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(
-        "button",
-        {
-          id: "btn-docs-refresh",
-          type: "button",
-          className: "btn icon ghost",
-          onClick: fetchDocs,
-          "aria-label": t("docs.refresh") || "\u041E\u0431\u043D\u043E\u0432\u0438\u0442\u044C",
-          title: t("docs.refresh") || "\u041E\u0431\u043D\u043E\u0432\u0438\u0442\u044C",
-          children: /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("i", { className: "fa-solid fa-rotate-right", "aria-hidden": "true" })
-        }
-      )
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { className: "row", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("span", { id: "page-indicator", className: "muted", children: [
+  return /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("section", { className: sectionClass(), id: "docs", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { className: "flex items-center gap-3", children: /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(
+      "h1",
+      {
+        className: "text-2xl font-semibold text-slate-900 dark:text-slate-50",
+        id: "docs-title",
+        children: t("docs.title") || "\u0414\u043E\u043A\u0443\u043C\u0435\u043D\u0442\u044B \u0437\u0430\u043A\u0443\u043F\u043A\u0438"
+      }
+    ) }),
+    /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)(
+      "form",
+      {
+        className: "flex flex-col gap-3 sm:flex-row sm:items-center",
+        onSubmit: handleSearchSubmit,
+        role: "search",
+        children: [
+          /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(
+            "input",
+            {
+              id: "search-docs",
+              type: "search",
+              value: inputValue,
+              placeholder: t("docs.search.placeholder") || "\u041F\u043E\u0438\u0441\u043A \u043F\u043E \u043D\u043E\u043C\u0435\u0440\u0443 / \u043F\u043E\u0441\u0442\u0430\u0432\u0449\u0438\u043A\u0443...",
+              onChange: (event) => setInputValue(event.target.value),
+              className: inputClass("flex-1")
+            }
+          ),
+          /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(
+            "button",
+            {
+              id: "btn-docs-refresh",
+              type: "button",
+              className: iconButtonClass({ variant: "ghost" }),
+              onClick: fetchDocs,
+              "aria-label": t("docs.refresh") || "\u041E\u0431\u043D\u043E\u0432\u0438\u0442\u044C",
+              title: t("docs.refresh") || "\u041E\u0431\u043D\u043E\u0432\u0438\u0442\u044C",
+              children: /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("i", { className: "fa-solid fa-rotate-right", "aria-hidden": "true" })
+            }
+          )
+        ]
+      }
+    ),
+    /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { className: "flex flex-wrap items-center justify-between gap-3", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("span", { id: "page-indicator", className: mutedTextClass(), children: [
         page,
         " / ",
         totalPages
       ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { className: "cluster", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { className: "flex items-center gap-2", children: [
         /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(
           "button",
           {
             id: "prev-page",
             type: "button",
-            className: "btn small ghost",
+            className: buttonClass({ variant: "ghost", size: "sm" }),
             onClick: handlePrev,
             disabled: page <= 1,
             children: backLabel
@@ -29534,7 +29688,7 @@ function DocsPage() {
           {
             id: "next-page",
             type: "button",
-            className: "btn small ghost",
+            className: buttonClass({ variant: "ghost", size: "sm" }),
             onClick: handleNext,
             disabled: page >= totalPages,
             children: nextLabel
@@ -29542,26 +29696,28 @@ function DocsPage() {
         )
       ] })
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { id: "docs-list", className: "list", "aria-live": "polite", children: [
-      loading && /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { className: "muted", children: t("common.loading") || "\u0417\u0430\u0433\u0440\u0443\u0437\u043A\u0430..." }),
-      !loading && error && /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { className: "muted", children: String(error.message || error) }),
-      !loading && !error && items.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { className: "muted", children: nothingLabel }),
-      !loading && !error && items.map((doc) => /* @__PURE__ */ (0, import_jsx_runtime10.jsx)(
+    /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { id: "docs-list", className: listClass(), "aria-live": "polite", children: [
+      loading && /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { className: mutedTextClass(), children: t("common.loading") || "\u0417\u0430\u0433\u0440\u0443\u0437\u043A\u0430..." }),
+      !loading && error && /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { className: mutedTextClass(), children: String(error.message || error) }),
+      !loading && !error && items.length === 0 && /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("div", { className: mutedTextClass(), children: nothingLabel }),
+      !loading && !error && items.map((doc) => /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)(
         "button",
         {
           type: "button",
-          className: "item",
+          className: cardClass(
+            "flex items-start justify-between gap-4 text-left transition hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-500 focus-visible:ring-offset-2"
+          ),
           onClick: () => navigate(`/doc/${doc.id}`),
-          children: /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { className: "row", children: [
-            /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { className: "stack muted", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("strong", { children: doc.code || doc.id }),
-              /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: "muted truncate", children: doc.partner?.name || "" })
+          children: [
+            /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { className: "flex min-w-0 flex-col gap-1", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("strong", { className: "text-base font-semibold text-slate-900 dark:text-slate-50", children: doc.code || doc.id }),
+              /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: cn(mutedTextClass(), "truncate"), children: doc.partner?.name || "" })
             ] }),
-            /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { className: "stack text-right muted", children: [
-              /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { children: unixToLocal2(doc.date) }),
-              /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { children: statusLabel(doc) })
+            /* @__PURE__ */ (0, import_jsx_runtime10.jsxs)("div", { className: "flex shrink-0 flex-col items-end gap-1 text-right", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: mutedTextClass(), children: unixToLocal2(doc.date) }),
+              /* @__PURE__ */ (0, import_jsx_runtime10.jsx)("span", { className: mutedTextClass(), children: statusLabel(doc) })
             ] })
-          ] })
+          ]
         },
         doc.id
       ))
@@ -29572,6 +29728,9 @@ function DocsPage() {
 // src/pages/DocPage.jsx
 var import_react12 = __toESM(require_react(), 1);
 var import_jsx_runtime11 = __toESM(require_jsx_runtime(), 1);
+function MetaSeparator() {
+  return /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { "aria-hidden": "true", className: "text-slate-300 dark:text-slate-600", children: "\u2022" });
+}
 function OperationRow({ op, onDelete, onSave }) {
   const { t, fmt } = useI18n();
   const { toNumber: toNumber2 } = useApp();
@@ -29592,9 +29751,10 @@ function OperationRow({ op, onDelete, onSave }) {
     });
   }, [op]);
   const item = op.item || {};
-  const barcode = item.base_barcode || (item.barcode_list ? String(item.barcode_list).split(",")[0]?.trim() : "");
+  const barcode = item.base_barcode || (item.barcode_list ? String(item.barcode_list).split(",")[0]?.trim() : "") || item.code || "";
   const code = (item.code ?? "").toString().padStart(6, "0");
   const unitName = item.unit?.name || t("unit.pcs") || "\u0448\u0442";
+  const priceValue = toNumber2(op.price ?? 0);
   const handleFieldChange = (field) => (event) => {
     setForm((prev) => ({ ...prev, [field]: event.target.value }));
   };
@@ -29619,139 +29779,155 @@ function OperationRow({ op, onDelete, onSave }) {
       setEditing(false);
     }
   };
-  return /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "item compact", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: `row top${editing ? " hidden" : ""}`, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "info", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("strong", { className: "name", children: item.name || "" }),
-        /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "sub", children: [
-          /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "muted text-small code", children: code }),
-          /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "dot" }),
-          /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "muted text-small barcode", children: barcode }),
-          op.description ? /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)(import_jsx_runtime11.Fragment, { children: [
-            /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "dot" }),
-            /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "muted text-small description", children: op.description })
-          ] }) : null
+  return /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)(
+    "div",
+    {
+      className: cardClass(
+        "space-y-4 transition hover:-translate-y-0.5 hover:shadow-md"
+      ),
+      children: [
+        !editing && /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)(import_jsx_runtime11.Fragment, { children: [
+          /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "flex items-start justify-between gap-4", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "flex min-w-0 flex-col gap-2", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("strong", { className: "truncate text-base font-semibold text-slate-900 dark:text-slate-50", children: item.name || "" }),
+              /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "flex flex-wrap items-center gap-2 text-sm text-slate-600 dark:text-slate-300", children: [
+                /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "font-semibold tracking-wide", children: code }),
+                barcode ? /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)(import_jsx_runtime11.Fragment, { children: [
+                  /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(MetaSeparator, {}),
+                  /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "truncate", children: barcode })
+                ] }) : null,
+                op.description ? /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)(import_jsx_runtime11.Fragment, { children: [
+                  /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(MetaSeparator, {}),
+                  /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "truncate", children: op.description })
+                ] }) : null
+              ] })
+            ] }),
+            /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "flex items-center gap-2", children: [
+              /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
+                "button",
+                {
+                  type: "button",
+                  className: cn(iconButtonClass({ variant: "ghost" }), "op-edit"),
+                  onClick: () => setEditing(true),
+                  "aria-label": t("op.edit") || "\u0420\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C",
+                  title: t("op.edit") || "\u0420\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C",
+                  children: /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("i", { className: "fa-solid fa-pen", "aria-hidden": "true" })
+                }
+              ),
+              /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
+                "button",
+                {
+                  type: "button",
+                  className: cn(iconButtonClass({ variant: "ghost" }), "op-del"),
+                  onClick: () => onDelete(op.id),
+                  "aria-label": t("op.delete") || "\u0423\u0434\u0430\u043B\u0438\u0442\u044C",
+                  title: t("op.delete") || "\u0423\u0434\u0430\u043B\u0438\u0442\u044C",
+                  children: /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("i", { className: "fa-solid fa-trash", "aria-hidden": "true" })
+                }
+              )
+            ] })
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "flex flex-wrap items-center gap-2 text-sm font-medium text-slate-600 dark:text-slate-300", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("span", { children: [
+              /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("strong", { className: "text-slate-900 dark:text-slate-100", children: fmt.number(op.quantity) }),
+              " ",
+              unitName
+            ] }),
+            /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(MetaSeparator, {}),
+            /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { children: fmt.money(op.cost) }),
+            /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(MetaSeparator, {}),
+            /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { children: fmt.money(priceValue) })
+          ] })
+        ] }),
+        editing && /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "flex flex-col gap-4", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "flex flex-col gap-2", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("label", { className: labelClass(), htmlFor: `qty-${op.id}`, children: t("op.qty") || "\u041A\u043E\u043B\u0438\u0447\u0435\u0441\u0442\u0432\u043E" }),
+            /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
+              "input",
+              {
+                id: `qty-${op.id}`,
+                type: "number",
+                inputMode: "decimal",
+                value: form.quantity,
+                onChange: handleFieldChange("quantity"),
+                className: inputClass()
+              }
+            )
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "flex flex-col gap-2", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("label", { className: labelClass(), htmlFor: `cost-${op.id}`, children: t("op.cost") || "\u0421\u0442\u043E\u0438\u043C\u043E\u0441\u0442\u044C" }),
+            /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
+              "input",
+              {
+                id: `cost-${op.id}`,
+                type: "number",
+                inputMode: "decimal",
+                value: form.cost,
+                onChange: handleFieldChange("cost"),
+                className: inputClass()
+              }
+            )
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "flex flex-col gap-2", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("label", { className: labelClass(), htmlFor: `price-${op.id}`, children: t("op.price") || "\u0426\u0435\u043D\u0430" }),
+            /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
+              "input",
+              {
+                id: `price-${op.id}`,
+                type: "number",
+                inputMode: "decimal",
+                value: form.price,
+                onChange: handleFieldChange("price"),
+                className: inputClass()
+              }
+            )
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "flex flex-col gap-2", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("label", { className: labelClass(), htmlFor: `description-${op.id}`, children: t("op.description") || "\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435" }),
+            /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
+              "input",
+              {
+                id: `description-${op.id}`,
+                type: "text",
+                value: form.description,
+                onChange: handleFieldChange("description"),
+                className: inputClass()
+              }
+            )
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "flex flex-wrap gap-3", id: `op-actions-${op.id}`, children: [
+            /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
+              "button",
+              {
+                type: "button",
+                className: buttonClass({ variant: "primary", size: "sm" }),
+                onClick: handleSave,
+                disabled: saving,
+                children: saving ? t("op.saving") || "\u0421\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u0438\u0435..." : t("common.save") || "\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C"
+              }
+            ),
+            /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
+              "button",
+              {
+                type: "button",
+                className: buttonClass({ variant: "ghost", size: "sm" }),
+                onClick: () => setEditing(false),
+                disabled: saving,
+                children: t("common.cancel") || "\u041E\u0442\u043C\u0435\u043D\u0430"
+              }
+            )
+          ] })
         ] })
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "actions", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
-          "button",
-          {
-            type: "button",
-            className: "btn icon clear op-edit",
-            onClick: () => setEditing(true),
-            "aria-label": t("op.edit") || "\u0420\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C",
-            title: t("op.edit") || "\u0420\u0435\u0434\u0430\u043A\u0442\u0438\u0440\u043E\u0432\u0430\u0442\u044C",
-            children: /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("i", { className: "fa-solid fa-pen", "aria-hidden": "true" })
-          }
-        ),
-        /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
-          "button",
-          {
-            type: "button",
-            className: "btn icon clear op-del",
-            onClick: () => onDelete(op.id),
-            "aria-label": t("op.delete") || "\u0423\u0434\u0430\u043B\u0438\u0442\u044C",
-            title: t("op.delete") || "\u0423\u0434\u0430\u043B\u0438\u0442\u044C",
-            children: /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("i", { className: "fa-solid fa-trash", "aria-hidden": "true" })
-          }
-        )
-      ] })
-    ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: `meta bottom${editing ? " hidden" : ""}`, children: [
-      /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("span", { className: "qty", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("strong", { children: fmt.number(op.quantity) }),
-        " ",
-        unitName
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "dot" }),
-      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "cost", children: fmt.money(op.cost) }),
-      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "dot" }),
-      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "price", children: fmt.money(op.price ?? 0) })
-    ] }),
-    editing && /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "form-vert", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { children: [
-        /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("label", { htmlFor: `qty-${op.id}`, children: t("op.qty") || "\u041A\u043E\u043B\u0438\u0447\u0435\u0441\u0442\u0432\u043E" }),
-        /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
-          "input",
-          {
-            id: `qty-${op.id}`,
-            type: "number",
-            inputMode: "decimal",
-            value: form.quantity,
-            onChange: handleFieldChange("quantity")
-          }
-        )
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { children: [
-        /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("label", { htmlFor: `cost-${op.id}`, children: t("op.cost") || "\u0421\u0442\u043E\u0438\u043C\u043E\u0441\u0442\u044C" }),
-        /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
-          "input",
-          {
-            id: `cost-${op.id}`,
-            type: "number",
-            inputMode: "decimal",
-            value: form.cost,
-            onChange: handleFieldChange("cost")
-          }
-        )
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { children: [
-        /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("label", { htmlFor: `price-${op.id}`, children: t("op.price") || "\u0426\u0435\u043D\u0430" }),
-        /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
-          "input",
-          {
-            id: `price-${op.id}`,
-            type: "number",
-            inputMode: "decimal",
-            value: form.price,
-            onChange: handleFieldChange("price")
-          }
-        )
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { children: [
-        /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("label", { htmlFor: `description-${op.id}`, children: t("op.description") || "\u041E\u043F\u0438\u0441\u0430\u043D\u0438\u0435" }),
-        /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
-          "input",
-          {
-            id: `description-${op.id}`,
-            type: "text",
-            value: form.description,
-            onChange: handleFieldChange("description")
-          }
-        )
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "page-actions", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
-          "button",
-          {
-            type: "button",
-            className: "btn small",
-            onClick: handleSave,
-            disabled: saving,
-            children: saving ? t("op.saving") || "\u0421\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u0438\u0435..." : t("common.save") || "\u0421\u043E\u0445\u0440\u0430\u043D\u0438\u0442\u044C"
-          }
-        ),
-        /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
-          "button",
-          {
-            type: "button",
-            className: "btn small ghost",
-            onClick: () => setEditing(false),
-            disabled: saving,
-            children: t("common.cancel") || "\u041E\u0442\u043C\u0435\u043D\u0430"
-          }
-        )
-      ] })
-    ] })
-  ] }, op.id);
+      ]
+    }
+  );
 }
 function DocPage() {
   const { id } = useParams();
-  const { api: api2, unixToLocal: unixToLocal2, setAppTitle: setAppTitle2 } = useApp();
-  const { t, locale, fmt } = useI18n();
-  const { showToast } = useToast();
   const navigate = useNavigate();
+  const { api: api2, unixToLocal: unixToLocal2, setAppTitle: setAppTitle2 } = useApp();
+  const { t, fmt, locale } = useI18n();
+  const { showToast } = useToast();
   const [doc, setDoc] = (0, import_react12.useState)(null);
   const [operations, setOperations] = (0, import_react12.useState)([]);
   const [loading, setLoading] = (0, import_react12.useState)(true);
@@ -29763,15 +29939,11 @@ function DocPage() {
       setError(null);
       try {
         const { data } = await api2("purchase_get", { doc_id: id });
-        const docData = data?.result?.doc || {};
-        let ops = data?.result?.operations;
-        if (!Array.isArray(ops)) {
-          const opsResponse = await api2("purchase_ops_get", { doc_id: id });
-          ops = opsResponse?.data?.result?.items || [];
-        }
+        const docData = data?.result?.doc || null;
+        const ops = data?.result?.operations || [];
         if (!cancelled) {
           setDoc(docData);
-          setOperations(ops);
+          setOperations(Array.isArray(ops) ? ops : []);
         }
       } catch (err) {
         if (!cancelled) {
@@ -29790,11 +29962,13 @@ function DocPage() {
       cancelled = true;
     };
   }, [api2, id]);
-  (0, import_react12.useEffect)(() => {
+  const docTitle = (0, import_react12.useMemo)(() => {
     const prefix = t("doc.title_prefix") || "\u0414\u043E\u043A\u0443\u043C\u0435\u043D\u0442";
-    const code = doc?.code || id;
-    setAppTitle2(`${prefix} ${code}`);
-  }, [doc, id, locale, setAppTitle2, t]);
+    return `${prefix} ${doc?.code || id}`;
+  }, [doc, id, t]);
+  (0, import_react12.useEffect)(() => {
+    setAppTitle2(docTitle);
+  }, [docTitle, locale, setAppTitle2]);
   const handleDelete = async (opId) => {
     const question = t("confirm.delete_op") || "\u0423\u0434\u0430\u043B\u0438\u0442\u044C \u043E\u043F\u0435\u0440\u0430\u0446\u0438\u044E?";
     if (!window.confirm(question)) return;
@@ -29872,69 +30046,143 @@ function DocPage() {
     const fallback = t("nav.back");
     return fallback === "nav.back" ? "\u041D\u0430\u0437\u0430\u0434" : fallback;
   }, [t]);
+  const addOperationLabel = (0, import_react12.useMemo)(() => {
+    const value = t("doc.add_op");
+    return value === "doc.add_op" ? "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C" : value;
+  }, [t]);
+  const nothingLabel = (0, import_react12.useMemo)(() => {
+    const value = t("doc.no_ops") || t("common.nothing");
+    return value || "\u041E\u043F\u0435\u0440\u0430\u0446\u0438\u0439 \u0435\u0449\u0451 \u043D\u0435\u0442";
+  }, [t]);
+  const metaSegments = (0, import_react12.useMemo)(() => {
+    if (!doc) return [];
+    const currency = doc.currency?.code_chr || "UZS";
+    return [
+      doc.date ? unixToLocal2(doc.date) : null,
+      doc.partner?.name || null,
+      fmt.money(doc.amount ?? 0, currency)
+    ].filter(Boolean);
+  }, [doc, fmt, unixToLocal2]);
   const goToDocs = (0, import_react12.useCallback)(() => {
     navigate("/docs", { replace: true });
   }, [navigate]);
+  const goToNewOperation = (0, import_react12.useCallback)(() => {
+    navigate(`/doc/${id}/op/new`);
+  }, [id, navigate]);
   if (loading) {
-    return /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("section", { className: "stack", id: "doc", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "row row-start", children: /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("h1", { id: "doc-title", children: [
-        t("doc.title_prefix") || "\u0414\u043E\u043A\u0443\u043C\u0435\u043D\u0442",
-        " ",
-        id
-      ] }) }),
-      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "muted", children: t("common.loading") || "\u0417\u0430\u0433\u0440\u0443\u0437\u043A\u0430..." })
+    return /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("section", { className: sectionClass(), id: "doc", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("h1", { className: "text-2xl font-semibold text-slate-900 dark:text-slate-50", children: docTitle }),
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: mutedTextClass(), children: t("common.loading") || "\u0417\u0430\u0433\u0440\u0443\u0437\u043A\u0430..." })
     ] });
   }
   if (error) {
-    return /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("section", { className: "stack", id: "doc", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "row row-start", children: /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("h1", { id: "doc-title", children: [
-        t("doc.title_prefix") || "\u0414\u043E\u043A\u0443\u043C\u0435\u043D\u0442",
-        " ",
-        id
-      ] }) }),
-      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "muted", children: String(error.message || error) }),
-      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "page-actions", children: /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("button", { type: "button", className: "btn small", onClick: goToDocs, children: backToDocsLabel }) })
+    return /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("section", { className: sectionClass(), id: "doc", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("h1", { className: "text-2xl font-semibold text-slate-900 dark:text-slate-50", children: docTitle }),
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: mutedTextClass(), children: String(error.message || error) }),
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "flex flex-wrap gap-2", children: /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
+        "button",
+        {
+          type: "button",
+          className: buttonClass({ variant: "ghost", size: "sm" }),
+          onClick: goToDocs,
+          children: backToDocsLabel
+        }
+      ) })
     ] });
   }
   if (!doc) {
-    return /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("section", { className: "stack", id: "doc", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "row row-start", children: /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("h1", { id: "doc-title", children: [
-        t("doc.title_prefix") || "\u0414\u043E\u043A\u0443\u043C\u0435\u043D\u0442",
-        " ",
-        id
-      ] }) }),
-      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "muted", children: t("common.nothing") || "\u041D\u0438\u0447\u0435\u0433\u043E \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u043E" }),
-      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "page-actions", children: /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("button", { type: "button", className: "btn small", onClick: goToDocs, children: backToDocsLabel }) })
-    ] });
-  }
-  const metaParts = [
-    unixToLocal2(doc.date),
-    doc.partner?.name,
-    fmt.money(doc.amount ?? 0, doc.currency?.code_chr ?? "UZS")
-  ].filter(Boolean).join(" \xB7 ");
-  return /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("section", { className: "stack", id: "doc", children: [
-    /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "row row-start", children: /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("h1", { id: "doc-title", children: [
-      t("doc.title_prefix") || "\u0414\u043E\u043A\u0443\u043C\u0435\u043D\u0442",
-      " ",
-      doc.code || id
-    ] }) }),
-    /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "row", children: [
-      /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "stack", children: [
-        /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { id: "doc-status", className: "muted", children: status }),
-        /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { id: "doc-meta", className: "muted", children: metaParts })
-      ] }),
-      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
+    return /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("section", { className: sectionClass(), id: "doc", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("h1", { className: "text-2xl font-semibold text-slate-900 dark:text-slate-50", children: docTitle }),
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: mutedTextClass(), children: t("common.nothing") || "\u041D\u0438\u0447\u0435\u0433\u043E \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u043E" }),
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "flex flex-wrap gap-2", children: /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
         "button",
         {
-          id: "btn-add-op",
           type: "button",
-          className: "btn small",
-          onClick: () => navigate(`/doc/${id}/op/new`),
-          children: t("doc.add_op") || "\u0414\u043E\u0431\u0430\u0432\u0438\u0442\u044C"
+          className: buttonClass({ variant: "ghost", size: "sm" }),
+          onClick: goToDocs,
+          children: backToDocsLabel
         }
-      )
+      ) })
+    ] });
+  }
+  return /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("section", { className: sectionClass(), id: "doc", children: [
+    /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "flex flex-wrap items-start justify-between gap-4", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "flex flex-col gap-2", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
+          "h1",
+          {
+            className: "text-2xl font-semibold text-slate-900 dark:text-slate-50",
+            id: "doc-title",
+            children: docTitle
+          }
+        ),
+        /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "flex flex-wrap items-center gap-2 text-sm text-slate-600 dark:text-slate-300", children: [
+          status ? /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { id: "doc-status", children: status }) : null,
+          status && metaSegments.length > 0 ? /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(MetaSeparator, {}) : null,
+          metaSegments.map((segment, index) => {
+            const segmentId = index === 0 ? "doc-date" : index === 1 ? "doc-partner" : index === 2 ? "doc-amount" : void 0;
+            return /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)(import_react12.default.Fragment, { children: [
+              index > 0 && /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(MetaSeparator, {}),
+              /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "truncate", id: segmentId, children: segment })
+            ] }, `${segment}-${index}`);
+          })
+        ] })
+      ] }),
+      /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "flex flex-wrap items-center gap-2", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
+          "button",
+          {
+            type: "button",
+            className: buttonClass({ variant: "ghost", size: "sm" }),
+            onClick: goToDocs,
+            children: backToDocsLabel
+          }
+        ),
+        /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)(
+          "button",
+          {
+            id: "btn-add-op",
+            type: "button",
+            className: buttonClass({ variant: "primary", size: "sm" }),
+            onClick: goToNewOperation,
+            children: [
+              /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { children: addOperationLabel }),
+              /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("i", { className: "fa-solid fa-plus", "aria-hidden": "true" })
+            ]
+          }
+        )
+      ] })
     ] }),
-    /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { id: "ops-list", className: "list", "aria-live": "polite", children: operations.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: "muted", children: t("doc.no_ops") || t("common.nothing") || "\u041E\u043F\u0435\u0440\u0430\u0446\u0438\u0439 \u0435\u0449\u0451 \u043D\u0435\u0442" }) : operations.map((operation) => /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
+    /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)(
+      "div",
+      {
+        className: cardClass(
+          "space-y-2 text-sm text-slate-700 dark:text-slate-200"
+        ),
+        id: "doc-meta",
+        children: [
+          /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "flex flex-wrap items-center gap-2", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "font-semibold text-slate-900 dark:text-slate-100", children: t("doc.partner") === "doc.partner" ? t("partner") === "partner" ? "\u041F\u043E\u0441\u0442\u0430\u0432\u0449\u0438\u043A" : t("partner") : t("doc.partner") }),
+            /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(MetaSeparator, {}),
+            /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "truncate", children: doc.partner?.name || "\u2014" })
+          ] }),
+          /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "flex flex-wrap items-center gap-2", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "font-semibold text-slate-900 dark:text-slate-100", children: t("doc.amount") === "doc.amount" ? "\u0421\u0443\u043C\u043C\u0430" : t("doc.amount") }),
+            /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(MetaSeparator, {}),
+            /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { children: fmt.money(
+              doc.amount ?? 0,
+              doc.currency?.code_chr || doc.currency?.code || "UZS"
+            ) })
+          ] }),
+          doc.employee?.full_name ? /* @__PURE__ */ (0, import_jsx_runtime11.jsxs)("div", { className: "flex flex-wrap items-center gap-2", children: [
+            /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { className: "font-semibold text-slate-900 dark:text-slate-100", children: t("doc.employee") === "doc.employee" ? "\u041E\u0442\u0432\u0435\u0442\u0441\u0442\u0432\u0435\u043D\u043D\u044B\u0439" : t("doc.employee") }),
+            /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(MetaSeparator, {}),
+            /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("span", { children: doc.employee.full_name })
+          ] }) : null
+        ]
+      }
+    ),
+    /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { id: "ops-list", className: listClass("mt-2"), "aria-live": "polite", children: operations.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime11.jsx)("div", { className: cardClass(`${mutedTextClass()} text-center py-6`), children: nothingLabel }) : operations.map((operation) => /* @__PURE__ */ (0, import_jsx_runtime11.jsx)(
       OperationRow,
       {
         op: operation,
@@ -55522,8 +55770,8 @@ var Encoder = (
       return singleCharacter.charCodeAt(0) - 48;
     };
     Encoder3.isDigit = function(singleCharacter) {
-      var cn = Encoder3.getDigit(singleCharacter);
-      return cn >= 0 && cn <= 9;
+      var cn2 = Encoder3.getDigit(singleCharacter);
+      return cn2 >= 0 && cn2 <= 9;
     };
     Encoder3.appendNumericBytes = function(content, bits) {
       var length = content.length;
