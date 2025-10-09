@@ -6,12 +6,28 @@ import React, {
   useState,
 } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { BrowserMultiFormatReader } from "@zxing/library";
+import {
+  BrowserMultiFormatReader,
+  BarcodeFormat,
+  DecodeHintType,
+} from "@zxing/library";
 import { useApp } from "../context/AppContext.jsx";
 import { useI18n } from "../context/I18nContext.jsx";
 import { useToast } from "../context/ToastContext.jsx";
 
 const QUICK_QTY = [1, 5, 10, 12];
+
+const ZXING_FORMATS = [
+  BarcodeFormat.QR_CODE,
+  BarcodeFormat.UPC_A,
+  BarcodeFormat.UPC_E,
+  BarcodeFormat.EAN_8,
+  BarcodeFormat.EAN_13,
+  BarcodeFormat.ITF,
+  BarcodeFormat.PDF_417,
+  BarcodeFormat.CODE_39,
+  BarcodeFormat.CODE_128,
+].filter(Boolean);
 
 function firstBarcode(item) {
   return (
@@ -110,7 +126,20 @@ export default function OpNewPage() {
 
   const ensureReader = useCallback(async () => {
     if (readerRef.current) return readerRef.current;
-    const reader = new BrowserMultiFormatReader();
+
+    const hints = new Map();
+    if (DecodeHintType?.POSSIBLE_FORMATS) {
+      hints.set(DecodeHintType.POSSIBLE_FORMATS, ZXING_FORMATS);
+    }
+    if (DecodeHintType?.TRY_HARDER) {
+      hints.set(DecodeHintType.TRY_HARDER, true);
+    }
+    if (DecodeHintType?.ALSO_INVERTED) {
+      hints.set(DecodeHintType.ALSO_INVERTED, true);
+    }
+
+    const reader = new BrowserMultiFormatReader(hints, 200);
+    reader.timeBetweenDecodingAttempts = 50;
     readerRef.current = reader;
     return readerRef.current;
   }, []);

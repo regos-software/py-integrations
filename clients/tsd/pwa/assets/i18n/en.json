@@ -6,6 +6,7 @@
   "common.nothing": "Nothing found",
   "common.cancel": "Cancel",
   "common.save": "Save",
+  "common.close": "Close",
 
   "docs.title": "Purchase documents",
   "docs.search.placeholder": "Search by number / supplier…",
@@ -55,11 +56,26 @@
   "nothing_found": "Nothing found",
   "search_error": "Search error",
   "camera_open_failed": "Could not access the camera",
+  "camera_permission_denied": "Camera access was denied",
+  "camera_not_found": "Camera not found",
+  "camera_not_supported": "Camera is not supported",
   "select_product_first": "Select a product first",
   "fill_required_fields": "Fill in the required fields",
   "op_added": "Operation added",
   "save_failed": "Failed to save the operation",
   "network_error_save": "Network error while saving",
-  "last_purchase_cost_hint": "Cos: {cost}",
-  "install_app": "Install app"
+  "last_purchase_cost_hint": "Cost: {cost}",
+  "install_app": "Install app",
+  "op.description": "Description",
+  "op.description.placeholder": "Optional note for this operation",
+
+  "qr.share_button": "Show page QR code",
+  "qr.share_title": "Scan on another device",
+  "qr.generating": "Preparing QR code...",
+  "qr.generate_failed": "Could not generate a QR code for this page",
+  "qr.image_alt": "QR code for opening this page on another device",
+  "qr.copy": "Copy link",
+  "qr.copied": "Link copied",
+  "qr.copy_failed": "Failed to copy the link",
+  "qr.copy_not_supported": "Copying the link is not supported"
 }
