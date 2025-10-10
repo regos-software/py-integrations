@@ -73,3 +73,24 @@ class BatchService:
         if result_type is None:
             return data
         return TypeAdapter(result_type).validate_python(data)
+
+
+
+# ------- Пример использования -------
+# from schemas.api.batch import BatchStep, ph
+#from core.api.regos_api import RegosAPI
+
+#async with RegosAPI(connected_integration_id="...") as api:
+#    steps = [
+#        BatchStep(key="ProducerAdd", path="Producer/Add", payload={"name": "Coca-Cola"}),
+#        BatchStep(key="ProducerGet", path="Producer/Get",
+#                  payload={"ids": [ph("ProducerAdd", "result", "new_id")]}),
+#    ]
+
+#    resp = await api.batch.run(steps, stop_on_error=False)
+
+#    # быстрые хелперы
+#    from core.api.batch_service import BatchService
+
+#    new_id = BatchService.result(resp, "ProducerAdd", result_type=dict)["new_id"]
+#    producers = BatchService.result(resp, "ProducerGet", result_type=list[dict])
