@@ -19,6 +19,8 @@ class APIBaseResponse(BaseSchema):
         default=None,
         description="Данные ответа (могут быть dict, list[dict], list[int], и т.д.)"
     )
+    next_offset: Optional[int] = None
+    total: Optional[int] = None
 
 class APIErrorResult(BaseSchema):
     error: int
