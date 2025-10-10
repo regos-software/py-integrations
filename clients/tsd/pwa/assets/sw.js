@@ -1,4 +1,4 @@
-const CACHE_NAME = "cache-and-update-v1";
+const CACHE_NAME = "cache-update-refresh-v1";
 const PRECACHE_ASSETS = [
   "/",
   "/index.html",
@@ -49,40 +49,59 @@ function isCacheableResponse(response) {
   );
 }
 
+function fromCache(request) {
+  return caches.open(CACHE_NAME).then((cache) => cache.match(request));
+}
+
+function update(request) {
+  return caches.open(CACHE_NAME).then((cache) =>
+    fetch(request)
+      .then((response) => {
+        if (isCacheableResponse(response)) {
+          cache.put(request, response.clone()).catch((error) => {
+            console.warn("[sw] cache put failed", error);
+          });
+        }
+        return response;
+      })
+      .catch((error) => {
+        console.warn("[sw] update failed", error);
+        throw error;
+      })
+  );
+}
+
+function refresh(response) {
+  if (!response) return undefined;
+  return self.clients.matchAll().then((clients) => {
+    const message = {
+      type: "refresh",
+      url: response.url,
+      eTag: response.headers.get("ETag"),
+    };
+    const payload = JSON.stringify(message);
+    clients.forEach((client) => client.postMessage(payload));
+    return response;
+  });
+}
+
 self.addEventListener("fetch", (event) => {
   const { request } = event;
   if (!shouldHandleFetch(request)) {
     return;
   }
 
+  const updatePromise = update(request);
+
   event.respondWith(
-    caches.open(CACHE_NAME).then(async (cache) => {
-      const cached = await cache.match(request);
-
-      const updatePromise = fetch(request)
-        .then((response) => {
-          if (isCacheableResponse(response)) {
-            cache.put(request, response.clone());
-          }
-          return response;
-        })
-        .catch((error) => {
-          console.warn("[sw] network update failed", error);
-          return undefined;
-        });
-
-      event.waitUntil(updatePromise.catch(() => undefined));
-
-      if (cached) {
-        return cached;
-      }
-
-      return updatePromise.then((response) => {
-        if (response) {
-          return response;
-        }
-        return caches.match("/index.html");
-      });
-    })
+    fromCache(request)
+      .then((cached) => {
+        if (cached) return cached;
+        return updatePromise.catch(() => fetch(request));
+      })
+      .catch(() => updatePromise.catch(() => fetch(request)))
+      .then((response) => response || caches.match("/index.html"))
   );
+
+  event.waitUntil(updatePromise.then(refresh).catch(() => undefined));
 });
