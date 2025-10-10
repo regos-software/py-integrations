@@ -152,7 +152,7 @@ export default function DocsPage() {
       </div>
 
       <form
-        className="flex flex-col gap-3 sm:flex-row sm:items-center"
+        className="flex gap-3 flex-row sm:items-center"
         onSubmit={handleSearchSubmit}
         role="search"
       >

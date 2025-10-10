@@ -382,23 +382,25 @@ export default function OpNewPage() {
       <div className="flex flex-wrap items-center gap-2">
         <button
           type="button"
-          className={buttonClass({
+          className={iconButtonClass({
             variant: searchMode === SEARCH_MODES.SCAN ? "primary" : "ghost",
-            size: "sm",
           })}
           onClick={() => setSearchMode(SEARCH_MODES.SCAN)}
+          aria-label={t("op.mode.scan") || "Режим сканирования"}
+          title={t("op.mode.scan") || "Режим сканирования"}
         >
-          {t("op.mode.scan") || "Скан"}
+          <i className="fa-solid fa-barcode" aria-hidden="true" />
         </button>
         <button
           type="button"
-          className={buttonClass({
+          className={iconButtonClass({
             variant: searchMode === SEARCH_MODES.NAME ? "primary" : "ghost",
-            size: "sm",
           })}
           onClick={() => setSearchMode(SEARCH_MODES.NAME)}
+          aria-label={t("op.mode.name") || "Поиск по названию"}
+          title={t("op.mode.name") || "Поиск по названию"}
         >
-          {t("op.mode.name") || "Поиск по названию"}
+          <i className="fa-solid fa-magnifying-glass" aria-hidden="true" />
         </button>
       </div>
 
@@ -434,10 +436,7 @@ export default function OpNewPage() {
             </div>
           </div>
 
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-            <label htmlFor="barcode" className="sr-only">
-              {t("op.scan") || "Штрих-код"}
-            </label>
+          <div className="flex gap-3 flex-row items-center">
             <input
               id="barcode"
               type="search"
@@ -471,47 +470,51 @@ export default function OpNewPage() {
       )}
 
       {searchMode === SEARCH_MODES.NAME && (
-        <div className={cardClass("space-y-3")}>
-          <label className={labelClass()} htmlFor="product-query">
-            {t("op.search.label") || "Поиск товара"}
-          </label>
-          <input
-            id="product-query"
-            type="search"
-            value={queryValue}
-            placeholder={t("op.search.placeholder") || "Наименование / артикул"}
-            onChange={(event) => setQueryValue(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                runSearch(queryValue, SEARCH_MODES.NAME);
+        <>
+          <div className="flex gap-3 flex-row items-center">
+            <input
+              id="product-query"
+              type="search"
+              value={queryValue}
+              placeholder={
+                t("op.search.placeholder") || "Наименование / артикул"
               }
-            }}
-            className={inputClass()}
-          />
-          <div className="flex justify-end">
+              onChange={(event) => setQueryValue(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  runSearch(queryValue, SEARCH_MODES.NAME);
+                }
+              }}
+              className={inputClass("flex-1")}
+            />
             <button
+              aria-label={t("common.search")}
+              title={t("common.search")}
               type="button"
-              className={buttonClass({ variant: "primary", size: "sm" })}
+              className={iconButtonClass()}
               onClick={() => runSearch(queryValue, SEARCH_MODES.NAME)}
             >
-              {t("common.search") || "Найти"}
+              <i className="fa-solid fa-magnifying-glass" aria-hidden="true" />
             </button>
           </div>
-          <div
-            id="product-results"
-            className={mutedTextClass()}
-            aria-live="polite"
-          >
-            {searchStatus === "loading" && (t("searching") || "Поиск...")}
-            {searchStatus === "empty" &&
-              (t("common.nothing") || "Ничего не найдено")}
-            {searchStatus === "error" && (t("search_error") || "Ошибка поиска")}
-            {searchStatus === "multi" &&
-              (t("op.search.choose_prompt") ||
-                "Найдено несколько результатов, выберите из списка")}
-          </div>
-        </div>
+          {searchStatus != "idle" && (
+            <div
+              id="product-results"
+              className={mutedTextClass()}
+              aria-live="polite"
+            >
+              {searchStatus === "loading" && (t("searching") || "Поиск...")}
+              {searchStatus === "empty" &&
+                (t("common.nothing") || "Ничего не найдено")}
+              {searchStatus === "error" &&
+                (t("search_error") || "Ошибка поиска")}
+              {searchStatus === "multi" &&
+                (t("op.search.choose_prompt") ||
+                  "Найдено несколько результатов, выберите из списка")}
+            </div>
+          )}
+        </>
       )}
 
       {picked && (
