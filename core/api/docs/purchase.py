@@ -29,17 +29,17 @@ class DocPurchaseService:
             )
         return resp
 
-    async def get(self, req: DocPurchaseGetRequest) -> List[DocPurchase]:
+    async def get(self, req: DocPurchaseGetRequest) -> DocPurchaseGetResponse:
         """
         Вызов /v1/DocPurchase/Get с любыми фильтрами из DocPurchaseGetRequest.
         Возвращает список DocPurchase.
         """
         resp = await self._get(req)
-        return [DocPurchase.model_validate(x) for x in resp.result]
+        return resp
 
     async def get_by_id(self, id_: int) -> Optional[DocPurchase]:
         """
         Получить один документ по ID. Возвращает None, если не найден.
         """
-        items = await self.get(DocPurchaseGetRequest(ids=[id_]))
-        return items[0] if items else None
+        resp = await self.get(DocPurchaseGetRequest(ids=[id_]))
+        return resp.result[0] if len(resp.result) >= 1 else None

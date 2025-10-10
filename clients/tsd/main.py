@@ -129,182 +129,42 @@ class TsdIntegration(ClientBase):
             ci = headers.get("Connected-Integration-Id") or getattr(
                 self, "connected_integration_id", None
             )
+            if not ci:
+                return self._json_error(400, "Missing Connected-Integration-Id")
 
             body = data.get("body") or {}
-            action = str(body.get("action") or "").lower()
-            params = body.get("params") or {}
+            raw_action = body.get("action")
+            if not raw_action or not isinstance(raw_action, str):
+                return self._json_error(400, "Missing action")
 
-            # --- ping/login/send ---
-            if action in ("", "ping"):
-                return {"result": {"pong": True, "ci": ci}}
+            action_segments = [segment.strip() for segment in raw_action.split(".")]
+            if not all(action_segments):
+                return self._json_error(400, "Invalid action value")
 
-            if action == "login":
-                return {"result": {"status": "logged_in", "ci": ci}}
+            params = body.get("params")
 
-            if action == "send":
-                return {"result": {"status": "sent", "ci": ci}}
-
-            # --- список документов ---
-            if action == "purchase_list":
-                page = int(params.get("page", 1) or 1)
-                page_size = int(params.get("page_size", 20) or 20)
-                query = (params.get("query") or "").strip() or None
-                start = params.get("start_date")
-                end = params.get("end_date")
-
-                async with RegosAPI(connected_integration_id=ci) as api:
-                    req = DocPurchaseGetRequest(
-                        performed=False,
-                        deleted_mark=False,
-                        start_date=start,
-                        end_date=end,
-                        search=query,
-                        limit=page_size,
-                        sort_orders=[
-                            DocPurchaseSortOrder(column="date", direction="desc")
-                        ],
-                        offset=(page - 1) * page_size,
-                    )
-                    docs = await api.docs.purchase._get(req)
-
-                return self._gzip_json(
-                    {
-                        "result": {
-                            "items": jsonable_encoder(getattr(docs, "result", [])),
-                            "page": page,
-                            "page_size": page_size,
-                            "next_offset": getattr(docs, "next_offset", None) or 0,
-                            "total": getattr(docs, "total", None) or 0,
-                        }
-                    }
-                )
-
-            if action == "purchase_get":
-                raw_id = params.get("doc_id")
-                if raw_id is None:
-                    return self._json_error(400, "doc_id is required")
-                try:
-                    doc_id = int(raw_id)
-                except (TypeError, ValueError):
-                    return self._json_error(400, "doc_id must be integer")
-
-                async with RegosAPI(connected_integration_id=ci) as api:
-                    doc = await api.docs.purchase.get_by_id(doc_id)
-                    ops = await api.docs.purchase_operation.get_by_document_id(doc_id)
-
-                if not doc:
-                    return self._json_error(404, f"DocPurchase id={doc_id} not found")
-
-                return self._gzip_json(
-                    {
-                        "result": {
-                            "doc": jsonable_encoder(doc),
-                            "operations": jsonable_encoder(ops),
-                        }
-                    }
-                )
-
-            if action == "purchase_ops_get":
-                try:
-                    doc_id = int(params.get("doc_id"))
-                except (TypeError, ValueError):
-                    return self._json_error(400, "doc_id must be integer")
-                async with RegosAPI(connected_integration_id=ci) as api:
-                    ops = await api.docs.purchase_operation.get_by_document_id(doc_id)
-                return self._gzip_json({"result": {"items": jsonable_encoder(ops)}})
-
-            if action == "purchase_ops_add":
-                payload = params.get("items") or []
-                if not isinstance(payload, list) or not payload:
-                    return self._json_error(400, "items (array) required")
-                async with RegosAPI(connected_integration_id=ci) as api:
-                    res = await api.docs.purchase_operation.add(
-                        [PurchaseOperationAddRequest.model_validate(x) for x in payload]
-                    )
-                return {"result": jsonable_encoder(res)}
-
-            if action == "purchase_ops_edit":
-                payload = params.get("items") or []
-                if not isinstance(payload, list) or not payload:
-                    return self._json_error(400, "items (array) required")
-                async with RegosAPI(connected_integration_id=ci) as api:
-                    res = await api.docs.purchase_operation.edit(
-                        [PurchaseOperationEditItem.model_validate(x) for x in payload]
-                    )
-                return {"result": jsonable_encoder(res)}
-
-            if action == "purchase_ops_delete":
-                payload = params.get("items") or []
-                if not isinstance(payload, list) or not payload:
-                    return self._json_error(400, "items (array) required")
-                async with RegosAPI(connected_integration_id=ci) as api:
-                    res = await api.docs.purchase_operation.delete(
-                        [PurchaseOperationDeleteItem.model_validate(x) for x in payload]
-                    )
-                return {"result": jsonable_encoder(res)}
-
-            # --- поиск номенклатуры (с учётом контекста документа) ---
-            if action == "product_search":
-                q = (params.get("q") or "").strip()
-                if not q:
-                    return {"result": {"items": []}}
-
-                def _to_int(v):
-                    try:
-                        return int(v) if v is not None else None
-                    except (TypeError, ValueError):
-                        return None
-
-                # контекст из запроса
-                price_type_id = _to_int(params.get("price_type_id"))
-                stock_id = _to_int(params.get("stock_id"))
-                limit = _to_int(params.get("limit")) or 50
-                if limit < 1:
-                    limit = 1
-                if limit > 200:
-                    limit = 200
-
-                # при необходимости — подтягиваем контекст из документа
-                raw_doc_id = params.get("doc_id")
-                if (
-                    price_type_id is None or stock_id is None
-                ) and raw_doc_id is not None:
-                    doc_id = _to_int(raw_doc_id)
-                    if doc_id is None:
-                        return self._json_error(400, "doc_id must be integer")
-
-                    async with RegosAPI(connected_integration_id=ci) as api:
-                        doc = await api.docs.purchase.get_by_id(doc_id)
-
-                    if not doc:
+            async with RegosAPI(connected_integration_id=ci) as api:
+                target = api
+                for segment in action_segments:
+                    safe_segment = re.sub(r"[^0-9A-Za-z_]+", "", segment)
+                    if not safe_segment:
                         return self._json_error(
-                            404, f"DocPurchase id={doc_id} not found"
+                            400, f"Invalid action segment: {segment}"
                         )
+                    if not hasattr(target, safe_segment):
+                        return self._json_error(404, f"Unknown action part: {segment}")
+                    target = getattr(target, safe_segment)
 
-                    # безопасно извлекаем идентификаторы
-                    try:
-                        if price_type_id is None and getattr(doc, "price_type", None):
-                            price_type_id = _to_int(getattr(doc.price_type, "id", None))
-                    except Exception:
-                        pass
-                    try:
-                        if stock_id is None and getattr(doc, "stock", None):
-                            stock_id = _to_int(getattr(doc.stock, "id", None))
-                    except Exception:
-                        pass
+                if not callable(target):
+                    return self._json_error(400, "Action does not resolve to callable")
 
-                # выполняем поиск: сперва расширенный (GetExt), затем — мягкий откат
-                async with RegosAPI(connected_integration_id=ci) as api:
-                    items = await api.refrences.item.search_and_get_ext(
-                        q,
-                        stock_id=stock_id,
-                        price_type_id=price_type_id,
-                        limit=limit,
-                    )
+                call_args = []
+                if params is not None:
+                    call_args.append(params)
+                result = await target(*call_args)
 
-                return {"result": {"items": jsonable_encoder(items)}}
-
-            return self._json_error(400, f"Unknown action '{action}'")
+            json_result = jsonable_encoder(result)
+            return self._gzip_json(json_result)
 
         except Exception as e:
             logger.exception("handle_external error")

@@ -49,20 +49,17 @@ export default function DocsPage() {
     setError(null);
     try {
       const searchTerm = debouncedSearch.trim();
-      const { data } = await api("purchase_list", {
-        page,
-        page_size: PAGE_SIZE,
-        query: searchTerm,
+      const { data } = await api("docs.purchase.get", {
+        offset: (page - 1) * PAGE_SIZE,
+        limit: PAGE_SIZE,
+        search: searchTerm,
+        performed: false,
+        deleted_mark: false,
+        sort_orders: [{ column: "date", direction: "desc" }],
       });
-      const received = data?.result?.items || [];
-      const total = data?.result?.total;
-      setItems(received);
-      if (typeof total === "number") {
-        setTotalPages(Math.max(1, Math.ceil(total / PAGE_SIZE)));
-      } else {
-        const hasMore = received.length === PAGE_SIZE;
-        setTotalPages(hasMore ? page + 1 : page);
-      }
+      const { total, result } = data || {};
+      setItems(result);
+      setTotalPages(Math.max(1, Math.ceil(total / PAGE_SIZE)));
     } catch (err) {
       setError(err);
       setItems([]);
