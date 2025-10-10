@@ -14,8 +14,24 @@ import {
 import { useApp } from "../context/AppContext.jsx";
 import { useI18n } from "../context/I18nContext.jsx";
 import { useToast } from "../context/ToastContext.jsx";
+import {
+  buttonClass,
+  cardClass,
+  chipClass,
+  iconButtonClass,
+  inputClass,
+  labelClass,
+  mutedTextClass,
+  sectionClass,
+} from "../lib/ui";
+import { cn } from "../lib/utils";
 
 const QUICK_QTY = [1, 5, 10, 12];
+
+const SEARCH_MODES = {
+  SCAN: "scan",
+  NAME: "name",
+};
 
 const ZXING_FORMATS = [
   BarcodeFormat.QR_CODE,
@@ -59,6 +75,9 @@ export default function OpNewPage() {
   const [picked, setPicked] = useState(null);
   const [saving, setSaving] = useState(false);
   const [scanning, setScanning] = useState(false);
+  const [searchMode, setSearchMode] = useState(SEARCH_MODES.SCAN);
+  const [resultModalOpen, setResultModalOpen] = useState(false);
+  const [resultItems, setResultItems] = useState([]);
   const videoRef = useRef(null);
   const readerRef = useRef(null);
 
@@ -82,46 +101,85 @@ export default function OpNewPage() {
     loadDocMeta();
   }, [api, docId]);
 
+  const closeResultModal = useCallback(() => {
+    setResultModalOpen(false);
+    setResultItems([]);
+  }, []);
+
+  const handlePickItem = useCallback(
+    (item) => {
+      setPicked(item);
+      closeResultModal();
+      setSearchStatus("done");
+      window.setTimeout(() => {
+        document.getElementById("qty")?.focus();
+      }, 0);
+    },
+    [closeResultModal]
+  );
+
   const runSearch = useCallback(
-    async (value) => {
+    async (value, mode = searchMode) => {
       const queryText = value?.trim();
       if (!queryText) return;
       setSearchStatus("loading");
       try {
         const payload = { q: queryText, doc_id: docId };
-        if (docCtx.price_type_id != null)
+        if (docCtx.price_type_id != null) {
           payload.price_type_id = Number(docCtx.price_type_id);
-        if (docCtx.stock_id != null) payload.stock_id = Number(docCtx.stock_id);
+        }
+        if (docCtx.stock_id != null) {
+          payload.stock_id = Number(docCtx.stock_id);
+        }
+
         const { data } = await api("product_search", payload);
-        const items = data?.result?.items || [];
-        if (!items.length) {
+        const rawItems = data?.result?.items || [];
+        if (!rawItems.length) {
           setPicked(null);
+          closeResultModal();
           setSearchStatus("empty");
           return;
         }
-        const ext = items[0];
-        const core = ext?.item || {};
-        setPicked({
-          id: Number(core.id ?? core.code),
-          name: core.name || "—",
-          barcode: firstBarcode(core),
-          vat_value: Number(core?.vat?.value ?? 0),
-          last_purchase_cost: ext?.last_purchase_cost ?? null,
-          price: ext?.price != null ? Number(ext.price) : null,
-          quantity_common: ext?.quantity?.common ?? null,
-          unit: core?.unit?.name || "шт",
+
+        const normalizedItems = rawItems.map((ext) => {
+          const core = ext?.item || {};
+          return {
+            id: Number(core.id ?? core.code),
+            name: core.name || "—",
+            barcode: firstBarcode(core),
+            vat_value: Number(core?.vat?.value ?? 0),
+            last_purchase_cost: ext?.last_purchase_cost ?? null,
+            price: ext?.price != null ? Number(ext.price) : null,
+            quantity_common: ext?.quantity?.common ?? null,
+            unit: core?.unit?.name || "шт",
+            unit_piece: core?.unit?.type === "pcs",
+          };
         });
-        setSearchStatus("done");
-        window.setTimeout(() => {
-          document.getElementById("qty")?.focus();
-        }, 0);
+
+        if (mode === SEARCH_MODES.NAME && normalizedItems.length > 1) {
+          setResultItems(normalizedItems);
+          setResultModalOpen(true);
+          setSearchStatus("multi");
+          return;
+        }
+
+        handlePickItem(normalizedItems[0]);
       } catch (err) {
         console.warn("[search] error", err);
         setPicked(null);
+        closeResultModal();
         setSearchStatus("error");
       }
     },
-    [api, docCtx.price_type_id, docCtx.stock_id, docId]
+    [
+      api,
+      closeResultModal,
+      docCtx.price_type_id,
+      docCtx.stock_id,
+      docId,
+      handlePickItem,
+      searchMode,
+    ]
   );
 
   const ensureReader = useCallback(async () => {
@@ -163,12 +221,28 @@ export default function OpNewPage() {
     setScanning(false);
   }, []);
 
+  const handleModalDismiss = useCallback(() => {
+    closeResultModal();
+    setSearchStatus("idle");
+  }, [closeResultModal]);
+
   useEffect(() => {
-    document.getElementById("barcode")?.focus();
-  }, []);
+    setSearchStatus("idle");
+    closeResultModal();
+    if (searchMode === SEARCH_MODES.SCAN) {
+      window.setTimeout(() => document.getElementById("barcode")?.focus(), 0);
+    } else {
+      stopScan();
+      window.setTimeout(
+        () => document.getElementById("product-query")?.focus(),
+        0
+      );
+    }
+  }, [searchMode, closeResultModal, stopScan]);
 
   const startScan = async () => {
     if (scanning) return;
+    if (searchMode !== SEARCH_MODES.SCAN) return;
 
     try {
       const reader = await ensureReader();
@@ -193,7 +267,7 @@ export default function OpNewPage() {
         if (result) {
           const text = result.getText();
           stopScan();
-          runSearch(text);
+          runSearch(text, SEARCH_MODES.SCAN);
         }
         if (
           err &&
@@ -226,8 +300,15 @@ export default function OpNewPage() {
     }
     const qtyNumber = toNumber(quantity);
     const costNumber = toNumber(cost);
-    if (!qtyNumber || qtyNumber <= 0 || !costNumber || costNumber <= 0) {
+    if (!qtyNumber || qtyNumber <= 0) {
       showToast(t("fill_required_fields") || "Заполните обязательные поля", {
+        type: "error",
+      });
+      return;
+    }
+
+    if (picked?.unit_piece && !Number.isInteger(qtyNumber)) {
+      showToast(t("qty.integer_only") || "Количество должно быть целым", {
         type: "error",
       });
       return;
@@ -293,223 +374,324 @@ export default function OpNewPage() {
   }, [fmt, picked]);
 
   return (
-    <section className="stack" id="op-new">
-      <h1>{t("op.title") || "Новая операция"}</h1>
+    <section className={sectionClass()} id="op-new">
+      <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-50">
+        {t("op.title") || "Новая операция"}
+      </h1>
 
-      <div id="scanner" className={`stack${scanning ? "" : " hidden"}`}>
-        <video
-          id="preview"
-          ref={videoRef}
-          playsInline
-          style={{ width: "100%", maxWidth: "400px" }}
-        />
-        <div className="row">
-          <span className="muted">
-            {t("scanner.hint") || "Наведи камеру на штрих-код"}
-          </span>
-          <button
-            id="btn-close-scan"
-            type="button"
-            className="btn icon"
-            onClick={stopScan}
-            aria-label={t("common.cancel") || "Отмена"}
-            title={t("common.cancel") || "Отмена"}
-          >
-            <i className="fa-solid fa-xmark" aria-hidden="true" />
-          </button>
-        </div>
-      </div>
-
-      <div className="input-row">
-        <label htmlFor="barcode" className="sr-only">
-          {t("op.scan") || "Штрих-код"}
-        </label>
-        <input
-          id="barcode"
-          type="search"
-          inputMode="search"
-          value={barcodeValue}
-          placeholder={
-            t("op.barcode.placeholder") ||
-            "или введите штрих-код и нажмите Enter"
-          }
-          onChange={(event) => setBarcodeValue(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              runSearch(barcodeValue);
-            }
-          }}
-        />
+      <div className="flex flex-wrap items-center gap-2">
         <button
-          id="btn-scan"
           type="button"
-          className="btn icon"
-          onClick={startScan}
-          aria-label={t("op.scan") || "Скан штрих-кода"}
-          title={t("op.scan") || "Скан штрих-кода"}
+          className={buttonClass({
+            variant: searchMode === SEARCH_MODES.SCAN ? "primary" : "ghost",
+            size: "sm",
+          })}
+          onClick={() => setSearchMode(SEARCH_MODES.SCAN)}
         >
-          <i className="fa-solid fa-camera" aria-hidden="true" />
+          {t("op.mode.scan") || "Скан"}
+        </button>
+        <button
+          type="button"
+          className={buttonClass({
+            variant: searchMode === SEARCH_MODES.NAME ? "primary" : "ghost",
+            size: "sm",
+          })}
+          onClick={() => setSearchMode(SEARCH_MODES.NAME)}
+        >
+          {t("op.mode.name") || "Поиск по названию"}
         </button>
       </div>
 
-      <div className="stack">
-        <label htmlFor="product-query">
-          {t("op.search.label") || "Поиск товара"}
-        </label>
-        <input
-          id="product-query"
-          type="search"
-          value={queryValue}
-          placeholder={t("op.search.placeholder") || "Наименование / артикул"}
-          onChange={(event) => setQueryValue(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              runSearch(queryValue);
-            }
-          }}
-          onSearch={(event) => runSearch(event.target.value)}
-        />
-        <div id="product-results" className="muted" aria-live="polite">
-          {searchStatus === "loading" && (t("searching") || "Поиск...")}
-          {searchStatus === "empty" &&
-            (t("common.nothing") || "Ничего не найдено")}
-          {searchStatus === "error" && (t("search_error") || "Ошибка поиска")}
+      {searchMode === SEARCH_MODES.SCAN && (
+        <>
+          <div
+            id="scanner"
+            className={cn(
+              scanning ? "space-y-4" : "hidden",
+              cardClass("space-y-4")
+            )}
+          >
+            <video
+              id="preview"
+              ref={videoRef}
+              playsInline
+              className="w-full rounded-xl"
+            />
+            <div className="flex items-center justify-between gap-3">
+              <span className={mutedTextClass()}>
+                {t("scanner.hint") || "Наведи камеру на штрих-код"}
+              </span>
+              <button
+                id="btn-close-scan"
+                type="button"
+                className={iconButtonClass()}
+                onClick={stopScan}
+                aria-label={t("common.cancel") || "Отмена"}
+                title={t("common.cancel") || "Отмена"}
+              >
+                <i className="fa-solid fa-xmark" aria-hidden="true" />
+              </button>
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+            <label htmlFor="barcode" className="sr-only">
+              {t("op.scan") || "Штрих-код"}
+            </label>
+            <input
+              id="barcode"
+              type="search"
+              inputMode="search"
+              value={barcodeValue}
+              placeholder={
+                t("op.barcode.placeholder") ||
+                "или введите штрих-код и нажмите Enter"
+              }
+              onChange={(event) => setBarcodeValue(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  runSearch(barcodeValue, SEARCH_MODES.SCAN);
+                }
+              }}
+              className={inputClass("flex-1")}
+            />
+            <button
+              id="btn-scan"
+              type="button"
+              className={iconButtonClass()}
+              onClick={startScan}
+              aria-label={t("op.scan") || "Скан штрих-кода"}
+              title={t("op.scan") || "Скан штрих-кода"}
+            >
+              <i className="fa-solid fa-camera" aria-hidden="true" />
+            </button>
+          </div>
+        </>
+      )}
+
+      {searchMode === SEARCH_MODES.NAME && (
+        <div className={cardClass("space-y-3")}>
+          <label className={labelClass()} htmlFor="product-query">
+            {t("op.search.label") || "Поиск товара"}
+          </label>
+          <input
+            id="product-query"
+            type="search"
+            value={queryValue}
+            placeholder={t("op.search.placeholder") || "Наименование / артикул"}
+            onChange={(event) => setQueryValue(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                runSearch(queryValue, SEARCH_MODES.NAME);
+              }
+            }}
+            className={inputClass()}
+          />
+          <div className="flex justify-end">
+            <button
+              type="button"
+              className={buttonClass({ variant: "primary", size: "sm" })}
+              onClick={() => runSearch(queryValue, SEARCH_MODES.NAME)}
+            >
+              {t("common.search") || "Найти"}
+            </button>
+          </div>
+          <div
+            id="product-results"
+            className={mutedTextClass()}
+            aria-live="polite"
+          >
+            {searchStatus === "loading" && (t("searching") || "Поиск...")}
+            {searchStatus === "empty" &&
+              (t("common.nothing") || "Ничего не найдено")}
+            {searchStatus === "error" && (t("search_error") || "Ошибка поиска")}
+            {searchStatus === "multi" &&
+              (t("op.search.choose_prompt") ||
+                "Найдено несколько результатов, выберите из списка")}
+          </div>
         </div>
-      </div>
+      )}
 
       {picked && (
-        <div id="product-picked" className="stack">
-          <strong id="picked-name">{picked.name}</strong>
-          <div className="muted">
-            <span id="picked-code">{picked.barcode}</span>
+        <div id="product-picked" className={cardClass("space-y-2")}>
+          <strong
+            id="picked-name"
+            className="text-lg font-semibold text-slate-900 dark:text-slate-50"
+          >
+            {picked.name}
+          </strong>
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            <span id="picked-code" className={mutedTextClass()}>
+              {picked.barcode}
+            </span>
             {picked.quantity_common != null && (
-              <>
-                <span className="dot" />
-                <span>
-                  {fmt.number(picked.quantity_common)} {t("unit.pcs") || "шт"}
-                </span>
-              </>
+              <span className={mutedTextClass()}>
+                {fmt.number(picked.quantity_common)} {picked.unit}
+              </span>
             )}
           </div>
           {descriptionPreview && (
-            <div id="picked-desc" className="muted">
+            <div id="picked-desc" className={mutedTextClass()}>
               {descriptionPreview}
             </div>
           )}
         </div>
       )}
 
-      <div className="stack">
-        <label htmlFor="qty">
-          {t("op.qty") || "Количество"} <span className="muted">*</span>
-        </label>
-        <input
-          id="qty"
-          type="number"
-          inputMode="decimal"
-          value={quantity}
-          onChange={(event) => setQuantity(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              document.getElementById("cost")?.focus();
-            }
-          }}
-        />
-        <div className="qty-quick" id="qty-quick">
-          {QUICK_QTY.map((value) => (
-            <button
-              key={value}
-              type="button"
-              className="chip"
-              data-inc={value}
-              onClick={() =>
-                setQuantity((prev) => String(toNumber(prev) + value))
+      <div className={cardClass("space-y-4")}>
+        <div className="space-y-2">
+          <label className={labelClass()} htmlFor="qty">
+            {t("op.qty") || "Количество"}
+            <span className={cn(mutedTextClass(), "ml-1")}>*</span>
+          </label>
+          <input
+            id="qty"
+            type="number"
+            inputMode={picked?.unit_piece ? "numeric" : "decimal"}
+            step={picked?.unit_piece ? 1 : "0.01"}
+            value={quantity}
+            onChange={(event) => {
+              const nextValue = event.target.value;
+              if (picked?.unit_piece) {
+                if (/^\d*$/.test(nextValue)) {
+                  setQuantity(nextValue);
+                }
+                return;
               }
-            >
-              +{value}
-            </button>
-          ))}
+              setQuantity(nextValue);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                document.getElementById("cost")?.focus();
+              }
+            }}
+            className={inputClass()}
+          />
+          <div className="flex flex-wrap gap-2" id="qty-quick">
+            {QUICK_QTY.map((value) => (
+              <button
+                key={value}
+                type="button"
+                className={chipClass()}
+                data-inc={value}
+                onClick={() =>
+                  setQuantity((prev) => {
+                    const base = toNumber(prev);
+                    if (picked?.unit_piece) {
+                      const normalized = Number.isFinite(base)
+                        ? Math.trunc(base)
+                        : 0;
+                      return String(normalized + value);
+                    }
+                    return String(base + value);
+                  })
+                }
+              >
+                +{value}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="space-y-2">
+          <label className={labelClass()} htmlFor="cost">
+            {t("op.cost") || "Стоимость"}
+          </label>
+          <input
+            id="cost"
+            type="number"
+            inputMode="decimal"
+            value={cost}
+            onChange={(event) => setCost(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                document.getElementById("price")?.focus();
+              }
+            }}
+            className={inputClass()}
+          />
+          {lpcLabel && (
+            <div className="flex flex-wrap gap-2" id="cost-hint-wrap">
+              <button
+                type="button"
+                id="cost-hint"
+                className={chipClass()}
+                onClick={() => setCost(String(picked.last_purchase_cost))}
+              >
+                {lpcLabel}
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div className="space-y-2">
+          <label className={labelClass()} htmlFor="price">
+            {t("op.price") || "Цена"}
+          </label>
+          <input
+            id="price"
+            type="number"
+            inputMode="decimal"
+            value={price}
+            onChange={(event) => setPrice(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                handleSubmit();
+              }
+            }}
+            className={inputClass()}
+          />
+          {priceLabel && (
+            <div className="flex flex-wrap gap-2" id="price-hint-wrap">
+              <button
+                type="button"
+                id="price-hint"
+                className={chipClass()}
+                onClick={() => setPrice(String(picked.price))}
+              >
+                {priceLabel}
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div className="space-y-2">
+          <label className={labelClass()} htmlFor="description">
+            {t("op.description") || "Описание"}
+          </label>
+          <input
+            id="description"
+            type="text"
+            value={description}
+            placeholder={
+              t("op.description.placeholder") ||
+              "Комментарий к операции (необяз.)"
+            }
+            onChange={(event) => setDescription(event.target.value)}
+            className={inputClass()}
+          />
         </div>
       </div>
 
-      <div className="stack">
-        <label htmlFor="cost">
-          {t("op.cost") || "Стоимость"} <span className="muted">*</span>
-        </label>
-        <input
-          id="cost"
-          type="number"
-          inputMode="decimal"
-          value={cost}
-          onChange={(event) => setCost(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              document.getElementById("price")?.focus();
-            }
-          }}
-        />
-        {lpcLabel && (
-          <button
-            type="button"
-            id="cost-hint"
-            className="btn secondary"
-            onClick={() => setCost(String(picked.last_purchase_cost))}
-          >
-            {lpcLabel}
-          </button>
-        )}
-      </div>
-
-      <div className="stack">
-        <label htmlFor="price">{t("op.price") || "Цена"}</label>
-        <input
-          id="price"
-          type="number"
-          inputMode="decimal"
-          value={price}
-          onChange={(event) => setPrice(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              event.preventDefault();
-              handleSubmit();
-            }
-          }}
-        />
-        {priceLabel && (
-          <button
-            type="button"
-            id="price-hint"
-            className="btn secondary"
-            onClick={() => setPrice(String(picked.price))}
-          >
-            {priceLabel}
-          </button>
-        )}
-      </div>
-
-      <div className="stack">
-        <label htmlFor="description">{t("op.description") || "Описание"}</label>
-        <input
-          id="description"
-          type="text"
-          value={description}
-          placeholder={
-            t("op.description.placeholder") ||
-            "Комментарий к операции (необяз.)"
-          }
-          onChange={(event) => setDescription(event.target.value)}
-        />
-      </div>
-
-      <div className="page-actions">
+      <div className="flex flex-wrap items-center justify-end gap-3">
+        <button
+          id="btn-op-cancel"
+          type="button"
+          className={buttonClass({ variant: "ghost", size: "sm" })}
+          onClick={() => navigate(`/doc/${docId}`)}
+          disabled={saving}
+        >
+          {t("common.cancel") || "Отмена"}
+        </button>
         <button
           id="btn-op-save"
           type="button"
-          className="btn small"
+          className={buttonClass({ variant: "primary", size: "sm" })}
           onClick={handleSubmit}
           disabled={saving}
         >
@@ -517,16 +699,64 @@ export default function OpNewPage() {
             ? t("op.saving") || "Сохранение..."
             : t("common.save") || "Сохранить"}
         </button>
-        <button
-          id="btn-op-cancel"
-          type="button"
-          className="btn small ghost"
-          onClick={() => navigate(`/doc/${docId}`)}
-          disabled={saving}
-        >
-          {t("common.cancel") || "Отмена"}
-        </button>
       </div>
+
+      {resultModalOpen ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/70 px-4 py-6"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="search-results-title"
+          onClick={handleModalDismiss}
+        >
+          <div
+            className={cardClass(
+              "relative w-full max-w-lg space-y-4 shadow-xl"
+            )}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h2
+              id="search-results-title"
+              className="text-lg font-semibold text-slate-900 dark:text-slate-50"
+            >
+              {t("op.search.choose_prompt") || "Выберите товар"}
+            </h2>
+            <div className="max-h-96 space-y-3 overflow-y-auto pr-1">
+              {resultItems.map((item) => (
+                <button
+                  key={`${item.id}-${item.barcode}`}
+                  type="button"
+                  className={cardClass(
+                    "w-full text-left transition hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-500 focus-visible:ring-offset-2"
+                  )}
+                  onClick={() => handlePickItem(item)}
+                >
+                  <div className="flex flex-col gap-1">
+                    <span className="text-sm font-semibold text-slate-900 dark:text-slate-50">
+                      {item.name}
+                    </span>
+                    <span className={mutedTextClass()}>{item.barcode}</span>
+                    {item.price != null ? (
+                      <span className={mutedTextClass()}>
+                        {fmt.money(item.price)}
+                      </span>
+                    ) : null}
+                  </div>
+                </button>
+              ))}
+            </div>
+            <div className="flex justify-end">
+              <button
+                type="button"
+                className={buttonClass({ variant: "ghost", size: "sm" })}
+                onClick={handleModalDismiss}
+              >
+                {t("common.cancel") || "Отмена"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }

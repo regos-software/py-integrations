@@ -3,6 +3,16 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { useApp } from "../context/AppContext.jsx";
 import { useI18n } from "../context/I18nContext.jsx";
 import useDebouncedValue from "../hooks/useDebouncedValue.js";
+import {
+  buttonClass,
+  cardClass,
+  iconButtonClass,
+  inputClass,
+  listClass,
+  mutedTextClass,
+  sectionClass,
+} from "../lib/ui";
+import { cn } from "../lib/utils";
 
 const PAGE_SIZE = 20;
 
@@ -131,12 +141,21 @@ export default function DocsPage() {
   }, [t]);
 
   return (
-    <section className="stack" id="docs">
-      <div className="row row-start">
-        <h1 id="docs-title">{t("docs.title") || "Документы закупки"}</h1>
+    <section className={sectionClass()} id="docs">
+      <div className="flex items-center gap-3">
+        <h1
+          className="text-2xl font-semibold text-slate-900 dark:text-slate-50"
+          id="docs-title"
+        >
+          {t("docs.title") || "Документы закупки"}
+        </h1>
       </div>
 
-      <form className="input-row" onSubmit={handleSearchSubmit} role="search">
+      <form
+        className="flex flex-col gap-3 sm:flex-row sm:items-center"
+        onSubmit={handleSearchSubmit}
+        role="search"
+      >
         <input
           id="search-docs"
           type="search"
@@ -145,11 +164,12 @@ export default function DocsPage() {
             t("docs.search.placeholder") || "Поиск по номеру / поставщику..."
           }
           onChange={(event) => setInputValue(event.target.value)}
+          className={inputClass("flex-1")}
         />
         <button
           id="btn-docs-refresh"
           type="button"
-          className="btn icon ghost"
+          className={iconButtonClass({ variant: "ghost" })}
           onClick={fetchDocs}
           aria-label={t("docs.refresh") || "Обновить"}
           title={t("docs.refresh") || "Обновить"}
@@ -158,15 +178,15 @@ export default function DocsPage() {
         </button>
       </form>
 
-      <div className="row">
-        <span id="page-indicator" className="muted">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <span id="page-indicator" className={mutedTextClass()}>
           {page} / {totalPages}
         </span>
-        <div className="cluster">
+        <div className="flex items-center gap-2">
           <button
             id="prev-page"
             type="button"
-            className="btn small ghost"
+            className={buttonClass({ variant: "ghost", size: "sm" })}
             onClick={handlePrev}
             disabled={page <= 1}
           >
@@ -175,7 +195,7 @@ export default function DocsPage() {
           <button
             id="next-page"
             type="button"
-            className="btn small ghost"
+            className={buttonClass({ variant: "ghost", size: "sm" })}
             onClick={handleNext}
             disabled={page >= totalPages}
           >
@@ -184,15 +204,19 @@ export default function DocsPage() {
         </div>
       </div>
 
-      <div id="docs-list" className="list" aria-live="polite">
+      <div id="docs-list" className={listClass()} aria-live="polite">
         {loading && (
-          <div className="muted">{t("common.loading") || "Загрузка..."}</div>
+          <div className={mutedTextClass()}>
+            {t("common.loading") || "Загрузка..."}
+          </div>
         )}
         {!loading && error && (
-          <div className="muted">{String(error.message || error)}</div>
+          <div className={mutedTextClass()}>
+            {String(error.message || error)}
+          </div>
         )}
         {!loading && !error && items.length === 0 && (
-          <div className="muted">{nothingLabel}</div>
+          <div className={mutedTextClass()}>{nothingLabel}</div>
         )}
         {!loading &&
           !error &&
@@ -200,20 +224,24 @@ export default function DocsPage() {
             <button
               key={doc.id}
               type="button"
-              className="item"
+              className={cardClass(
+                "flex items-start justify-between gap-4 text-left transition hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-500 focus-visible:ring-offset-2"
+              )}
               onClick={() => navigate(`/doc/${doc.id}`)}
             >
-              <div className="row">
-                <div className="stack muted">
-                  <strong>{doc.code || doc.id}</strong>
-                  <span className="muted truncate">
-                    {doc.partner?.name || ""}
-                  </span>
-                </div>
-                <div className="stack text-right muted">
-                  <span>{unixToLocal(doc.date)}</span>
-                  <span>{statusLabel(doc)}</span>
-                </div>
+              <div className="flex min-w-0 flex-col gap-1">
+                <strong className="text-base font-semibold text-slate-900 dark:text-slate-50">
+                  {doc.code || doc.id}
+                </strong>
+                <span className={cn(mutedTextClass(), "truncate")}>
+                  {doc.partner?.name || ""}
+                </span>
+              </div>
+              <div className="flex shrink-0 flex-col items-end gap-1 text-right">
+                <span className={mutedTextClass()}>
+                  {unixToLocal(doc.date)}
+                </span>
+                <span className={mutedTextClass()}>{statusLabel(doc)}</span>
               </div>
             </button>
           ))}

@@ -3,24 +3,43 @@ import { useNavigate, useParams } from "react-router-dom";
 import { useApp } from "../context/AppContext.jsx";
 import { useI18n } from "../context/I18nContext.jsx";
 import { useToast } from "../context/ToastContext.jsx";
+import {
+  buttonClass,
+  cardClass,
+  iconButtonClass,
+  inputClass,
+  labelClass,
+  listClass,
+  mutedTextClass,
+  sectionClass,
+} from "../lib/ui";
+import { cn } from "../lib/utils";
+
+function MetaSeparator() {
+  return (
+    <span aria-hidden="true" className="text-slate-300 dark:text-slate-600">
+      •
+    </span>
+  );
+}
 
 function OperationRow({ op, onDelete, onSave }) {
   const { t, fmt } = useI18n();
   const { toNumber } = useApp();
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState({
-    quantity: op.quantity,
-    cost: op.cost,
-    price: op.price ?? "",
+    quantity: op.quantity != null ? String(op.quantity) : "",
+    cost: op.cost != null ? String(op.cost) : "",
+    price: op.price != null ? String(op.price) : "",
     description: op.description ?? "",
   });
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     setForm({
-      quantity: op.quantity,
-      cost: op.cost,
-      price: op.price ?? "",
+      quantity: op.quantity != null ? String(op.quantity) : "",
+      cost: op.cost != null ? String(op.cost) : "",
+      price: op.price != null ? String(op.price) : "",
       description: op.description ?? "",
     });
   }, [op]);
@@ -28,12 +47,30 @@ function OperationRow({ op, onDelete, onSave }) {
   const item = op.item || {};
   const barcode =
     item.base_barcode ||
-    (item.barcode_list ? String(item.barcode_list).split(",")[0]?.trim() : "");
+    (item.barcode_list
+      ? String(item.barcode_list).split(",")[0]?.trim()
+      : "") ||
+    item.code ||
+    "";
   const code = (item.code ?? "").toString().padStart(6, "0");
-  const unitName = item.unit?.name || t("unit.pcs") || "шт";
+  const unitName = item.unit?.name;
+  const unitPiece = item.unit?.type === "pcs";
+  const priceValue = toNumber(op.price ?? 0);
 
   const handleFieldChange = (field) => (event) => {
     setForm((prev) => ({ ...prev, [field]: event.target.value }));
+  };
+
+  const handleQuantityChange = (event) => {
+    console.log("item", item);
+    const nextValue = event.target.value;
+    if (unitPiece) {
+      if (/^\d*$/.test(nextValue)) {
+        setForm((prev) => ({ ...prev, quantity: nextValue }));
+      }
+      return;
+    }
+    setForm((prev) => ({ ...prev, quantity: nextValue }));
   };
 
   const handleSave = async () => {
@@ -61,72 +98,88 @@ function OperationRow({ op, onDelete, onSave }) {
   };
 
   return (
-    <div className="item compact" key={op.id}>
-      <div className={`row top${editing ? " hidden" : ""}`}>
-        <div className="info">
-          <strong className="name">{item.name || ""}</strong>
-          <div className="sub">
-            <span className="muted text-small code">{code}</span>
-            <span className="dot" />
-            <span className="muted text-small barcode">{barcode}</span>
-            {op.description ? (
-              <>
-                <span className="dot" />
-                <span className="muted text-small description">
-                  {op.description}
-                </span>
-              </>
-            ) : null}
+    <div
+      className={cardClass(
+        "space-y-4 transition hover:-translate-y-0.5 hover:shadow-md"
+      )}
+    >
+      {!editing && (
+        <>
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex min-w-0 flex-col gap-2">
+              <strong className="truncate text-base font-semibold text-slate-900 dark:text-slate-50">
+                {item.name || ""}
+              </strong>
+              <div className="flex flex-wrap items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
+                <span className="font-semibold tracking-wide">{code}</span>
+                {barcode ? (
+                  <>
+                    <MetaSeparator />
+                    <span className="truncate">{barcode}</span>
+                  </>
+                ) : null}
+                {op.description ? (
+                  <>
+                    <MetaSeparator />
+                    <span className="truncate">{op.description}</span>
+                  </>
+                ) : null}
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                className={cn(iconButtonClass({ variant: "ghost" }), "op-edit")}
+                onClick={() => setEditing(true)}
+                aria-label={t("op.edit") || "Редактировать"}
+                title={t("op.edit") || "Редактировать"}
+              >
+                <i className="fa-solid fa-pen" aria-hidden="true" />
+              </button>
+              <button
+                type="button"
+                className={cn(iconButtonClass({ variant: "ghost" }), "op-del")}
+                onClick={() => onDelete(op.id)}
+                aria-label={t("op.delete") || "Удалить"}
+                title={t("op.delete") || "Удалить"}
+              >
+                <i className="fa-solid fa-trash" aria-hidden="true" />
+              </button>
+            </div>
           </div>
-        </div>
-        <div className="actions">
-          <button
-            type="button"
-            className="btn icon clear op-edit"
-            onClick={() => setEditing(true)}
-            aria-label={t("op.edit") || "Редактировать"}
-            title={t("op.edit") || "Редактировать"}
-          >
-            <i className="fa-solid fa-pen" aria-hidden="true" />
-          </button>
-          <button
-            type="button"
-            className="btn icon clear op-del"
-            onClick={() => onDelete(op.id)}
-            aria-label={t("op.delete") || "Удалить"}
-            title={t("op.delete") || "Удалить"}
-          >
-            <i className="fa-solid fa-trash" aria-hidden="true" />
-          </button>
-        </div>
-      </div>
-
-      <div className={`meta bottom${editing ? " hidden" : ""}`}>
-        <span className="qty">
-          <strong>{fmt.number(op.quantity)}</strong> {unitName}
-        </span>
-        <span className="dot" />
-        <span className="cost">{fmt.money(op.cost)}</span>
-        <span className="dot" />
-        <span className="price">{fmt.money(op.price ?? 0)}</span>
-      </div>
+          <div className="flex flex-wrap items-center gap-2 text-sm font-medium text-slate-600 dark:text-slate-300">
+            <span>
+              <strong className="text-slate-900 dark:text-slate-100">
+                {fmt.number(op.quantity)}
+              </strong>{" "}
+              {unitName}
+            </span>
+            <MetaSeparator />
+            <span>{fmt.money(op.cost)}</span>
+            <MetaSeparator />
+            <span>{fmt.money(priceValue)}</span>
+          </div>
+        </>
+      )}
 
       {editing && (
-        <div className="form-vert">
-          <div>
-            <label htmlFor={`qty-${op.id}`}>
+        <div className="flex flex-col gap-4">
+          <div className="flex flex-col gap-2">
+            <label className={labelClass()} htmlFor={`qty-${op.id}`}>
               {t("op.qty") || "Количество"}
             </label>
             <input
               id={`qty-${op.id}`}
               type="number"
-              inputMode="decimal"
+              inputMode={unitPiece ? "numeric" : "decimal"}
+              step={unitPiece ? 1 : "0.01"}
               value={form.quantity}
-              onChange={handleFieldChange("quantity")}
+              onChange={handleQuantityChange}
+              className={inputClass()}
             />
           </div>
-          <div>
-            <label htmlFor={`cost-${op.id}`}>
+          <div className="flex flex-col gap-2">
+            <label className={labelClass()} htmlFor={`cost-${op.id}`}>
               {t("op.cost") || "Стоимость"}
             </label>
             <input
@@ -135,20 +188,24 @@ function OperationRow({ op, onDelete, onSave }) {
               inputMode="decimal"
               value={form.cost}
               onChange={handleFieldChange("cost")}
+              className={inputClass()}
             />
           </div>
-          <div>
-            <label htmlFor={`price-${op.id}`}>{t("op.price") || "Цена"}</label>
+          <div className="flex flex-col gap-2">
+            <label className={labelClass()} htmlFor={`price-${op.id}`}>
+              {t("op.price") || "Цена"}
+            </label>
             <input
               id={`price-${op.id}`}
               type="number"
               inputMode="decimal"
               value={form.price}
               onChange={handleFieldChange("price")}
+              className={inputClass()}
             />
           </div>
-          <div>
-            <label htmlFor={`description-${op.id}`}>
+          <div className="flex flex-col gap-2">
+            <label className={labelClass()} htmlFor={`description-${op.id}`}>
               {t("op.description") || "Описание"}
             </label>
             <input
@@ -156,26 +213,27 @@ function OperationRow({ op, onDelete, onSave }) {
               type="text"
               value={form.description}
               onChange={handleFieldChange("description")}
+              className={inputClass()}
             />
           </div>
-          <div className="page-actions">
+          <div className="flex flex-wrap gap-3" id={`op-actions-${op.id}`}>
             <button
               type="button"
-              className="btn small"
+              className={buttonClass({ variant: "ghost", size: "sm" })}
+              onClick={() => setEditing(false)}
+              disabled={saving}
+            >
+              {t("common.cancel") || "Отмена"}
+            </button>
+            <button
+              type="button"
+              className={buttonClass({ variant: "primary", size: "sm" })}
               onClick={handleSave}
               disabled={saving}
             >
               {saving
                 ? t("op.saving") || "Сохранение..."
                 : t("common.save") || "Сохранить"}
-            </button>
-            <button
-              type="button"
-              className="btn small ghost"
-              onClick={() => setEditing(false)}
-              disabled={saving}
-            >
-              {t("common.cancel") || "Отмена"}
             </button>
           </div>
         </div>
@@ -186,10 +244,10 @@ function OperationRow({ op, onDelete, onSave }) {
 
 export default function DocPage() {
   const { id } = useParams();
-  const { api, unixToLocal, setAppTitle } = useApp();
-  const { t, locale, fmt } = useI18n();
-  const { showToast } = useToast();
   const navigate = useNavigate();
+  const { api, unixToLocal, setAppTitle } = useApp();
+  const { t, fmt, locale } = useI18n();
+  const { showToast } = useToast();
 
   const [doc, setDoc] = useState(null);
   const [operations, setOperations] = useState([]);
@@ -198,20 +256,17 @@ export default function DocPage() {
 
   useEffect(() => {
     let cancelled = false;
+
     async function fetchDoc() {
       setLoading(true);
       setError(null);
       try {
         const { data } = await api("purchase_get", { doc_id: id });
-        const docData = data?.result?.doc || {};
-        let ops = data?.result?.operations;
-        if (!Array.isArray(ops)) {
-          const opsResponse = await api("purchase_ops_get", { doc_id: id });
-          ops = opsResponse?.data?.result?.items || [];
-        }
+        const docData = data?.result?.doc || null;
+        const ops = data?.result?.operations || [];
         if (!cancelled) {
           setDoc(docData);
-          setOperations(ops);
+          setOperations(Array.isArray(ops) ? ops : []);
         }
       } catch (err) {
         if (!cancelled) {
@@ -232,11 +287,14 @@ export default function DocPage() {
     };
   }, [api, id]);
 
-  useEffect(() => {
+  const docTitle = useMemo(() => {
     const prefix = t("doc.title_prefix") || "Документ";
-    const code = doc?.code || id;
-    setAppTitle(`${prefix} ${code}`);
-  }, [doc, id, locale, setAppTitle, t]);
+    return `${prefix} ${doc?.code || id}`;
+  }, [doc, id, t]);
+
+  useEffect(() => {
+    setAppTitle(docTitle);
+  }, [docTitle, locale, setAppTitle]);
 
   const handleDelete = async (opId) => {
     const question = t("confirm.delete_op") || "Удалить операцию?";
@@ -320,34 +378,60 @@ export default function DocPage() {
     return fallback === "nav.back" ? "Назад" : fallback;
   }, [t]);
 
+  const addOperationLabel = useMemo(() => {
+    const value = t("doc.add_op");
+    return value === "doc.add_op" ? "Добавить" : value;
+  }, [t]);
+
+  const nothingLabel = useMemo(() => {
+    const value = t("doc.no_ops") || t("common.nothing");
+    return value || "Операций ещё нет";
+  }, [t]);
+
+  const metaSegments = useMemo(() => {
+    if (!doc) return [];
+    const currency = doc.currency?.code_chr || "UZS";
+    return [
+      doc.date ? unixToLocal(doc.date) : null,
+      doc.partner?.name || null,
+      fmt.money(doc.amount ?? 0, currency),
+    ].filter(Boolean);
+  }, [doc, fmt, unixToLocal]);
+
   const goToDocs = useCallback(() => {
     navigate("/docs", { replace: true });
   }, [navigate]);
 
+  const goToNewOperation = useCallback(() => {
+    navigate(`/doc/${id}/op/new`);
+  }, [id, navigate]);
+
   if (loading) {
     return (
-      <section className="stack" id="doc">
-        <div className="row row-start">
-          <h1 id="doc-title">
-            {t("doc.title_prefix") || "Документ"} {id}
-          </h1>
+      <section className={sectionClass()} id="doc">
+        <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-50">
+          {docTitle}
+        </h1>
+        <div className={mutedTextClass()}>
+          {t("common.loading") || "Загрузка..."}
         </div>
-        <div className="muted">{t("common.loading") || "Загрузка..."}</div>
       </section>
     );
   }
 
   if (error) {
     return (
-      <section className="stack" id="doc">
-        <div className="row row-start">
-          <h1 id="doc-title">
-            {t("doc.title_prefix") || "Документ"} {id}
-          </h1>
-        </div>
-        <div className="muted">{String(error.message || error)}</div>
-        <div className="page-actions">
-          <button type="button" className="btn small" onClick={goToDocs}>
+      <section className={sectionClass()} id="doc">
+        <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-50">
+          {docTitle}
+        </h1>
+        <div className={mutedTextClass()}>{String(error.message || error)}</div>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            className={buttonClass({ variant: "ghost", size: "sm" })}
+            onClick={goToDocs}
+          >
             {backToDocsLabel}
           </button>
         </div>
@@ -357,17 +441,19 @@ export default function DocPage() {
 
   if (!doc) {
     return (
-      <section className="stack" id="doc">
-        <div className="row row-start">
-          <h1 id="doc-title">
-            {t("doc.title_prefix") || "Документ"} {id}
-          </h1>
-        </div>
-        <div className="muted">
+      <section className={sectionClass()} id="doc">
+        <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-50">
+          {docTitle}
+        </h1>
+        <div className={mutedTextClass()}>
           {t("common.nothing") || "Ничего не найдено"}
         </div>
-        <div className="page-actions">
-          <button type="button" className="btn small" onClick={goToDocs}>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            className={buttonClass({ variant: "ghost", size: "sm" })}
+            onClick={goToDocs}
+          >
             {backToDocsLabel}
           </button>
         </div>
@@ -375,44 +461,105 @@ export default function DocPage() {
     );
   }
 
-  const metaParts = [
-    unixToLocal(doc.date),
-    doc.partner?.name,
-    fmt.money(doc.amount ?? 0, doc.currency?.code_chr ?? "UZS"),
-  ]
-    .filter(Boolean)
-    .join(" · ");
-
   return (
-    <section className="stack" id="doc">
-      <div className="row row-start">
-        <h1 id="doc-title">
-          {t("doc.title_prefix") || "Документ"} {doc.code || id}
-        </h1>
+    <section className={sectionClass()} id="doc">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="flex flex-col gap-2">
+          <h1
+            className="text-2xl font-semibold text-slate-900 dark:text-slate-50"
+            id="doc-title"
+          >
+            {docTitle}
+          </h1>
+          <div className="flex flex-wrap items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
+            {status ? <span id="doc-status">{status}</span> : null}
+            {status && metaSegments.length > 0 ? <MetaSeparator /> : null}
+            {metaSegments.map((segment, index) => {
+              const segmentId =
+                index === 0
+                  ? "doc-date"
+                  : index === 1
+                  ? "doc-partner"
+                  : index === 2
+                  ? "doc-amount"
+                  : undefined;
+              return (
+                <React.Fragment key={`${segment}-${index}`}>
+                  {index > 0 && <MetaSeparator />}
+                  <span className="truncate" id={segmentId}>
+                    {segment}
+                  </span>
+                </React.Fragment>
+              );
+            })}
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            className={buttonClass({ variant: "ghost", size: "sm" })}
+            onClick={goToDocs}
+          >
+            {backToDocsLabel}
+          </button>
+          <button
+            id="btn-add-op"
+            type="button"
+            className={buttonClass({ variant: "primary", size: "sm" })}
+            onClick={goToNewOperation}
+          >
+            <span>{addOperationLabel}</span>
+            <i className="fa-solid fa-plus" aria-hidden="true" />
+          </button>
+        </div>
       </div>
-      <div className="row">
-        <div className="stack">
-          <span id="doc-status" className="muted">
-            {status}
+
+      <div
+        className={cardClass(
+          "space-y-2 text-sm text-slate-700 dark:text-slate-200"
+        )}
+        id="doc-meta"
+      >
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-semibold text-slate-900 dark:text-slate-100">
+            {t("doc.partner") === "doc.partner"
+              ? t("partner") === "partner"
+                ? "Поставщик"
+                : t("partner")
+              : t("doc.partner")}
           </span>
-          <span id="doc-meta" className="muted">
-            {metaParts}
+          <MetaSeparator />
+          <span className="truncate">{doc.partner?.name || "—"}</span>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-semibold text-slate-900 dark:text-slate-100">
+            {t("doc.amount") === "doc.amount" ? "Сумма" : t("doc.amount")}
+          </span>
+          <MetaSeparator />
+          <span>
+            {fmt.money(
+              doc.amount ?? 0,
+              doc.currency?.code_chr || doc.currency?.code || "UZS"
+            )}
           </span>
         </div>
-        <button
-          id="btn-add-op"
-          type="button"
-          className="btn small"
-          onClick={() => navigate(`/doc/${id}/op/new`)}
-        >
-          {t("doc.add_op") || "Добавить"}
-        </button>
+        {doc.employee?.full_name ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-semibold text-slate-900 dark:text-slate-100">
+              {t("doc.employee") === "doc.employee"
+                ? "Ответственный"
+                : t("doc.employee")}
+            </span>
+            <MetaSeparator />
+            <span>{doc.employee.full_name}</span>
+          </div>
+        ) : null}
       </div>
 
-      <div id="ops-list" className="list" aria-live="polite">
+      <div id="ops-list" className={listClass("mt-2")} aria-live="polite">
         {operations.length === 0 ? (
-          <div className="muted">
-            {t("doc.no_ops") || t("common.nothing") || "Операций ещё нет"}
+          <div className={cardClass(`${mutedTextClass()} text-center py-6`)}>
+            {nothingLabel}
           </div>
         ) : (
           operations.map((operation) => (

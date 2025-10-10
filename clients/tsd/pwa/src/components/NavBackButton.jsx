@@ -1,4 +1,5 @@
 import React from "react";
+import { iconButtonClass } from "../lib/ui";
 
 export default function NavBackButton({ onClick, label }) {
   if (!onClick) return null;
@@ -6,7 +7,7 @@ export default function NavBackButton({ onClick, label }) {
     <button
       id="nav-back"
       type="button"
-      className="btn icon clear"
+      className={iconButtonClass({ variant: "ghost" })}
       aria-label={label || "Назад"}
       title={label || "Назад"}
       onClick={onClick}
