@@ -8,14 +8,13 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 from pydantic.config import ConfigDict
 
-from schemas.api.base import BaseSchema
+from schemas.api.base import APIBaseResponse, ArrayResult, BaseSchema
 from schemas.api.refrences.item import Item
 from schemas.api.refrences.tax import VatCalculationType
 
 
-
-
 # ---------- Core model ----------
+
 
 class PurchaseOperation(BaseModel):
     id: Optional[int] = None
@@ -39,10 +38,12 @@ class PurchaseOperation(BaseModel):
 
 # ---------- Get ----------
 
+
 class PurchaseOperationGetRequest(BaseSchema):
     """
     Параметры для /v1/PurchaseOperation/Get
     """
+
     ids: Optional[List[int]] = None
     item_ids: Optional[List[int]] = None
     document_ids: Optional[List[int]] = None
@@ -50,11 +51,13 @@ class PurchaseOperationGetRequest(BaseSchema):
 
 # ---------- Add ----------
 
+
 class PurchaseOperationAddRequest(BaseSchema):
     """
     Один элемент массива для /v1/PurchaseOperation/Add
     Все элементы массива должны иметь одинаковый document_id.
     """
+
     document_id: int
     item_id: int
     quantity: Decimal
@@ -64,14 +67,14 @@ class PurchaseOperationAddRequest(BaseSchema):
     description: Optional[str] = None
 
 
-
-
 # ---------- Edit ----------
+
 
 class PurchaseOperationEditItem(BaseSchema):
     """
     Один элемент массива для /v1/PurchaseOperation/Edit
     """
+
     id: int
     quantity: Optional[Decimal] = None
     cost: Optional[Decimal] = None
@@ -81,13 +84,16 @@ class PurchaseOperationEditItem(BaseSchema):
     description: Optional[str] = None
 
 
-
-
 # ---------- Delete ----------
+
 
 class PurchaseOperationDeleteItem(BaseSchema):
     """
     Один элемент массива для /v1/PurchaseOperation/Delete
     """
+
     id: int
 
+
+class PurchaseOperationActionResponse(APIBaseResponse):
+    result: Optional[ArrayResult] = []

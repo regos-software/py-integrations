@@ -261,12 +261,14 @@ export default function DocPage() {
       setLoading(true);
       setError(null);
       try {
-        const { data } = await api("purchase_get", { doc_id: id });
-        const docData = data?.result?.doc || null;
-        const ops = data?.result?.operations || [];
+        const { data: docData } = await api("docs.purchase.get_by_id", id);
+        const { data: docOperationsData } = await api(
+          "docs.purchase_operation.get_by_document_id",
+          id
+        );
         if (!cancelled) {
           setDoc(docData);
-          setOperations(Array.isArray(ops) ? ops : []);
+          setOperations(docOperationsData);
         }
       } catch (err) {
         if (!cancelled) {
@@ -300,11 +302,11 @@ export default function DocPage() {
     const question = t("confirm.delete_op") || "Удалить операцию?";
     if (!window.confirm(question)) return;
     try {
-      const { ok, data } = await api("purchase_ops_delete", {
-        items: [{ id: opId }],
-      });
-      const affected = data?.result?.row_affected || 0;
-      if (ok && affected > 0) {
+      const { data } = await api("docs.purchase_operation.delete", [
+        { id: opId },
+      ]);
+
+      if (data?.row_affected > 0) {
         setOperations((prev) => prev.filter((op) => op.id !== opId));
         showToast(t("toast.op_deleted") || "Операция удалена", {
           type: "success",
@@ -322,11 +324,11 @@ export default function DocPage() {
 
   const handleSave = async (opId, payload) => {
     try {
-      const { ok, data } = await api("purchase_ops_edit", {
-        items: [{ id: opId, ...payload }],
-      });
-      const affected = data?.result?.row_affected || 0;
-      if (ok && affected > 0) {
+      const { data } = await api("docs.purchase_operation.edit", [
+        { id: opId, ...payload },
+      ]);
+      console.log("row_affected", data?.row_affected);
+      if (data?.row_affected > 0) {
         setOperations((prev) =>
           prev.map((op) => {
             if (op.id !== opId) return op;

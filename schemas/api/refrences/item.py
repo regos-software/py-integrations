@@ -5,6 +5,7 @@ from decimal import Decimal
 from pydantic import BaseModel, Field
 
 # ---------- вспомогательные модели (плейсхолдеры, чтобы не тянуть все справочники) ----------
+from schemas.api.base import APIBaseResponse
 from schemas.api.refrences.brand import Brand
 from schemas.api.refrences.price_type import PriceType
 from schemas.api.refrences.stock import Stock
@@ -228,3 +229,15 @@ class ItemImportRequest(BaseModel):
     unit_id: int = None
     vat_value_id: int = None
     data: List[ItemImportData] = []
+
+
+class ItemGetExtResponse(APIBaseResponse):
+    result: List[ItemExt] = []
+    next_offset: int = 0
+    total: int = 0
+
+
+class ItemGetResponse(APIBaseResponse):
+    result: List[int] = []
+    next_offset: int = 0
+    total: int = 0

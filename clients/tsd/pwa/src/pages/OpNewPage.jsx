@@ -88,11 +88,10 @@ export default function OpNewPage() {
   useEffect(() => {
     async function loadDocMeta() {
       try {
-        const { data } = await api("purchase_get", { doc_id: docId });
-        const doc = data?.result?.doc;
+        const { data: docData } = await api("docs.purchase.get_by_id", id);
         setDocCtx({
-          price_type_id: doc?.price_type?.id ?? null,
-          stock_id: doc?.stock?.id ?? null,
+          price_type_id: docData?.price_type?.id ?? null,
+          stock_id: docData?.stock?.id ?? null,
         });
       } catch (err) {
         console.warn("[op_new] failed to fetch doc context", err);
@@ -124,16 +123,14 @@ export default function OpNewPage() {
       if (!queryText) return;
       setSearchStatus("loading");
       try {
-        const payload = { q: queryText, doc_id: docId };
-        if (docCtx.price_type_id != null) {
-          payload.price_type_id = Number(docCtx.price_type_id);
-        }
-        if (docCtx.stock_id != null) {
-          payload.stock_id = Number(docCtx.stock_id);
-        }
+        const payload = {
+          search: queryText,
+          price_type_id: docCtx?.price_type_id,
+          stock_id: docCtx?.stock_id,
+        };
 
-        const { data } = await api("product_search", payload);
-        const rawItems = data?.result?.items || [];
+        const { data } = await api("refrences.item.get_ext", payload);
+        const rawItems = data?.result || [];
         if (!rawItems.length) {
           setPicked(null);
           closeResultModal();

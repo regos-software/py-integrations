@@ -30069,12 +30069,14 @@ function DocPage() {
       setLoading(true);
       setError(null);
       try {
-        const { data } = await api2("purchase_get", { doc_id: id });
-        const docData = data?.result?.doc || null;
-        const ops = data?.result?.operations || [];
+        const { data: docData } = await api2("docs.purchase.get_by_id", id);
+        const { data: docOperationsData } = await api2(
+          "docs.purchase_operation.get_by_document_id",
+          id
+        );
         if (!cancelled) {
           setDoc(docData);
-          setOperations(Array.isArray(ops) ? ops : []);
+          setOperations(docOperationsData);
         }
       } catch (err) {
         if (!cancelled) {
@@ -30104,11 +30106,10 @@ function DocPage() {
     const question = t("confirm.delete_op") || "\u0423\u0434\u0430\u043B\u0438\u0442\u044C \u043E\u043F\u0435\u0440\u0430\u0446\u0438\u044E?";
     if (!window.confirm(question)) return;
     try {
-      const { ok, data } = await api2("purchase_ops_delete", {
-        items: [{ id: opId }]
-      });
-      const affected = data?.result?.row_affected || 0;
-      if (ok && affected > 0) {
+      const { data } = await api2("docs.purchase_operation.delete", [
+        { id: opId }
+      ]);
+      if (data?.row_affected > 0) {
         setOperations((prev) => prev.filter((op) => op.id !== opId));
         showToast(t("toast.op_deleted") || "\u041E\u043F\u0435\u0440\u0430\u0446\u0438\u044F \u0443\u0434\u0430\u043B\u0435\u043D\u0430", {
           type: "success"
@@ -30125,11 +30126,11 @@ function DocPage() {
   };
   const handleSave = async (opId, payload) => {
     try {
-      const { ok, data } = await api2("purchase_ops_edit", {
-        items: [{ id: opId, ...payload }]
-      });
-      const affected = data?.result?.row_affected || 0;
-      if (ok && affected > 0) {
+      const { data } = await api2("docs.purchase_operation.edit", [
+        { id: opId, ...payload }
+      ]);
+      console.log("row_affected", data?.row_affected);
+      if (data?.row_affected > 0) {
         setOperations(
           (prev) => prev.map((op) => {
             if (op.id !== opId) return op;
@@ -60855,11 +60856,10 @@ function OpNewPage() {
   (0, import_react13.useEffect)(() => {
     async function loadDocMeta() {
       try {
-        const { data } = await api2("purchase_get", { doc_id: docId });
-        const doc = data?.result?.doc;
+        const { data: docData } = await api2("docs.purchase.get_by_id", id);
         setDocCtx({
-          price_type_id: doc?.price_type?.id ?? null,
-          stock_id: doc?.stock?.id ?? null
+          price_type_id: docData?.price_type?.id ?? null,
+          stock_id: docData?.stock?.id ?? null
         });
       } catch (err) {
         console.warn("[op_new] failed to fetch doc context", err);
@@ -60888,15 +60888,13 @@ function OpNewPage() {
       if (!queryText) return;
       setSearchStatus("loading");
       try {
-        const payload = { q: queryText, doc_id: docId };
-        if (docCtx.price_type_id != null) {
-          payload.price_type_id = Number(docCtx.price_type_id);
-        }
-        if (docCtx.stock_id != null) {
-          payload.stock_id = Number(docCtx.stock_id);
-        }
-        const { data } = await api2("product_search", payload);
-        const rawItems = data?.result?.items || [];
+        const payload = {
+          search: queryText,
+          price_type_id: docCtx?.price_type_id,
+          stock_id: docCtx?.stock_id
+        };
+        const { data } = await api2("refrences.item.get_ext", payload);
+        const rawItems = data?.result || [];
         if (!rawItems.length) {
           setPicked(null);
           closeResultModal();
