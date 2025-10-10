@@ -6,7 +6,6 @@ import asyncio
 
 class ClientBase(IntegrationBase):
 
-
     async def connect(self) -> Any:
         # Заглушка подключения
         return {"status": "connected"}
