@@ -1,85 +1,38 @@
-# Сервисы API: как оформлять
+## Конвенции для сервисов
 
-Этот документ описывает, как оформлять сервисы для работы с REST-эндпоинтами (асинхронный Python, Pydantic v2).
+### Цели
 
-## Цели
+- **Тонкая обёртка** над API без бизнес-логики.
+- **Типобезопасность** через Pydantic-схемы.
+- **Прозрачность**: метаданные (`ok`, `result`, `next_offset`, `total`) доступны через RAW-методы.
 
-- **Тонкая обёртка над API** без бизнес-логики.
-- **Типобезопасность** за счёт Pydantic-схем.
-- **Прозрачность**: метаданные ответа (`ok`, `result`, `next_offset`, `total`) доступны через raw-методы.
+### Принципы
 
----
-
-## Структура проекта (фрагмент)
-
-```
-
-core/
-logger.py
-schemas/
-api/
-base.py                     # BaseSchema, APIBaseResponse, ArrayResult
-common/
-filters.py                # Filter, Filters
-sort_orders.py            # SortOrder, SortOrders
-refrences/                  # (именно 'refrences', как в проекте)
-fields.py
-region.py
-retail_customer_group.py
-retail_customer.py        # модели и запросы RetailCustomer
-services/
-retail_customer_service.py    # 1 файл = 1 сущность
-
-````
-
----
-
-## Принципы
-
-1. **Один файл — одна сущность**  
-   `RetailCustomerService` → `services/retail_customer_service.py`.
-
-2. **Константы путей** в начале класса:  
+1. **Один файл — одна сущность**: `core/api/<entity>.py`.
+2. **Константы путей**:
    ```py
    PATH_GET = "Entity/Get"
    PATH_ADD = "Entity/Add"
    ...
-````
-
-3. **Два слоя методов**
-
-   * `*_raw(...) -> APIBaseResponse` — *1:1 к эндпоинтам*, ничего не скрывают.
-   * Тонкие методы (`get`, `get_page`, `add`, `edit`, `delete_mark`, `delete`) — удобства для приложения.
-
-4. **Минимум логики в сервисах**
-   Нормализация/валидация — в Pydantic-схемах.
-
-5. **Логирование**
-   Логер на модуль: `setup_logger("references.<Entity>")`.
-   Логируйте `ok=false` и неожиданный формат `result` (без чувствительных данных).
-
-6. **Исключения**
-   По умолчанию используйте стандартные:
-
-   * `RuntimeError` — если `ok=False`
-   * `TypeError` — если формат `result` не тот
-
-7. **Валидация списков** — через `TypeAdapter`:
-
+   ```
+3. **Два слоя**:
+   - `*_raw(...) -> APIBaseResponse` — *1:1 к эндпоинтам*, ничего не скрывают.
+   - Тонкие методы (`get`, `get_page`, `add`, `edit`, `delete_mark`, `delete`) — для удобства.
+4. **Логирование**: логируем `ok=False` и неожиданный формат `result` (без чувствительных данных).
+5. **Исключения** (стандартные):
+   - `RuntimeError` — если `ok=False`;
+   - `TypeError` — если формат `result` неожиданный.
+6. **Валидация списков** — через `TypeAdapter`:
    ```py
    from pydantic import TypeAdapter
    TypeAdapter(list[Model]).validate_python(resp.result)
    ```
+7. **Пагинация** — не скрывать: `get_page(...) -> (items, next_offset, total)`.
 
-8. **Пагинация**
-   Не скрывайте: давайте `get_page(...) -> (items, next_offset, total)`; при необходимости — генератор `paginate(...)`.
-
----
-
-## Шаблон сервиса
+### Шаблон сервиса
 
 ```py
-# services/<entity>_service.py
+# core/api/<entity>.py
 from __future__ import annotations
 
 from typing import List, Tuple
@@ -180,5 +133,37 @@ class <EntityName>Service:
             raise RuntimeError(f"{self.PATH_DELETE}: ok=False (result={getattr(resp, 'result', None)!r})")
 ```
 
+---
 
+## Пример использования (RetailCustomer)
+
+```py
+from services.retail_customer_service import RetailCustomerService
+from schemas.api.refrences.retail_customer import (
+    RetailCustomerGetRequest,
+    RetailCustomerAddRequest,
+    RetailCustomerDeleteMarkRequest,
+    RetailCustomerDeleteRequest,
+)
+
+svc = RetailCustomerService(api)
+
+# Страница покупателей
+items, next_offset, total = await svc.get_page(RetailCustomerGetRequest(limit=50, offset=0))
+
+# Добавить покупателя
+new_id = await svc.add(RetailCustomerAddRequest(
+    group_id=1,
+    first_name="Alexey",
+    sex="male",  # только: non|male|female
+))
+
+# Тоггл пометки на удаление
+await svc.delete_mark(RetailCustomerDeleteMarkRequest(id=new_id))
+
+# Удалить покупателя
+await svc.delete(RetailCustomerDeleteRequest(id=new_id))
+```
+
+---
 

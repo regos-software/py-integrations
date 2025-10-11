@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import functools
+from typing_extensions import deprecated
 import warnings
 from typing import Iterable, List, Optional, Tuple
 
@@ -19,30 +20,6 @@ from schemas.api.refrences.item import (
 
 logger = setup_logger("refrences.Item")
 
-
-# ---------- helper: deprecation decorator (BC-маркер) ----------
-def deprecated(reason: str):
-    """
-    Помечает метод устаревшим.
-    - добавляет атрибуты: __deprecated__=True, __deprecated_reason__=<reason>
-    - при вызове генерирует DeprecationWarning
-    """
-
-    def _wrap(func):
-        @functools.wraps(func)
-        async def _inner(*args, **kwargs):
-            warnings.warn(
-                f"{func.__qualname__} is deprecated: {reason}",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            return await func(*args, **kwargs)
-
-        _inner.__deprecated__ = True  # <- BC: явный атрибут
-        _inner.__deprecated_reason__ = reason
-        return _inner
-
-    return _wrap
 
 
 class ItemService:
