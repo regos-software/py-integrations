@@ -298,6 +298,7 @@ export default function DocPage({ definition: definitionProp }) {
   const [operations, setOperations] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [actionsOpen, setActionsOpen] = useState(false);
 
   const loadDoc = useCallback(async () => {
     const detail = docDefinition?.detail || {};
@@ -458,6 +459,11 @@ export default function DocPage({ definition: definitionProp }) {
     return fallback === "nav.back" ? "Назад" : fallback;
   }, [t]);
 
+  const actionsLabel = useMemo(() => {
+    const value = t("doc.actions");
+    return value === "doc.actions" ? "Действия" : value;
+  }, [t]);
+
   const addOperationLabel = useMemo(() => {
     const value = t("doc.add_op");
     return value === "doc.add_op" ? "Добавить" : value;
@@ -503,6 +509,192 @@ export default function DocPage({ definition: definitionProp }) {
       ((docId) => `/doc/${docId}/op/new`);
     navigate(buildNewOperationPath(docIdNumber));
   }, [docDefinition, docIdNumber, navigate]);
+
+  const handleOpenActions = useCallback(() => {
+    setActionsOpen(true);
+  }, []);
+
+  const handleCloseActions = useCallback(() => {
+    setActionsOpen(false);
+  }, []);
+
+  const handlePerform = useCallback(async () => {
+    const detail = docDefinition?.detail || {};
+    const action = detail.performAction;
+    if (!action) {
+      showToast(t("not_supported") || "Действие недоступно", {
+        type: "error",
+      });
+      return;
+    }
+
+    const confirmMessage = t("confirm.perform_doc") || "Провести документ?";
+    if (!window.confirm(confirmMessage)) {
+      return;
+    }
+
+    try {
+      const payloadBuilder =
+        detail.buildPerformPayload || ((docId) => ({ id: docId }));
+      const payload = payloadBuilder(doc?.id ?? docIdNumber, { doc });
+      const { data } = await api(action, payload);
+      const succeeded =
+        detail.handlePerformResponse?.(data, { doc }) ??
+        data?.result?.success ??
+        true;
+
+      if (succeeded) {
+        showToast(t("toast.doc_performed") || "Документ проведён", {
+          type: "success",
+        });
+        setActionsOpen(false);
+        await loadDoc();
+      } else {
+        throw new Error(data?.description || "Perform failed");
+      }
+    } catch (err) {
+      showToast(err.message || "Не удалось провести документ", {
+        type: "error",
+        duration: 2400,
+      });
+    }
+  }, [api, doc, docDefinition, docIdNumber, loadDoc, showToast, t]);
+
+  const handleCancelPerform = useCallback(async () => {
+    const detail = docDefinition?.detail || {};
+    const action = detail.cancelPerformAction;
+    if (!action) {
+      showToast(t("not_supported") || "Действие недоступно", {
+        type: "error",
+      });
+      return;
+    }
+
+    const confirmMessage =
+      t("confirm.cancel_perform_doc") || "Отменить проведение документа?";
+    if (!window.confirm(confirmMessage)) {
+      return;
+    }
+
+    try {
+      const payloadBuilder =
+        detail.buildCancelPerformPayload || ((docId) => ({ id: docId }));
+      const payload = payloadBuilder(doc?.id ?? docIdNumber, { doc });
+      const { data } = await api(action, payload);
+      const succeeded =
+        detail.handleCancelPerformResponse?.(data, { doc }) ??
+        data?.result?.success ??
+        true;
+
+      if (succeeded) {
+        showToast(t("toast.doc_cancelled") || "Проведение отменено", {
+          type: "success",
+        });
+        setActionsOpen(false);
+        await loadDoc();
+      } else {
+        throw new Error(data?.description || "Cancel perform failed");
+      }
+    } catch (err) {
+      showToast(err.message || "Не удалось отменить проведение", {
+        type: "error",
+        duration: 2400,
+      });
+    }
+  }, [api, doc, docDefinition, docIdNumber, loadDoc, showToast, t]);
+
+  const handleLock = useCallback(async () => {
+    const detail = docDefinition?.detail || {};
+    const action = detail.lockAction;
+    if (!action) {
+      showToast(t("not_supported") || "Действие недоступно", {
+        type: "error",
+      });
+      return;
+    }
+
+    const confirmMessage = t("confirm.lock_doc") || "Заблокировать документ?";
+    if (!window.confirm(confirmMessage)) {
+      return;
+    }
+
+    try {
+      const payloadBuilder =
+        detail.buildLockPayload || ((docId) => ({ ids: [docId] }));
+      const payload = payloadBuilder(doc?.id ?? docIdNumber, { doc });
+      const { data } = await api(action, payload);
+      const succeeded =
+        detail.handleLockResponse?.(data, { doc }) ??
+        data?.result?.success ??
+        true;
+
+      if (succeeded) {
+        showToast(t("toast.doc_locked") || "Документ заблокирован", {
+          type: "success",
+        });
+        setActionsOpen(false);
+        await loadDoc();
+      } else {
+        throw new Error(data?.description || "Lock failed");
+      }
+    } catch (err) {
+      showToast(err.message || "Не удалось заблокировать документ", {
+        type: "error",
+        duration: 2400,
+      });
+    }
+  }, [api, doc, docDefinition, docIdNumber, loadDoc, showToast, t]);
+
+  const handleUnlock = useCallback(async () => {
+    const detail = docDefinition?.detail || {};
+    const action = detail.unlockAction;
+    if (!action) {
+      showToast(t("not_supported") || "Действие недоступно", {
+        type: "error",
+      });
+      return;
+    }
+
+    const confirmMessage =
+      t("confirm.unlock_doc") || "Разблокировать документ?";
+    if (!window.confirm(confirmMessage)) {
+      return;
+    }
+
+    try {
+      const payloadBuilder =
+        detail.buildUnlockPayload || ((docId) => ({ ids: [docId] }));
+      const payload = payloadBuilder(doc?.id ?? docIdNumber, { doc });
+      const { data } = await api(action, payload);
+      const succeeded =
+        detail.handleUnlockResponse?.(data, { doc }) ??
+        data?.result?.success ??
+        true;
+
+      if (succeeded) {
+        showToast(t("toast.doc_unlocked") || "Документ разблокирован", {
+          type: "success",
+        });
+        setActionsOpen(false);
+        await loadDoc();
+      } else {
+        throw new Error(data?.description || "Unlock failed");
+      }
+    } catch (err) {
+      showToast(err.message || "Не удалось разблокировать документ", {
+        type: "error",
+        duration: 2400,
+      });
+    }
+  }, [api, doc, docDefinition, docIdNumber, loadDoc, showToast, t]);
+
+  const handlePrint = useCallback(() => {
+    console.log("[doc-actions] print", {
+      id: doc?.id ?? docIdNumber,
+      type: docDefinition?.key,
+    });
+    setActionsOpen(false);
+  }, [doc?.id, docDefinition?.key, docIdNumber]);
 
   if (!docDefinition) {
     return (
@@ -609,15 +801,16 @@ export default function DocPage({ definition: definitionProp }) {
           <button
             type="button"
             className={buttonClass({ variant: "ghost", size: "sm" })}
-            onClick={goToDocs}
+            onClick={handleOpenActions}
           >
-            {backToDocsLabel}
+            {actionsLabel}
           </button>
           <button
             id="btn-add-op"
             type="button"
             className={buttonClass({ variant: "primary", size: "sm" })}
             onClick={goToNewOperation}
+            disabled={doc?.performed || doc?.blocked}
           >
             <span>{addOperationLabel}</span>
             <i className="fa-solid fa-plus" aria-hidden="true" />
@@ -682,6 +875,98 @@ export default function DocPage({ definition: definitionProp }) {
           ))
         )}
       </div>
+
+      {actionsOpen ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/70 px-4 py-6"
+          role="presentation"
+          onClick={handleCloseActions}
+        >
+          <div
+            className={cardClass(
+              "relative w-full max-w-sm space-y-4 p-6 shadow-xl"
+            )}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="doc-actions-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <h2
+                id="doc-actions-title"
+                className="text-lg font-semibold text-slate-900 dark:text-slate-50"
+              >
+                {actionsLabel}
+              </h2>
+              <button
+                type="button"
+                className={iconButtonClass({ variant: "ghost" })}
+                onClick={handleCloseActions}
+                aria-label={t("common.close") || "Закрыть"}
+                title={t("common.close") || "Закрыть"}
+              >
+                <i className="fa-solid fa-xmark" aria-hidden="true" />
+              </button>
+            </div>
+
+            <div className="flex flex-col gap-3">
+              {!doc?.performed ? (
+                <button
+                  type="button"
+                  className={buttonClass({ variant: "primary", size: "md" })}
+                  onClick={handlePerform}
+                >
+                  {t("doc.perform") === "doc.perform"
+                    ? "Провести"
+                    : t("doc.perform") || "Провести"}
+                </button>
+              ) : null}
+              {doc?.performed ? (
+                <button
+                  type="button"
+                  className={buttonClass({ variant: "ghost", size: "md" })}
+                  onClick={handleCancelPerform}
+                >
+                  {t("doc.cancel_perform") === "doc.cancel_perform"
+                    ? "Отменить проведение"
+                    : t("doc.cancel_perform") || "Отменить проведение"}
+                </button>
+              ) : null}
+              {!doc?.blocked ? (
+                <button
+                  type="button"
+                  className={buttonClass({ variant: "ghost", size: "md" })}
+                  onClick={handleLock}
+                >
+                  {t("doc.lock") === "doc.lock"
+                    ? "Заблокировать"
+                    : t("doc.lock") || "Заблокировать"}
+                </button>
+              ) : null}
+              {doc?.blocked ? (
+                <button
+                  type="button"
+                  className={buttonClass({ variant: "ghost", size: "md" })}
+                  onClick={handleUnlock}
+                >
+                  {t("doc.unlock") === "doc.unlock"
+                    ? "Разблокировать"
+                    : t("doc.unlock") || "Разблокировать"}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className={buttonClass({ variant: "ghost", size: "md" })}
+                onClick={handlePrint}
+              >
+                {t("doc.print") === "doc.print"
+                  ? "Печать"
+                  : t("doc.print") || "Печать"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </section>
   );
 }
