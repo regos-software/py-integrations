@@ -16,14 +16,56 @@ const purchaseDefinition = {
   list: {
     action: "docs.purchase.get_raw",
     pageSize: DEFAULT_PAGE_SIZE,
-    buildParams: ({ page, pageSize, search }) => ({
-      offset: (page - 1) * pageSize,
-      limit: pageSize,
-      search: search || undefined,
-      performed: false,
-      deleted_mark: false,
-      sort_orders: [{ column: "date", direction: "desc" }],
-    }),
+    buildParams: ({ page, pageSize, search, filters = {} }) => {
+      const params = {
+        offset: (page - 1) * pageSize,
+        limit: pageSize,
+        search: search || undefined,
+        sort_orders: [{ column: "date", direction: "desc" }],
+      };
+      params.performed = false;
+      params.deleted_mark = false;
+
+      const {
+        performed,
+        blocked,
+        deleted_mark,
+        stock_ids,
+        start_date,
+        end_date,
+      } = filters;
+
+      if (performed === true || performed === false) {
+        params.performed = performed;
+      } else if (performed == null) {
+        delete params.performed;
+      }
+      if (blocked !== null && blocked !== undefined) {
+        params.blocked = blocked;
+      }
+      if (deleted_mark === true || deleted_mark === false) {
+        params.deleted_mark = deleted_mark;
+      } else if (deleted_mark == null) {
+        delete params.deleted_mark;
+      }
+      if (Array.isArray(stock_ids) && stock_ids.length > 0) {
+        params.stock_ids = stock_ids;
+      }
+      if (start_date) {
+        const parsed = new Date(start_date);
+        if (!Number.isNaN(parsed.getTime())) {
+          params.start_date = parsed.toISOString();
+        }
+      }
+      if (end_date) {
+        const parsed = new Date(end_date);
+        if (!Number.isNaN(parsed.getTime())) {
+          params.end_date = parsed.toISOString();
+        }
+      }
+
+      return params;
+    },
     transformResponse: (data = {}) => ({
       items: data.result || [],
       total: data.total || 0,
@@ -53,6 +95,7 @@ const purchaseDefinition = {
           doc.amount != null
             ? fmt.money(doc.amount, currency, doc.price_type?.round_to)
             : undefined,
+        stockLabel: doc.stock?.name || "",
         raw: doc,
       };
     },
@@ -114,6 +157,7 @@ const purchaseDefinition = {
             id: Number(core.id ?? core.code),
             name: core.name || "—",
             barcode: firstBarcode,
+            code: core?.code != null ? String(core.code) : null,
             vat_value: Number(core?.vat?.value ?? 0),
             last_purchase_cost:
               ext?.last_purchase_cost != null
@@ -175,14 +219,56 @@ const wholesaleDefinition = {
   list: {
     action: "docs.wholesale.get_raw",
     pageSize: DEFAULT_PAGE_SIZE,
-    buildParams: ({ page, pageSize, search }) => ({
-      offset: (page - 1) * pageSize,
-      limit: pageSize,
-      search: search || undefined,
-      performed: false,
-      deleted_mark: false,
-      sort_orders: [{ column: "date", direction: "desc" }],
-    }),
+    buildParams: ({ page, pageSize, search, filters = {} }) => {
+      const params = {
+        offset: (page - 1) * pageSize,
+        limit: pageSize,
+        search: search || undefined,
+        sort_orders: [{ column: "date", direction: "desc" }],
+      };
+      params.performed = false;
+      params.deleted_mark = false;
+
+      const {
+        performed,
+        blocked,
+        deleted_mark,
+        stock_ids,
+        start_date,
+        end_date,
+      } = filters;
+
+      if (performed === true || performed === false) {
+        params.performed = performed;
+      } else if (performed == null) {
+        delete params.performed;
+      }
+      if (blocked !== null && blocked !== undefined) {
+        params.blocked = blocked;
+      }
+      if (deleted_mark === true || deleted_mark === false) {
+        params.deleted_mark = deleted_mark;
+      } else if (deleted_mark == null) {
+        delete params.deleted_mark;
+      }
+      if (Array.isArray(stock_ids) && stock_ids.length > 0) {
+        params.stock_ids = stock_ids;
+      }
+      if (start_date) {
+        const parsed = new Date(start_date);
+        if (!Number.isNaN(parsed.getTime())) {
+          params.start_date = parsed.toISOString();
+        }
+      }
+      if (end_date) {
+        const parsed = new Date(end_date);
+        if (!Number.isNaN(parsed.getTime())) {
+          params.end_date = parsed.toISOString();
+        }
+      }
+
+      return params;
+    },
     transformResponse: (data = {}) => ({
       items: data.result || [],
       total: data.total || 0,
@@ -212,6 +298,7 @@ const wholesaleDefinition = {
           doc.amount != null
             ? fmt.money(doc.amount, currency, doc.price_type?.round_to)
             : undefined,
+        stockLabel: doc.stock?.name || "",
         raw: doc,
       };
     },
@@ -281,9 +368,14 @@ const wholesaleDefinition = {
             id: Number(core.id ?? core.code),
             name: core.name || "—",
             barcode: firstBarcode,
+            code: core?.code != null ? String(core.code) : null,
             vat_value: Number(core?.vat?.value ?? 0),
             price,
             price2: basePrice,
+            last_purchase_cost:
+              ext?.last_purchase_cost != null
+                ? Number(ext.last_purchase_cost)
+                : null,
             quantity_common: ext?.quantity?.common ?? null,
             unit: unit?.name || "шт",
             unit_piece: unit?.type === "pcs",

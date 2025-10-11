@@ -30,6 +30,11 @@ function OperationRow({ op, doc, onDelete, onSave, operationForm }) {
   const { t, fmt } = useI18n();
   const { toNumber } = useApp();
   const priceRoundTo = doc?.price_type?.round_to ?? null;
+  const currencyCode =
+    doc?.currency?.code_chr ||
+    doc?.currency?.code ||
+    doc?.currency_code ||
+    "UZS";
   const formOptions = useMemo(
     () => ({ ...DEFAULT_OPERATION_FORM, ...(operationForm || {}) }),
     [operationForm]
@@ -64,6 +69,16 @@ function OperationRow({ op, doc, onDelete, onSave, operationForm }) {
   const unitName = item.unit?.name;
   const unitPiece = item.unit?.type === "pcs";
   const priceValue = toNumber(op.price ?? 0);
+  const quantityNumber = toNumber(op.quantity ?? 0);
+  const costValue = toNumber(op.cost ?? 0);
+  const costTotal =
+    formOptions.showCost !== false && op.cost != null
+      ? costValue * quantityNumber
+      : null;
+  const priceTotal =
+    formOptions.showPrice !== false && op.price != null
+      ? priceValue * quantityNumber
+      : null;
 
   const handleFieldChange = (field) => (event) => {
     setForm((prev) => ({ ...prev, [field]: event.target.value }));
@@ -159,28 +174,64 @@ function OperationRow({ op, doc, onDelete, onSave, operationForm }) {
               </button>
             </div>
           </div>
-          <div className="flex flex-wrap items-center gap-2 text-sm font-medium text-slate-600 dark:text-slate-300">
-            <span>
-              <strong className="text-slate-900 dark:text-slate-100">
-                {fmt.number(op.quantity)}
-              </strong>{" "}
-              {unitName}
-            </span>
+          <div className="flex flex-col gap-3 text-sm text-slate-600 dark:text-slate-300">
+            <div className="flex flex-wrap items-center gap-2 font-medium">
+              <span>
+                <strong className="text-slate-900 dark:text-slate-100">
+                  {fmt.number(op.quantity)}
+                </strong>{" "}
+                {unitName}
+              </span>
+            </div>
+
             {formOptions.showCost !== false && op.cost != null ? (
-              <>
-                <MetaSeparator />
-                <span>
-                  {fmt.money(op.cost, doc.currency.code_chr, priceRoundTo)}
+              <div className="flex flex-col gap-1">
+                <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                  {t("op.cost") || "Стоимость"}
                 </span>
-              </>
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <span className="text-sm font-normal text-slate-500 dark:text-slate-400">
+                    {fmt.money(costValue, currencyCode, priceRoundTo)}
+                    {Number.isFinite(quantityNumber) && quantityNumber > 0
+                      ? ` × ${fmt.number(quantityNumber)}`
+                      : ""}
+                  </span>
+                  {Number.isFinite(costTotal) ? (
+                    <span className="text-lg font-semibold text-slate-900 dark:text-slate-100">
+                      {fmt.money(costTotal, currencyCode, priceRoundTo)}
+                    </span>
+                  ) : (
+                    <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
+                      {fmt.money(costValue, currencyCode, priceRoundTo)}
+                    </span>
+                  )}
+                </div>
+              </div>
             ) : null}
+
             {formOptions.showPrice !== false ? (
-              <>
-                <MetaSeparator />
-                <span>
-                  {fmt.money(priceValue, doc.currency.code_chr, priceRoundTo)}
+              <div className="flex flex-col gap-1">
+                <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                  {t("op.price") || "Цена"}
                 </span>
-              </>
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <span className="text-sm font-normal text-slate-500 dark:text-slate-400">
+                    {fmt.money(priceValue, currencyCode, priceRoundTo)}
+                    {Number.isFinite(quantityNumber) && quantityNumber > 0
+                      ? ` × ${fmt.number(quantityNumber)}`
+                      : ""}
+                  </span>
+                  {Number.isFinite(priceTotal) ? (
+                    <span className="text-lg font-semibold text-slate-900 dark:text-slate-100">
+                      {fmt.money(priceTotal, currencyCode, priceRoundTo)}
+                    </span>
+                  ) : (
+                    <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
+                      {fmt.money(priceValue, currencyCode, priceRoundTo)}
+                    </span>
+                  )}
+                </div>
+              </div>
             ) : null}
           </div>
         </>
@@ -797,7 +848,7 @@ export default function DocPage({ definition: definitionProp }) {
             })}
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="w-full flex items-center justify-between gap-2">
           <button
             type="button"
             className={buttonClass({ variant: "ghost", size: "sm" })}
