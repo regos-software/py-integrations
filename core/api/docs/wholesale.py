@@ -19,16 +19,7 @@ class DocWholeSaleService:
 
     async def get_raw(self, req: DocWholeSaleGetRequest) -> DocWholeSaleGetResponse:
         """ """
-        resp = await self.api.call(self.PATH_GET, req, DocWholeSaleGetResponse)
-        if not getattr(resp, "ok", False) or not isinstance(resp.result, list):
-            logger.warning(
-                "DocWholeSale/Get non-ok or non-list result: %s",
-                getattr(resp, "result", None),
-            )
-            return DocWholeSaleGetResponse(
-                ok=False, result=APIErrorResult(getattr(resp, "result", None))
-            )
-        return resp
+        return await self.api.call(self.PATH_GET, req, DocWholeSaleGetResponse)
 
     async def get_by_id(self, id_: int) -> Optional[DocWholeSale]:
         """

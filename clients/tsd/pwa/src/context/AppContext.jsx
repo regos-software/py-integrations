@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useMemo } from "react";
 import { CI, api } from "../lib/api.js";
-import { esc, fmtMoney, fmtNum, toNumber, unixToLocal } from "../lib/utils.js";
+import { toNumber, unixToLocal } from "../lib/utils.js";
 
 const AppContext = createContext(null);
 
@@ -18,11 +18,8 @@ export function AppProvider({ children }) {
     () => ({
       ci: CI,
       api,
-      fmtMoney,
-      fmtNum,
       toNumber,
       unixToLocal,
-      esc,
       setAppTitle,
     }),
     []

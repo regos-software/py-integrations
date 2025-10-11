@@ -21,25 +21,18 @@ class PurchaseOperationService:
         self.api = api
 
     async def get_raw(self, req: PurchaseOperationGetRequest) -> APIBaseResponse:
-        resp = await self.api.call(self.PATH_GET, req, APIBaseResponse)
-        if not getattr(resp, "ok", False) or not isinstance(resp.result, list):
-            return APIBaseResponse(ok=False, result=[])
-        return resp
+        return await self.api.call(self.PATH_GET, req, APIBaseResponse)
 
     async def get_by_document_id(self, doc_id: int) -> List[PurchaseOperation]:
-        resp = await self.get_raw(PurchaseOperationGetRequest(document_ids=[doc_id]))
-        return resp.result if resp.ok else []
+        return await self.get_raw(PurchaseOperationGetRequest(document_ids=[doc_id]))
 
     async def add_raw(self, req: List[PurchaseOperationAddRequest]) -> APIBaseResponse:
-        resp = await self.api.call(self.PATH_ADD, req, APIBaseResponse)
-        return resp
+        return await self.api.call(self.PATH_ADD, req, APIBaseResponse)
 
     async def edit_raw(self, req: List[PurchaseOperationEditItem]) -> APIBaseResponse:
-        resp = await self.api.call(self.PATH_EDIT, req, APIBaseResponse)
-        return resp
+        return await self.api.call(self.PATH_EDIT, req, APIBaseResponse)
 
     async def delete_raw(
         self, req: List[PurchaseOperationDeleteItem]
     ) -> APIBaseResponse:
-        resp = await self.api.call(self.PATH_DELETE, req, APIBaseResponse)
-        return resp
+        return await self.api.call(self.PATH_DELETE, req, APIBaseResponse)

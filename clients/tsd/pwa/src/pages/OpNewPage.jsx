@@ -95,6 +95,8 @@ export default function OpNewPage({ definition: definitionProp }) {
   const [searchMode, setSearchMode] = useState(SEARCH_MODES.SCAN);
   const [resultModalOpen, setResultModalOpen] = useState(false);
   const [resultItems, setResultItems] = useState([]);
+  const priceRoundTo = docCtx?.price_type_round_to ?? null;
+  const docCurrency = docCtx?.doc_currency ?? null;
 
   const videoRef = useRef(null);
   const readerRef = useRef(null);
@@ -434,13 +436,13 @@ export default function OpNewPage({ definition: definitionProp }) {
 
   const lpcLabel = useMemo(() => {
     if (!showCostField || picked?.last_purchase_cost == null) return null;
-    return fmt.money(picked.last_purchase_cost);
-  }, [fmt, picked, showCostField]);
+    return fmt.money(picked.last_purchase_cost, docCurrency, priceRoundTo);
+  }, [fmt, picked, priceRoundTo, showCostField]);
 
   const priceLabel = useMemo(() => {
     if (!showPriceField || picked?.price == null) return null;
-    return fmt.money(picked.price);
-  }, [fmt, picked, showPriceField]);
+    return fmt.money(picked.price, docCurrency, priceRoundTo);
+  }, [fmt, picked, priceRoundTo, showPriceField]);
 
   if (!docDefinition) {
     return (
@@ -837,7 +839,7 @@ export default function OpNewPage({ definition: definitionProp }) {
                     <span className={mutedTextClass()}>{item.barcode}</span>
                     {item.price != null ? (
                       <span className={mutedTextClass()}>
-                        {fmt.money(item.price)}
+                        {fmt.money(item.price, docCurrency, priceRoundTo)}
                       </span>
                     ) : null}
                   </div>

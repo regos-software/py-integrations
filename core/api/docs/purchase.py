@@ -19,16 +19,7 @@ class DocPurchaseService:
 
     async def get_raw(self, req: DocPurchaseGetRequest) -> DocPurchaseGetResponse:
         """ """
-        resp = await self.api.call(self.PATH_GET, req, DocPurchaseGetResponse)
-        if not getattr(resp, "ok", False) or not isinstance(resp.result, list):
-            logger.warning(
-                "DocPurchase/Get non-ok or non-list result: %s",
-                getattr(resp, "result", None),
-            )
-            return DocPurchaseGetResponse(
-                ok=False, result=APIErrorResult(getattr(resp, "result", None))
-            )
-        return resp
+        return await self.api.call(self.PATH_GET, req, DocPurchaseGetResponse)
 
     async def get_by_id(self, id_: int) -> Optional[DocPurchase]:
         """

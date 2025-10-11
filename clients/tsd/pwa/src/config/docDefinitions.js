@@ -50,7 +50,9 @@ const purchaseDefinition = {
         rightTop: doc.date ? unixToLocal(doc.date) : "",
         rightBottom: statusParts.filter(Boolean).join(" • "),
         amountLabel:
-          doc.amount != null ? fmt.money(doc.amount, currency) : undefined,
+          doc.amount != null
+            ? fmt.money(doc.amount, currency, doc.price_type?.round_to)
+            : undefined,
         raw: doc,
       };
     },
@@ -64,8 +66,8 @@ const purchaseDefinition = {
     buildDeletePayload: (opId) => [{ id: opId }],
     editAction: "docs.purchase_operation.edit_raw",
     buildEditPayload: (opId, payload) => [{ id: opId, ...payload }],
-    handleDeleteResponse: (data) => data?.row_affected > 0,
-    handleEditResponse: (data) => data?.row_affected > 0,
+    handleDeleteResponse: (data) => data?.result?.row_affected > 0,
+    handleEditResponse: (data) => data?.result?.row_affected > 0,
     operationForm: {
       showCost: true,
       showPrice: true,
@@ -80,7 +82,9 @@ const purchaseDefinition = {
     docMetaPayload: (docId) => docId,
     extractDocContext: (doc = {}) => ({
       price_type_id: doc?.price_type?.id ?? null,
+      doc_currency: doc?.currency?.code_chr ?? null,
       stock_id: doc?.stock?.id ?? null,
+      price_type_round_to: doc?.price_type?.round_to ?? null,
     }),
     search: {
       action: "refrences.item.get_ext_raw",
@@ -201,7 +205,9 @@ const wholesaleDefinition = {
         rightTop: doc.date ? unixToLocal(doc.date) : "",
         rightBottom: statusParts.filter(Boolean).join(" • "),
         amountLabel:
-          doc.amount != null ? fmt.money(doc.amount, currency) : undefined,
+          doc.amount != null
+            ? fmt.money(doc.amount, currency, doc.price_type?.round_to)
+            : undefined,
         raw: doc,
       };
     },
@@ -215,8 +221,8 @@ const wholesaleDefinition = {
     buildDeletePayload: (opId) => [{ id: opId }],
     editAction: "docs.wholesale_operation.edit_raw",
     buildEditPayload: (opId, payload) => [{ id: opId, ...payload }],
-    handleDeleteResponse: (data) => data?.row_affected > 0,
-    handleEditResponse: (data) => data?.row_affected > 0,
+    handleDeleteResponse: (data) => data?.result?.row_affected > 0,
+    handleEditResponse: (data) => data?.result?.row_affected > 0,
     operationForm: {
       showCost: false,
       showPrice: true,
@@ -231,7 +237,9 @@ const wholesaleDefinition = {
     docMetaPayload: (docId) => docId,
     extractDocContext: (doc = {}) => ({
       price_type_id: doc?.price_type?.id ?? null,
+      doc_currency: doc?.currency?.code_chr ?? null,
       stock_id: doc?.stock?.id ?? null,
+      price_type_round_to: doc?.price_type?.round_to ?? null,
     }),
     search: {
       action: "refrences.item.get_ext_raw",

@@ -26,9 +26,10 @@ function MetaSeparator() {
   );
 }
 
-function OperationRow({ op, onDelete, onSave, operationForm }) {
+function OperationRow({ op, doc, onDelete, onSave, operationForm }) {
   const { t, fmt } = useI18n();
   const { toNumber } = useApp();
+  const priceRoundTo = doc?.price_type?.round_to ?? null;
   const formOptions = useMemo(
     () => ({ ...DEFAULT_OPERATION_FORM, ...(operationForm || {}) }),
     [operationForm]
@@ -168,13 +169,17 @@ function OperationRow({ op, onDelete, onSave, operationForm }) {
             {formOptions.showCost !== false && op.cost != null ? (
               <>
                 <MetaSeparator />
-                <span>{fmt.money(op.cost)}</span>
+                <span>
+                  {fmt.money(op.cost, doc.currency.code_chr, priceRoundTo)}
+                </span>
               </>
             ) : null}
             {formOptions.showPrice !== false ? (
               <>
                 <MetaSeparator />
-                <span>{fmt.money(priceValue)}</span>
+                <span>
+                  {fmt.money(priceValue, doc.currency.code_chr, priceRoundTo)}
+                </span>
               </>
             ) : null}
           </div>
@@ -466,10 +471,11 @@ export default function DocPage({ definition: definitionProp }) {
   const metaSegments = useMemo(() => {
     if (!doc) return [];
     const currency = doc.currency?.code_chr || "UZS";
+    const roundTo = doc.price_type?.round_to ?? null;
     return [
       doc.date ? unixToLocal(doc.date) : null,
       doc.partner?.name || null,
-      fmt.money(doc.amount ?? 0, currency),
+      fmt.money(doc.amount ?? 0, currency, roundTo),
     ].filter(Boolean);
   }, [doc, fmt, unixToLocal]);
 
@@ -640,7 +646,8 @@ export default function DocPage({ definition: definitionProp }) {
           <span>
             {fmt.money(
               doc.amount ?? 0,
-              doc.currency?.code_chr || doc.currency?.code || "UZS"
+              doc.currency?.code_chr || doc.currency?.code || "UZS",
+              doc.price_type?.round_to ?? null
             )}
           </span>
         </div>
@@ -667,6 +674,7 @@ export default function DocPage({ definition: definitionProp }) {
             <OperationRow
               key={operation.id}
               op={operation}
+              doc={doc}
               onDelete={handleDelete}
               onSave={handleSave}
               operationForm={operationForm}
