@@ -14,7 +14,7 @@ class ItemGroupService:
     def __init__(self, api):
         self.api = api
 
-    async def get(self, req: ItemGroupGetRequest) -> ItemGroupGetResponse:
+    async def get_raw(self, req: ItemGroupGetRequest) -> ItemGroupGetResponse:
         try:
             resp = await self.api.call(self.PATH_GET, req, ItemGroupGetResponse)
         except Exception:

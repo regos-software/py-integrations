@@ -302,7 +302,7 @@ export default function DocPage() {
     const question = t("confirm.delete_op") || "Удалить операцию?";
     if (!window.confirm(question)) return;
     try {
-      const { data } = await api("docs.purchase_operation.delete", [
+      const { data } = await api("docs.purchase_operation.delete_raw", [
         { id: opId },
       ]);
 
@@ -324,7 +324,7 @@ export default function DocPage() {
 
   const handleSave = async (opId, payload) => {
     try {
-      const { data } = await api("docs.purchase_operation.edit", [
+      const { data } = await api("docs.purchase_operation.edit_raw", [
         { id: opId, ...payload },
       ]);
       console.log("row_affected", data?.row_affected);

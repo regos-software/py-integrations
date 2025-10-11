@@ -129,7 +129,7 @@ export default function OpNewPage() {
           stock_id: docCtx?.stock_id,
         };
 
-        const { data } = await api("refrences.item.get_ext", payload);
+        const { data } = await api("refrences.item.get_ext_raw", payload);
         const rawItems = data?.result || [];
         if (!rawItems.length) {
           setPicked(null);
@@ -311,26 +311,24 @@ export default function OpNewPage() {
       return;
     }
 
-    const payload = {
-      items: [
-        {
-          document_id: docId,
-          item_id: Number(picked.id),
-          quantity: qtyNumber,
-          cost: costNumber,
-          vat_value: Number(picked.vat_value ?? 0),
-        },
-      ],
-    };
+    const payload = [
+      {
+        document_id: docId,
+        item_id: Number(picked.id),
+        quantity: qtyNumber,
+        cost: costNumber,
+        vat_value: Number(picked.vat_value ?? 0),
+      },
+    ];
+
     const priceNumber = toNumber(price);
-    if (priceNumber > 0) payload.items[0].price = priceNumber;
-    if (description.trim()) payload.items[0].description = description.trim();
+    if (priceNumber > 0) payload[0].price = priceNumber;
+    if (description.trim()) payload[0].description = description.trim();
 
     setSaving(true);
     try {
-      const { ok, data } = await api("purchase_ops_add", payload);
-      const affected = data?.result?.row_affected || 0;
-      if (ok && affected > 0) {
+      const { data } = await api("docs.purchase_operation.add_raw", payload);
+      if (data?.result?.row_affected > 0) {
         showToast(t("toast.op_added") || "Операция добавлена", {
           type: "success",
         });

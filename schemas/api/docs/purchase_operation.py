@@ -61,8 +61,8 @@ class PurchaseOperationAddRequest(BaseSchema):
     document_id: int
     item_id: int
     quantity: Decimal
-    cost: Decimal
-    vat_value: Decimal
+    cost: Optional[Decimal] = None
+    vat_value: Optional[Decimal] = None
     price: Optional[Decimal] = None
     description: Optional[str] = None
 

@@ -49,7 +49,7 @@ export default function DocsPage() {
     setError(null);
     try {
       const searchTerm = debouncedSearch.trim();
-      const { data } = await api("docs.purchase.get", {
+      const { data } = await api("docs.purchase.get_raw", {
         offset: (page - 1) * PAGE_SIZE,
         limit: PAGE_SIZE,
         search: searchTerm,
