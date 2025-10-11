@@ -51,10 +51,27 @@ export default function HomePage() {
           </span>
         </button>
 
-        {["doc_sales", "doc_inventory"].map((key) => (
+        <button
+          id="btn-doc-wholesale"
+          type="button"
+          className={buttonClass({
+            variant: "primary",
+            size: "lg",
+            block: true,
+          })}
+          onClick={() => navigate("/docs?type=wholesale")}
+        >
+          <span id="btn-doc-wholesale-txt">
+            {t("doc_wholesale") === "doc_wholesale"
+              ? "Отгрузка контрагенту"
+              : t("doc_wholesale") || "Отгрузка контрагенту"}
+          </span>
+        </button>
+
+        {["doc_inventory"].map((key) => (
           <button
             key={key}
-            id={key === "doc_sales" ? "btn-doc-sales" : "btn-doc-inventory"}
+            id={"btn-doc-inventory"}
             type="button"
             className={buttonClass({
               variant: "ghost",
@@ -65,14 +82,7 @@ export default function HomePage() {
           >
             <div className="flex w-full items-center justify-between gap-3">
               <span id={`${key}-txt`} className="text-left">
-                {t(key) === key
-                  ? key === "doc_sales"
-                    ? "Отгрузка контрагенту"
-                    : "Инвентаризация"
-                  : t(key) ||
-                    (key === "doc_sales"
-                      ? "Отгрузка контрагенту"
-                      : "Инвентаризация")}
+                {t(key) === key ? "Инвентаризация" : t(key) || "Инвентаризация"}
               </span>
               <span
                 className={cn(
@@ -81,7 +91,7 @@ export default function HomePage() {
                   ),
                   "uppercase"
                 )}
-                id={key === "doc_sales" ? "pill-sales" : "pill-inventory"}
+                id="pill-inventory"
               >
                 {soonLabel}
               </span>

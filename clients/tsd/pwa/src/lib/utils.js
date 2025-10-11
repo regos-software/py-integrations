@@ -1,38 +1,3 @@
-export function esc(value) {
-  if (value == null) return "";
-  return String(value).replace(
-    /[&<>"']/g,
-    (m) =>
-      ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        '"': "&quot;",
-        "'": "&#39;",
-      }[m])
-  );
-}
-
-export function fmtNum(value, options = {}) {
-  const v = Number(value ?? 0);
-  if (!Number.isFinite(v)) return "0";
-  return v.toLocaleString("ru-RU", {
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 2,
-    ...options,
-  });
-}
-
-export function fmtMoney(value, locale = "ru-RU", currency = "UZS") {
-  const v = Number(value ?? 0);
-  return v.toLocaleString(locale, {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-    currency,
-    style: "currency",
-  });
-}
-
 export function toNumber(value) {
   if (value == null || value === "") return 0;
   const normalized = String(value).replace(",", ".");
@@ -51,4 +16,38 @@ export function unixToLocal(ts) {
 
 export function cn(...classes) {
   return classes.flat().filter(Boolean).join(" ");
+}
+
+export function decimalPlacesFromRoundTo(roundTo) {
+  if (roundTo == null) return 0;
+
+  if (typeof roundTo === "number") {
+    if (!Number.isFinite(roundTo) || roundTo === 0) {
+      return 0;
+    }
+  }
+
+  const raw = String(roundTo).trim();
+  if (!raw) return 0;
+
+  const normalized = raw.replace(",", ".");
+
+  const numeric = Number(normalized);
+  if (!Number.isFinite(numeric) || numeric === 0) {
+    return 0;
+  }
+
+  const absolute = Math.abs(numeric);
+  if (Number.isInteger(absolute)) {
+    return 0;
+  }
+
+  if (normalized.toLowerCase().includes("e")) {
+    const parts = absolute.toString().split(".");
+    return parts[1] ? parts[1].replace(/0+$/, "").length : 0;
+  }
+
+  const [, fraction = ""] = normalized.split(".");
+  const trimmed = fraction.replace(/0+$/, "");
+  return trimmed.length;
 }

@@ -1,4 +1,4 @@
-# schemas/api/docs/purchase_operation.py
+# schemas/api/docs/WholeSale_operation.py
 from __future__ import annotations
 
 from decimal import Decimal
@@ -16,7 +16,7 @@ from schemas.api.refrences.tax import VatCalculationType
 # ---------- Core model ----------
 
 
-class PurchaseOperation(BaseModel):
+class WholeSaleOperation(BaseModel):
     id: Optional[int] = None
     document_id: Optional[int] = None
     item: Optional[Item] = None
@@ -26,7 +26,8 @@ class PurchaseOperation(BaseModel):
     vat_value: Optional[Decimal] = None
     vat_calculation_type: Optional[VatCalculationType] = None
 
-    price: Optional[Decimal] = None
+    price: Optional[Decimal] = None  # Цена с учетом скидки
+    price2: Optional[Decimal] = None  # Цена без скидки
     current_price: Optional[Decimal] = None
     last_purchase_cost: Optional[Decimal] = None
 
@@ -39,9 +40,9 @@ class PurchaseOperation(BaseModel):
 # ---------- Get ----------
 
 
-class PurchaseOperationGetRequest(BaseSchema):
+class WholeSaleOperationGetRequest(BaseSchema):
     """
-    Параметры для /v1/PurchaseOperation/Get
+    Параметры для /v1/WholeSaleOperation/Get
     """
 
     ids: Optional[List[int]] = None
@@ -52,27 +53,27 @@ class PurchaseOperationGetRequest(BaseSchema):
 # ---------- Add ----------
 
 
-class PurchaseOperationAddRequest(BaseSchema):
+class WholeSaleOperationAddRequest(BaseSchema):
     """
-    Один элемент массива для /v1/PurchaseOperation/Add
+    Один элемент массива для /v1/WholeSaleOperation/Add
     Все элементы массива должны иметь одинаковый document_id.
     """
 
     document_id: int
     item_id: int
     quantity: Decimal
-    cost: Optional[Decimal] = None
+    price: Optional[Decimal] = None  # Цена с учетом скидки
+    price2: Optional[Decimal] = None  # Цена без скидки
     vat_value: Optional[Decimal] = None
-    price: Optional[Decimal] = None
     description: Optional[str] = None
 
 
 # ---------- Edit ----------
 
 
-class PurchaseOperationEditItem(BaseSchema):
+class WholeSaleOperationEditItem(BaseSchema):
     """
-    Один элемент массива для /v1/PurchaseOperation/Edit
+    Один элемент массива для /v1/WholeSaleOperation/Edit
     """
 
     id: int
@@ -87,13 +88,13 @@ class PurchaseOperationEditItem(BaseSchema):
 # ---------- Delete ----------
 
 
-class PurchaseOperationDeleteItem(BaseSchema):
+class WholeSaleOperationDeleteItem(BaseSchema):
     """
-    Один элемент массива для /v1/PurchaseOperation/Delete
+    Один элемент массива для /v1/WholeSaleOperation/Delete
     """
 
     id: int
 
 
-class PurchaseOperationActionResponse(APIBaseResponse):
+class WholeSaleOperationActionResponse(APIBaseResponse):
     result: Optional[ArrayResult] = []

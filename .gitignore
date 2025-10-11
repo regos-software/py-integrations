@@ -56,3 +56,7 @@ Thumbs.db
 data/
 node_modules/
 dist/
+
+clients/tsd/pwa/assets/app.js.map
+clients/tsd/pwa/assets/app.css
+clients/tsd/pwa/assets/app.js

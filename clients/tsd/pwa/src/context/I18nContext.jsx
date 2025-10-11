@@ -6,6 +6,7 @@ import React, {
   useState,
 } from "react";
 import { useApp } from "./AppContext.jsx";
+import { decimalPlacesFromRoundTo } from "../lib/utils.js";
 
 const SUPPORTED = ["ru", "en", "uz"];
 const STORAGE_KEY = "tsd_locale";
@@ -90,13 +91,52 @@ export function I18nProvider({ children }) {
 
   const fmt = useMemo(
     () => ({
-      money(value, currency = "UZS") {
-        return new Intl.NumberFormat(locale, {
-          style: "currency",
-          currency,
-          maximumFractionDigits: 2,
-          minimumFractionDigits: 2,
-        }).format(Number(value || 0));
+      money(value, currency = "UZS", roundTo = null) {
+        const numberValue = Number(value ?? 0);
+        const normalized = (currency || "").trim();
+        const decimals = Math.max(
+          0,
+          Math.min(6, decimalPlacesFromRoundTo(roundTo))
+        );
+
+        const map = {
+          $: "USD",
+          US$: "USD",
+          uzs: "UZS",
+          сум: "UZS",
+          "₽": "RUB",
+          "₸": "KZT",
+          "€": "EUR",
+          "£": "GBP",
+          "¥": "CNY",
+          "₴": "UAH",
+        };
+
+        const letterCode = normalized.toUpperCase();
+        const resolved =
+          (/^[A-Z]{3}$/.test(letterCode) && letterCode) ||
+          map[normalized] ||
+          map[letterCode];
+
+        if (resolved) {
+          try {
+            return new Intl.NumberFormat(locale, {
+              style: "currency",
+              currency: resolved,
+              maximumFractionDigits: decimals,
+              minimumFractionDigits: decimals,
+            }).format(numberValue);
+          } catch (err) {
+            // fall through to plain number formatting below
+          }
+        }
+
+        const formatted = new Intl.NumberFormat(locale, {
+          maximumFractionDigits: decimals,
+          minimumFractionDigits: decimals,
+        }).format(numberValue);
+
+        return normalized ? `${formatted} ${normalized}`.trim() : formatted;
       },
       number(value, options = {}) {
         return new Intl.NumberFormat(locale, options).format(
