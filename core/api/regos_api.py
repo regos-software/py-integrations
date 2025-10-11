@@ -10,6 +10,7 @@ from tenacity import (
     retry_if_exception_type,
 )
 
+from core.api.batch import BatchService
 from core.api.client import APIClient
 from core.api.refrences.item_group import ItemGroupService
 from core.logger import setup_logger
@@ -22,6 +23,8 @@ class RegosAPI:
     def __init__(self, connected_integration_id: str):
         self.connected_integration_id = connected_integration_id
         self._client = APIClient(connected_integration_id=connected_integration_id)
+        self.batch = BatchService(self._client)
+
         self.docs: "RegosAPI.Docs" = self.Docs(self)
         self.integrations: "RegosAPI.Integrations" = self.Integrations(self)
         self.reports: "RegosAPI.Reports" = self.Reports(self)
