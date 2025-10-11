@@ -13,6 +13,7 @@ from tenacity import (
 from core.api.batch import BatchService
 from core.api.client import APIClient
 from core.api.refrences.item_group import ItemGroupService
+from core.api.refrences.stock import StockService
 from core.logger import setup_logger
 
 logger = setup_logger("regos_api")
@@ -96,3 +97,4 @@ class RegosAPI:
 
             self.item = ItemService(api)
             self.item_group = ItemGroupService(api)
+            self.stock = StockService(api)

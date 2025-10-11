@@ -8,15 +8,18 @@ from typing import List, Optional
 from pydantic import Field as PydField, EmailStr, field_validator
 from pydantic.config import ConfigDict
 
-from schemas.api.base import BaseSchema
+from schemas.api.base import APIBaseResponse, BaseSchema
 from schemas.api.common.filters import Filters
 from schemas.api.common.sort_orders import SortOrders
+from schemas.api.docs.cheque import DocCheque
+from schemas.api.docs.cheque_operation import DocChequeOperation
 from schemas.api.refrences.fields import FieldValueAdds, FieldValueEdits, FieldValues
 from schemas.api.refrences.region import Region
 from schemas.api.refrences.retail_customer_group import RetailCustomerGroup
 
 
 # ---------- Вспомогательные модели ----------
+
 
 class Sex(str, Enum):
     """
@@ -25,6 +28,7 @@ class Sex(str, Enum):
       - male   — Мужской
       - female — Женский
     """
+
     non = "non"
     male = "male"
     female = "female"
@@ -32,18 +36,24 @@ class Sex(str, Enum):
 
 # ---------- Основная модель ----------
 
+
 class RetailCustomer(BaseSchema):
     """
     Покупатель (физ. лицо розницы).
     """
+
     # Настраиваем приём лишних полей на чтении мягко (если нужно — можно запретить)
     model_config = ConfigDict(extra="ignore")
 
     id: int = PydField(..., description="ID покупателя.")
     region: Optional[Region] = PydField(None, description="Регион проживания (Region).")
-    group: RetailCustomerGroup = PydField(..., description="Группа покупателя (RetailCustomerGroup).")
+    group: RetailCustomerGroup = PydField(
+        ..., description="Группа покупателя (RetailCustomerGroup)."
+    )
 
-    last_purchase: Optional[int] = PydField(None, description="ID последней покупки (если ведётся).")
+    last_purchase: Optional[int] = PydField(
+        None, description="ID последней покупки (если ведётся)."
+    )
     debt: Optional[Decimal] = PydField(None, description="Долг покупателя.")
 
     # Персональные данные
@@ -52,30 +62,44 @@ class RetailCustomer(BaseSchema):
     middle_name: Optional[str] = PydField(None, description="Отчество.")
     full_name: Optional[str] = PydField(None, description="Полное ФИО.")
     sex: Sex = PydField(Sex.non, description="Пол: non|male|female.")
-    date_of_birth: Optional[str] = PydField(None, description="Дата рождения (строка, напр. YYYY-MM-DD).")
+    date_of_birth: Optional[str] = PydField(
+        None, description="Дата рождения (строка, напр. YYYY-MM-DD)."
+    )
 
     # Контакты и адрес
     address: Optional[str] = PydField(None, description="Адрес.")
     main_phone: Optional[str] = PydField(None, description="Основной телефон.")
-    phones: Optional[str] = PydField(None, description="Доп. телефоны (свободный формат).")
+    phones: Optional[str] = PydField(
+        None, description="Доп. телефоны (свободный формат)."
+    )
     email: Optional[str] = PydField(None, description="E-mail.")
 
     # Реферальная информация
     refer_id: Optional[int] = PydField(None, description="ID реферального покупателя.")
 
     # Доп. поля и заметки
-    fields: Optional[FieldValues] = PydField(None, description="Массив значений доп. полей (FieldValue[]).")
+    fields: Optional[FieldValues] = PydField(
+        None, description="Массив значений доп. полей (FieldValue[])."
+    )
     description: Optional[str] = PydField(None, description="Примечание/заметка.")
 
     # Служебные флаги и метаданные
     deleted_mark: bool = PydField(..., description="Метка удаления: true/false.")
-    last_update: int = PydField(..., description="Unix time (сек) последнего изменения.")
+    last_update: int = PydField(
+        ..., description="Unix time (сек) последнего изменения."
+    )
 
     # легкая нормализация пробелов на чтении
     @field_validator(
-        "first_name", "last_name", "middle_name", "full_name",
-        "address", "main_phone", "phones", "email",
-        mode="before"
+        "first_name",
+        "last_name",
+        "middle_name",
+        "full_name",
+        "address",
+        "main_phone",
+        "phones",
+        "email",
+        mode="before",
     )
     @classmethod
     def _strip_strings(cls, v):
@@ -83,6 +107,7 @@ class RetailCustomer(BaseSchema):
 
 
 # ---------- Get ----------
+
 
 class RetailCustomerGetRequest(BaseSchema):
     # запретим опечатки во входе
@@ -106,14 +131,18 @@ class RetailCustomerGetRequest(BaseSchema):
 
 # ---------- Add ----------
 
+
 class RetailCustomerAddRequest(BaseSchema):
     """
     Параметры для /v1/RetailCustomer/Add
     """
+
     model_config = ConfigDict(extra="forbid")
 
     group_id: int = PydField(..., ge=1, description="ID группы покупателя.")
-    region_id: Optional[int] = PydField(None, ge=1, description="ID региона (опционально).")
+    region_id: Optional[int] = PydField(
+        None, ge=1, description="ID региона (опционально)."
+    )
 
     first_name: str = PydField(..., description="Имя.")
     last_name: Optional[str] = PydField(None, description="Фамилия.")
@@ -122,7 +151,9 @@ class RetailCustomerAddRequest(BaseSchema):
 
     # только non|male|female
     sex: Optional[Sex] = PydField(None, description="Пол: non|male|female.")
-    date_of_birth: Optional[str] = PydField(None, description="Дата рождения (строка, напр. YYYY-MM-DD).")
+    date_of_birth: Optional[str] = PydField(
+        None, description="Дата рождения (строка, напр. YYYY-MM-DD)."
+    )
 
     address: Optional[str] = PydField(None, description="Адрес.")
     main_phone: Optional[str] = PydField(None, description="Основной телефон.")
@@ -133,11 +164,19 @@ class RetailCustomerAddRequest(BaseSchema):
     refer_id: Optional[int] = PydField(None, ge=1, description="ID реферала.")
     description: Optional[str] = PydField(None, description="Примечание.")
 
-    fields: Optional[FieldValueAdds] = PydField(None, description="Массив FieldValueAdd[].")
+    fields: Optional[FieldValueAdds] = PydField(
+        None, description="Массив FieldValueAdd[]."
+    )
 
     @field_validator(
-        "first_name", "last_name", "middle_name", "full_name",
-        "address", "main_phone", "phones", mode="before"
+        "first_name",
+        "last_name",
+        "middle_name",
+        "full_name",
+        "address",
+        "main_phone",
+        "phones",
+        mode="before",
     )
     @classmethod
     def _strip_strings(cls, v):
@@ -157,10 +196,12 @@ class RetailCustomerAddRequest(BaseSchema):
 
 # ---------- Edit ----------
 
+
 class RetailCustomerEditRequest(BaseSchema):
     """
     Параметры для /v1/RetailCustomer/Edit
     """
+
     model_config = ConfigDict(extra="forbid")
 
     id: int = PydField(..., ge=1, description="ID покупателя.")
@@ -175,7 +216,9 @@ class RetailCustomerEditRequest(BaseSchema):
 
     # только non|male|female
     sex: Optional[Sex] = PydField(None, description="Пол: non|male|female.")
-    date_of_birth: Optional[str] = PydField(None, description="Дата рождения (строка, напр. YYYY-MM-DD).")
+    date_of_birth: Optional[str] = PydField(
+        None, description="Дата рождения (строка, напр. YYYY-MM-DD)."
+    )
 
     address: Optional[str] = PydField(None, description="Адрес.")
     main_phone: Optional[str] = PydField(None, description="Основной телефон.")
@@ -185,11 +228,19 @@ class RetailCustomerEditRequest(BaseSchema):
     refer_id: Optional[int] = PydField(None, ge=1, description="ID реферала.")
     description: Optional[str] = PydField(None, description="Примечание.")
 
-    fields: Optional[FieldValueEdits] = PydField(None, description="Массив FieldValueEdit[].")
+    fields: Optional[FieldValueEdits] = PydField(
+        None, description="Массив FieldValueEdit[]."
+    )
 
     @field_validator(
-        "first_name", "last_name", "middle_name", "full_name",
-        "address", "main_phone", "phones", mode="before"
+        "first_name",
+        "last_name",
+        "middle_name",
+        "full_name",
+        "address",
+        "main_phone",
+        "phones",
+        mode="before",
     )
     @classmethod
     def _strip_strings(cls, v):
@@ -209,20 +260,24 @@ class RetailCustomerEditRequest(BaseSchema):
 
 # ---------- DeleteMark ----------
 
+
 class RetailCustomerDeleteMarkRequest(BaseSchema):
     """
     Параметры для /v1/RetailCustomer/DeleteMark
     """
+
     model_config = ConfigDict(extra="forbid")
     id: int = PydField(..., ge=1, description="ID покупателя.")
 
 
 # ---------- Delete ----------
 
+
 class RetailCustomerDeleteRequest(BaseSchema):
     """
     Параметры для /v1/RetailCustomer/Delete
     """
+
     model_config = ConfigDict(extra="forbid")
     id: int = PydField(..., ge=1, description="ID покупателя.")
 
@@ -236,3 +291,42 @@ __all__ = [
     "RetailCustomerDeleteMarkRequest",
     "RetailCustomerDeleteRequest",
 ]
+
+
+class RetailCustomerGetResponse(APIBaseResponse):
+    """
+    Ответ от /v1/RetailCustomer/Get
+    """
+
+    result: List[RetailCustomer] = PydField(
+        ..., description="Массив покупателей (RetailCustomer[])."
+    )
+    next_offset: Optional[int] = PydField(
+        None, description="Смещение для следующего запроса."
+    )
+    total: Optional[int] = PydField(None, description="Общее количество записей.")
+
+
+class RetailCustomerGetLastChequeRequest(BaseSchema):
+    """
+    Параметры для тонкого метода get_last_cheque
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    id: int = PydField(..., ge=1, description="ID покупателя.")
+    detail: bool = PydField(
+        False, description="Если true, возвращает детали чека (DocChequeOperations)."
+    )
+
+
+class RetailCustomerGetLastChequeResponse(BaseSchema):
+    """
+    Ответ от тонкого метода get_last_cheque
+    """
+
+    model_config = ConfigDict(extra="ignore")
+    ## object of Cheque type
+    cheque: Optional[DocCheque] = PydField(None, description="Чек.")
+    cheque_operations: Optional[List[DocChequeOperation]] = PydField(
+        None, description="Массив операций чека (DocChequeOperations[])."
+    )

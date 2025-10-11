@@ -3,10 +3,10 @@ from decimal import Decimal
 from typing import Optional, Any
 from pydantic import BaseModel, ConfigDict, Field
 
+
 class BaseSchema(BaseModel):
-    model_config = ConfigDict(
-        json_encoders={Decimal: float}
-    )
+    model_config = ConfigDict(json_encoders={Decimal: float})
+
 
 class APIBaseResponse(BaseSchema):
     """
@@ -14,18 +14,25 @@ class APIBaseResponse(BaseSchema):
     Разные методы возвращают разные формы result (dict, list[dict], list[int], int, str ...),
     поэтому здесь допускаем любой тип.
     """
+
     ok: bool = Field(..., description="True/False – метка успешного ответа")
     result: Optional[Any] = Field(
         default=None,
-        description="Данные ответа (могут быть dict, list[dict], list[int], и т.д.)"
+        description="Данные ответа (могут быть dict, list[dict], list[int], и т.д.)",
     )
     next_offset: Optional[int] = None
     total: Optional[int] = None
+
 
 class APIErrorResult(BaseSchema):
     error: int
     description: str
 
+
 class ArrayResult(BaseSchema):
     row_affected: int
     ids: list[int]
+
+
+class IDRequest(BaseSchema):
+    id: int
