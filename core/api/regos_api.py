@@ -60,6 +60,8 @@ class RegosAPI:
             from core.api.docs.cash_operation import CashOperationService
             from core.api.docs.purchase import DocPurchaseService
             from core.api.docs.purchase_operation import PurchaseOperationService
+            from core.api.docs.wholesale import DocWholeSaleService
+            from core.api.docs.wholesale_operation import WholeSaleOperationService
 
             # Initialize services
 
@@ -70,6 +72,8 @@ class RegosAPI:
             self.cash_operation = CashOperationService(api)
             self.purchase = DocPurchaseService(api)
             self.purchase_operation = PurchaseOperationService(api)
+            self.wholesale = DocWholeSaleService(api)
+            self.wholesale_operation = WholeSaleOperationService(api)
 
     class Integrations:
         def __init__(self, api: "RegosAPI"):

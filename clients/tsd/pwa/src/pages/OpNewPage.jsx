@@ -5,7 +5,7 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   BrowserMultiFormatReader,
   BarcodeFormat,
@@ -25,6 +25,7 @@ import {
   sectionClass,
 } from "../lib/ui";
 import { cn } from "../lib/utils";
+import { getDocDefinition } from "../config/docDefinitions.js";
 
 const QUICK_QTY = [1, 5, 10, 12];
 
@@ -45,26 +46,42 @@ const ZXING_FORMATS = [
   BarcodeFormat.CODE_128,
 ].filter(Boolean);
 
-function firstBarcode(item) {
-  return (
-    item?.base_barcode ||
-    (item?.barcode_list
-      ? String(item.barcode_list).split(",")[0]?.trim()
-      : "") ||
-    item?.code ||
-    ""
-  );
-}
-
-export default function OpNewPage() {
+export default function OpNewPage({ definition: definitionProp }) {
   const { id } = useParams();
   const docId = Number(id);
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { api, toNumber, setAppTitle } = useApp();
   const { t, fmt, locale } = useI18n();
   const { showToast } = useToast();
 
-  const [docCtx, setDocCtx] = useState({ price_type_id: null, stock_id: null });
+  const typeParam = searchParams.get("type") || undefined;
+  const docDefinition = useMemo(
+    () => definitionProp || getDocDefinition(typeParam),
+    [definitionProp, typeParam]
+  );
+
+  const buildDocPath = useMemo(
+    () =>
+      docDefinition?.navigation?.buildDocPath || ((doc) => `/doc/${doc.id}`),
+    [docDefinition]
+  );
+
+  const formOptions = docDefinition?.operation?.form || {};
+  const showCostField = formOptions.showCost !== false;
+  const showPriceField = formOptions.showPrice !== false;
+  const autoFill = docDefinition?.operation?.autoFill || {};
+
+  const initialDocContext = useMemo(
+    () => ({
+      price_type_id: null,
+      stock_id: null,
+      ...(docDefinition?.operation?.initialContext || {}),
+    }),
+    [docDefinition]
+  );
+
+  const [docCtx, setDocCtx] = useState(initialDocContext);
   const [barcodeValue, setBarcodeValue] = useState("");
   const [queryValue, setQueryValue] = useState("");
   const [quantity, setQuantity] = useState("");
@@ -78,27 +95,53 @@ export default function OpNewPage() {
   const [searchMode, setSearchMode] = useState(SEARCH_MODES.SCAN);
   const [resultModalOpen, setResultModalOpen] = useState(false);
   const [resultItems, setResultItems] = useState([]);
+
   const videoRef = useRef(null);
   const readerRef = useRef(null);
 
   useEffect(() => {
-    setAppTitle(t("op.title") || "Новая операция");
-  }, [locale, setAppTitle, t]);
+    setDocCtx(initialDocContext);
+  }, [initialDocContext]);
+
+  const operationTitle = useMemo(() => {
+    const key = docDefinition?.operation?.titleKey || "op.title";
+    const translated = t(key);
+    if (translated === key) {
+      return docDefinition?.operation?.titleFallback || "Новая операция";
+    }
+    return translated;
+  }, [docDefinition, t]);
 
   useEffect(() => {
+    setAppTitle(operationTitle);
+  }, [operationTitle, locale, setAppTitle]);
+
+  useEffect(() => {
+    const metaAction = docDefinition?.operation?.docMetaAction;
+    if (!metaAction) return;
+
+    let cancelled = false;
     async function loadDocMeta() {
       try {
-        const { data: docData } = await api("docs.purchase.get_by_id", id);
-        setDocCtx({
-          price_type_id: docData?.price_type?.id ?? null,
-          stock_id: docData?.stock?.id ?? null,
-        });
+        const buildPayload =
+          docDefinition?.operation?.docMetaPayload || ((value) => value);
+        const payload = buildPayload(docId);
+        const { data } = await api(metaAction, payload);
+        if (cancelled) return;
+        const extractor =
+          docDefinition?.operation?.extractDocContext || (() => ({}));
+        const context = extractor(data) || {};
+        setDocCtx((prev) => ({ ...prev, ...context }));
       } catch (err) {
         console.warn("[op_new] failed to fetch doc context", err);
       }
     }
+
     loadDocMeta();
-  }, [api, docId]);
+    return () => {
+      cancelled = true;
+    };
+  }, [api, docDefinition, docId]);
 
   const closeResultModal = useCallback(() => {
     setResultModalOpen(false);
@@ -109,49 +152,63 @@ export default function OpNewPage() {
     (item) => {
       setPicked(item);
       closeResultModal();
+      if (autoFill.priceFromItem && showPriceField && item?.price != null) {
+        setPrice(String(item.price));
+      }
+      if (
+        autoFill.costFromItem &&
+        showCostField &&
+        item?.last_purchase_cost != null
+      ) {
+        setCost(String(item.last_purchase_cost));
+      }
       setSearchStatus("done");
       window.setTimeout(() => {
         document.getElementById("qty")?.focus();
       }, 0);
     },
-    [closeResultModal]
+    [
+      autoFill.costFromItem,
+      autoFill.priceFromItem,
+      closeResultModal,
+      showCostField,
+      showPriceField,
+    ]
   );
 
   const runSearch = useCallback(
     async (value, mode = searchMode) => {
       const queryText = value?.trim();
       if (!queryText) return;
+      const searchDescriptor = docDefinition?.operation?.search;
+      if (!searchDescriptor?.action || !searchDescriptor?.buildParams) {
+        console.warn("[op_new] search not configured for doc type");
+        return;
+      }
       setSearchStatus("loading");
       try {
-        const payload = {
-          search: queryText,
-          price_type_id: docCtx?.price_type_id,
-          stock_id: docCtx?.stock_id,
-        };
+        const params = searchDescriptor.buildParams({
+          queryText,
+          docCtx,
+          docId,
+          mode,
+        });
 
-        const { data } = await api("refrences.item.get_ext_raw", payload);
-        const rawItems = data?.result || [];
-        if (!rawItems.length) {
+        const { data } = await api(searchDescriptor.action, params);
+        const normalize = searchDescriptor.normalize || (() => []);
+        const normalizedItems = normalize(data, {
+          docCtx,
+          queryText,
+          mode,
+          docId,
+        });
+
+        if (!Array.isArray(normalizedItems) || normalizedItems.length === 0) {
           setPicked(null);
           closeResultModal();
           setSearchStatus("empty");
           return;
         }
-
-        const normalizedItems = rawItems.map((ext) => {
-          const core = ext?.item || {};
-          return {
-            id: Number(core.id ?? core.code),
-            name: core.name || "—",
-            barcode: firstBarcode(core),
-            vat_value: Number(core?.vat?.value ?? 0),
-            last_purchase_cost: ext?.last_purchase_cost ?? null,
-            price: ext?.price != null ? Number(ext.price) : null,
-            quantity_common: ext?.quantity?.common ?? null,
-            unit: core?.unit?.name || "шт",
-            unit_piece: core?.unit?.type === "pcs",
-          };
-        });
 
         if (mode === SEARCH_MODES.NAME && normalizedItems.length > 1) {
           setResultItems(normalizedItems);
@@ -171,8 +228,8 @@ export default function OpNewPage() {
     [
       api,
       closeResultModal,
-      docCtx.price_type_id,
-      docCtx.stock_id,
+      docDefinition,
+      docCtx,
       docId,
       handlePickItem,
       searchMode,
@@ -295,8 +352,8 @@ export default function OpNewPage() {
       });
       return;
     }
+
     const qtyNumber = toNumber(quantity);
-    const costNumber = toNumber(cost);
     if (!qtyNumber || qtyNumber <= 0) {
       showToast(t("fill_required_fields") || "Заполните обязательные поля", {
         type: "error",
@@ -311,30 +368,47 @@ export default function OpNewPage() {
       return;
     }
 
-    const payload = [
-      {
-        document_id: docId,
-        item_id: Number(picked.id),
-        quantity: qtyNumber,
-        cost: costNumber,
-        vat_value: Number(picked.vat_value ?? 0),
-      },
-    ];
+    const costNumber = showCostField ? toNumber(cost) : undefined;
+    const priceNumber = showPriceField ? toNumber(price) : undefined;
+    const trimmedDescription = description.trim();
 
-    const priceNumber = toNumber(price);
-    if (priceNumber > 0) payload[0].price = priceNumber;
-    if (description.trim()) payload[0].description = description.trim();
+    const buildPayload =
+      docDefinition?.operation?.buildAddPayload || (() => null);
+    const payload = buildPayload({
+      docId,
+      picked,
+      quantity: qtyNumber,
+      cost: costNumber,
+      price: priceNumber,
+      description: trimmedDescription,
+      docCtx,
+    });
+
+    if (!payload) {
+      showToast(t("save_failed") || "Не удалось сохранить операцию", {
+        type: "error",
+      });
+      return;
+    }
 
     setSaving(true);
     try {
-      const { data } = await api("docs.purchase_operation.add_raw", payload);
-      if (data?.result?.row_affected > 0) {
+      const addAction = docDefinition?.operation?.addAction;
+      if (!addAction) {
+        throw new Error("Operation add action is not configured");
+      }
+      const { data } = await api(addAction, payload);
+      const handleAddResponse =
+        docDefinition?.operation?.handleAddResponse ||
+        ((response) => response?.result?.row_affected > 0);
+
+      if (handleAddResponse(data, { docCtx, picked, payload })) {
         showToast(t("toast.op_added") || "Операция добавлена", {
           type: "success",
         });
         setQuantity("");
-        setCost("");
-        setPrice("");
+        if (showCostField) setCost("");
+        if (showPriceField) setPrice("");
         setBarcodeValue("");
         setQueryValue("");
         setPicked(null);
@@ -359,19 +433,32 @@ export default function OpNewPage() {
   }, [description, picked, t]);
 
   const lpcLabel = useMemo(() => {
-    if (picked?.last_purchase_cost == null) return null;
+    if (!showCostField || picked?.last_purchase_cost == null) return null;
     return fmt.money(picked.last_purchase_cost);
-  }, [fmt, picked]);
+  }, [fmt, picked, showCostField]);
 
   const priceLabel = useMemo(() => {
-    if (picked?.price == null) return null;
+    if (!showPriceField || picked?.price == null) return null;
     return fmt.money(picked.price);
-  }, [fmt, picked]);
+  }, [fmt, picked, showPriceField]);
+
+  if (!docDefinition) {
+    return (
+      <section className={sectionClass()} id="op-new">
+        <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-50">
+          {operationTitle}
+        </h1>
+        <p className={mutedTextClass()}>
+          {t("doc.not_supported") || "Тип документа не поддерживается"}
+        </p>
+      </section>
+    );
+  }
 
   return (
     <section className={sectionClass()} id="op-new">
       <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-50">
-        {t("op.title") || "Новая операция"}
+        {operationTitle}
       </h1>
 
       <div className="flex flex-wrap items-center gap-2">
@@ -563,7 +650,13 @@ export default function OpNewPage() {
             onKeyDown={(event) => {
               if (event.key === "Enter") {
                 event.preventDefault();
-                document.getElementById("cost")?.focus();
+                if (showCostField) {
+                  document.getElementById("cost")?.focus();
+                } else if (showPriceField) {
+                  document.getElementById("price")?.focus();
+                } else {
+                  handleSubmit();
+                }
               }
             }}
             className={inputClass()}
@@ -594,69 +687,77 @@ export default function OpNewPage() {
           </div>
         </div>
 
-        <div className="space-y-2">
-          <label className={labelClass()} htmlFor="cost">
-            {t("op.cost") || "Стоимость"}
-          </label>
-          <input
-            id="cost"
-            type="number"
-            inputMode="decimal"
-            value={cost}
-            onChange={(event) => setCost(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                document.getElementById("price")?.focus();
-              }
-            }}
-            className={inputClass()}
-          />
-          {lpcLabel && (
-            <div className="flex flex-wrap gap-2" id="cost-hint-wrap">
-              <button
-                type="button"
-                id="cost-hint"
-                className={chipClass()}
-                onClick={() => setCost(String(picked.last_purchase_cost))}
-              >
-                {lpcLabel}
-              </button>
-            </div>
-          )}
-        </div>
+        {showCostField && (
+          <div className="space-y-2">
+            <label className={labelClass()} htmlFor="cost">
+              {t("op.cost") || "Стоимость"}
+            </label>
+            <input
+              id="cost"
+              type="number"
+              inputMode="decimal"
+              value={cost}
+              onChange={(event) => setCost(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  if (showPriceField) {
+                    document.getElementById("price")?.focus();
+                  } else {
+                    handleSubmit();
+                  }
+                }
+              }}
+              className={inputClass()}
+            />
+            {lpcLabel && (
+              <div className="flex flex-wrap gap-2" id="cost-hint-wrap">
+                <button
+                  type="button"
+                  id="cost-hint"
+                  className={chipClass()}
+                  onClick={() => setCost(String(picked.last_purchase_cost))}
+                >
+                  {lpcLabel}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
 
-        <div className="space-y-2">
-          <label className={labelClass()} htmlFor="price">
-            {t("op.price") || "Цена"}
-          </label>
-          <input
-            id="price"
-            type="number"
-            inputMode="decimal"
-            value={price}
-            onChange={(event) => setPrice(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                handleSubmit();
-              }
-            }}
-            className={inputClass()}
-          />
-          {priceLabel && (
-            <div className="flex flex-wrap gap-2" id="price-hint-wrap">
-              <button
-                type="button"
-                id="price-hint"
-                className={chipClass()}
-                onClick={() => setPrice(String(picked.price))}
-              >
-                {priceLabel}
-              </button>
-            </div>
-          )}
-        </div>
+        {showPriceField && (
+          <div className="space-y-2">
+            <label className={labelClass()} htmlFor="price">
+              {t("op.price") || "Цена"}
+            </label>
+            <input
+              id="price"
+              type="number"
+              inputMode="decimal"
+              value={price}
+              onChange={(event) => setPrice(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  handleSubmit();
+                }
+              }}
+              className={inputClass()}
+            />
+            {priceLabel && (
+              <div className="flex flex-wrap gap-2" id="price-hint-wrap">
+                <button
+                  type="button"
+                  id="price-hint"
+                  className={chipClass()}
+                  onClick={() => setPrice(String(picked.price))}
+                >
+                  {priceLabel}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="space-y-2">
           <label className={labelClass()} htmlFor="description">
@@ -681,7 +782,7 @@ export default function OpNewPage() {
           id="btn-op-cancel"
           type="button"
           className={buttonClass({ variant: "ghost", size: "sm" })}
-          onClick={() => navigate(`/doc/${docId}`)}
+          onClick={() => navigate(buildDocPath({ id: docId }))}
           disabled={saving}
         >
           {t("common.cancel") || "Отмена"}

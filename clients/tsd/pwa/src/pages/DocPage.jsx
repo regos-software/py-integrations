@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useApp } from "../context/AppContext.jsx";
 import { useI18n } from "../context/I18nContext.jsx";
 import { useToast } from "../context/ToastContext.jsx";
@@ -14,6 +14,9 @@ import {
   sectionClass,
 } from "../lib/ui";
 import { cn } from "../lib/utils";
+import { getDocDefinition } from "../config/docDefinitions.js";
+
+const DEFAULT_OPERATION_FORM = { showCost: true, showPrice: true };
 
 function MetaSeparator() {
   return (
@@ -23,16 +26,20 @@ function MetaSeparator() {
   );
 }
 
-function OperationRow({ op, onDelete, onSave }) {
+function OperationRow({ op, onDelete, onSave, operationForm }) {
   const { t, fmt } = useI18n();
   const { toNumber } = useApp();
+  const formOptions = useMemo(
+    () => ({ ...DEFAULT_OPERATION_FORM, ...(operationForm || {}) }),
+    [operationForm]
+  );
   const [editing, setEditing] = useState(false);
-  const [form, setForm] = useState({
+  const [form, setForm] = useState(() => ({
     quantity: op.quantity != null ? String(op.quantity) : "",
     cost: op.cost != null ? String(op.cost) : "",
     price: op.price != null ? String(op.price) : "",
     description: op.description ?? "",
-  });
+  }));
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -62,7 +69,6 @@ function OperationRow({ op, onDelete, onSave }) {
   };
 
   const handleQuantityChange = (event) => {
-    console.log("item", item);
     const nextValue = event.target.value;
     if (unitPiece) {
       if (/^\d*$/.test(nextValue)) {
@@ -82,12 +88,17 @@ function OperationRow({ op, onDelete, onSave }) {
     setSaving(true);
     const payload = {
       quantity: toNumber(form.quantity),
-      cost: toNumber(form.cost),
       description: form.description || undefined,
     };
-    const priceNumber = toNumber(form.price);
-    if (Number.isFinite(priceNumber) && priceNumber > 0) {
-      payload.price = priceNumber;
+    if (formOptions.showCost !== false) {
+      const costNumber = toNumber(form.cost);
+      if (Number.isFinite(costNumber)) payload.cost = costNumber;
+    }
+    if (formOptions.showPrice !== false) {
+      const priceNumber = toNumber(form.price);
+      if (Number.isFinite(priceNumber) && priceNumber > 0) {
+        payload.price = priceNumber;
+      }
     }
 
     const ok = await onSave(op.id, payload);
@@ -154,10 +165,18 @@ function OperationRow({ op, onDelete, onSave }) {
               </strong>{" "}
               {unitName}
             </span>
-            <MetaSeparator />
-            <span>{fmt.money(op.cost)}</span>
-            <MetaSeparator />
-            <span>{fmt.money(priceValue)}</span>
+            {formOptions.showCost !== false && op.cost != null ? (
+              <>
+                <MetaSeparator />
+                <span>{fmt.money(op.cost)}</span>
+              </>
+            ) : null}
+            {formOptions.showPrice !== false ? (
+              <>
+                <MetaSeparator />
+                <span>{fmt.money(priceValue)}</span>
+              </>
+            ) : null}
           </div>
         </>
       )}
@@ -178,32 +197,36 @@ function OperationRow({ op, onDelete, onSave }) {
               className={inputClass()}
             />
           </div>
-          <div className="flex flex-col gap-2">
-            <label className={labelClass()} htmlFor={`cost-${op.id}`}>
-              {t("op.cost") || "Стоимость"}
-            </label>
-            <input
-              id={`cost-${op.id}`}
-              type="number"
-              inputMode="decimal"
-              value={form.cost}
-              onChange={handleFieldChange("cost")}
-              className={inputClass()}
-            />
-          </div>
-          <div className="flex flex-col gap-2">
-            <label className={labelClass()} htmlFor={`price-${op.id}`}>
-              {t("op.price") || "Цена"}
-            </label>
-            <input
-              id={`price-${op.id}`}
-              type="number"
-              inputMode="decimal"
-              value={form.price}
-              onChange={handleFieldChange("price")}
-              className={inputClass()}
-            />
-          </div>
+          {formOptions.showCost !== false ? (
+            <div className="flex flex-col gap-2">
+              <label className={labelClass()} htmlFor={`cost-${op.id}`}>
+                {t("op.cost") || "Стоимость"}
+              </label>
+              <input
+                id={`cost-${op.id}`}
+                type="number"
+                inputMode="decimal"
+                value={form.cost}
+                onChange={handleFieldChange("cost")}
+                className={inputClass()}
+              />
+            </div>
+          ) : null}
+          {formOptions.showPrice !== false ? (
+            <div className="flex flex-col gap-2">
+              <label className={labelClass()} htmlFor={`price-${op.id}`}>
+                {t("op.price") || "Цена"}
+              </label>
+              <input
+                id={`price-${op.id}`}
+                type="number"
+                inputMode="decimal"
+                value={form.price}
+                onChange={handleFieldChange("price")}
+                className={inputClass()}
+              />
+            </div>
+          ) : null}
           <div className="flex flex-col gap-2">
             <label className={labelClass()} htmlFor={`description-${op.id}`}>
               {t("op.description") || "Описание"}
@@ -242,57 +265,88 @@ function OperationRow({ op, onDelete, onSave }) {
   );
 }
 
-export default function DocPage() {
+export default function DocPage({ definition: definitionProp }) {
   const { id } = useParams();
+  const docIdNumber = Number(id);
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { api, unixToLocal, setAppTitle } = useApp();
   const { t, fmt, locale } = useI18n();
   const { showToast } = useToast();
+
+  const typeParam = searchParams.get("type") || undefined;
+  const docDefinition = useMemo(
+    () => definitionProp || getDocDefinition(typeParam),
+    [definitionProp, typeParam]
+  );
+
+  const operationForm = useMemo(
+    () => ({
+      ...DEFAULT_OPERATION_FORM,
+      ...(docDefinition?.operation?.form || {}),
+      ...(docDefinition?.detail?.operationForm || {}),
+    }),
+    [docDefinition]
+  );
 
   const [doc, setDoc] = useState(null);
   const [operations, setOperations] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  useEffect(() => {
-    let cancelled = false;
-
-    async function fetchDoc() {
-      setLoading(true);
-      setError(null);
-      try {
-        const { data: docData } = await api("docs.purchase.get_by_id", id);
-        const { data: docOperationsData } = await api(
-          "docs.purchase_operation.get_by_document_id",
-          id
-        );
-        if (!cancelled) {
-          setDoc(docData);
-          setOperations(docOperationsData);
-        }
-      } catch (err) {
-        if (!cancelled) {
-          setError(err);
-          setDoc(null);
-          setOperations([]);
-        }
-      } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
-      }
+  const loadDoc = useCallback(async () => {
+    const detail = docDefinition?.detail || {};
+    if (!detail.docAction || !detail.operationsAction) {
+      setLoading(false);
+      return;
     }
 
-    fetchDoc();
-    return () => {
-      cancelled = true;
-    };
-  }, [api, id]);
+    setLoading(true);
+    setError(null);
+    try {
+      const buildDocPayload = detail.buildDocPayload || ((docId) => docId);
+      const buildOpsPayload =
+        detail.buildOperationsPayload || ((docId) => docId);
+
+      const [docResponse, opsResponse] = await Promise.all([
+        api(detail.docAction, buildDocPayload(docIdNumber)),
+        api(detail.operationsAction, buildOpsPayload(docIdNumber)),
+      ]);
+
+      const transformDoc = detail.transformDoc || ((data) => data);
+      const transformOperations =
+        detail.transformOperations ||
+        ((data) => {
+          if (Array.isArray(data)) return data;
+          if (Array.isArray(data?.result)) return data.result;
+          if (Array.isArray(data?.operations)) return data.operations;
+          return [];
+        });
+
+      setDoc(transformDoc(docResponse?.data));
+      setOperations(transformOperations(opsResponse?.data) || []);
+    } catch (err) {
+      setError(err);
+      setDoc(null);
+      setOperations([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [api, docDefinition, docIdNumber]);
+
+  useEffect(() => {
+    loadDoc();
+  }, [loadDoc]);
 
   const docTitle = useMemo(() => {
-    const prefix = t("doc.title_prefix") || "Документ";
+    const prefixKey = docDefinition?.labels?.title || "doc.title_prefix";
+    const translated = t(prefixKey);
+    const prefix =
+      translated === prefixKey
+        ? docDefinition?.labels?.titleFallback || "Документ"
+        : translated;
     return `${prefix} ${doc?.code || id}`;
-  }, [doc, id, t]);
+  }, [doc, docDefinition, id, t]);
 
   useEffect(() => {
     setAppTitle(docTitle);
@@ -301,16 +355,30 @@ export default function DocPage() {
   const handleDelete = async (opId) => {
     const question = t("confirm.delete_op") || "Удалить операцию?";
     if (!window.confirm(question)) return;
-    try {
-      const { data } = await api("docs.purchase_operation.delete_raw", [
-        { id: opId },
-      ]);
+    const detail = docDefinition?.detail || {};
+    const deleteAction = detail.deleteAction;
+    if (!deleteAction) {
+      showToast(t("not_supported") || "Действие недоступно", {
+        type: "error",
+      });
+      return;
+    }
 
-      if (data?.row_affected > 0) {
-        setOperations((prev) => prev.filter((op) => op.id !== opId));
+    try {
+      const buildDeletePayload =
+        detail.buildDeletePayload || ((operationId) => [{ id: operationId }]);
+      const handleDeleteResponse =
+        detail.handleDeleteResponse ||
+        ((data) => data?.row_affected > 0 || data?.result?.row_affected > 0);
+
+      const payload = buildDeletePayload(opId, { docId: docIdNumber, doc });
+      const { data } = await api(deleteAction, payload);
+
+      if (handleDeleteResponse(data, { opId, payload, doc })) {
         showToast(t("toast.op_deleted") || "Операция удалена", {
           type: "success",
         });
+        await loadDoc();
       } else {
         throw new Error(data?.description || "Delete failed");
       }
@@ -323,28 +391,33 @@ export default function DocPage() {
   };
 
   const handleSave = async (opId, payload) => {
+    const detail = docDefinition?.detail || {};
+    const editAction = detail.editAction;
+    if (!editAction) {
+      showToast(t("not_supported") || "Действие недоступно", {
+        type: "error",
+      });
+      return false;
+    }
+
     try {
-      const { data } = await api("docs.purchase_operation.edit_raw", [
-        { id: opId, ...payload },
-      ]);
-      console.log("row_affected", data?.row_affected);
-      if (data?.row_affected > 0) {
-        setOperations((prev) =>
-          prev.map((op) => {
-            if (op.id !== opId) return op;
-            const next = { ...op, ...payload };
-            if (!Object.prototype.hasOwnProperty.call(payload, "price")) {
-              next.price = op.price;
-            }
-            if (!Object.prototype.hasOwnProperty.call(payload, "description")) {
-              next.description = op.description;
-            }
-            return next;
-          })
-        );
+      const buildEditPayload =
+        detail.buildEditPayload ||
+        ((operationId, next) => [{ id: operationId, ...next }]);
+      const handleEditResponse =
+        detail.handleEditResponse ||
+        ((data) => data?.row_affected > 0 || data?.result?.row_affected > 0);
+
+      const requestPayload = buildEditPayload(opId, payload, {
+        docId: docIdNumber,
+        doc,
+      });
+      const { data } = await api(editAction, requestPayload);
+      if (handleEditResponse(data, { opId, payload, doc })) {
         showToast(t("toast.op_updated") || "Операция сохранена", {
           type: "success",
         });
+        await loadDoc();
         return true;
       }
       throw new Error(data?.description || "Save failed");
@@ -400,13 +473,43 @@ export default function DocPage() {
     ].filter(Boolean);
   }, [doc, fmt, unixToLocal]);
 
+  const partnerLabel = useMemo(() => {
+    const detail = docDefinition?.detail || {};
+    const key = detail.partnerLabelKey || "doc.partner";
+    const translated = t(key);
+    if (translated && translated !== key) return translated;
+    const fallbackKey = detail.partnerLabelFallback;
+    if (fallbackKey) return fallbackKey;
+    const generic = t("partner");
+    if (generic && generic !== "partner") return generic;
+    return "Партнёр";
+  }, [docDefinition, t]);
+
   const goToDocs = useCallback(() => {
-    navigate("/docs", { replace: true });
-  }, [navigate]);
+    const buildDocsPath =
+      docDefinition?.navigation?.buildDocsPath || (() => "/docs");
+    navigate(buildDocsPath(doc), { replace: true });
+  }, [doc, docDefinition, navigate]);
 
   const goToNewOperation = useCallback(() => {
-    navigate(`/doc/${id}/op/new`);
-  }, [id, navigate]);
+    const buildNewOperationPath =
+      docDefinition?.navigation?.buildNewOperationPath ||
+      ((docId) => `/doc/${docId}/op/new`);
+    navigate(buildNewOperationPath(docIdNumber));
+  }, [docDefinition, docIdNumber, navigate]);
+
+  if (!docDefinition) {
+    return (
+      <section className={sectionClass()} id="doc">
+        <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-50">
+          {t("doc.title_prefix") || "Документ"}
+        </h1>
+        <div className={mutedTextClass()}>
+          {t("doc.not_supported") || "Тип документа не поддерживается"}
+        </div>
+      </section>
+    );
+  }
 
   if (loading) {
     return (
@@ -524,11 +627,7 @@ export default function DocPage() {
       >
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-semibold text-slate-900 dark:text-slate-100">
-            {t("doc.partner") === "doc.partner"
-              ? t("partner") === "partner"
-                ? "Поставщик"
-                : t("partner")
-              : t("doc.partner")}
+            {partnerLabel}
           </span>
           <MetaSeparator />
           <span className="truncate">{doc.partner?.name || "—"}</span>
@@ -570,6 +669,7 @@ export default function DocPage() {
               op={operation}
               onDelete={handleDelete}
               onSave={handleSave}
+              operationForm={operationForm}
             />
           ))
         )}

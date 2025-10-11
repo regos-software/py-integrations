@@ -13,12 +13,14 @@ import {
   sectionClass,
 } from "../lib/ui";
 import { cn } from "../lib/utils";
+import {
+  DEFAULT_PAGE_SIZE,
+  getDocDefinition,
+} from "../config/docDefinitions.js";
 
-const PAGE_SIZE = 20;
-
-export default function DocsPage() {
+export default function DocsPage({ definition: definitionProp }) {
   const { api, unixToLocal, setAppTitle } = useApp();
-  const { t, locale } = useI18n();
+  const { t, locale, fmt } = useI18n();
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
 
@@ -27,6 +29,14 @@ export default function DocsPage() {
     Number.parseInt(searchParams.get("page") || "1", 10) || 1
   );
   const query = searchParams.get("q") || "";
+  const typeParam = searchParams.get("type") || undefined;
+
+  const docDefinition = useMemo(
+    () => definitionProp || getDocDefinition(typeParam),
+    [definitionProp, typeParam]
+  );
+
+  const pageSize = docDefinition?.list?.pageSize || DEFAULT_PAGE_SIZE;
 
   const [inputValue, setInputValue] = useState(query);
   const [items, setItems] = useState([]);
@@ -40,33 +50,52 @@ export default function DocsPage() {
   }, [query]);
 
   useEffect(() => {
-    const title = t("docs.title") || "Документы закупки";
+    const titleKey = docDefinition?.labels?.title || "docs.title";
+    const translated = t(titleKey);
+    const title =
+      translated === titleKey
+        ? docDefinition?.labels?.titleFallback || "Документы"
+        : translated;
     setAppTitle(`${t("app.title") || "TSD"} • ${title}`);
-  }, [locale, setAppTitle, t]);
+  }, [docDefinition, locale, setAppTitle, t]);
 
   const fetchDocs = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
       const searchTerm = debouncedSearch.trim();
-      const { data } = await api("docs.purchase.get_raw", {
-        offset: (page - 1) * PAGE_SIZE,
-        limit: PAGE_SIZE,
+      const listDescriptor = docDefinition.list;
+      const params = listDescriptor.buildParams({
+        page,
+        pageSize,
         search: searchTerm,
-        performed: false,
-        deleted_mark: false,
-        sort_orders: [{ column: "date", direction: "desc" }],
       });
-      const { total, result } = data || {};
-      setItems(result);
-      setTotalPages(Math.max(1, Math.ceil(total / PAGE_SIZE)));
+      const { data } = await api(listDescriptor.action, params);
+      const { items: rawItems = [], total = 0 } =
+        listDescriptor.transformResponse(data) || {};
+
+      const mapped = rawItems.map((doc) =>
+        listDescriptor.mapItem(doc, { t, fmt, unixToLocal })
+      );
+
+      setItems(mapped);
+      setTotalPages(Math.max(1, Math.ceil(total / pageSize)));
     } catch (err) {
       setError(err);
       setItems([]);
     } finally {
       setLoading(false);
     }
-  }, [api, page, debouncedSearch]);
+  }, [
+    api,
+    docDefinition,
+    page,
+    pageSize,
+    debouncedSearch,
+    fmt,
+    t,
+    unixToLocal,
+  ]);
 
   const updateSearchParams = useCallback(
     (nextPage, nextQuery = query) => {
@@ -78,9 +107,10 @@ export default function DocsPage() {
       const params = new URLSearchParams();
       if (nextPage > 1) params.set("page", String(nextPage));
       if (normalizedQuery) params.set("q", normalizedQuery);
+      if (typeParam) params.set("type", typeParam);
       setSearchParams(params, { replace: true });
     },
-    [page, query, setSearchParams]
+    [page, query, setSearchParams, typeParam]
   );
 
   useEffect(() => {
@@ -106,28 +136,11 @@ export default function DocsPage() {
     if (page < totalPages) updateSearchParams(page + 1, query);
   };
 
-  const statusLabel = useCallback(
-    (doc) => {
-      const normalize = (key, fallback) => {
-        const value = t(key);
-        return value === key ? fallback : value;
-      };
-      const parts = [];
-      parts.push(
-        doc.performed
-          ? normalize("docs.status.performed", "проведён")
-          : normalize("docs.status.new", "новый")
-      );
-      if (doc.blocked) parts.push(normalize("docs.status.blocked", "блок."));
-      return parts.filter(Boolean).join(" • ");
-    },
-    [t]
-  );
-
-  const nothingLabel = useMemo(
-    () => t("common.nothing") || "Ничего не найдено",
-    [t]
-  );
+  const nothingLabel = useMemo(() => {
+    const key = docDefinition?.labels?.nothing || "common.nothing";
+    const value = t(key);
+    return value === key ? "Ничего не найдено" : value;
+  }, [docDefinition, t]);
   const backLabel = useMemo(() => {
     const value = t("nav.back");
     return value === "nav.back" ? "Назад" : value;
@@ -144,7 +157,16 @@ export default function DocsPage() {
           className="text-2xl font-semibold text-slate-900 dark:text-slate-50"
           id="docs-title"
         >
-          {t("docs.title") || "Документы закупки"}
+          {(() => {
+            const key = docDefinition?.labels?.title || "docs.title";
+            const value = t(key);
+            if (value === key) {
+              return (
+                docDefinition?.labels?.titleFallback || "Документы закупки"
+              );
+            }
+            return value;
+          })()}
         </h1>
       </div>
 
@@ -157,9 +179,19 @@ export default function DocsPage() {
           id="search-docs"
           type="search"
           value={inputValue}
-          placeholder={
-            t("docs.search.placeholder") || "Поиск по номеру / поставщику..."
-          }
+          placeholder={(() => {
+            const key =
+              docDefinition?.labels?.searchPlaceholder ||
+              "docs.search.placeholder";
+            const value = t(key);
+            if (value === key) {
+              return (
+                docDefinition?.labels?.searchPlaceholderFallback ||
+                "Поиск по номеру / поставщику..."
+              );
+            }
+            return value;
+          })()}
           onChange={(event) => setInputValue(event.target.value)}
           className={inputClass("flex-1")}
         />
@@ -168,8 +200,16 @@ export default function DocsPage() {
           type="button"
           className={iconButtonClass({ variant: "ghost" })}
           onClick={fetchDocs}
-          aria-label={t("docs.refresh") || "Обновить"}
-          title={t("docs.refresh") || "Обновить"}
+          aria-label={(() => {
+            const key = docDefinition?.labels?.refresh || "docs.refresh";
+            const value = t(key);
+            return value === key ? "Обновить" : value;
+          })()}
+          title={(() => {
+            const key = docDefinition?.labels?.refresh || "docs.refresh";
+            const value = t(key);
+            return value === key ? "Обновить" : value;
+          })()}
         >
           <i className="fa-solid fa-rotate-right" aria-hidden="true" />
         </button>
@@ -217,28 +257,31 @@ export default function DocsPage() {
         )}
         {!loading &&
           !error &&
-          items.map((doc) => (
+          items.map((item) => (
             <button
-              key={doc.id}
+              key={item.id}
               type="button"
               className={cardClass(
                 "flex items-start justify-between gap-4 text-left transition hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-500 focus-visible:ring-offset-2"
               )}
-              onClick={() => navigate(`/doc/${doc.id}`)}
+              onClick={() => {
+                const buildPath =
+                  docDefinition?.navigation?.buildDocPath ||
+                  ((doc) => `/doc/${doc.id}`);
+                navigate(buildPath(item.raw));
+              }}
             >
               <div className="flex min-w-0 flex-col gap-1">
                 <strong className="text-base font-semibold text-slate-900 dark:text-slate-50">
-                  {doc.code || doc.id}
+                  {item.title}
                 </strong>
                 <span className={cn(mutedTextClass(), "truncate")}>
-                  {doc.partner?.name || ""}
+                  {item.subtitle || ""}
                 </span>
               </div>
               <div className="flex shrink-0 flex-col items-end gap-1 text-right">
-                <span className={mutedTextClass()}>
-                  {unixToLocal(doc.date)}
-                </span>
-                <span className={mutedTextClass()}>{statusLabel(doc)}</span>
+                <span className={mutedTextClass()}>{item.rightTop}</span>
+                <span className={mutedTextClass()}>{item.rightBottom}</span>
               </div>
             </button>
           ))}
