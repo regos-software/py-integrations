@@ -57,9 +57,6 @@ data/
 node_modules/
 dist/
 
-*assets/app.js
-*assets/app.js.map
-*assets/app.css
 clients/tsd/pwa/assets/app.js.map
 clients/tsd/pwa/assets/app.css
 clients/tsd/pwa/assets/app.js
