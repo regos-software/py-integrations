@@ -1,12 +1,15 @@
 import gzip
 import json
+from typing import Any, Type, TypeVar
+
 import httpx
-from typing import Any, Optional, Type, TypeVar
 from pydantic import BaseModel
 
+from core.api.rate_limiter import get_shared_limiter
 from schemas.api.base import APIBaseResponse
 from core.logger import setup_logger
 from config.settings import settings
+
 
 logger = setup_logger("api_client")
 TResponse = TypeVar("TResponse", bound=BaseModel)
@@ -14,30 +17,34 @@ TResponse = TypeVar("TResponse", bound=BaseModel)
 
 class APIClient:
     """
-    Универсальный клиент REGOS API для работы с конкретной интеграцией по её ID.
+    Универсальный клиент REGOS API под конкретный integration_id.
+    Соблюдает рейтлимит: 2 req/s + ведро на 50 (общий для всех экземпляров
+    с одинаковым integration_id внутри процесса).
     """
 
-    BASE_URL = settings.integration_url  
+    BASE_URL = settings.integration_url
+    RATE_PER_SEC = settings.integration_rps  # requests per second
+    BURST = settings.integration_burst  # bucket size
 
-    def __init__(
-        self,
-        connected_integration_id: str,
-        timeout: int = 90
-    ):
+    def __init__(self, connected_integration_id: str, timeout: int = 90):
         self.base_url = self.BASE_URL
         self.integration_id = connected_integration_id
         self.timeout = timeout
         self.client = httpx.AsyncClient(timeout=self.timeout)
 
-        logger.debug(f"Инициализирован APIClient: base_url={self.base_url}, integration_id={self.integration_id}")
+        # Общий лимитер на один integration_id (внутри текущего процесса)
+        self._limiter = get_shared_limiter(self.integration_id, self.RATE_PER_SEC, self.BURST)
+
+        logger.debug(
+            f"Инициализирован APIClient: base_url={self.base_url}, "
+            f"integration_id={self.integration_id}, rate={self.RATE_PER_SEC}/s, burst={self.BURST}"
+        )
 
     def _headers(self) -> dict:
         headers = {"Content-Type": "application/json"}
         logger.debug(f"Сформированы заголовки: {headers}")
         return headers
-    
-    
-    
+
     async def post(
         self,
         method_path: str,
@@ -47,8 +54,12 @@ class APIClient:
         """
         Универсальный POST-запрос к методам интеграции.
         Обрабатывает gzip-сжатые и обычные ответы.
+        Учитывает рейтлимит по integration_id.
         """
         url = f"{self.base_url}/gateway/out/{self.integration_id}/v1/{method_path}"
+
+        # ---- РЕЙТЛИМИТ: дождаться токен перед каждым запросом ----
+        await self._limiter.acquire()
 
         # сериализация
         if isinstance(data, BaseModel):
@@ -66,7 +77,7 @@ class APIClient:
         try:
             resp = await self.client.post(url, json=payload, headers=self._headers())
 
-            # статус проверяем сразу, до чтения тела
+            # статус проверяем до чтения тела
             resp.raise_for_status()
 
             # читаем байты тела
@@ -93,7 +104,13 @@ class APIClient:
             logger.exception(f"Непредвиденная ошибка при POST {url}: {e}")
             raise
 
-
     async def close(self):
         logger.debug("Закрытие httpx.AsyncClient")
-        await self.client.aclose()  
+        await self.client.aclose()
+
+    # Удобный контекстный менеджер
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.close()
