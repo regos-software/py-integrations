@@ -43,36 +43,39 @@ export default function AppLayout() {
     return `${pathname}${search || ""}${hash || ""}`;
   }, [hash, pathname, search]);
 
-  const fallbackPath = useMemo(() => {
-    if (pathname.startsWith("/doc/") && pathname.endsWith("/op/new")) {
-      return pathname.replace(/\/op\/new\/?$/, "");
-    }
-    if (pathname.startsWith("/doc/")) {
-      return "/docs";
-    }
-    if (pathname.startsWith("/docs")) {
+  const backTarget = useMemo(() => {
+    if (pathname === "/home") return null;
+
+    const searchParams = new URLSearchParams(search || "");
+    const docType = searchParams.get("type");
+
+    if (pathname === "/docs") {
       return "/home";
     }
-    return "/home";
-  }, [pathname]);
 
-  const showBack = pathname !== "/home";
+    if (pathname.startsWith("/doc/") && pathname.endsWith("/op/new")) {
+      const basePath = pathname.replace(/\/op\/new\/?$/, "");
+      return `${basePath}${search || ""}`;
+    }
+
+    if (pathname.startsWith("/doc/")) {
+      const docsParams = new URLSearchParams();
+      if (docType) {
+        docsParams.set("type", docType);
+      }
+      const query = docsParams.toString();
+      return `/docs${query ? `?${query}` : ""}`;
+    }
+
+    return "/home";
+  }, [pathname, search]);
+
+  const showBack = Boolean(backTarget);
 
   const handleBack = useCallback(() => {
-    const canGoBack =
-      typeof window !== "undefined" && window.history?.state?.idx > 0;
-
-    if (canGoBack) {
-      navigate(-1);
-      return;
-    }
-
-    if (pathname !== fallbackPath) {
-      navigate(fallbackPath, { replace: true });
-    } else {
-      navigate("/home", { replace: true });
-    }
-  }, [navigate, pathname, fallbackPath]);
+    if (!backTarget) return;
+    navigate(backTarget);
+  }, [backTarget, navigate]);
 
   const backLabelRaw = t("nav.back");
   const backLabel = backLabelRaw === "nav.back" ? "Назад" : backLabelRaw;
