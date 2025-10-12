@@ -804,7 +804,7 @@ export default function OpNewPage({ definition: definitionProp }) {
 
       {resultModalOpen ? (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/70 px-4 py-6"
+          className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/70 px-4 py-6"
           role="dialog"
           aria-modal="true"
           aria-labelledby="search-results-title"
@@ -812,7 +812,7 @@ export default function OpNewPage({ definition: definitionProp }) {
         >
           <div
             className={cardClass(
-              "relative w-full max-w-lg space-y-4 shadow-xl"
+              "relative mt-6 w-full max-w-lg space-y-4 shadow-xl"
             )}
             onClick={(event) => event.stopPropagation()}
           >
@@ -836,10 +836,42 @@ export default function OpNewPage({ definition: definitionProp }) {
                     <span className="text-sm font-semibold text-slate-900 dark:text-slate-50">
                       {item.name}
                     </span>
-                    <span className={mutedTextClass()}>{item.barcode}</span>
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                      {item.code ? (
+                        <span>
+                          {(t("item.code") === "item.code"
+                            ? "Код"
+                            : t("item.code")) + ": "}
+                          <span className="font-medium text-slate-700 dark:text-slate-200">
+                            {item.code}
+                          </span>
+                        </span>
+                      ) : null}
+                      {item.code && item.barcode ? <span>•</span> : null}
+                      {item.barcode ? <span>{item.barcode}</span> : null}
+                    </div>
+                    {item.last_purchase_cost != null ? (
+                      <span className="text-xs text-slate-500 dark:text-slate-400">
+                        {(t("op.last_purchase_cost") === "op.last_purchase_cost"
+                          ? "Последняя закуп"
+                          : t("op.last_purchase_cost")) + ": "}
+                        <span className="font-medium text-slate-700 dark:text-slate-200">
+                          {fmt.money(
+                            item.last_purchase_cost,
+                            docCurrency,
+                            priceRoundTo
+                          )}
+                        </span>
+                      </span>
+                    ) : null}
                     {item.price != null ? (
-                      <span className={mutedTextClass()}>
-                        {fmt.money(item.price, docCurrency, priceRoundTo)}
+                      <span className="text-xs text-slate-500 dark:text-slate-400">
+                        {(t("op.price") === "op.price"
+                          ? "Цена"
+                          : t("op.price")) + ": "}
+                        <span className="font-medium text-slate-700 dark:text-slate-200">
+                          {fmt.money(item.price, docCurrency, priceRoundTo)}
+                        </span>
                       </span>
                     ) : null}
                   </div>
