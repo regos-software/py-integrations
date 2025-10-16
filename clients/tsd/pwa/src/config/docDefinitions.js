@@ -365,7 +365,7 @@ const inventoryDefinition = {
           {
             key: "operations",
             path: "InventoryOperation/Get",
-            payload: { document_ids: [docId] },
+            payload: { document_ids: [docId], limit: 100 },
           },
         ],
       }),
