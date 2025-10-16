@@ -1,4 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useApp } from "../context/AppContext.jsx";
 import { useI18n } from "../context/I18nContext.jsx";
@@ -67,7 +73,14 @@ export default function DocsPage({ definition: definitionProp }) {
     setInputValue(query);
   }, [query]);
 
+  const resetFiltersOnTypeRef = useRef(true);
+
   useEffect(() => {
+    if (!docDefinition?.key) return;
+    if (resetFiltersOnTypeRef.current) {
+      resetFiltersOnTypeRef.current = false;
+      return;
+    }
     setFilters(createDefaultFilters());
     setFiltersDraft(createDefaultFilters());
   }, [docDefinition?.key]);

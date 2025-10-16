@@ -8,7 +8,7 @@ from tenacity import (
     retry_if_exception_type,
 )
 
-
+from core.api.batch import BatchService
 from core.api.client import APIClient
 
 from core.logger import setup_logger
@@ -21,7 +21,7 @@ class RegosAPI:
     def __init__(self, connected_integration_id: str):
         self.connected_integration_id = connected_integration_id
         self._client = APIClient(connected_integration_id=connected_integration_id)
-        self.batch = self.Batch(self)
+        self.batch = BatchService(self)
 
         self.docs: "RegosAPI.Docs" = self.Docs(self)
         self.integrations: "RegosAPI.Integrations" = self.Integrations(self)
@@ -49,12 +49,6 @@ class RegosAPI:
         await self.close()
 
     # ------- Namespaces -------
-    class Batch:
-        def __init__(self, api: "RegosAPI"):
-            from core.api.batch import BatchService
-
-            self.batch = BatchService(api)
-
     class Docs:
         def __init__(self, api: "RegosAPI"):
             from core.api.docs.cheque import DocsChequeService
@@ -107,3 +101,12 @@ class RegosAPI:
             self.item = ItemService(api)
             self.item_group = ItemGroupService(api)
             self.stock = StockService(api)
+
+    class Batch:
+        def __init__(self, api: "RegosAPI"):
+            self._service = BatchService(api)
+
+        async def run(self, req):
+            return await self._service.run(req)
+
+        # add helpers (map/result/etc.) here if you want them reachable via router
