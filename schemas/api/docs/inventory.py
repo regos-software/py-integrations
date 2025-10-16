@@ -13,12 +13,12 @@ from schemas.api.references.price_type import PriceType
 from schemas.api.references.stock import Stock
 
 
-class InventoryCompareType(str, Enum):
+class InventoryCompareType(int, Enum):
     """Допустимые значения сопоставления инвентаризации."""
 
-    OPEN_DATE = "open_date"
-    CLOSE_DATE = "close_date"
-    OPERATION_DATE = "operation_date"
+    OPEN_DATE = 1
+    CLOSE_DATE = 2
+    OPERATION_DATE = 3
 
 
 class DocInventory(BaseSchema):
