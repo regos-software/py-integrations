@@ -8,6 +8,7 @@ from schemas.api.batch import BatchRequest, BatchResponse, BatchStep
 
 T = TypeVar("T")
 
+
 class RegosAPIError(Exception):
     def __init__(self, *, step_key: str, status: int, error: int, description: str):
         self.step_key = step_key
@@ -15,6 +16,7 @@ class RegosAPIError(Exception):
         self.error = error
         self.description = description
         super().__init__(f"[{step_key}] status={status} error={error}: {description}")
+
 
 class BatchService:
     """
@@ -25,7 +27,9 @@ class BatchService:
     def __init__(self, api_client):
         self._client = api_client
 
-    async def run(self, steps: list[BatchStep], *, stop_on_error: bool = False) -> BatchResponse:
+    async def run(
+        self, steps: list[BatchStep], *, stop_on_error: bool = False
+    ) -> BatchResponse:
         """
         Выполнить пакет запросов (POST …/v1/batch).
         ВАЖНО: передаём method_path="batch", т.к. APIClient сам добавляет префикс /v1/
@@ -40,7 +44,9 @@ class BatchService:
             raise ValueError(f"Дубликаты ключей в steps: {keys}")
 
         req = BatchRequest(stop_on_error=stop_on_error, requests=steps)
-        return await self._client.post(method_path="batch", data=req, response_model=BatchResponse)
+        return await self._client.post(
+            method_path="batch", data=req, response_model=BatchResponse
+        )
 
     # ------- Хелперы разбора ответа -------
     @staticmethod
@@ -55,7 +61,9 @@ class BatchService:
         raise KeyError(f"Шаг '{key}' не найден")
 
     @staticmethod
-    def result(resp: BatchResponse, key: str, result_type: Optional[Type[T]] = None) -> T | Any:
+    def result(
+        resp: BatchResponse, key: str, result_type: Optional[Type[T]] = None
+    ) -> T | Any:
         """
         Достаёт .result из шага, валидирует ok, опционально приводит к модели.
         Если ok=False — бросает RegosAPIError.
@@ -67,7 +75,12 @@ class BatchService:
         api_resp = step.response
         if not api_resp.ok:
             err = APIErrorResult.model_validate(api_resp.result)
-            raise RegosAPIError(step_key=key, status=step.status, error=err.error, description=err.description)
+            raise RegosAPIError(
+                step_key=key,
+                status=step.status,
+                error=err.error,
+                description=err.description,
+            )
 
         data = api_resp.result
         if result_type is None:
@@ -75,12 +88,11 @@ class BatchService:
         return TypeAdapter(result_type).validate_python(data)
 
 
-
 # ------- Пример использования -------
 # from schemas.api.batch import BatchStep, ph
-#from core.api.regos_api import RegosAPI
+# from core.api.regos_api import RegosAPI
 
-#async with RegosAPI(connected_integration_id="...") as api:
+# async with RegosAPI(connected_integration_id="...") as api:
 #    steps = [
 #        BatchStep(key="ProducerAdd", path="Producer/Add", payload={"name": "Coca-Cola"}),
 #        BatchStep(key="ProducerGet", path="Producer/Get",

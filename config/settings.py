@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings
 
+
 class Settings(BaseSettings):
     environment: str = "dev"
     debug: bool = True
@@ -8,7 +9,7 @@ class Settings(BaseSettings):
     integration_rps: int = 2
     integration_burst: int = 50
     service_a_token: str = ""
-    log_level: str = "DEBUG"  
+    log_level: str = "DEBUG"
     redis_enabled: bool = False
     redis_host: str = "host"
     redis_port: int = 6379
@@ -20,5 +21,6 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = ".env"
+
 
 settings = Settings()

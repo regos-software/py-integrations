@@ -10,13 +10,13 @@ from pydantic import TypeAdapter
 
 from core.logger import setup_logger
 from schemas.api.base import APIBaseResponse
-from schemas.api.refrences.stock import (
+from schemas.api.references.stock import (
     Stock,
     StockGetRequest,
     StockGetResponse,  # BC: используем для устаревшего метода _get
 )
 
-logger = setup_logger("refrences.Stock")
+logger = setup_logger("references.Stock")
 
 
 class StockService:
@@ -84,7 +84,9 @@ class StockService:
             return StockGetResponse(ok=False)
 
         if not getattr(resp, "ok", False) or not isinstance(resp.result, list):
-            logger.warning("Stock/Get: unexpected result=%r", getattr(resp, "result", None))
+            logger.warning(
+                "Stock/Get: unexpected result=%r", getattr(resp, "result", None)
+            )
             return StockGetResponse(ok=False)
 
         return resp

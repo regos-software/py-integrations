@@ -12,19 +12,23 @@ class Brand(BaseModel):
     name: Optional[str] = None
     last_update: int
 
+
 class BrandGetRequest(BaseModel):
     ids: Optional[List[int]] = None
     sort_orders: Optional[SortOrders] = None
     search: Optional[str] = None
-    limit: Optional[int] 
-    offset: Optional[int] 
+    limit: Optional[int]
+    offset: Optional[int]
+
 
 class BrandAddRequest(BaseModel):
     name: str
 
+
 class BrandEditRequest(BaseModel):
     id: int
     name: str
+
 
 class BrandDeleteRequest(BaseModel):
     id: int

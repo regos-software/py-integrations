@@ -1,7 +1,10 @@
 from typing import List, Iterable
 from core.logger import setup_logger
 from schemas.api.base import APIBaseResponse
-from schemas.api.docs.cheque_operation import DocChequeOperationGetRequest, DocChequeOperation
+from schemas.api.docs.cheque_operation import (
+    DocChequeOperationGetRequest,
+    DocChequeOperation,
+)
 
 logger = setup_logger("docs.ChequeOperation")
 
@@ -20,5 +23,8 @@ class DocChequeOperationService:
 
     async def get_by_uuids(self, uuids: Iterable) -> List[DocChequeOperation]:
         return await self.get(DocChequeOperationGetRequest(uuids=list(uuids)))
-    async def get_by_doc_sale_uuid(self, doc_sale_uuid: str) -> List[DocChequeOperation]:
+
+    async def get_by_doc_sale_uuid(
+        self, doc_sale_uuid: str
+    ) -> List[DocChequeOperation]:
         return await self.get(DocChequeOperationGetRequest(doc_sale_uuid=doc_sale_uuid))

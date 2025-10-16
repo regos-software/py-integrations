@@ -5,6 +5,7 @@ from schemas.api.docs.cheque import DocChequeGetRequest, DocCheque
 
 logger = setup_logger("docs.cheque")
 
+
 class DocsChequeService:
     PATH_GET = "DocCheque/Get"
 

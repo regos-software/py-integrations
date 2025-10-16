@@ -8,12 +8,12 @@ from pydantic import BaseModel, Field, model_validator
 
 from schemas.api.base import APIBaseResponse
 from schemas.api.rbac.user import User
-from schemas.api.refrences.partner import Partner
-from schemas.api.refrences.stock import Stock
-from schemas.api.refrences.currency import Currency
+from schemas.api.references.partner import Partner
+from schemas.api.references.stock import Stock
+from schemas.api.references.currency import Currency
 
-from schemas.api.refrences.price_type import PriceType
-from schemas.api.refrences.tax import VatCalculationType
+from schemas.api.references.price_type import PriceType
+from schemas.api.references.tax import VatCalculationType
 
 
 # ==== Модели ====

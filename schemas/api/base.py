@@ -1,6 +1,6 @@
 # schemas/api/base.py
 from decimal import Decimal
-from typing import Optional, Any
+from typing import Any, Generic, Optional, TypeVar
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -8,7 +8,10 @@ class BaseSchema(BaseModel):
     model_config = ConfigDict(json_encoders={Decimal: float})
 
 
-class APIBaseResponse(BaseSchema):
+T = TypeVar("T", default=Any)
+
+
+class APIBaseResponse(BaseSchema, Generic[T]):
     """
     Универсальный ответ API REGOS.
     Разные методы возвращают разные формы result (dict, list[dict], list[int], int, str ...),
@@ -16,7 +19,7 @@ class APIBaseResponse(BaseSchema):
     """
 
     ok: bool = Field(..., description="True/False – метка успешного ответа")
-    result: Optional[Any] = Field(
+    result: Optional[T] = Field(
         default=None,
         description="Данные ответа (могут быть dict, list[dict], list[int], и т.д.)",
     )

@@ -3,8 +3,7 @@ from decimal import Decimal
 from typing import List, Optional
 from pydantic import BaseModel
 
-from schemas.api.refrences.item import Item
-
+from schemas.api.references.item import Item
 
 
 class DocChequeOperation(BaseModel):

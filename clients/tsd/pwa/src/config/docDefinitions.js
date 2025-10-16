@@ -134,7 +134,7 @@ const purchaseDefinition = {
       price_type_round_to: doc?.price_type?.round_to ?? null,
     }),
     search: {
-      action: "refrences.item.get_ext_raw",
+      action: "references.item.get_ext_raw",
       buildParams: ({ queryText, docCtx }) => ({
         search: queryText,
         price_type_id: docCtx?.price_type_id ?? undefined,
@@ -337,7 +337,7 @@ const wholesaleDefinition = {
       price_type_round_to: doc?.price_type?.round_to ?? null,
     }),
     search: {
-      action: "refrences.item.get_ext_raw",
+      action: "references.item.get_ext_raw",
       buildParams: ({ queryText, docCtx }) => ({
         search: queryText,
         price_type_id: docCtx?.price_type_id ?? undefined,

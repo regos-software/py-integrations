@@ -3,9 +3,9 @@ from pydantic import TypeAdapter, ValidationError
 
 from core.logger import setup_logger
 from schemas.api.base import APIBaseResponse
-from schemas.api.refrences.item_group import ItemGroupGetRequest, ItemGroupGetResponse
+from schemas.api.references.item_group import ItemGroupGetRequest, ItemGroupGetResponse
 
-logger = setup_logger("refrences.Item")
+logger = setup_logger("references.Item")
 
 
 class ItemGroupService:

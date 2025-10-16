@@ -178,7 +178,7 @@ export default function DocsPage({ definition: definitionProp }) {
     setStocksLoading(true);
     setStocksError(null);
     try {
-      const { data } = await api("refrences.stock.get", {
+      const { data } = await api("references.stock.get", {
         deleted_mark: false,
         sort_orders: [{ column: "Name", direction: "asc" }],
       });

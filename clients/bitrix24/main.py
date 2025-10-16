@@ -47,7 +47,7 @@ class TsdIntegration(ClientBase):
         "bitrix_endpoint": "BITRIX_ENDPOINT",
     }
 
-    # -------------------- helpers --------------------   
+    # -------------------- helpers --------------------
 
     async def _fetch_settings(self, cache_key: str) -> dict:
         # 1) Redis
@@ -97,4 +97,3 @@ class TsdIntegration(ClientBase):
         # тут мы должны слушать вебхуки от Битрикс24 и выполнять действия
         # над сущностями в REGOS
         return Response(status_code=200)
-

@@ -60,6 +60,10 @@ class DocCashSessionGetRequest(BaseModel):
 
     @model_validator(mode="after")
     def _check_dates(cls, values: DocCashSessionGetRequest):
-        if values.start_date and values.end_date and values.end_date < values.start_date:
+        if (
+            values.start_date
+            and values.end_date
+            and values.end_date < values.start_date
+        ):
             raise ValueError("end_date не может быть меньше start_date")
         return values

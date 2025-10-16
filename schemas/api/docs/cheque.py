@@ -7,12 +7,11 @@ from typing import List, Optional, Union
 from pydantic import BaseModel, Field, model_validator
 
 from schemas.api.rbac.user import User
-from schemas.api.refrences.retail_card import RetailCard
-from schemas.api.refrences.retail_return_reason import RetailReturnReason
+from schemas.api.references.retail_card import RetailCard
+from schemas.api.references.retail_return_reason import RetailReturnReason
 
 
 # ==== Enums (работа только по строкам) ====
-
 
 
 class SortColumn(str, Enum):
@@ -38,11 +37,12 @@ class SortDirection(str, Enum):
 
 # ==== Основные модели ====
 
+
 class DocCheque(BaseModel):
     uuid: str
     date: int
     code: str
-    status: Union[str, int] = "none"  
+    status: Union[str, int] = "none"
     session: str
     cashier: Optional[User] = None
     is_return: bool
@@ -56,12 +56,14 @@ class DocCheque(BaseModel):
 
 # ==== Сортировка ====
 
+
 class SortOrder(BaseModel):
     column: SortColumn
     direction: SortDirection
 
 
 # ==== Запрос ====
+
 
 class DocChequeGetRequest(BaseModel):
     # Идентификаторы
@@ -93,6 +95,10 @@ class DocChequeGetRequest(BaseModel):
 
     @model_validator(mode="after")
     def _check_dates(cls, values: "DocChequeGetRequest"):
-        if values.start_date and values.end_date and values.end_date < values.start_date:
+        if (
+            values.start_date
+            and values.end_date
+            and values.end_date < values.start_date
+        ):
             raise ValueError("end_date не может быть меньше start_date")
         return values

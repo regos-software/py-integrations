@@ -1,19 +1,15 @@
-
-
-
 from decimal import Decimal
 from typing import List, Optional
 from pydantic import BaseModel
 
-from schemas.api.refrences.payment_type import PaymentType
-
-
+from schemas.api.references.payment_type import PaymentType
 
 
 class DocRetailPayment(BaseModel):
     """
     Модель, описывающая документы розничных платежей.
     """
+
     uuid: str  # UUID платежа
     has_storno: bool  # Метка о том, что платеж является сторнирующим
     storno_uuid: Optional[str] = None  # UUID сторнированного платежа
@@ -23,6 +19,7 @@ class DocRetailPayment(BaseModel):
     value: Decimal  # Сумма платежа
     has_change: bool  # Метка о том, что по платежу имеется сдача
     change_uuid: Optional[str] = None  # UUID платежа со сдачей
+
 
 class DocRetailPaymentGetRequest(BaseModel):
     doc_sale_uuid: Optional[str] = None

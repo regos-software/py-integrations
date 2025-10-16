@@ -4,12 +4,14 @@ from enum import Enum
 from typing import Optional
 from pydantic import BaseModel
 
-from schemas.api.refrences.account import Account
+from schemas.api.references.account import Account
+
 
 class PaymentType(BaseModel):
     """
     Модель, описывающая форму оплаты.
     """
+
     id: int  # Id формы оплаты
     name: str  # Наименование формы оплаты
     account: Optional[Account] = None  # Счет, используемый для формы оплаты

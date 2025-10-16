@@ -4,12 +4,11 @@ from typing import Optional
 from pydantic import BaseModel
 
 
-
-
 class Unit(BaseModel):
     """
     Модель, описывающая единицы измерения.
     """
+
     id: int  # ID единицы измерения
     name: Optional[str] = None  # Наименование единицы измерения
     type: Optional[str] = None  # Тип единицы измерения

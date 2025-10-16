@@ -1,10 +1,8 @@
-
 from decimal import Decimal
 from typing import Optional
 
 from pydantic import BaseModel
 from schemas.api.docs.cash_operation_type import CashOperationType
-
 
 
 class CashOperation(BaseModel):
@@ -33,6 +31,7 @@ class CashOperationGetRequest(BaseModel):
     limit:      необязательный (количество элементов)
     offset:     необязательный (смещение)
     """
+
     start_date: int
     end_date: int
     operating_cash_id: Optional[int] = None

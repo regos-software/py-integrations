@@ -10,7 +10,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from core.logger import setup_logger
 from schemas.api.base import APIBaseResponse
-from schemas.api.refrences.item import (
+from schemas.api.references.item import (
     Item,
     ItemExt,
     ItemGetExtRequest,
@@ -18,8 +18,7 @@ from schemas.api.refrences.item import (
     ItemSearchRequest,
 )
 
-logger = setup_logger("refrences.Item")
-
+logger = setup_logger("references.Item")
 
 
 class ItemService:

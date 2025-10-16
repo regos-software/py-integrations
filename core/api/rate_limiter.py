@@ -10,10 +10,11 @@ class TokenBucket:
     rate_per_sec: токенов в секунду (скорость пополнения)
     capacity: максимальный размер ведра (бурст)
     """
+
     def __init__(self, rate_per_sec: float, capacity: int):
         self.rate = float(rate_per_sec)
         self.capacity = int(capacity)
-        self.tokens = float(capacity)     # стартуем с полным ведром
+        self.tokens = float(capacity)  # стартуем с полным ведром
         self.updated_at = time.monotonic()
         self._lock = asyncio.Lock()
 

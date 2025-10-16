@@ -7,7 +7,9 @@ from email.message import EmailMessage
 import aiosmtplib
 
 from core.api.regos_api import RegosAPI
-from schemas.api.integrations.connected_integration_setting import ConnectedIntegrationSettingRequest
+from schemas.api.integrations.connected_integration_setting import (
+    ConnectedIntegrationSettingRequest,
+)
 from schemas.integration.base import (
     IntegrationSuccessResponse,
     IntegrationErrorResponse,
@@ -78,8 +80,12 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
 
     # -------------------- helpers --------------------
 
-    def _create_error_response(self, code: int, description: str) -> IntegrationErrorResponse:
-        return IntegrationErrorResponse(result=IntegrationErrorModel(error=code, description=description))
+    def _create_error_response(
+        self, code: int, description: str
+    ) -> IntegrationErrorResponse:
+        return IntegrationErrorResponse(
+            result=IntegrationErrorModel(error=code, description=description)
+        )
 
     @staticmethod
     def _to_bool(value: Any) -> bool:
@@ -103,9 +109,15 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
                 logger.warning(f"Ошибка Redis: {err}, загружаем из API")
 
         # 2) API
-        async with RegosAPI(connected_integration_id=self.connected_integration_id) as api:
-            settings_response = await api.integrations.connected_integration_setting.get(
-                ConnectedIntegrationSettingRequest(integration_key=self.INTEGRATION_KEY)
+        async with RegosAPI(
+            connected_integration_id=self.connected_integration_id
+        ) as api:
+            settings_response = (
+                await api.integrations.connected_integration_setting.get(
+                    ConnectedIntegrationSettingRequest(
+                        integration_key=self.INTEGRATION_KEY
+                    )
+                )
             )
 
         settings_map = {item.key.lower(): item.value for item in settings_response}
@@ -113,7 +125,9 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
         # 3) Cache
         if settings.redis_enabled and redis_client:
             try:
-                await redis_client.setex(cache_key, self.SETTINGS_TTL, json.dumps(settings_map))
+                await redis_client.setex(
+                    cache_key, self.SETTINGS_TTL, json.dumps(settings_map)
+                )
             except Exception as err:
                 logger.warning(f"Не удалось сохранить настройки в Redis: {err}")
 
@@ -140,8 +154,12 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
             msg.set_content(body or "")
         return msg
 
-    async def _open_smtp(self, host: str, port: int, user: str, password: str, use_ssl: bool) -> aiosmtplib.SMTP:
-        smtp = aiosmtplib.SMTP(hostname=host, port=port, timeout=self.COMMAND_TIMEOUT, use_tls=use_ssl)
+    async def _open_smtp(
+        self, host: str, port: int, user: str, password: str, use_ssl: bool
+    ) -> aiosmtplib.SMTP:
+        smtp = aiosmtplib.SMTP(
+            hostname=host, port=port, timeout=self.COMMAND_TIMEOUT, use_tls=use_ssl
+        )
         await asyncio.wait_for(smtp.connect(), timeout=self.CONNECT_TIMEOUT)
         if not use_ssl:
             try:
@@ -166,7 +184,9 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
             messages = messages["messages"]
 
         if not self.connected_integration_id:
-            return self._create_error_response(1000, "No connected_integration_id specified")
+            return self._create_error_response(
+                1000, "No connected_integration_id specified"
+            )
 
         # Validate messages
         if not messages:
@@ -174,14 +194,22 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
 
         for message in messages:
             if "message" not in message or not message["message"]:
-                return self._create_error_response(1009, f"Message missing text: {message}")
+                return self._create_error_response(
+                    1009, f"Message missing text: {message}"
+                )
             if "recipient" not in message or not message["recipient"]:
-                return self._create_error_response(1010, f"Message missing recipient: {message}")
+                return self._create_error_response(
+                    1010, f"Message missing recipient: {message}"
+                )
             if not self._is_valid_email(str(message["recipient"]).strip()):
-                return self._create_error_response(1011, f"Invalid recipient email: {message['recipient']}")
+                return self._create_error_response(
+                    1011, f"Invalid recipient email: {message['recipient']}"
+                )
 
         # Fetch SMTP settings
-        cache_key = f"clients:settings:{self.INTEGRATION_KEY}:{self.connected_integration_id}"
+        cache_key = (
+            f"clients:settings:{self.INTEGRATION_KEY}:{self.connected_integration_id}"
+        )
         try:
             settings_map = await self._fetch_settings(cache_key)
             host = settings_map.get(self.SETTINGS_KEYS["host"])
@@ -190,34 +218,48 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
             password = settings_map.get(self.SETTINGS_KEYS["password"])
             use_ssl = self._to_bool(settings_map.get(self.SETTINGS_KEYS["use_ssl"]))
             smtp_user = settings_map.get(self.SETTINGS_KEYS["user"]) or from_email
-            default_subject = settings_map.get(self.SETTINGS_KEYS["default_subject"]) or "Уведомление"
+            default_subject = (
+                settings_map.get(self.SETTINGS_KEYS["default_subject"]) or "Уведомление"
+            )
 
             sender_name_raw = settings_map.get(self.SETTINGS_KEYS["name"])
             # лёгкая санация от CR/LF во избежание инъекций заголовков
-            sender_name = re.sub(r"[\r\n]+", " ", str(sender_name_raw)).strip() if sender_name_raw else ""
+            sender_name = (
+                re.sub(r"[\r\n]+", " ", str(sender_name_raw)).strip()
+                if sender_name_raw
+                else ""
+            )
 
             from_header = (
                 formataddr((str(Header(sender_name, "utf-8")), from_email))
-                if sender_name else
-                from_email
-)
+                if sender_name
+                else from_email
+            )
 
             pool_size_raw = settings_map.get(self.SETTINGS_KEYS["pool_size"])
             try:
-                pool_size = int(pool_size_raw) if pool_size_raw else self.DEFAULT_POOL_SIZE
+                pool_size = (
+                    int(pool_size_raw) if pool_size_raw else self.DEFAULT_POOL_SIZE
+                )
             except Exception:
                 pool_size = self.DEFAULT_POOL_SIZE
             pool_size = max(1, min(self.MAX_POOL_SIZE, pool_size))
 
             if not all([host, port_raw, from_email, password]):
-                return self._create_error_response(1002, "Missing SMTP settings (host/port/email/password)")
+                return self._create_error_response(
+                    1002, "Missing SMTP settings (host/port/email/password)"
+                )
             try:
                 port = int(str(port_raw).strip())
             except Exception:
-                return self._create_error_response(1003, f"Invalid SMTP port: {port_raw}")
+                return self._create_error_response(
+                    1003, f"Invalid SMTP port: {port_raw}"
+                )
 
         except Exception as error:
-            return self._create_error_response(1001, f"Settings retrieval error: {error}")
+            return self._create_error_response(
+                1001, f"Settings retrieval error: {error}"
+            )
 
         # ---------- отправка батчами, внутри батча — параллельные воркеры ----------
         results: List[Dict] = []
@@ -230,20 +272,24 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
             local_pool = min(pool_size, max(1, queue.qsize()))
             batch_results: List[Dict] = []
 
-            async def drain_queue_with_error(err_msg: str, worker_label: str = "init") -> int:
+            async def drain_queue_with_error(
+                err_msg: str, worker_label: str = "init"
+            ) -> int:
                 drained = 0
                 while True:
                     try:
                         item = queue.get_nowait()
                     except asyncio.QueueEmpty:
                         break
-                    batch_results.append({
-                        "campaign_recipient_id": item.get("campaign_recipient_id"),
-                        "sms_id": item.get("sms_id"),
-                        "recipient": item.get("recipient"),
-                        "error": err_msg,
-                        "worker": worker_label,
-                    })
+                    batch_results.append(
+                        {
+                            "campaign_recipient_id": item.get("campaign_recipient_id"),
+                            "sms_id": item.get("sms_id"),
+                            "recipient": item.get("recipient"),
+                            "error": err_msg,
+                            "worker": worker_label,
+                        }
+                    )
                     queue.task_done()
                     drained += 1
                 return drained
@@ -251,8 +297,12 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
             async def worker(wid: int):
                 smtp: Optional[aiosmtplib.SMTP] = None
                 try:
-                    logger.debug(f"[batch {batch_index} w{wid}] opening SMTP {host}:{port} ssl={use_ssl}")
-                    smtp = await self._open_smtp(host, port, smtp_user, password, use_ssl)
+                    logger.debug(
+                        f"[batch {batch_index} w{wid}] opening SMTP {host}:{port} ssl={use_ssl}"
+                    )
+                    smtp = await self._open_smtp(
+                        host, port, smtp_user, password, use_ssl
+                    )
                     logger.debug(f"[batch {batch_index} w{wid}] SMTP opened")
                     while True:
                         try:
@@ -266,7 +316,7 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
                         is_html = bool(item.get("is_html", True))
 
                         email_msg = self._build_email_message(
-                            from_addr=from_header,    
+                            from_addr=from_header,
                             to_addr=recipient,
                             subject=subject,
                             body=body,
@@ -274,45 +324,63 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
                         )
                         try:
                             send_status, envelope_id = await asyncio.wait_for(
-                                smtp.send_message(email_msg, sender=from_email, recipients=[recipient]),
+                                smtp.send_message(
+                                    email_msg, sender=from_email, recipients=[recipient]
+                                ),
                                 timeout=self.COMMAND_TIMEOUT,
                             )
 
                             accepted = {
                                 rcpt: {
                                     "code": resp.code,
-                                    "message": (resp.message or b"").decode("utf-8", errors="ignore"),
+                                    "message": (resp.message or b"").decode(
+                                        "utf-8", errors="ignore"
+                                    ),
                                 }
                                 for rcpt, resp in (send_status or {}).items()
                             }
 
-                            batch_results.append({
-                                "campaign_recipient_id": item.get("campaign_recipient_id"),
-                                "sms_id": item.get("sms_id"),
-                                "recipient": recipient,
-                                "status": "sent" if accepted else "unknown",
-                                "response": {
-                                    "accepted": accepted,          # пер-адресатный код SMTP (обычно 250)
-                                    "envelope_id": envelope_id,    # id транзакции, если сервер вернул
-                                },
-                                "worker": wid,
-                            })
+                            batch_results.append(
+                                {
+                                    "campaign_recipient_id": item.get(
+                                        "campaign_recipient_id"
+                                    ),
+                                    "sms_id": item.get("sms_id"),
+                                    "recipient": recipient,
+                                    "status": "sent" if accepted else "unknown",
+                                    "response": {
+                                        "accepted": accepted,  # пер-адресатный код SMTP (обычно 250)
+                                        "envelope_id": envelope_id,  # id транзакции, если сервер вернул
+                                    },
+                                    "worker": wid,
+                                }
+                            )
                         except Exception as send_err:
-                            logger.error(f"[batch {batch_index} w{wid}] send error to {recipient}: {send_err}")
-                            batch_results.append({
-                                "campaign_recipient_id": item.get("campaign_recipient_id"),
-                                "sms_id": item.get("sms_id"),
-                                "recipient": recipient,
-                                "error": str(send_err),
-                                "worker": wid,
-                            })
+                            logger.error(
+                                f"[batch {batch_index} w{wid}] send error to {recipient}: {send_err}"
+                            )
+                            batch_results.append(
+                                {
+                                    "campaign_recipient_id": item.get(
+                                        "campaign_recipient_id"
+                                    ),
+                                    "sms_id": item.get("sms_id"),
+                                    "recipient": recipient,
+                                    "error": str(send_err),
+                                    "worker": wid,
+                                }
+                            )
                         finally:
                             queue.task_done()
 
                 except Exception as open_err:
                     # Критично: воркер не открыл SMTP — дренируем очередь, иначе queue.join() зависнет
-                    logger.error(f"[batch {batch_index} w{wid}] SMTP open failed: {open_err}")
-                    await drain_queue_with_error(f"SMTP open failed: {open_err}", worker_label=f"w{wid}")
+                    logger.error(
+                        f"[batch {batch_index} w{wid}] SMTP open failed: {open_err}"
+                    )
+                    await drain_queue_with_error(
+                        f"SMTP open failed: {open_err}", worker_label=f"w{wid}"
+                    )
                 finally:
                     if smtp:
                         try:
@@ -320,24 +388,32 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
                         except Exception:
                             pass
 
-            logger.info(f"[batch {batch_index}] starting with pool={local_pool}, total_items={queue.qsize()}")
+            logger.info(
+                f"[batch {batch_index}] starting with pool={local_pool}, total_items={queue.qsize()}"
+            )
             tasks = [asyncio.create_task(worker(i + 1)) for i in range(local_pool)]
 
             # ждём завершение очереди, но с таймаутом
             try:
                 await asyncio.wait_for(queue.join(), timeout=self.BATCH_JOIN_TIMEOUT)
             except asyncio.TimeoutError:
-                logger.error(f"[batch {batch_index}] queue.join() timeout after {self.BATCH_JOIN_TIMEOUT}s, cancelling workers")
+                logger.error(
+                    f"[batch {batch_index}] queue.join() timeout after {self.BATCH_JOIN_TIMEOUT}s, cancelling workers"
+                )
                 for t in tasks:
                     t.cancel()
                 # дренируем остатки очереди, чтобы не потерять письма
-                await drain_queue_with_error("Batch join timeout; cancelled workers", worker_label="timeout")
+                await drain_queue_with_error(
+                    "Batch join timeout; cancelled workers", worker_label="timeout"
+                )
 
             # дожимаем воркеров (не упадём, даже если кто-то уже отменён)
             await asyncio.gather(*tasks, return_exceptions=True)
 
             sent = sum(1 for r in batch_results if r.get("status") == "sent")
-            logger.info(f"[batch {batch_index}] done: sent={sent}/{len(batch)}, pool_used={local_pool}")
+            logger.info(
+                f"[batch {batch_index}] done: sent={sent}/{len(batch)}, pool_used={local_pool}"
+            )
             return {
                 "batch_index": batch_index,
                 "sent": sent,
@@ -347,7 +423,10 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
             }
 
         # ---- разбиение на батчи и запуск ----
-        batches = [messages[i: i + self.BATCH_SIZE] for i in range(0, len(messages), self.BATCH_SIZE)]
+        batches = [
+            messages[i : i + self.BATCH_SIZE]
+            for i in range(0, len(messages), self.BATCH_SIZE)
+        ]
         for idx, batch in enumerate(batches, 1):
             try:
                 batch_result = await send_batch(batch, idx)

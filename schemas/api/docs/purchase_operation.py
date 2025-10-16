@@ -9,8 +9,8 @@ from pydantic import BaseModel, Field
 from pydantic.config import ConfigDict
 
 from schemas.api.base import APIBaseResponse, ArrayResult, BaseSchema
-from schemas.api.refrences.item import Item
-from schemas.api.refrences.tax import VatCalculationType
+from schemas.api.references.item import Item
+from schemas.api.references.tax import VatCalculationType
 
 
 # ---------- Core model ----------

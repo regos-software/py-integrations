@@ -10,13 +10,12 @@ logger = setup_logger("reports.retail_report")
 
 
 class RetailReportService:
-    
+
     PATH_COUNTS = "RetailReport/Counts"
     PATH_PAYMENTS = "RetailReport/Payments"
 
     def __init__(self, api):
         self.api = api
-
 
     async def get_counts(self, req: CountsGetRequest) -> List[Counts]:
         """

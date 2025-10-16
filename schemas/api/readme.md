@@ -3,8 +3,6 @@
 Единые правила оформления **схем (Pydantic v2)** и **сервисов** для работы с REST-эндпоинтами.  
 Проект — асинхронный Python, Pydantic v2.
 
-> ⚠️ В проекте используется пакет **`schemas/api/refrences/`** (именно `refrences`). Во всех файлах и импортax придерживаемся одного написания.
-
 ---
 
 ## Структура проекта (фрагмент)
@@ -18,7 +16,7 @@ schemas/
     common/
       filters.py                # Filter, Filters
       sort_orders.py            # SortOrder, SortOrders
-    refrences/                  # (именно 'refrences')
+    references/                 # Справочники
       fields.py                 # Field, FieldValue*, FieldValues/FieldValueAdds/FieldValueEdits
       region.py
       retail_customer_group.py
@@ -34,16 +32,19 @@ services/
 ### Базовые правила
 
 1. **Базовый класс** — наследуем от `BaseSchema`.
+
    - В `BaseSchema` уже настроен `json_encoders={Decimal: float}`.
    - **Рид-модели** (ответы сервера): `model_config = ConfigDict(extra="ignore")`.
    - **Запросы** (наши payload’ы): `model_config = ConfigDict(extra="forbid")`.
 
 2. **Документация** — у каждого поля обязателен `description` через `Field`:
+
    ```py
    id: int = Field(..., description="ID записи.")
    ```
 
 3. **Типы**:
+
    - Идентификаторы: `int` с `ge=1` в запросах.
    - Денежные и количественные: `Decimal`.
    - Даты: **строки** (указать формат в `description`, напр. `YYYY-MM-DD`).
@@ -51,19 +52,22 @@ services/
    - Пол (`sex`): только `non|male|female` в Add/Edit (без числовых кодов).
 
 4. **Нормализация строк** — общий валидатор `.strip()`:
+
    ```py
    @field_validator("name", mode="before")
    def _strip(cls, v): return v.strip() if isinstance(v, str) else v
    ```
 
 5. **Фильтры/сортировки** — используем общие модели:
+
    ```py
    from schemas.api.common.filters import Filters
    from schemas.api.common.sort_orders import SortOrders
    ```
 
 6. **Доп. поля**:
-   - Метаданные и значения — в `schemas/api/refrences/fields.py`.
+
+   - Метаданные и значения — в `schemas/api/references/fields.py`.
    - В сущности: `fields: Optional[FieldValues]`.
    - В Add — `FieldValueAdds`, в Edit — `FieldValueEdits`.
 
@@ -75,7 +79,7 @@ services/
 ### Шаблон файла сущности
 
 ```py
-# schemas/api/refrences/<entity>.py
+# schemas/api/references/<entity>.py
 from __future__ import annotations
 
 from decimal import Decimal
@@ -87,8 +91,8 @@ from pydantic.config import ConfigDict
 from schemas.api.base import BaseSchema
 from schemas.api.common.filters import Filters
 from schemas.api.common.sort_orders import SortOrders
-from schemas.api.refrences.fields import FieldValueAdds, FieldValueEdits, FieldValues
-# from schemas.api.refrences.<linked_ref> import <LinkedRefModel>  # при необходимости
+from schemas.api.references.fields import FieldValueAdds, FieldValueEdits, FieldValues
+# from schemas.api.references.<linked_ref> import <LinkedRefModel>  # при необходимости
 
 
 # ---------- Enum / helpers ----------
@@ -191,6 +195,3 @@ __all__ = [
     "<EntityName>DeleteRequest",
 ]
 ```
-
-
-

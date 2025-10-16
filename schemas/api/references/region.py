@@ -6,6 +6,7 @@ class Region(BaseModel):
     """
     Регион.
     """
+
     id: int
     parent_id: Optional[int] = None
     name: str

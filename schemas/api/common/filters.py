@@ -13,6 +13,7 @@ class FilterOperator(str, Enum):
       - Equal (=), NotEqual (!=), Greater (>), Less (<),
         GreaterOrEqual (>=), LessOrEqual (<=), Like, Exists, NotExists
     """
+
     Equal = "Equal"
     NotEqual = "NotEqual"
     Greater = "Greater"
@@ -36,18 +37,25 @@ class Filter(BaseModel):
           * bool    — 'true' | 'false' (регистронезависимо)
       - Exists/NotExists не требуют value (игнорируется).
     """
-    field: str = Field(..., description="Имя поля (например: first_name, region_id, date_of_birth).")
+
+    field: str = Field(
+        ..., description="Имя поля (например: first_name, region_id, date_of_birth)."
+    )
     operator: FilterOperator
-    value: Optional[str] = Field(None, description="Значение фильтра (строкой). Для Exists/NotExists не требуется.")
+    value: Optional[str] = Field(
+        None,
+        description="Значение фильтра (строкой). Для Exists/NotExists не требуется.",
+    )
 
     @model_validator(mode="after")
     def _check_value_presence(self):
         if self.operator in {FilterOperator.Exists, FilterOperator.NotExists}:
             return self
         if self.value is None or str(self.value).strip() == "":
-            raise ValueError("Для выбранного оператора требуется непустое значение 'value'.")
+            raise ValueError(
+                "Для выбранного оператора требуется непустое значение 'value'."
+            )
         return self
 
+
 Filters = List[Filter]
-
-

@@ -5,7 +5,7 @@ from schemas.api.integrations.connected_integration_setting import (
     ConnectedIntegrationSetting,
     ConnectedIntegrationSettingRequest,
     ConnectedIntegrationSettingEditRequest,
-    ConnectedIntegrationSettingEditItem
+    ConnectedIntegrationSettingEditItem,
 )
 
 logger = setup_logger("ConnectedIntegrationSettingService")
@@ -18,7 +18,9 @@ class ConnectedIntegrationSettingService:
     def __init__(self, api):
         self.api = api
 
-    async def get(self, req: ConnectedIntegrationSettingRequest) -> List[ConnectedIntegrationSetting]:
+    async def get(
+        self, req: ConnectedIntegrationSettingRequest
+    ) -> List[ConnectedIntegrationSetting]:
         """Получить список настроек по ключу интеграции (и, опционально, firm_id)."""
         resp = await self.api.call(self.PATH_GET, req, APIBaseResponse)
         if not getattr(resp, "ok", False) or not isinstance(resp.result, list):

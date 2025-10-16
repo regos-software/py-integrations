@@ -3,12 +3,12 @@ from __future__ import annotations
 
 from core.logger import setup_logger
 from schemas.api.base import APIBaseResponse
-from schemas.api.refrences.retail_customer import (
+from schemas.api.references.retail_customer import (
     RetailCustomerGetRequest,
     RetailCustomerAddRequest,
     RetailCustomerEditRequest,
     RetailCustomerDeleteMarkRequest,
-    RetailCustomerDeleteRequest
+    RetailCustomerDeleteRequest,
 )
 
 logger = setup_logger("references.RetailCustomer")
@@ -54,5 +54,3 @@ class RetailCustomerService:
         Полное удаление (возможно только при deleted_mark=true).
         """
         return await self.api.call(self.PATH_DELETE, req, APIBaseResponse)
-
-   

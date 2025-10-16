@@ -6,7 +6,7 @@ from pydantic import TypeAdapter
 
 from core.logger import setup_logger
 from schemas.api.base import APIBaseResponse
-from schemas.api.refrences.brand import (
+from schemas.api.references.brand import (
     Brand,
     BrandGetRequest,
     BrandAddRequest,
@@ -18,9 +18,9 @@ logger = setup_logger("references.Brand")
 
 
 class BrandService:
-    PATH_GET    = "Brand/Get"
-    PATH_ADD    = "Brand/Add"
-    PATH_EDIT   = "Brand/Edit"
+    PATH_GET = "Brand/Get"
+    PATH_ADD = "Brand/Add"
+    PATH_EDIT = "Brand/Edit"
     PATH_DELETE = "Brand/Delete"
 
     def __init__(self, api):
