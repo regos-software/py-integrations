@@ -34,7 +34,7 @@ class BatchService:
     def __init__(self, api):
         self.api = api
 
-    async def run(self, req: BatchRequest) -> BatchResponse:
+    async def run(self, req: BatchRequest | dict[str, Any]) -> BatchResponse:
         """Выполнить список шагов через POST …/v1/batch."""
         return await self.api.call(self.PATH, req, BatchResponse)
 
@@ -78,6 +78,3 @@ class BatchService:
             return payload
 
         return TypeAdapter(result_type).validate_python(payload)
-
-
-__all__ = ["BatchService", "RegosAPIError"]

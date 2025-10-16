@@ -8,12 +8,9 @@ from tenacity import (
     retry_if_exception_type,
 )
 
-from core.api.batch import BatchService
+
 from core.api.client import APIClient
-from core.api.references.brand import BrandService
-from core.api.references.item_group import ItemGroupService
-from core.api.references.retail_customer import RetailCustomerService
-from core.api.references.stock import StockService
+
 from core.logger import setup_logger
 
 logger = setup_logger("regos_api")
@@ -24,7 +21,7 @@ class RegosAPI:
     def __init__(self, connected_integration_id: str):
         self.connected_integration_id = connected_integration_id
         self._client = APIClient(connected_integration_id=connected_integration_id)
-        self.batch = BatchService(self._client)
+        self.batch = self.Batch(self)
 
         self.docs: "RegosAPI.Docs" = self.Docs(self)
         self.integrations: "RegosAPI.Integrations" = self.Integrations(self)
@@ -52,6 +49,12 @@ class RegosAPI:
         await self.close()
 
     # ------- Namespaces -------
+    class Batch:
+        def __init__(self, api: "RegosAPI"):
+            from core.api.batch import BatchService
+
+            self.batch = BatchService(api)
+
     class Docs:
         def __init__(self, api: "RegosAPI"):
             from core.api.docs.cheque import DocsChequeService
@@ -94,6 +97,10 @@ class RegosAPI:
         def __init__(self, api: "RegosAPI"):
 
             from core.api.references.item import ItemService
+            from core.api.references.brand import BrandService
+            from core.api.references.item_group import ItemGroupService
+            from core.api.references.retail_customer import RetailCustomerService
+            from core.api.references.stock import StockService
 
             self.brand = BrandService(api)
             self.retail_customer = RetailCustomerService(api)

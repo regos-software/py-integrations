@@ -105,6 +105,35 @@ const purchaseDefinition = {
     buildDocPayload: (docId) => docId,
     operationsAction: "docs.purchase_operation.get_by_document_id",
     buildOperationsPayload: (docId) => docId,
+    batch: {
+      action: "batch.run",
+      docKey: "doc",
+      operationsKey: "operations",
+      buildRequest: (docId) => ({
+        stop_on_error: false,
+        requests: [
+          {
+            key: "doc",
+            path: "DocPurchase/Get",
+            payload: { ids: [docId] },
+          },
+          {
+            key: "operations",
+            path: "PurchaseOperation/Get",
+            payload: { document_ids: [docId] },
+          },
+        ],
+      }),
+      extractDoc: (response) => {
+        if (!response) return null;
+        const { result } = response;
+        if (Array.isArray(result)) {
+          return result[0] ?? null;
+        }
+        return result ?? null;
+      },
+      extractOperations: (response) => response?.result ?? [],
+    },
     performAction: "docs.purchase.perform",
     cancelPerformAction: "docs.purchase.perform_cancel",
     lockAction: "docs.purchase.lock",
@@ -308,6 +337,35 @@ const wholesaleDefinition = {
     buildDocPayload: (docId) => docId,
     operationsAction: "docs.wholesale_operation.get_by_document_id",
     buildOperationsPayload: (docId) => docId,
+    batch: {
+      action: "batch.run",
+      docKey: "doc",
+      operationsKey: "operations",
+      buildRequest: (docId) => ({
+        stop_on_error: false,
+        requests: [
+          {
+            key: "doc",
+            path: "DocWholeSale/Get",
+            payload: { ids: [docId] },
+          },
+          {
+            key: "operations",
+            path: "WholeSaleOperation/Get",
+            payload: { document_ids: [docId] },
+          },
+        ],
+      }),
+      extractDoc: (response) => {
+        if (!response) return null;
+        const { result } = response;
+        if (Array.isArray(result)) {
+          return result[0] ?? null;
+        }
+        return result ?? null;
+      },
+      extractOperations: (response) => response?.result ?? [],
+    },
     performAction: "docs.wholesale.perform",
     cancelPerformAction: "docs.wholesale.perform_cancel",
     lockAction: "docs.wholesale.lock",

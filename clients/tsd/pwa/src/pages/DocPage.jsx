@@ -364,12 +364,6 @@ export default function DocPage({ definition: definitionProp }) {
       const buildDocPayload = detail.buildDocPayload || ((docId) => docId);
       const buildOpsPayload =
         detail.buildOperationsPayload || ((docId) => docId);
-
-      const [docResponse, opsResponse] = await Promise.all([
-        api(detail.docAction, buildDocPayload(docIdNumber)),
-        api(detail.operationsAction, buildOpsPayload(docIdNumber)),
-      ]);
-
       const transformDoc = detail.transformDoc || ((data) => data);
       const transformOperations =
         detail.transformOperations ||
@@ -380,6 +374,83 @@ export default function DocPage({ definition: definitionProp }) {
           return [];
         });
 
+      const batchConfig = detail.batch;
+      if (batchConfig?.buildRequest) {
+        const batchPayload = batchConfig.buildRequest(docIdNumber, {
+          buildDocPayload,
+          buildOperationsPayload: buildOpsPayload,
+          definition: docDefinition,
+        });
+        const batchAction = batchConfig.action || "batch.run";
+        const {
+          ok: batchOk,
+          status,
+          data: batchData,
+        } = await api(batchAction, batchPayload);
+
+        if (!batchOk) {
+          const description =
+            batchData?.description ||
+            batchData?.error ||
+            "Batch request failed";
+          throw new Error(`${description} (${status})`);
+        }
+
+        const docKey = batchConfig.docKey || "doc";
+        const operationsKey = batchConfig.operationsKey || "operations";
+        const findStep = (key) =>
+          batchData?.result?.find?.((step) => step?.key === key);
+
+        const docStep = findStep(docKey);
+        if (!docStep) {
+          throw new Error(`Шаг batch '${docKey}' не найден`);
+        }
+        if (docStep.response?.ok === false) {
+          const description =
+            docStep.response?.result?.description ||
+            docStep.response?.description ||
+            `Batch step '${docKey}' failed`;
+          throw new Error(description);
+        }
+
+        const opsStep = findStep(operationsKey);
+        if (!opsStep) {
+          throw new Error(`Шаг batch '${operationsKey}' не найден`);
+        }
+        if (opsStep.response?.ok === false) {
+          const description =
+            opsStep.response?.result?.description ||
+            opsStep.response?.description ||
+            `Batch step '${operationsKey}' failed`;
+          throw new Error(description);
+        }
+
+        const extractDoc =
+          batchConfig.extractDoc ||
+          ((response) => {
+            if (!response) return null;
+            const { result } = response;
+            if (Array.isArray(result)) {
+              return result[0] ?? null;
+            }
+            return result ?? null;
+          });
+
+        const extractOperations =
+          batchConfig.extractOperations || ((response) => response);
+
+        const docData = extractDoc(docStep.response);
+        const operationsData = extractOperations(opsStep.response);
+
+        setDoc(transformDoc(docData));
+        setOperations(transformOperations(operationsData) || []);
+        return;
+      }
+
+      const [docResponse, opsResponse] = await Promise.all([
+        api(detail.docAction, buildDocPayload(docIdNumber)),
+        api(detail.operationsAction, buildOpsPayload(docIdNumber)),
+      ]);
       setDoc(transformDoc(docResponse?.data));
       setOperations(transformOperations(opsResponse?.data) || []);
     } catch (err) {
