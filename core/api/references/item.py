@@ -28,8 +28,10 @@ class ItemService:
     async def search(self, req: ItemSearchRequest) -> APIBaseResponse[List[int]]:
         return await self.api.call(self.PATH_SEARCH, req, APIBaseResponse[List[int]])
 
-    async def get(self, req: ItemGetRequest) -> APIBaseResponse[Item]:
-        return await self.api.call(self.PATH_GET, req, APIBaseResponse[Item])
+    async def get(self, req: ItemGetRequest) -> APIBaseResponse[List[Item]]:
+        return await self.api.call(self.PATH_GET, req, APIBaseResponse[List[Item]])
 
-    async def get_ext(self, req: ItemGetExtRequest) -> APIBaseResponse[ItemExt]:
-        return await self.api.call(self.PATH_GET_EXT, req, APIBaseResponse[ItemExt])
+    async def get_ext(self, req: ItemGetExtRequest) -> APIBaseResponse[List[ItemExt]]:
+        return await self.api.call(
+            self.PATH_GET_EXT, req, APIBaseResponse[List[ItemExt]]
+        )

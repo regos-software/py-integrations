@@ -582,7 +582,7 @@ export default function OpNewPage({ definition: definitionProp }) {
               <i className="fa-solid fa-magnifying-glass" aria-hidden="true" />
             </button>
           </div>
-          {searchStatus != "idle" && (
+          {["idle", "done"].includes(searchStatus) && (
             <div
               id="product-results"
               className={mutedTextClass()}
