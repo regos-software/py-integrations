@@ -14,7 +14,7 @@ const purchaseDefinition = {
     buildNewOperationPath: (docId) => `/doc/${docId}/op/new`,
   },
   list: {
-    action: "docs.purchase.get_raw",
+    action: "docs.purchase.get",
     pageSize: DEFAULT_PAGE_SIZE,
     buildParams: ({ page, pageSize, search, filters = {} }) => {
       const params = {
@@ -105,13 +105,13 @@ const purchaseDefinition = {
     buildDocPayload: (docId) => docId,
     operationsAction: "docs.purchase_operation.get_by_document_id",
     buildOperationsPayload: (docId) => docId,
-    performAction: "docs.purchase.perform_raw",
-    cancelPerformAction: "docs.purchase.perform_cancel_raw",
-    lockAction: "docs.purchase.lock_raw",
-    unlockAction: "docs.purchase.unlock_raw",
-    deleteAction: "docs.purchase_operation.delete_raw",
+    performAction: "docs.purchase.perform",
+    cancelPerformAction: "docs.purchase.perform_cancel",
+    lockAction: "docs.purchase.lock",
+    unlockAction: "docs.purchase.unlock",
+    deleteAction: "docs.purchase_operation.delete",
     buildDeletePayload: (opId) => [{ id: opId }],
-    editAction: "docs.purchase_operation.edit_raw",
+    editAction: "docs.purchase_operation.edit,
     buildEditPayload: (opId, payload) => [{ id: opId, ...payload }],
     handleDeleteResponse: (data) => data?.result?.row_affected > 0,
     handleEditResponse: (data) => data?.result?.row_affected > 0,
@@ -134,7 +134,7 @@ const purchaseDefinition = {
       price_type_round_to: doc?.price_type?.round_to ?? null,
     }),
     search: {
-      action: "references.item.get_ext_raw",
+      action: "references.item.get_ext",
       buildParams: ({ queryText, docCtx }) => ({
         search: queryText,
         price_type_id: docCtx?.price_type_id ?? undefined,
@@ -171,7 +171,7 @@ const purchaseDefinition = {
         });
       },
     },
-    addAction: "docs.purchase_operation.add_raw",
+    addAction: "docs.purchase_operation.add",
     buildAddPayload: ({
       docId,
       picked,
@@ -217,7 +217,7 @@ const wholesaleDefinition = {
     buildNewOperationPath: (docId) => `/doc/${docId}/op/new?type=wholesale`,
   },
   list: {
-    action: "docs.wholesale.get_raw",
+    action: "docs.wholesale.get",
     pageSize: DEFAULT_PAGE_SIZE,
     buildParams: ({ page, pageSize, search, filters = {} }) => {
       const params = {
@@ -308,13 +308,13 @@ const wholesaleDefinition = {
     buildDocPayload: (docId) => docId,
     operationsAction: "docs.wholesale_operation.get_by_document_id",
     buildOperationsPayload: (docId) => docId,
-    performAction: "docs.wholesale.perform_raw",
-    cancelPerformAction: "docs.wholesale.perform_cancel_raw",
-    lockAction: "docs.wholesale.lock_raw",
-    unlockAction: "docs.wholesale.unlock_raw",
-    deleteAction: "docs.wholesale_operation.delete_raw",
+    performAction: "docs.wholesale.perform",
+    cancelPerformAction: "docs.wholesale.perform_cancel",
+    lockAction: "docs.wholesale.lock",
+    unlockAction: "docs.wholesale.unlock",
+    deleteAction: "docs.wholesale_operation.delete",
     buildDeletePayload: (opId) => [{ id: opId }],
-    editAction: "docs.wholesale_operation.edit_raw",
+    editAction: "docs.wholesale_operation.edit",
     buildEditPayload: (opId, payload) => [{ id: opId, ...payload }],
     handleDeleteResponse: (data) => data?.result?.row_affected > 0,
     handleEditResponse: (data) => data?.result?.row_affected > 0,
@@ -337,7 +337,7 @@ const wholesaleDefinition = {
       price_type_round_to: doc?.price_type?.round_to ?? null,
     }),
     search: {
-      action: "references.item.get_ext_raw",
+      action: "references.item.get_ext",
       buildParams: ({ queryText, docCtx }) => ({
         search: queryText,
         price_type_id: docCtx?.price_type_id ?? undefined,
@@ -383,7 +383,7 @@ const wholesaleDefinition = {
         });
       },
     },
-    addAction: "docs.wholesale_operation.add_raw",
+    addAction: "docs.wholesale_operation.add",
     buildAddPayload: ({ docId, picked, quantity, price, description }) => {
       const entry = {
         document_id: docId,

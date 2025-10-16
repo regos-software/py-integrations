@@ -17,7 +17,7 @@ from clients.telegram_bot_notification.services.message_formatters import (
     format_session_notification,
 )
 from schemas.api.docs.cash_amount_details import CashAmountDetailsGetRequest
-from schemas.api.docs.retail_payment import DocRetailPaymentGetRequest
+from schemas.api.docs.retail_payment import DocChequePaymentGetRequest
 from schemas.api.reports.retail_report.count import CountsGetRequest
 from schemas.api.reports.retail_report.payment import PaymentGetRequest
 from .utils import parse_chat_ids, extract_chat_id
@@ -114,7 +114,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                             integration_key=str(TelegramBotConfig.INTEGRATION_KEY)
                         )
                     )
-                )
+                ).result
             # Normalize keys to lowercase for case-insensitive access
             settings_map = {item.key.lower(): item.value for item in settings_response}
 
@@ -265,17 +265,21 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
 
             try:
                 async with RegosAPI(self.connected_integration_id) as api:
-                    cheques = await api.docs.cheque.get_by_uuids([uuid])
+                    cheques = (await api.docs.cheque.get_by_uuids([uuid])).result
                     if not cheques:
                         await callback_query.answer("Чек не найден", show_alert=True)
                         return
                     cheque = cheques[0]
-                    operations = await api.docs.cheque_operation.get(
-                        DocChequeOperationGetRequest(doc_sale_uuid=uuid)
-                    )
-                    payments = await api.docs.retail_payment.get(
-                        DocRetailPaymentGetRequest(doc_sale_uuid=uuid)
-                    )
+                    operations = (
+                        await api.docs.cheque_operation.get(
+                            DocChequeOperationGetRequest(doc_sale_uuid=uuid)
+                        )
+                    ).result
+                    payments = (
+                        await api.docs.cheque_payment.get(
+                            DocChequePaymentGetRequest(doc_sale_uuid=uuid)
+                        )
+                    ).result
             except Exception as error:
                 logger.error(f"Error fetching cheque details {uuid}: {error}")
                 await callback_query.answer("Ошибка получения данных", show_alert=True)

@@ -55,7 +55,7 @@ class RegosAPI:
             from core.api.docs.cheque import DocsChequeService
             from core.api.docs.cash_session import DocCashSessionService
             from core.api.docs.cheque_operation import DocChequeOperationService
-            from core.api.docs.retail_payment import DocRetailPaymentService
+            from core.api.docs.cheque_payment import DocChequePaymentService
             from core.api.docs.cash_operation import CashOperationService
             from core.api.docs.purchase import DocPurchaseService
             from core.api.docs.purchase_operation import PurchaseOperationService
@@ -67,7 +67,7 @@ class RegosAPI:
             self.cheque = DocsChequeService(api)
             self.cash_session = DocCashSessionService(api)
             self.cheque_operation = DocChequeOperationService(api)
-            self.retail_payment = DocRetailPaymentService(api)
+            self.cheque_payment = DocChequePaymentService(api)
             self.cash_operation = CashOperationService(api)
             self.purchase = DocPurchaseService(api)
             self.purchase_operation = PurchaseOperationService(api)

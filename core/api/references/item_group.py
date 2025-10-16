@@ -1,6 +1,8 @@
-
+from typing import List
+from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
-from schemas.api.references.item_group import ItemGroupGetRequest, ItemGroupGetResponse
+from schemas.api.base import APIBaseResponse
+from schemas.api.references.item_group import ItemGroup, ItemGroupGetRequest
 
 logger = setup_logger("references.Item")
 
@@ -8,18 +10,9 @@ logger = setup_logger("references.Item")
 class ItemGroupService:
     PATH_GET = "ItemGroup/Get"
 
-    def __init__(self, api):
+    def __init__(self, api: RegosAPI):
         self.api = api
 
-    async def get_raw(self, req: ItemGroupGetRequest) -> ItemGroupGetResponse:
-        try:
-            resp = await self.api.call(self.PATH_GET, req, ItemGroupGetResponse)
-        except Exception:
-            logger.exception("ItemGroup/Get failed")
-            return ItemGroupGetResponse(ok=False)
-        if not getattr(resp, "ok", False) or not isinstance(resp.result, list):
-            logger.warning(
-                "ItemGroup/Get: unexpected result=%r", getattr(resp, "result", None)
-            )
-            return ItemGroupGetResponse(ok=False)
+    async def get(self, req: ItemGroupGetRequest) -> APIBaseResponse[List[ItemGroup]]:
+        resp = await self.api.call(self.PATH_GET, req, APIBaseResponse[List[ItemGroup]])
         return resp

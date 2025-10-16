@@ -26,14 +26,13 @@ class ItemService:
     def __init__(self, api):
         self.api = api
 
-    # ---------- RAW слой (1:1 к эндпоинтам) ----------
-    async def search_raw(self, req: ItemSearchRequest) -> APIBaseResponse:
+    async def search(self, req: ItemSearchRequest) -> APIBaseResponse:
         return await self.api.call(self.PATH_SEARCH, req, APIBaseResponse)
 
-    async def get_raw(self, req: ItemGetRequest) -> APIBaseResponse:
+    async def get(self, req: ItemGetRequest) -> APIBaseResponse:
         return await self.api.call(self.PATH_GET, req, APIBaseResponse)
 
-    async def get_ext_raw(self, req: ItemGetExtRequest) -> APIBaseResponse:
+    async def get_ext(self, req: ItemGetExtRequest) -> APIBaseResponse:
         return await self.api.call(self.PATH_GET_EXT, req, APIBaseResponse)
 
     # ---------- Тонкие методы (рекомендуемый «стандарт») ----------
@@ -44,7 +43,7 @@ class ItemService:
         - result не list -> TypeError
         - элементы приводим к int (мягкая попытка BC)
         """
-        resp = await self.search_raw(req)
+        resp = await self.search(req)
         if not getattr(resp, "ok", False):
             logger.warning("Item/Search ok=False: %r", getattr(resp, "result", None))
             raise RuntimeError(f"{self.PATH_SEARCH}: ok=False")
@@ -73,7 +72,7 @@ class ItemService:
         """
         Строгий вариант получения списка Item: возвращает список или бросает исключение.
         """
-        resp = await self.get_raw(req)
+        resp = await self.get(req)
         if not getattr(resp, "ok", False):
             logger.warning("Item/Get ok=False: %r", getattr(resp, "result", None))
             raise RuntimeError(f"{self.PATH_GET}: ok=False")
@@ -89,7 +88,7 @@ class ItemService:
         Возвращает (items, next_offset, total).
         Бросает исключение при ok=False/невалидном формате.
         """
-        resp = await self.get_raw(req)
+        resp = await self.get(req)
         if not getattr(resp, "ok", False):
             logger.warning("Item/Get ok=False: %r", getattr(resp, "result", None))
             raise RuntimeError(f"{self.PATH_GET}: ok=False")
@@ -107,7 +106,7 @@ class ItemService:
         """
         Строгий вариант расширенной выдачи.
         """
-        resp = await self.get_ext_raw(req)
+        resp = await self.get_ext(req)
         if not getattr(resp, "ok", False):
             logger.warning("Item/GetExt ok=False: %r", getattr(resp, "result", None))
             raise RuntimeError(f"{self.PATH_GET_EXT}: ok=False")
@@ -124,7 +123,7 @@ class ItemService:
         """
         Возвращает (items_ext, next_offset, total) для расширенной выдачи.
         """
-        resp = await self.get_ext_raw(req)
+        resp = await self.get_ext(req)
         if not getattr(resp, "ok", False):
             logger.warning("Item/GetExt ok=False: %r", getattr(resp, "result", None))
             raise RuntimeError(f"{self.PATH_GET_EXT}: ok=False")

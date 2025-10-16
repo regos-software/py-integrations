@@ -87,11 +87,3 @@ class DocWholeSaleGetRequest(BaseModel):
         ):
             raise ValueError("end_date не может быть меньше start_date")
         return values
-
-
-class DocWholeSaleGetResponse(APIBaseResponse):
-    """Ответ /v1/DocWholeSale/Get"""
-
-    result: List[DocWholeSale] = []
-    next_offset: Optional[int] = None
-    total: Optional[int] = None

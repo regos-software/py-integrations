@@ -69,7 +69,7 @@ class GetSmsIntegration(IntegrationSmsBase, ClientBase):
                     await api.integrations.connected_integration_setting.get(
                         ConnectedIntegrationSettingRequest(integration_key="sms_getsms")
                     )
-                )
+                ).result
 
             # settings_response — это список моделей ConnectedIntegrationSetting
             settings_map = {item.key.lower(): item.value for item in settings_response}

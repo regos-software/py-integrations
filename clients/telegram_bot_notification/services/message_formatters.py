@@ -3,7 +3,7 @@ from typing import List
 
 from schemas.api.docs.cash_amount_details import CashAmountDetails
 from schemas.api.docs.cash_session import DocCashSession
-from schemas.api.docs.retail_payment import DocRetailPayment
+from schemas.api.docs.retail_payment import DocChequePayment
 from schemas.api.reports.retail_report.count import Counts
 from schemas.api.reports.retail_report.payment import Payment
 from ..utils import format_money, format_timestamp
@@ -79,7 +79,7 @@ def format_cheque_details(
     *,
     cheque: DocCheque,
     operations: List[DocChequeOperation],
-    payments: List[DocRetailPayment],
+    payments: List[DocChequePayment],
 ) -> str:
     """
     Creates a formatted message for cheque details, including itemized operations.

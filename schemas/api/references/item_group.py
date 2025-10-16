@@ -28,11 +28,3 @@ class ItemGroupGetRequest(BaseModel):
         None  # Список ID родительских групп для фильтрации
     )
     name: Optional[str] = None  # Фильтр по наименованию группы (частичное совпадение)
-
-
-class ItemGroupGetResponse(APIBaseResponse):
-    """
-    Ответ на запрос /v1/ItemGroup/Get
-    """
-
-    result: List[ItemGroup] = []

@@ -14,8 +14,8 @@ class CashOperationService:
     PATH_GET = "CashOperation/Get"
     PATH_GET_AMOUNT_DETAILS = "CashOperation/GetAmountDetails"
 
-    def __init__(self, api):
-        self.api: RegosAPI = api
+    def __init__(self, api: RegosAPI):
+        self.api = api
 
     async def get(
         self, req: CashOperationGetRequest

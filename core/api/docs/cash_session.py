@@ -1,4 +1,5 @@
 from typing import List, Iterable
+from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
 from schemas.api.base import APIBaseResponse
 from schemas.api.docs.cash_session import DocCashSessionGetRequest, DocCashSession
@@ -9,7 +10,7 @@ logger = setup_logger("docs.CashSession")
 class DocCashSessionService:
     PATH_GET = "DocCashSession/Get"
 
-    def __init__(self, api):
+    def __init__(self, api: RegosAPI):
         self.api = api
 
     async def get(

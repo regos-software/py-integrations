@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from schemas.api.references.payment_type import PaymentType
 
 
-class DocRetailPayment(BaseModel):
+class DocChequePayment(BaseModel):
     """
     Модель, описывающая документы розничных платежей.
     """
@@ -21,7 +21,7 @@ class DocRetailPayment(BaseModel):
     change_uuid: Optional[str] = None  # UUID платежа со сдачей
 
 
-class DocRetailPaymentGetRequest(BaseModel):
+class DocChequePaymentGetRequest(BaseModel):
     doc_sale_uuid: Optional[str] = None
     uuids: Optional[List[str]] = None
     payment_type_ids: Optional[List[int]] = None

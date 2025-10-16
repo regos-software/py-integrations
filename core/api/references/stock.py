@@ -24,7 +24,7 @@ class StockService:
         self.api = api
 
     # ---------- RAW слой (1:1 к эндпоинтам, стандарт) ----------
-    async def get_raw(self, req: StockGetRequest) -> APIBaseResponse:
+    async def get(self, req: StockGetRequest) -> APIBaseResponse:
         return await self.api.call(self.PATH_GET, req, APIBaseResponse)
 
     # ---------- Тонкие методы (стандарт) ----------
@@ -35,7 +35,7 @@ class StockService:
           - RuntimeError при ok=False
           - TypeError, если result не list
         """
-        resp = await self.get_raw(req)
+        resp = await self.get(req)
         if not getattr(resp, "ok", False):
             logger.warning("Stock/Get ok=False: %r", getattr(resp, "result", None))
             raise RuntimeError(f"{self.PATH_GET}: ok=False")
@@ -48,7 +48,7 @@ class StockService:
         """
         Возвращает (items, next_offset, total). Пагинация не скрывается.
         """
-        resp = await self.get_raw(req)
+        resp = await self.get(req)
         if not getattr(resp, "ok", False):
             logger.warning("Stock/Get ok=False: %r", getattr(resp, "result", None))
             raise RuntimeError(f"{self.PATH_GET}: ok=False")
@@ -72,7 +72,7 @@ class StockService:
     # ---------- Backward compatibility ----------
     # Сохраняем старый приватный метод _get, но помечаем как устаревший и
     # сохраняем прежний тип ответа (StockGetResponse).
-    @deprecated("use get_raw() (APIBaseResponse) or get()/get_page() instead")
+    @deprecated("use get() (APIBaseResponse) or get()/get_page() instead")
     async def _get(self, req: StockGetRequest) -> StockGetResponse:
         try:
             # Старое поведение: сразу просим типизированный ответ

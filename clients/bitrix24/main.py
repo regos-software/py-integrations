@@ -53,7 +53,7 @@ class TsdIntegration(ClientBase):
                         integration_key=self.INTEGRATION_KEY
                     )
                 )
-            )
+            ).result
 
         settings_map = {item.key.lower(): item.value for item in settings_response}
 
