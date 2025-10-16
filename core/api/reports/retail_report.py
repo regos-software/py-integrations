@@ -1,7 +1,6 @@
-from typing import List, Iterable
+from typing import List
 from core.logger import setup_logger
 from schemas.api.base import APIBaseResponse
-from schemas.api.docs.cheque import DocChequeGetRequest, DocCheque
 from schemas.api.reports.retail_report.count import Counts, CountsGetRequest
 from schemas.api.reports.retail_report.payment import Payment, PaymentGetRequest
 

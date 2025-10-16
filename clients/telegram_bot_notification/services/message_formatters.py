@@ -1,5 +1,5 @@
 from decimal import Decimal
-from typing import Optional, List
+from typing import List
 
 from schemas.api.docs.cash_amount_details import CashAmountDetails
 from schemas.api.docs.cash_session import DocCashSession
@@ -57,7 +57,7 @@ def format_session_notification(*, session: DocCashSession, action: str) -> str:
         "----------------------",
         f"*Касса:* {session.operating_cash_id}",
         "----------------------",
-        f"*Открыл(а):*",
+        "*Открыл(а):*",
         f"{format_timestamp(session.start_date)}",
         f"_{session.start_user.full_name}_\n",
     ]
@@ -66,7 +66,7 @@ def format_session_notification(*, session: DocCashSession, action: str) -> str:
         message.extend(
             [
                 "----------------------",
-                f"*Закрыл(а):*",
+                "*Закрыл(а):*",
                 f"{format_timestamp(session.close_date)}",
                 f"_{session.close_user.full_name}_\n",
             ]
@@ -173,15 +173,15 @@ def format_session_details(
     count = counts[0] if counts else Counts()
 
     message = [
-        f"*ДЕТАЛИ СМЕНЫ*",
+        "*ДЕТАЛИ СМЕНЫ*",
         f"*{session.code}*",
         "----------------------",
         f"*Касса:* {session.operating_cash_id}",
         "----------------------",
-        f"*Открыл(а):*",
+        "*Открыл(а):*",
         f"{format_timestamp(session.start_date)}",
         f"_{session.start_user.full_name}_\n" "----------------------",
-        f"*Закрыл(а):*",
+        "*Закрыл(а):*",
         f"{format_timestamp(session.close_date)}",
         f"_{session.close_user.full_name}_\n" "----------------------",
         "*ИТОГИ ПРОДАЖ*",

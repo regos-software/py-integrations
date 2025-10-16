@@ -1,9 +1,8 @@
 import asyncio
 import re
 from typing import Optional, Union, Any, Dict
-from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Header, Query, Request, Path, Response
+from fastapi import APIRouter, Header, Request, Path, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.responses import JSONResponse
 

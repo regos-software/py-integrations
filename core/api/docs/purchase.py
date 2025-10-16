@@ -1,7 +1,7 @@
-from typing import List, Optional
+from typing import Optional
 
 from core.logger import setup_logger
-from schemas.api.base import APIBaseResponse, APIErrorResult, IDRequest
+from schemas.api.base import APIBaseResponse, IDRequest
 from schemas.api.docs.purchase import (
     DocPurchaseGetRequest,
     DocPurchase,

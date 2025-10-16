@@ -4,7 +4,6 @@ import uuid
 from typing import Any, Optional
 from core.api.regos_api import RegosAPI
 from schemas.integration.sms_integration_base import IntegrationSmsBase
-from schemas.api.base import APIBaseResponse
 from schemas.api.integrations.connected_integration_setting import (
     ConnectedIntegrationSettingRequest,
 )
@@ -14,7 +13,6 @@ from schemas.integration.base import (
     IntegrationErrorModel,
 )
 from clients.base import ClientBase
-from core.api.client import APIClient
 from core.logger import setup_logger
 from config.settings import settings
 from core.redis import redis_client
@@ -65,7 +63,7 @@ class EskizSmsIntegration(IntegrationSmsBase, ClientBase):
                 logger.warning(f"Ошибка Redis: {error}, загружаем из API")
 
         # 2. Если нет в кеше — API
-        logger.debug(f"Настройки не найдены в кеше, загружаем из API")
+        logger.debug("Настройки не найдены в кеше, загружаем из API")
         try:
             async with RegosAPI(
                 connected_integration_id=self.connected_integration_id

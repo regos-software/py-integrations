@@ -1,10 +1,7 @@
 # services/item.py
 from __future__ import annotations
 
-import functools
-from typing_extensions import deprecated
-import warnings
-from typing import Iterable, List, Optional, Tuple
+from typing import List, Tuple
 
 from pydantic import TypeAdapter, ValidationError
 

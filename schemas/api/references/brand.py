@@ -4,7 +4,6 @@ from typing import List, Optional
 from pydantic import BaseModel
 
 from schemas.api.common.sort_orders import SortOrders
-from schemas.api.docs.cheque import SortOrder
 
 
 class Brand(BaseModel):

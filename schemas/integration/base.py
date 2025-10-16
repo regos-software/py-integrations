@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Any, Dict
+from typing import Any
 
 
 class IntegrationRequest(BaseModel):

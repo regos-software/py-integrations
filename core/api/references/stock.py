@@ -1,9 +1,7 @@
 # services/stock.py
 from __future__ import annotations
 
-import functools
 from typing_extensions import deprecated
-import warnings
 from typing import Iterable, List, Tuple
 
 from pydantic import TypeAdapter

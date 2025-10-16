@@ -1,7 +1,6 @@
 from typing import List
-from pydantic import TypeAdapter
 
-from schemas.api.base import APIBaseResponse, ArrayResult
+from schemas.api.base import APIBaseResponse
 from schemas.api.docs.wholesale_operation import (
     WholeSaleOperation,
     WholeSaleOperationGetRequest,

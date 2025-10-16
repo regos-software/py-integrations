@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from enum import Enum
 from typing import List, Optional
 
 from pydantic import BaseModel, Field, model_validator

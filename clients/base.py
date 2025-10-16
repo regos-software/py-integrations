@@ -1,7 +1,5 @@
 from typing import Any
 from schemas.integration.integration_base import IntegrationBase
-from config import settings  # предполагается, что здесь есть токен авторизации
-import asyncio
 
 
 class ClientBase(IntegrationBase):

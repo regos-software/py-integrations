@@ -1,7 +1,7 @@
 # services/brand.py
 from __future__ import annotations
 
-from typing import Iterable, List, Tuple
+from typing import List, Tuple
 from pydantic import TypeAdapter
 
 from core.logger import setup_logger
