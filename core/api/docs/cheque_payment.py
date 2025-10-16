@@ -2,7 +2,7 @@ from typing import List, Iterable
 from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
 from schemas.api.base import APIBaseResponse
-from schemas.api.docs.retail_payment import DocChequePaymentGetRequest, DocChequePayment
+from schemas.api.docs.cheque_payment import DocChequePaymentGetRequest, DocChequePayment
 
 logger = setup_logger("docs.RetailPayment")
 

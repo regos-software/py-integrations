@@ -1,68 +1,116 @@
+"""Схемы справочника складов."""
+
 from __future__ import annotations
+
 from decimal import Decimal
 from enum import Enum
 from typing import List, Optional
-from pydantic import BaseModel
 
-from schemas.api.base import APIBaseResponse
+from pydantic import ConfigDict, Field as PydField, field_validator
 
-from .firm import Firm
+from schemas.api.base import APIBaseResponse, BaseSchema
+from schemas.api.references.firm import Firm
 
 
 class SortColumn(str, Enum):
+    """Колонки сортировки списка складов."""
+
     ID = "Id"
     NAME = "Name"
     LAST_UPDATE = "LastUpdate"
 
 
 class SortDirection(str, Enum):
+    """Направление сортировки."""
+
     ASC = "asc"
     DESC = "desc"
 
 
-class SortOrder(BaseModel):
-    column: SortColumn
-    direction: SortDirection
+class SortOrder(BaseSchema):
+    """Правило сортировки складов."""
 
+    model_config = ConfigDict(extra="forbid")
 
-class Stock(BaseModel):
-    """
-    Модель, описывающая склады.
-    """
-
-    id: int  # ID склада
-    name: Optional[str] = None  # Наименование склада
-    address: Optional[str] = None  # Адрес склада
-    firm: Firm  # Предприятие
-    area: Decimal  # Площадь
-    description: Optional[str] = None  # Примечание
-    deleted_mark: bool  # Метка об удалении
-    last_update: int  # Дата последнего изменения (unixtime, сек)
-
-
-class StockGetRequest(BaseModel):
-    """
-    Модель запроса для получения списка складов.
-    """
-
-    ids: Optional[List[int]] = []  # Массив ID складов
-    firm_ids: Optional[List[int]] = []  # Массив ID предприятий
-    sort_orders: Optional[List[SortOrder]] = []  # Сортировка выходных данных
-    search: Optional[str] = ""  # Строка поиска по полю name
-    deleted_mark: Optional[bool] = False  # Метка об удалении
-    limit: Optional[int] = (
-        10000  # Лимит возвращаемых данных при запросе. Значение по умолчанию 10000. Максимальное значение 10000
+    column: SortColumn = PydField(..., description="Колонка сортировки.")
+    direction: SortDirection = PydField(
+        ..., description="Направление сортировки (asc|desc)."
     )
-    offset: Optional[int] = 0  # Смещение для пагинации
 
 
-class StockGetResponse(APIBaseResponse):
-    """
-    Модель ответа при получении списка складов.
-    """
+class Stock(BaseSchema):
+    """Рид-модель склада."""
 
-    result: List[Stock] = []  # Массив складов
-    next_offset: Optional[int] = None  # Смещение для следующего запроса (если есть)
-    total: int = (
-        0  # Общее количество складов, подходящих под условия запроса (без учёта limit и offset)
+    model_config = ConfigDict(extra="ignore")
+
+    id: int = PydField(..., ge=1, description="ID склада.")
+    name: Optional[str] = PydField(default=None, description="Наименование склада.")
+    address: Optional[str] = PydField(default=None, description="Адрес склада.")
+    firm: Firm = PydField(..., description="Предприятие, к которому относится склад.")
+    area: Decimal = PydField(..., ge=0, description="Площадь склада.")
+    description: Optional[str] = PydField(
+        default=None, description="Дополнительное описание."
     )
+    deleted_mark: bool = PydField(..., description="Метка удаления.")
+    last_update: int = PydField(
+        ..., ge=0, description="Метка последнего изменения (unixtime)."
+    )
+
+    @field_validator("name", "address", "description", mode="before")
+    @classmethod
+    def _strip_strings(cls, value: Optional[str]) -> Optional[str]:
+        return value.strip() if isinstance(value, str) else value
+
+
+class StockGetRequest(BaseSchema):
+    """Фильтры получения складов."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ids: Optional[List[int]] = PydField(
+        default=None, description="Список ID складов для выборки."
+    )
+    firm_ids: Optional[List[int]] = PydField(
+        default=None, description="Фильтр по ID предприятий."
+    )
+    sort_orders: Optional[List[SortOrder]] = PydField(
+        default=None, description="Набор правил сортировки."
+    )
+    search: Optional[str] = PydField(
+        default=None, description="Поиск по названию склада."
+    )
+    deleted_mark: Optional[bool] = PydField(
+        default=None, description="Фильтр по метке удаления."
+    )
+    limit: Optional[int] = PydField(
+        default=None,
+        ge=1,
+        le=10000,
+        description="Лимит возвращаемых записей (максимум 10000).",
+    )
+    offset: Optional[int] = PydField(
+        default=None,
+        ge=0,
+        description="Смещение для пагинации.",
+    )
+
+    @field_validator("search", mode="before")
+    @classmethod
+    def _strip_search(cls, value: Optional[str]) -> Optional[str]:
+        return value.strip() if isinstance(value, str) else value
+
+
+class StockGetResponse(APIBaseResponse[List[Stock]]):
+    """Ответ на запрос списка складов."""
+
+    model_config = ConfigDict(extra="ignore")
+
+
+__all__ = [
+    "SortColumn",
+    "SortDirection",
+    "SortOrder",
+    "Stock",
+    "StockGetRequest",
+    "StockGetResponse",
+]

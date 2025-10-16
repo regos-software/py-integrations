@@ -5,7 +5,6 @@ from schemas.api.base import APIBaseResponse, ArrayResult, IDRequest
 from schemas.api.docs.wholesale import (
     DocWholeSaleGetRequest,
     DocWholeSale,
-    DocWholeSaleGetResponse,
 )
 
 logger = setup_logger("docs.WholeSale")

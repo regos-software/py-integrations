@@ -32,7 +32,6 @@ class APIClient:
         self.timeout = timeout
         self.client = httpx.AsyncClient(timeout=self.timeout)
 
-        # Общий лимитер на один integration_id (внутри текущего процесса)
         self._limiter = get_shared_limiter(
             self.integration_id, self.RATE_PER_SEC, self.BURST
         )

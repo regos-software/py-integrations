@@ -10,7 +10,9 @@ from tenacity import (
 
 from core.api.batch import BatchService
 from core.api.client import APIClient
+from core.api.references.brand import BrandService
 from core.api.references.item_group import ItemGroupService
+from core.api.references.retail_customer import RetailCustomerService
 from core.api.references.stock import StockService
 from core.logger import setup_logger
 
@@ -27,7 +29,7 @@ class RegosAPI:
         self.docs: "RegosAPI.Docs" = self.Docs(self)
         self.integrations: "RegosAPI.Integrations" = self.Integrations(self)
         self.reports: "RegosAPI.Reports" = self.Reports(self)
-        self.references: "RegosAPI.references" = self.references(self)
+        self.references: "RegosAPI.References" = self.References(self)
 
     @retry(
         wait=wait_exponential(min=0.2, max=5),
@@ -88,11 +90,13 @@ class RegosAPI:
 
             self.retail_report = RetailReportService(api)
 
-    class references:
+    class References:
         def __init__(self, api: "RegosAPI"):
 
             from core.api.references.item import ItemService
 
+            self.brand = BrandService(api)
+            self.retail_customer = RetailCustomerService(api)
             self.item = ItemService(api)
             self.item_group = ItemGroupService(api)
             self.stock = StockService(api)

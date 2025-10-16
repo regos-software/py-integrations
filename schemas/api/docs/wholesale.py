@@ -5,7 +5,6 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
-from schemas.api.base import APIBaseResponse
 from schemas.api.rbac.user import User
 from schemas.api.references.partner import Partner
 from schemas.api.references.stock import Stock

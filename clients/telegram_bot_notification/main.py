@@ -17,7 +17,7 @@ from clients.telegram_bot_notification.services.message_formatters import (
     format_session_notification,
 )
 from schemas.api.docs.cash_amount_details import CashAmountDetailsGetRequest
-from schemas.api.docs.retail_payment import DocChequePaymentGetRequest
+from schemas.api.docs.cheque_payment import DocChequePaymentGetRequest
 from schemas.api.reports.retail_report.count import CountsGetRequest
 from schemas.api.reports.retail_report.payment import PaymentGetRequest
 from .utils import parse_chat_ids, extract_chat_id

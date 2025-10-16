@@ -1,30 +1,65 @@
+"""Схемы справочника групп товаров."""
+
 from __future__ import annotations
+
 from typing import List, Optional
-from pydantic import BaseModel
 
-from schemas.api.base import APIBaseResponse
+from pydantic import ConfigDict, Field as PydField, field_validator
 
-
-class ItemGroup(BaseModel):
-    """
-    Модель, описывающая группы номенклатуры.
-    """
-
-    id: Optional[int] = None  # ID группы в системе
-    parent_id: Optional[int] = None  # ID родительской группы
-    path: Optional[str] = None  # Путь к группе (вложенные группы через '/')
-    name: Optional[str] = None  # Наименование группы
-    child_count: Optional[int] = None  # Количество дочерних групп
-    last_update: Optional[int] = None  # Дата последнего изменения (unixtime, сек)
+from schemas.api.base import BaseSchema
 
 
-class ItemGroupGetRequest(BaseModel):
-    """
-    Параметры для /v1/ItemGroup/Get
-    """
+class ItemGroup(BaseSchema):
+    """Рид-модель группы номенклатуры."""
 
-    ids: Optional[List[int]] = None  # Список ID групп для фильтрации
-    parent_ids: Optional[List[int]] = (
-        None  # Список ID родительских групп для фильтрации
+    model_config = ConfigDict(extra="ignore")
+
+    id: Optional[int] = PydField(default=None, ge=1, description="ID группы в системе.")
+    parent_id: Optional[int] = PydField(
+        default=None, ge=1, description="ID родительской группы."
     )
-    name: Optional[str] = None  # Фильтр по наименованию группы (частичное совпадение)
+    path: Optional[str] = PydField(
+        default=None,
+        description="Полный путь группы (вложенность через '/').",
+    )
+    name: Optional[str] = PydField(default=None, description="Наименование группы.")
+    child_count: Optional[int] = PydField(
+        default=None,
+        ge=0,
+        description="Количество непосредственных дочерних групп.",
+    )
+    last_update: Optional[int] = PydField(
+        default=None, ge=0, description="Дата последнего изменения (unixtime)."
+    )
+
+    @field_validator("path", "name", mode="before")
+    @classmethod
+    def _strip_fields(cls, value: Optional[str]) -> Optional[str]:
+        return value.strip() if isinstance(value, str) else value
+
+
+class ItemGroupGetRequest(BaseSchema):
+    """Фильтры для получения групп номенклатуры."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ids: Optional[List[int]] = PydField(
+        default=None, description="Список ID групп для выборки."
+    )
+    parent_ids: Optional[List[int]] = PydField(
+        default=None, description="Фильтр по родительским группам."
+    )
+    name: Optional[str] = PydField(
+        default=None, description="Фильтр по названию (подстрочный поиск)."
+    )
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def _strip_name(cls, value: Optional[str]) -> Optional[str]:
+        return value.strip() if isinstance(value, str) else value
+
+
+__all__ = [
+    "ItemGroup",
+    "ItemGroupGetRequest",
+]

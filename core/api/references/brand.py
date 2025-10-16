@@ -1,8 +1,7 @@
 # services/brand.py
 from __future__ import annotations
 
-from typing import List, Tuple
-from pydantic import TypeAdapter
+from typing import List
 
 from core.logger import setup_logger
 from schemas.api.base import APIBaseResponse, ArrayResult

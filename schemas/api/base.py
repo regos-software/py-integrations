@@ -1,10 +1,16 @@
-# schemas/api/base.py
+"""Базовые схемы API по конвенциям проекта."""
+
+from __future__ import annotations
+
 from decimal import Decimal
 from typing import Any, Generic, Optional, TypeVar
-from pydantic import BaseModel, ConfigDict, Field
+
+from pydantic import BaseModel, ConfigDict, Field as PydField
 
 
 class BaseSchema(BaseModel):
+    """Базовая модель со стандартными JSON-энкодерами."""
+
     model_config = ConfigDict(json_encoders={Decimal: float})
 
 
@@ -12,30 +18,61 @@ T = TypeVar("T", default=Any)
 
 
 class APIBaseResponse(BaseSchema, Generic[T]):
-    """
-    Универсальный ответ API REGOS.
-    Разные методы возвращают разные формы result (dict, list[dict], list[int], int, str ...),
-    поэтому здесь допускаем любой тип.
-    """
+    """Универсальный ответ REST-эндпоинта REGOS."""
 
-    ok: bool = Field(..., description="True/False – метка успешного ответа")
-    result: Optional[T] = Field(
+    model_config = ConfigDict(extra="ignore")
+
+    ok: bool = PydField(..., description="Признак успешного ответа.")
+    result: Optional[T] = PydField(
         default=None,
-        description="Данные ответа (могут быть dict, list[dict], list[int], и т.д.)",
+        description="Полезная нагрузка ответа (dict, list, scalar и др.).",
     )
-    next_offset: Optional[int] = None
-    total: Optional[int] = None
+    next_offset: Optional[int] = PydField(
+        default=None,
+        ge=0,
+        description="Следующий offset для постраничной выборки.",
+    )
+    total: Optional[int] = PydField(
+        default=None,
+        ge=0,
+        description="Общее количество записей в выборке.",
+    )
 
 
 class APIErrorResult(BaseSchema):
-    error: int
-    description: str
+    """Структура ошибки, возвращаемой REST-эндпоинтом."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    error: int = PydField(..., description="Код ошибки.")
+    description: str = PydField(..., description="Описание ошибки.")
 
 
 class ArrayResult(BaseSchema):
-    row_affected: int
-    ids: list[int]
+    """Ответ методов Add/Edit/Delete с массивом идентификаторов."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    row_affected: int = PydField(
+        ..., ge=0, description="Количество обработанных записей."
+    )
+    ids: list[int] = PydField(
+        default_factory=list, description="Идентификаторы затронутых сущностей."
+    )
 
 
 class IDRequest(BaseSchema):
-    id: int
+    """Запрос на работу с одной записью по идентификатору."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: int = PydField(..., ge=1, description="ID записи.")
+
+
+__all__ = [
+    "APIBaseResponse",
+    "APIErrorResult",
+    "ArrayResult",
+    "BaseSchema",
+    "IDRequest",
+]

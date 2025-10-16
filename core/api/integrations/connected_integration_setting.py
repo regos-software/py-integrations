@@ -5,7 +5,6 @@ from schemas.api.integrations.connected_integration_setting import (
     ConnectedIntegrationSetting,
     ConnectedIntegrationSettingRequest,
     ConnectedIntegrationSettingEditRequest,
-    ConnectedIntegrationSettingEditItem,
 )
 
 logger = setup_logger("ConnectedIntegrationSettingService")
