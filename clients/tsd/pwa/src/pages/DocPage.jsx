@@ -80,6 +80,90 @@ function OperationRow({ op, doc, onDelete, onSave, operationForm }) {
       ? priceValue * quantityNumber
       : null;
 
+  const metrics = useMemo(() => {
+    const conciseQuantity = Number.isFinite(quantityNumber)
+      ? fmt.number(quantityNumber)
+      : "—";
+    const quantityDisplay = `${conciseQuantity}${
+      unitName ? ` ${unitName}` : ""
+    }`.trim();
+
+    const showCost = formOptions.showCost !== false && op.cost != null;
+    const showPrice = formOptions.showPrice !== false && op.price != null;
+
+    const costUnit = showCost
+      ? fmt.money(costValue, currencyCode, priceRoundTo)
+      : "—";
+    const costTotalNumber =
+      showCost && Number.isFinite(quantityNumber)
+        ? costValue * quantityNumber
+        : null;
+    const costTotalDisplay = showCost
+      ? Number.isFinite(costTotalNumber)
+        ? fmt.money(costTotalNumber, currencyCode, priceRoundTo)
+        : fmt.money(costValue, currencyCode, priceRoundTo)
+      : "—";
+
+    const priceUnit = showPrice
+      ? fmt.money(priceValue, currencyCode, priceRoundTo)
+      : "—";
+    const priceTotalNumber =
+      showPrice && Number.isFinite(quantityNumber)
+        ? priceValue * quantityNumber
+        : null;
+    const priceTotalDisplay = showPrice
+      ? Number.isFinite(priceTotalNumber)
+        ? fmt.money(priceTotalNumber, currencyCode, priceRoundTo)
+        : fmt.money(priceValue, currencyCode, priceRoundTo)
+      : "—";
+
+    return [
+      {
+        key: "quantity",
+        value: quantityDisplay || "—",
+        accent: false,
+        title: t("op.qty") || "Количество",
+      },
+      {
+        key: "cost",
+        value: costUnit,
+        accent: false,
+        title: t("op.cost") || "Стоимость",
+      },
+      {
+        key: "cost-total",
+        value: costTotalDisplay,
+        accent: true,
+        title: t("op.cost_total") || "Сумма по себестоимости",
+      },
+      {
+        key: "price",
+        value: priceUnit,
+        accent: false,
+        title: t("op.price") || "Цена",
+      },
+      {
+        key: "price-total",
+        value: priceTotalDisplay,
+        accent: true,
+        title: t("op.price_total") || "Сумма по цене",
+      },
+    ];
+  }, [
+    currencyCode,
+    fmt,
+    formOptions.showCost,
+    formOptions.showPrice,
+    costValue,
+    op.cost,
+    op.price,
+    priceRoundTo,
+    priceValue,
+    quantityNumber,
+    t,
+    unitName,
+  ]);
+
   const handleFieldChange = (field) => (event) => {
     setForm((prev) => ({ ...prev, [field]: event.target.value }));
   };
@@ -127,7 +211,7 @@ function OperationRow({ op, doc, onDelete, onSave, operationForm }) {
   return (
     <div
       className={cardClass(
-        "space-y-4 transition hover:-translate-y-0.5 hover:shadow-md"
+        "space-y-3 transition hover:-translate-y-0.5 hover:shadow-md"
       )}
     >
       {!editing && (
@@ -174,71 +258,27 @@ function OperationRow({ op, doc, onDelete, onSave, operationForm }) {
               </button>
             </div>
           </div>
-          <div className="flex flex-col gap-3 text-sm text-slate-600 dark:text-slate-300">
-            <div className="flex flex-wrap items-center gap-2 font-medium">
-              <span>
-                <strong className="text-slate-900 dark:text-slate-100">
-                  {fmt.number(op.quantity)}
-                </strong>{" "}
-                {unitName}
-              </span>
-            </div>
-
-            {formOptions.showCost !== false && op.cost != null ? (
-              <div className="flex flex-col gap-1">
-                <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
-                  {t("op.cost") || "Стоимость"}
-                </span>
-                <div className="flex flex-wrap items-baseline justify-between gap-2">
-                  <span className="text-sm font-normal text-slate-500 dark:text-slate-400">
-                    {fmt.money(costValue, currencyCode, priceRoundTo)}
-                    {Number.isFinite(quantityNumber) && quantityNumber > 0
-                      ? ` × ${fmt.number(quantityNumber)}`
-                      : ""}
-                  </span>
-                  {Number.isFinite(costTotal) ? (
-                    <span className="text-lg font-semibold text-slate-900 dark:text-slate-100">
-                      {fmt.money(costTotal, currencyCode, priceRoundTo)}
-                    </span>
-                  ) : (
-                    <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
-                      {fmt.money(costValue, currencyCode, priceRoundTo)}
-                    </span>
-                  )}
-                </div>
+          <div className="grid grid-cols-5 items-center gap-2 text-[0.75rem] leading-tight">
+            {metrics.map((metric) => (
+              <div
+                key={metric.key}
+                title={metric.title}
+                className={cn(
+                  "flex min-w-0 items-center justify-end rounded-sm px-2 py-0.5",
+                  metric.accent && metric.value !== "—"
+                    ? "bg-slate-100 font-semibold text-slate-900 dark:bg-slate-800 dark:text-slate-100"
+                    : "text-slate-600 dark:text-slate-300"
+                )}
+              >
+                <span className="truncate">{metric.value}</span>
               </div>
-            ) : null}
-
-            {formOptions.showPrice !== false ? (
-              <div className="flex flex-col gap-1">
-                <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
-                  {t("op.price") || "Цена"}
-                </span>
-                <div className="flex flex-wrap items-baseline justify-between gap-2">
-                  <span className="text-sm font-normal text-slate-500 dark:text-slate-400">
-                    {fmt.money(priceValue, currencyCode, priceRoundTo)}
-                    {Number.isFinite(quantityNumber) && quantityNumber > 0
-                      ? ` × ${fmt.number(quantityNumber)}`
-                      : ""}
-                  </span>
-                  {Number.isFinite(priceTotal) ? (
-                    <span className="text-lg font-semibold text-slate-900 dark:text-slate-100">
-                      {fmt.money(priceTotal, currencyCode, priceRoundTo)}
-                    </span>
-                  ) : (
-                    <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
-                      {fmt.money(priceValue, currencyCode, priceRoundTo)}
-                    </span>
-                  )}
-                </div>
-              </div>
-            ) : null}
+            ))}
           </div>
         </>
       )}
 
       {editing && (
-        <div className="flex flex-col gap-4">
+        <div className="flex flex-col gap-3">
           <div className="flex flex-col gap-2">
             <label className={labelClass()} htmlFor={`qty-${op.id}`}>
               {t("op.qty") || "Количество"}
