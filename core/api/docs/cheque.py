@@ -1,5 +1,4 @@
 from typing import List, Iterable
-from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
 from schemas.api.base import APIBaseResponse
 from schemas.api.docs.cheque import DocChequeGetRequest, DocCheque
@@ -10,7 +9,7 @@ logger = setup_logger("docs.cheque")
 class DocsChequeService:
     PATH_GET = "DocCheque/Get"
 
-    def __init__(self, api: RegosAPI):
+    def __init__(self, api):
         self.api = api
 
     async def get(self, req: DocChequeGetRequest) -> APIBaseResponse[List[DocCheque]]:

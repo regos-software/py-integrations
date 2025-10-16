@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Any, Generic, Optional, TypeVar
+from typing import Generic, Optional, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field as PydField
 
@@ -14,7 +14,7 @@ class BaseSchema(BaseModel):
     model_config = ConfigDict(json_encoders={Decimal: float})
 
 
-T = TypeVar("T", default=Any)
+T = TypeVar("T")
 
 
 class APIBaseResponse(BaseSchema, Generic[T]):

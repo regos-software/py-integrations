@@ -6,7 +6,6 @@ from typing import Any, Optional, Type, TypeVar
 
 from pydantic import TypeAdapter
 
-from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
 from schemas.api.base import APIBaseResponse, APIErrorResult
 from schemas.api.batch import BatchRequest, BatchResponse
@@ -32,7 +31,7 @@ class BatchService:
 
     PATH = "batch"
 
-    def __init__(self, api: RegosAPI):
+    def __init__(self, api):
         self.api = api
 
     async def run(self, req: BatchRequest) -> BatchResponse:

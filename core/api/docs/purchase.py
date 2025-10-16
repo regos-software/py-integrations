@@ -1,6 +1,5 @@
 from typing import Optional
 
-from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
 from schemas.api.base import APIBaseResponse, ArrayResult, IDRequest
 from schemas.api.docs.purchase import (
@@ -20,7 +19,7 @@ class DocPurchaseService:
     PATH_UNLOCK = "DocPurchase/Unlock"
     PATH_DELETE_MARK = "DocPurchase/DeleteMark"
 
-    def __init__(self, api: RegosAPI):
+    def __init__(self, api):
         self.api = api
 
     async def get(self, req: DocPurchaseGetRequest) -> DocPurchaseGetResponse:

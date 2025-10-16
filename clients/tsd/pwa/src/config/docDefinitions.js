@@ -111,7 +111,7 @@ const purchaseDefinition = {
     unlockAction: "docs.purchase.unlock",
     deleteAction: "docs.purchase_operation.delete",
     buildDeletePayload: (opId) => [{ id: opId }],
-    editAction: "docs.purchase_operation.edit,
+    editAction: "docs.purchase_operation.edit",
     buildEditPayload: (opId, payload) => [{ id: opId, ...payload }],
     handleDeleteResponse: (data) => data?.result?.row_affected > 0,
     handleEditResponse: (data) => data?.result?.row_affected > 0,

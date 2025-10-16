@@ -69,8 +69,6 @@ class ConnectedIntegrationSettingEditRequest(
 ):
     """Запрос на массовое редактирование настроек (root=list)."""
 
-    model_config = ConfigDict(extra="forbid")
-
 
 __all__ = [
     "ConnectedIntegrationSetting",

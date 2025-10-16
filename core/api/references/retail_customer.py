@@ -2,7 +2,6 @@
 from __future__ import annotations
 from typing import List
 
-from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
 from schemas.api.base import APIBaseResponse, ArrayResult
 from schemas.api.references.retail_customer import (
@@ -24,7 +23,7 @@ class RetailCustomerService:
     PATH_DELETE_MARK = "RetailCustomer/DeleteMark"
     PATH_DELETE = "RetailCustomer/Delete"
 
-    def __init__(self, api: RegosAPI):
+    def __init__(self, api):
         self.api = api
 
     async def get(

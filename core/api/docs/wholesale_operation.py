@@ -1,6 +1,5 @@
 from typing import List
 
-from core.api.regos_api import RegosAPI
 from schemas.api.base import APIBaseResponse, ArrayResult
 from schemas.api.docs.wholesale_operation import (
     WholeSaleOperation,
@@ -17,7 +16,7 @@ class WholeSaleOperationService:
     PATH_EDIT = "WholeSaleOperation/Edit"
     PATH_DELETE = "WholeSaleOperation/Delete"
 
-    def __init__(self, api: RegosAPI):
+    def __init__(self, api):
         self.api = api
 
     async def get(

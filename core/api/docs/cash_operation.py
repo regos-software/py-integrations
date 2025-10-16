@@ -1,4 +1,3 @@
-from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
 from schemas.api.base import APIBaseResponse
 from schemas.api.docs.cash_operation import CashOperation, CashOperationGetRequest
@@ -14,7 +13,7 @@ class CashOperationService:
     PATH_GET = "CashOperation/Get"
     PATH_GET_AMOUNT_DETAILS = "CashOperation/GetAmountDetails"
 
-    def __init__(self, api: RegosAPI):
+    def __init__(self, api):
         self.api = api
 
     async def get(
