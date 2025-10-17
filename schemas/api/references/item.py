@@ -8,7 +8,7 @@ from typing import List, Optional
 from pydantic import Field as PydField, field_validator
 from pydantic.config import ConfigDict
 
-from schemas.api.base import BaseSchema
+from schemas.api.base import APIBaseResponse, BaseSchema
 from schemas.api.references.brand import Brand
 from schemas.api.references.price_type import PriceType
 from schemas.api.references.stock import Stock
@@ -341,6 +341,29 @@ class ItemQuantity(BaseSchema):
     booked: Optional[Decimal] = PydField(None, description="Зарезервировано.")
 
 
+# ---------- GetQuantity ----------
+class ItemGetQuantityRequest(BaseSchema):
+    """Параметры запроса количества номенклатуры."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: int = PydField(..., ge=1, description="ID номенклатуры.")
+    stock_ids: Optional[List[int]] = PydField(
+        None, description="Список ID складов для выборки остатков."
+    )
+    date: Optional[int] = PydField(
+        None,
+        ge=0,
+        description="Дата, на которую требуется остаток (Unix time, секунд).",
+    )
+
+
+class ItemGetQuantityResponse(APIBaseResponse[List[ItemQuantity]]):
+    """Ответ на запрос /v1/Item/GetQuantity."""
+
+    model_config = ConfigDict(extra="ignore")
+
+
 class ItemExt(BaseSchema):
     """Элемент расширенной выдачи."""
 
@@ -483,6 +506,8 @@ __all__ = [
     "ItemGetExtImageSize",
     "ItemGetExtRequest",
     "ItemQuantity",
+    "ItemGetQuantityRequest",
+    "ItemGetQuantityResponse",
     "ItemExt",
     "ItemImportData",
     "ItemImportRequest",

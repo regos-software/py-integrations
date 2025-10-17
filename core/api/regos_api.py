@@ -99,12 +99,16 @@ class RegosAPI:
             from core.api.references.item_group import ItemGroupService
             from core.api.references.retail_customer import RetailCustomerService
             from core.api.references.stock import StockService
+            from core.api.references.item_price import ItemPriceService
+            from core.api.references.item_operation import ItemOperationService
 
             self.brand = BrandService(api)
             self.retail_customer = RetailCustomerService(api)
             self.item = ItemService(api)
             self.item_group = ItemGroupService(api)
             self.stock = StockService(api)
+            self.item_price = ItemPriceService(api)
+            self.item_operation = ItemOperationService(api)
 
     class Batch:
         def __init__(self, api: "RegosAPI"):
