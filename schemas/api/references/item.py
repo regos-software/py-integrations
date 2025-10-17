@@ -9,40 +9,17 @@ from pydantic import Field as PydField, field_validator
 from pydantic.config import ConfigDict
 
 from schemas.api.base import APIBaseResponse, BaseSchema
+from schemas.api.references.tax_vat import TaxVat
 from schemas.api.references.brand import Brand
+from schemas.api.references.color import Color
+from schemas.api.references.country import Country
+from schemas.api.references.department import Department
 from schemas.api.references.price_type import PriceType
+from schemas.api.references.producer import Producer
+from schemas.api.references.size import SizeChart
 from schemas.api.references.stock import Stock
 from schemas.api.references.unit import Unit
-
-
-# ---------- Плейсхолдеры справочников ----------
-# (оставлены как есть для обратной совместимости с текущими импортами)
-class ItemGroup(BaseSchema):  # BC: прежнее имя и пустая структура сохранены
-    model_config = ConfigDict(extra="ignore")
-
-
-class Department(BaseSchema):  # BC
-    model_config = ConfigDict(extra="ignore")
-
-
-class TaxVat(BaseSchema):  # BC
-    model_config = ConfigDict(extra="ignore")
-
-
-class Color(BaseSchema):  # BC
-    model_config = ConfigDict(extra="ignore")
-
-
-class SizeChart(BaseSchema):  # BC
-    model_config = ConfigDict(extra="ignore")
-
-
-class Producer(BaseSchema):  # BC
-    model_config = ConfigDict(extra="ignore")
-
-
-class Country(BaseSchema):  # BC
-    model_config = ConfigDict(extra="ignore")
+from schemas.api.references.item_group import ItemGroup
 
 
 # ---------- Общие enum ----------
@@ -511,7 +488,6 @@ __all__ = [
     "ItemExt",
     "ItemImportData",
     "ItemImportRequest",
-    # Плейсхолдеры (для текущей обратной совместимости импортов):
     "ItemGroup",
     "Department",
     "TaxVat",

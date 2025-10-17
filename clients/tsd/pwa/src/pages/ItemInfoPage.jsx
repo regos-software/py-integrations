@@ -130,6 +130,35 @@ export default function ItemInfoPage() {
   }, []);
 
   useEffect(() => {
+    console.log("stocks", stocks, settingsDraft);
+
+    if (stocks.length > 0) {
+      setSettingsDraft((prev) => ({
+        ...prev,
+        stockId: prev.stockId ?? stocks?.[0]?.value,
+      }));
+      setSettings((prev) => ({
+        ...prev,
+        stockId: prev.stockId ?? stocks?.[0]?.value,
+      }));
+    }
+  }, [stocks]);
+
+  useEffect(() => {
+    console.log("priceTypes", priceTypes, settingsDraft);
+    if (priceTypes.length > 0) {
+      setSettingsDraft((prev) => ({
+        ...prev,
+        priceTypeId: prev.priceTypeId ?? priceTypes?.[0]?.value,
+      }));
+      setSettings((prev) => ({
+        ...prev,
+        priceTypeId: prev.priceTypeId ?? priceTypes?.[0]?.value,
+      }));
+    }
+  }, [priceTypes]);
+
+  useEffect(() => {
     focusBarcodeInput();
   }, [focusBarcodeInput, searchMode]);
 
@@ -270,11 +299,13 @@ export default function ItemInfoPage() {
         ? Number(activeSettings.priceTypeId)
         : null;
 
-      const stockIds = stockId ? [stockId] : undefined;
-      const priceTypeIds = priceTypeId ? [priceTypeId] : undefined;
-
       setDetailsLoading(true);
       try {
+        console.log("[item-info] load details", {
+          itemId,
+          stockId,
+          priceTypeId,
+        });
         const nowTs = Math.floor(Date.now() / 1000);
         const [extData, quantityData, priceData, preCostData, operationData] =
           await Promise.all([
@@ -296,7 +327,6 @@ export default function ItemInfoPage() {
               "references.item.get_quantity",
               {
                 item_id: itemId,
-                stock_ids: stockIds,
               },
               formatFallback(
                 t,
@@ -308,7 +338,6 @@ export default function ItemInfoPage() {
               "references.item_price.get",
               {
                 item_ids: [itemId],
-                price_type_ids: priceTypeIds,
               },
               formatFallback(
                 t,
@@ -317,22 +346,9 @@ export default function ItemInfoPage() {
               )
             ),
             callApi(
-              "references.item_price.get_pre_cost",
-              {
-                item_ids: [itemId],
-                cost_date: nowTs,
-              },
-              formatFallback(
-                t,
-                "item_info.precost_error",
-                "Не удалось получить себестоимость"
-              )
-            ),
-            callApi(
               "references.item_operation.get",
               {
                 item_id: itemId,
-                stock_ids: stockIds,
                 limit: DEFAULT_LIMIT,
               },
               formatFallback(
@@ -376,9 +392,9 @@ export default function ItemInfoPage() {
       setSearchStatus("done");
       setBarcodeValue("");
       setQueryValue("");
-      await loadItemDetails(item.id);
+      await loadItemDetails(item.id, settings);
     },
-    [loadItemDetails]
+    [loadItemDetails, settings]
   );
 
   const handleSearch = useCallback(
@@ -401,6 +417,8 @@ export default function ItemInfoPage() {
         if (settings.stockId) payload.stock_id = Number(settings.stockId);
         if (settings.priceTypeId)
           payload.price_type_id = Number(settings.priceTypeId);
+
+        console.log("search payload", payload);
 
         const data = await callApi(
           "references.item.get_ext",
@@ -617,13 +635,12 @@ export default function ItemInfoPage() {
         </button>
         <button
           type="button"
-          className={buttonClass({ variant: "secondary", size: "sm" })}
+          className={iconButtonClass({ variant: "secondary" })}
+          aria-label={formatFallback(t, "item_info.settings", "Настройки")}
+          title={formatFallback(t, "item_info.settings", "Настройки")}
           onClick={() => setSettingsOpen(true)}
         >
           <i className="fa-solid fa-gear" aria-hidden="true" />
-          <span className="ml-2">
-            {formatFallback(t, "item_info.settings", "Настройки")}
-          </span>
         </button>
       </div>
 
@@ -748,7 +765,6 @@ export default function ItemInfoPage() {
             <div className="flex flex-wrap gap-2 text-sm text-slate-600 dark:text-slate-300">
               {selectedCore.code ? (
                 <span>
-                  {JSON.stringify(selectedCore)}
                   {formatFallback(t, "item.code", "Код")}: {selectedCore.code}
                 </span>
               ) : null}
@@ -790,7 +806,7 @@ export default function ItemInfoPage() {
             </div>
             <div>
               <p className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
-                {formatFallback(t, "item_info.department", "Подразделение")}
+                {formatFallback(t, "item_info.department", "Отдел")}
               </p>
               <p className="text-sm text-slate-900 dark:text-slate-100">
                 {selectedCore.department?.name || "—"}
@@ -903,6 +919,7 @@ export default function ItemInfoPage() {
 
       <div className="grid gap-4 xl:grid-cols-2">
         <div className={cardClass("space-y-3")} id="item-info-quantity">
+          {JSON.stringify(settings)}
           <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-50">
             {formatFallback(t, "item_info.quantity", "Остатки по складам")}
           </h2>
@@ -1232,7 +1249,7 @@ export default function ItemInfoPage() {
                 <select
                   id="item-info-settings-stock"
                   className={inputClass()}
-                  value={settingsDraft.stockId ?? ""}
+                  value={settingsDraft.stockId ?? stocks?.[0]?.value ?? ""}
                   onChange={(event) =>
                     setSettingsDraft((prev) => ({
                       ...prev,
@@ -1240,9 +1257,6 @@ export default function ItemInfoPage() {
                     }))
                   }
                 >
-                  <option value="">
-                    {formatFallback(t, "item_info.all_stocks", "Все склады")}
-                  </option>
                   {stocks.map((stock) => (
                     <option key={stock.value} value={stock.value}>
                       {stock.label}
@@ -1260,7 +1274,9 @@ export default function ItemInfoPage() {
                 <select
                   id="item-info-settings-price-type"
                   className={inputClass()}
-                  value={settingsDraft.priceTypeId ?? ""}
+                  value={
+                    settingsDraft.priceTypeId ?? priceTypes?.[0]?.value ?? ""
+                  }
                   onChange={(event) =>
                     setSettingsDraft((prev) => ({
                       ...prev,
@@ -1268,13 +1284,6 @@ export default function ItemInfoPage() {
                     }))
                   }
                 >
-                  <option value="">
-                    {formatFallback(
-                      t,
-                      "item_info.any_price_type",
-                      "Все виды цен"
-                    )}
-                  </option>
                   {priceTypes.map((pt) => (
                     <option key={pt.value} value={pt.value}>
                       {pt.label}

@@ -16,7 +16,7 @@ class ItemGroup(BaseSchema):
 
     id: Optional[int] = PydField(default=None, ge=1, description="ID группы в системе.")
     parent_id: Optional[int] = PydField(
-        default=None, ge=1, description="ID родительской группы."
+        default=None, ge=0, description="ID родительской группы."
     )
     path: Optional[str] = PydField(
         default=None,
