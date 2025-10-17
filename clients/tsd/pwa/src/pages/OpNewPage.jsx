@@ -14,6 +14,8 @@ import {
 import { useApp } from "../context/AppContext.jsx";
 import { useI18n } from "../context/I18nContext.jsx";
 import { useToast } from "../context/ToastContext.jsx";
+import scanSuccessSfx from "../../assets/audio/scan_success.mp3";
+import scanFailSfx from "../../assets/audio/scan_fail.mp3";
 import {
   buttonClass,
   cardClass,
@@ -32,6 +34,7 @@ const QUICK_QTY = [1, 5, 10, 12];
 const SEARCH_MODES = {
   SCAN: "scan",
   NAME: "name",
+  INSANT: "insant",
 };
 
 const ZXING_FORMATS = [
@@ -100,6 +103,45 @@ export default function OpNewPage({ definition: definitionProp }) {
 
   const videoRef = useRef(null);
   const readerRef = useRef(null);
+  const barcodeInputRef = useRef(null);
+  const successSoundRef = useRef(null);
+  const failSoundRef = useRef(null);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof Audio === "undefined") return;
+
+    successSoundRef.current = new Audio(scanSuccessSfx);
+    successSoundRef.current.preload = "auto";
+
+    failSoundRef.current = new Audio(scanFailSfx);
+    failSoundRef.current.preload = "auto";
+  }, [scanFailSfx, scanSuccessSfx]);
+
+  const focusBarcodeInput = useCallback(() => {
+    window.setTimeout(() => {
+      barcodeInputRef.current?.focus();
+    }, 0);
+  }, []);
+
+  const playSound = useCallback((soundRef) => {
+    const audio = soundRef.current;
+    if (!audio) return;
+    try {
+      audio.pause();
+      audio.currentTime = 0;
+      void audio.play();
+    } catch (err) {
+      console.warn("[op_new] failed to play sound", err);
+    }
+  }, []);
+
+  const playSuccessSound = useCallback(() => {
+    playSound(successSoundRef);
+  }, [playSound]);
+
+  const playFailSound = useCallback(() => {
+    playSound(failSoundRef);
+  }, [playSound]);
 
   useEffect(() => {
     setDocCtx(initialDocContext);
@@ -178,10 +220,158 @@ export default function OpNewPage({ definition: definitionProp }) {
     ]
   );
 
+  const resetFormState = useCallback(() => {
+    setQuantity("");
+    if (showCostField) setCost("");
+    if (showPriceField) setPrice("");
+    setBarcodeValue("");
+    setQueryValue("");
+    setPicked(null);
+    setSearchStatus("idle");
+    setResultModalOpen(false);
+    setResultItems([]);
+    focusBarcodeInput();
+  }, [
+    focusBarcodeInput,
+    setResultModalOpen,
+    setResultItems,
+    showCostField,
+    showPriceField,
+  ]);
+
+  const performAddOperation = useCallback(
+    async ({
+      pickedItem,
+      quantityValue,
+      costValue,
+      priceValue,
+      descriptionValue = "",
+      resetForm = true,
+      suppressSuccessToast = false,
+      onSuccess,
+      onFailure,
+    }) => {
+      if (!pickedItem?.id) {
+        showToast(t("select_product_first") || "Сначала выберите товар", {
+          type: "error",
+        });
+        onFailure?.();
+        return false;
+      }
+
+      const qtyNumber = toNumber(quantityValue);
+      if (!qtyNumber || qtyNumber <= 0) {
+        showToast(t("fill_required_fields") || "Заполните обязательные поля", {
+          type: "error",
+        });
+        onFailure?.();
+        return false;
+      }
+
+      if (pickedItem?.unit_piece && !Number.isInteger(qtyNumber)) {
+        showToast(t("qty.integer_only") || "Количество должно быть целым", {
+          type: "error",
+        });
+        onFailure?.();
+        return false;
+      }
+
+      const costNumber =
+        showCostField &&
+        costValue !== undefined &&
+        costValue !== null &&
+        costValue !== ""
+          ? toNumber(costValue)
+          : undefined;
+      const priceNumber =
+        showPriceField &&
+        priceValue !== undefined &&
+        priceValue !== null &&
+        priceValue !== ""
+          ? toNumber(priceValue)
+          : undefined;
+      const trimmedDescription =
+        typeof descriptionValue === "string" ? descriptionValue.trim() : "";
+
+      const buildPayload =
+        docDefinition?.operation?.buildAddPayload || (() => null);
+      const payload = buildPayload({
+        docId,
+        picked: pickedItem,
+        quantity: qtyNumber,
+        cost: costNumber,
+        price: priceNumber,
+        description: trimmedDescription,
+        docCtx,
+      });
+
+      if (!payload) {
+        showToast(t("save_failed") || "Не удалось сохранить операцию", {
+          type: "error",
+        });
+        onFailure?.();
+        return false;
+      }
+
+      setSaving(true);
+      try {
+        const addAction = docDefinition?.operation?.addAction;
+        if (!addAction) {
+          throw new Error("Operation add action is not configured");
+        }
+        const { data } = await api(addAction, payload);
+        const handleAddResponse =
+          docDefinition?.operation?.handleAddResponse ||
+          ((response) => response?.result?.row_affected > 0);
+
+        if (handleAddResponse(data, { docCtx, picked: pickedItem, payload })) {
+          if (!suppressSuccessToast) {
+            showToast(t("toast.op_added") || "Операция добавлена", {
+              type: "success",
+            });
+          }
+          if (resetForm) {
+            resetFormState();
+          }
+          onSuccess?.();
+          return true;
+        }
+
+        throw new Error(data?.description || "Save failed");
+      } catch (err) {
+        showToast(
+          err.message || t("save_failed") || "Не удалось сохранить операцию",
+          { type: "error", duration: 2400 }
+        );
+        onFailure?.();
+        return false;
+      } finally {
+        setSaving(false);
+      }
+    },
+    [
+      api,
+      docCtx,
+      docDefinition,
+      resetFormState,
+      showCostField,
+      showPriceField,
+      showToast,
+      t,
+      toNumber,
+    ]
+  );
+
   const runSearch = useCallback(
     async (value, mode = searchMode) => {
       const queryText = value?.trim();
-      if (!queryText) return;
+      if (!queryText) {
+        if (mode === SEARCH_MODES.INSANT) {
+          setBarcodeValue("");
+          focusBarcodeInput();
+        }
+        return;
+      }
       const searchDescriptor = docDefinition?.operation?.search;
       if (!searchDescriptor?.action || !searchDescriptor?.buildParams) {
         console.warn("[op_new] search not configured for doc type");
@@ -209,6 +399,11 @@ export default function OpNewPage({ definition: definitionProp }) {
           setPicked(null);
           closeResultModal();
           setSearchStatus("empty");
+          if (mode === SEARCH_MODES.INSANT) {
+            playFailSound();
+            setBarcodeValue("");
+            focusBarcodeInput();
+          }
           return;
         }
 
@@ -219,22 +414,78 @@ export default function OpNewPage({ definition: definitionProp }) {
           return;
         }
 
+        if (mode === SEARCH_MODES.INSANT && normalizedItems.length > 1) {
+          setPicked(null);
+          closeResultModal();
+          setSearchStatus("multi");
+          playFailSound();
+          setBarcodeValue("");
+          focusBarcodeInput();
+          return;
+        }
+
+        if (mode === SEARCH_MODES.INSANT) {
+          const item = normalizedItems[0];
+          setPicked(null);
+          closeResultModal();
+          const costFromItem =
+            autoFill.costFromItem &&
+            showCostField &&
+            item?.last_purchase_cost != null
+              ? item.last_purchase_cost
+              : undefined;
+          const priceFromItem =
+            autoFill.priceFromItem && showPriceField && item?.price != null
+              ? item.price
+              : undefined;
+
+          const success = await performAddOperation({
+            pickedItem: item,
+            quantityValue: 1,
+            costValue: costFromItem,
+            priceValue: priceFromItem,
+            descriptionValue: "",
+            resetForm: false,
+            suppressSuccessToast: true,
+            onSuccess: playSuccessSound,
+            onFailure: playFailSound,
+          });
+
+          setBarcodeValue("");
+          focusBarcodeInput();
+          setSearchStatus(success ? "done" : "error");
+          return;
+        }
+
         handlePickItem(normalizedItems[0]);
       } catch (err) {
         console.warn("[search] error", err);
         setPicked(null);
         closeResultModal();
         setSearchStatus("error");
+        if (mode === SEARCH_MODES.INSANT) {
+          playFailSound();
+          setBarcodeValue("");
+          focusBarcodeInput();
+        }
       }
     },
     [
       api,
+      autoFill,
       closeResultModal,
       docDefinition,
       docCtx,
       docId,
+      focusBarcodeInput,
       handlePickItem,
+      performAddOperation,
+      playFailSound,
+      playSuccessSound,
       searchMode,
+      setBarcodeValue,
+      showCostField,
+      showPriceField,
     ]
   );
 
@@ -285,20 +536,26 @@ export default function OpNewPage({ definition: definitionProp }) {
   useEffect(() => {
     setSearchStatus("idle");
     closeResultModal();
-    if (searchMode === SEARCH_MODES.SCAN) {
-      window.setTimeout(() => document.getElementById("barcode")?.focus(), 0);
-    } else {
+    if (searchMode === SEARCH_MODES.NAME) {
       stopScan();
       window.setTimeout(
         () => document.getElementById("product-query")?.focus(),
         0
       );
+      return;
     }
-  }, [searchMode, closeResultModal, stopScan]);
+
+    focusBarcodeInput();
+  }, [searchMode, closeResultModal, stopScan, focusBarcodeInput]);
 
   const startScan = async () => {
     if (scanning) return;
-    if (searchMode !== SEARCH_MODES.SCAN) return;
+    if (
+      searchMode !== SEARCH_MODES.SCAN &&
+      searchMode !== SEARCH_MODES.INSANT
+    ) {
+      return;
+    }
 
     try {
       const reader = await ensureReader();
@@ -323,7 +580,7 @@ export default function OpNewPage({ definition: definitionProp }) {
         if (result) {
           const text = result.getText();
           stopScan();
-          runSearch(text, SEARCH_MODES.SCAN);
+          runSearch(text, searchMode);
         }
         if (
           err &&
@@ -348,85 +605,14 @@ export default function OpNewPage({ definition: definitionProp }) {
   };
 
   const handleSubmit = async () => {
-    if (!picked?.id) {
-      showToast(t("select_product_first") || "Сначала выберите товар", {
-        type: "error",
-      });
-      return;
-    }
-
-    const qtyNumber = toNumber(quantity);
-    if (!qtyNumber || qtyNumber <= 0) {
-      showToast(t("fill_required_fields") || "Заполните обязательные поля", {
-        type: "error",
-      });
-      return;
-    }
-
-    if (picked?.unit_piece && !Number.isInteger(qtyNumber)) {
-      showToast(t("qty.integer_only") || "Количество должно быть целым", {
-        type: "error",
-      });
-      return;
-    }
-
-    const costNumber = showCostField ? toNumber(cost) : undefined;
-    const priceNumber = showPriceField ? toNumber(price) : undefined;
-    const trimmedDescription = description.trim();
-
-    const buildPayload =
-      docDefinition?.operation?.buildAddPayload || (() => null);
-    const payload = buildPayload({
-      docId,
-      picked,
-      quantity: qtyNumber,
-      cost: costNumber,
-      price: priceNumber,
-      description: trimmedDescription,
-      docCtx,
+    await performAddOperation({
+      pickedItem: picked,
+      quantityValue: quantity,
+      costValue: cost,
+      priceValue: price,
+      descriptionValue: description,
+      resetForm: true,
     });
-
-    if (!payload) {
-      showToast(t("save_failed") || "Не удалось сохранить операцию", {
-        type: "error",
-      });
-      return;
-    }
-
-    setSaving(true);
-    try {
-      const addAction = docDefinition?.operation?.addAction;
-      if (!addAction) {
-        throw new Error("Operation add action is not configured");
-      }
-      const { data } = await api(addAction, payload);
-      const handleAddResponse =
-        docDefinition?.operation?.handleAddResponse ||
-        ((response) => response?.result?.row_affected > 0);
-
-      if (handleAddResponse(data, { docCtx, picked, payload })) {
-        showToast(t("toast.op_added") || "Операция добавлена", {
-          type: "success",
-        });
-        setQuantity("");
-        if (showCostField) setCost("");
-        if (showPriceField) setPrice("");
-        setBarcodeValue("");
-        setQueryValue("");
-        setPicked(null);
-        setSearchStatus("idle");
-        window.setTimeout(() => document.getElementById("barcode")?.focus(), 0);
-      } else {
-        throw new Error(data?.description || "Save failed");
-      }
-    } catch (err) {
-      showToast(
-        err.message || t("save_failed") || "Не удалось сохранить операцию",
-        { type: "error", duration: 2400 }
-      );
-    } finally {
-      setSaving(false);
-    }
   };
 
   const descriptionPreview = useMemo(() => {
@@ -486,9 +672,20 @@ export default function OpNewPage({ definition: definitionProp }) {
         >
           <i className="fa-solid fa-magnifying-glass" aria-hidden="true" />
         </button>
+        <button
+          type="button"
+          className={iconButtonClass({
+            variant: searchMode === SEARCH_MODES.INSANT ? "primary" : "ghost",
+          })}
+          onClick={() => setSearchMode(SEARCH_MODES.INSANT)}
+          aria-label={t("op.mode.insant") || "Мгновенное добавление"}
+          title={t("op.mode.insant") || "Мгновенное добавление"}
+        >
+          <i className="fa-solid fa-bolt" aria-hidden="true" />
+        </button>
       </div>
 
-      {searchMode === SEARCH_MODES.SCAN && (
+      {[SEARCH_MODES.SCAN, SEARCH_MODES.INSANT].includes(searchMode) && (
         <>
           <div
             id="scanner"
@@ -525,6 +722,7 @@ export default function OpNewPage({ definition: definitionProp }) {
               id="barcode"
               type="search"
               inputMode="search"
+              ref={barcodeInputRef}
               value={barcodeValue}
               placeholder={
                 t("op.barcode.placeholder") ||
@@ -534,7 +732,7 @@ export default function OpNewPage({ definition: definitionProp }) {
               onKeyDown={(event) => {
                 if (event.key === "Enter") {
                   event.preventDefault();
-                  runSearch(barcodeValue, SEARCH_MODES.SCAN);
+                  runSearch(barcodeValue, searchMode);
                 }
               }}
               className={inputClass("flex-1")}

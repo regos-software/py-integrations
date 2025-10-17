@@ -64,6 +64,7 @@
   "op.inventory.title": "New inventory line",
   "op.mode.name": "Name search",
   "op.mode.scan": "Scan mode",
+  "op.mode.insant": "Instant add",
   "op.price": "Sale price",
   "op.qty": "Quantity",
   "op.qty.required": "Enter quantity",
