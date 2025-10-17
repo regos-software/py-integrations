@@ -43,6 +43,17 @@ const ZXING_FORMATS = [
 ].filter(Boolean);
 
 const DEFAULT_LIMIT = 20;
+const OPERATION_LIMIT_MIN = 1;
+const OPERATION_LIMIT_MAX = 1000;
+
+function normalizeOperationLimit(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return DEFAULT_LIMIT;
+  const floored = Math.floor(parsed);
+  if (floored < OPERATION_LIMIT_MIN) return OPERATION_LIMIT_MIN;
+  if (floored > OPERATION_LIMIT_MAX) return OPERATION_LIMIT_MAX;
+  return floored;
+}
 
 function normalizeItemExt(ext) {
   if (!ext) return null;
@@ -95,6 +106,7 @@ export default function ItemInfoPage() {
   const [settings, setSettings] = useState({
     stockId: null,
     priceTypeId: null,
+    limit: DEFAULT_LIMIT,
   });
   const [settingsDraft, setSettingsDraft] = useState(settings);
   const [optionsLoading, setOptionsLoading] = useState(false);
@@ -140,6 +152,7 @@ export default function ItemInfoPage() {
       setSettings((prev) => ({
         ...prev,
         stockId: prev.stockId ?? stocks?.[0]?.value,
+        limit: normalizeOperationLimit(prev.limit ?? DEFAULT_LIMIT),
       }));
     }
   }, [stocks]);
@@ -154,6 +167,7 @@ export default function ItemInfoPage() {
       setSettings((prev) => ({
         ...prev,
         priceTypeId: prev.priceTypeId ?? priceTypes?.[0]?.value,
+        limit: normalizeOperationLimit(prev.limit ?? DEFAULT_LIMIT),
       }));
     }
   }, [priceTypes]);
@@ -241,10 +255,12 @@ export default function ItemInfoPage() {
       setSettings((prev) => ({
         stockId: prev.stockId ?? defaultStockId,
         priceTypeId: prev.priceTypeId ?? defaultPriceTypeId,
+        limit: normalizeOperationLimit(prev.limit ?? DEFAULT_LIMIT),
       }));
       setSettingsDraft((prev) => ({
         stockId: prev.stockId ?? defaultStockId,
         priceTypeId: prev.priceTypeId ?? defaultPriceTypeId,
+        limit: prev.limit ?? DEFAULT_LIMIT,
       }));
     } catch (err) {
       console.warn("[item-info] load options", err);
@@ -316,6 +332,9 @@ export default function ItemInfoPage() {
           : fallbackPriceTypeId != null
           ? Number(fallbackPriceTypeId)
           : null;
+      const operationLimit = normalizeOperationLimit(
+        activeSettings.limit ?? DEFAULT_LIMIT
+      );
 
       setDetailsLoading(true);
       try {
@@ -362,7 +381,7 @@ export default function ItemInfoPage() {
               "references.item_operation.get",
               {
                 item_id: itemId,
-                limit: DEFAULT_LIMIT,
+                limit: operationLimit,
               },
               formatFallback(
                 t,
@@ -570,6 +589,7 @@ export default function ItemInfoPage() {
         settingsDraft.priceTypeId === "" || settingsDraft.priceTypeId == null
           ? null
           : Number(settingsDraft.priceTypeId),
+      limit: normalizeOperationLimit(settingsDraft.limit ?? DEFAULT_LIMIT),
     };
     setSettings(normalized);
     setSettingsOpen(false);
@@ -1096,7 +1116,7 @@ export default function ItemInfoPage() {
                               "Тип цены неизвестен"
                             )}
                         </p>
-                        <p className={mutedTextClass()}>
+                        {/* <p className={mutedTextClass()}>
                           {price.price_type?.markup != null
                             ? `${formatFallback(
                                 t,
@@ -1105,8 +1125,9 @@ export default function ItemInfoPage() {
                               )}: ${fmt.number(price.price_type.markup, {
                                 maximumFractionDigits: 2,
                               })}`
-                            : null}
-                        </p>
+                            : null}{" "}
+                          %
+                        </p> */}
                       </div>
                       <p className="text-base font-semibold text-slate-900 dark:text-slate-100">
                         {fmt.money(
@@ -1343,6 +1364,43 @@ export default function ItemInfoPage() {
                     </option>
                   ))}
                 </select>
+              </div>
+              <div className="space-y-2">
+                <label
+                  className={labelClass()}
+                  htmlFor="item-info-settings-limit"
+                >
+                  {formatFallback(
+                    t,
+                    "item_info.limit",
+                    "Лимит последних операций"
+                  )}
+                </label>
+                <input
+                  id="item-info-settings-limit"
+                  type="number"
+                  min={OPERATION_LIMIT_MIN}
+                  max={OPERATION_LIMIT_MAX}
+                  step={1}
+                  className={inputClass()}
+                  value={settingsDraft.limit ?? ""}
+                  onChange={(event) =>
+                    setSettingsDraft((prev) => ({
+                      ...prev,
+                      limit:
+                        event.target.value === ""
+                          ? ""
+                          : Number(event.target.value),
+                    }))
+                  }
+                />
+                <p className={mutedTextClass()}>
+                  {formatFallback(
+                    t,
+                    "item_info.limit_help",
+                    "От 1 до 1000 записей"
+                  )}
+                </p>
               </div>
             </div>
             <div className="flex justify-end gap-3">
