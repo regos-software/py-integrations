@@ -31,7 +31,7 @@ const buildOptions = {
   },
   loader: {
     ".svg": "dataurl",
-    ".mp3": "file",
+    ".mp3": "dataurl",
   },
   logLevel: "info",
 };

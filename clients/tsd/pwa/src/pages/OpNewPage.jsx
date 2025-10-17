@@ -14,8 +14,8 @@ import {
 import { useApp } from "../context/AppContext.jsx";
 import { useI18n } from "../context/I18nContext.jsx";
 import { useToast } from "../context/ToastContext.jsx";
-import scanSuccessSfx from "../../assets/audio/scan_success.mp3";
-import scanFailSfx from "../../assets/audio/scan_fail.mp3";
+import scanSuccessSfx from "../audio/scan_success.mp3";
+import scanFailSfx from "../audio/scan_fail.mp3";
 import {
   buttonClass,
   cardClass,
@@ -48,6 +48,20 @@ const ZXING_FORMATS = [
   BarcodeFormat.CODE_39,
   BarcodeFormat.CODE_128,
 ].filter(Boolean);
+
+const normalizeAudioSrc = (src) => {
+  if (typeof src !== "string") return src;
+  if (src.startsWith("data:application/octet-stream;base64")) {
+    return src.replace(
+      "data:application/octet-stream;base64",
+      "data:audio/mpeg;base64"
+    );
+  }
+  return src;
+};
+
+const SCAN_SUCCESS_SRC = normalizeAudioSrc(scanSuccessSfx);
+const SCAN_FAIL_SRC = normalizeAudioSrc(scanFailSfx);
 
 export default function OpNewPage({ definition: definitionProp }) {
   const { id } = useParams();
@@ -110,12 +124,25 @@ export default function OpNewPage({ definition: definitionProp }) {
   useEffect(() => {
     if (typeof window === "undefined" || typeof Audio === "undefined") return;
 
-    successSoundRef.current = new Audio(scanSuccessSfx);
-    successSoundRef.current.preload = "auto";
+    const successAudio = new Audio();
+    successAudio.src = SCAN_SUCCESS_SRC;
+    successAudio.preload = "auto";
+    successAudio.load();
+    successSoundRef.current = successAudio;
 
-    failSoundRef.current = new Audio(scanFailSfx);
-    failSoundRef.current.preload = "auto";
-  }, [scanFailSfx, scanSuccessSfx]);
+    const failAudio = new Audio();
+    failAudio.src = SCAN_FAIL_SRC;
+    failAudio.preload = "auto";
+    failAudio.load();
+    failSoundRef.current = failAudio;
+
+    return () => {
+      successAudio.pause();
+      successAudio.src = "";
+      failAudio.pause();
+      failAudio.src = "";
+    };
+  }, []);
 
   const focusBarcodeInput = useCallback(() => {
     window.setTimeout(() => {
@@ -128,8 +155,16 @@ export default function OpNewPage({ definition: definitionProp }) {
     if (!audio) return;
     try {
       audio.pause();
+      if (audio.readyState < 2) {
+        audio.load();
+      }
       audio.currentTime = 0;
-      void audio.play();
+      const playPromise = audio.play();
+      if (playPromise && typeof playPromise.catch === "function") {
+        playPromise.catch((err) =>
+          console.warn("[op_new] failed to play sound", err)
+        );
+      }
     } catch (err) {
       console.warn("[op_new] failed to play sound", err);
     }
