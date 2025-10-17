@@ -42,11 +42,20 @@ const ZXING_FORMATS = [
   BarcodeFormat.CODE_128,
 ].filter(Boolean);
 
-const DEFAULT_LIMIT = 20;
+const DEFAULT_LIMIT = 2;
 const OPERATION_LIMIT_MIN = 1;
 const OPERATION_LIMIT_MAX = 1000;
 const SIMILAR_SEARCH_STEP_KEY = "similar_search";
 const SIMILAR_EXT_STEP_KEY = "similar_ext";
+const DEFAULT_OPERATION_FILTERS = Object.freeze({
+  stockId: "all",
+  positive: "all",
+  docType: "all",
+});
+const FILTER_POPOVER_WIDTH = 360;
+const FILTER_POPOVER_HEIGHT = 320;
+const FILTER_POPOVER_MARGIN = 16;
+const FILTER_POPOVER_OFFSET = 8;
 
 function normalizeOperationLimit(value) {
   const parsed = Number(value);
@@ -143,11 +152,20 @@ export default function ItemInfoPage() {
   const [pricesInfo, setPricesInfo] = useState([]);
   const [operations, setOperations] = useState([]);
   const [similarItems, setSimilarItems] = useState([]);
+  const [operationFiltersOpen, setOperationFiltersOpen] = useState(false);
+  const [operationFiltersAnchor, setOperationFiltersAnchor] = useState(null);
+  const [operationFilters, setOperationFilters] = useState(() => ({
+    ...DEFAULT_OPERATION_FILTERS,
+  }));
+  const [operationFiltersDraft, setOperationFiltersDraft] = useState(() => ({
+    ...DEFAULT_OPERATION_FILTERS,
+  }));
   const [detailsLoading, setDetailsLoading] = useState(false);
 
   const barcodeInputRef = useRef(null);
   const videoRef = useRef(null);
   const readerRef = useRef(null);
+  const filterButtonRef = useRef(null);
 
   const title = useMemo(() => {
     const translated = t("item_info.title");
@@ -305,6 +323,154 @@ export default function ItemInfoPage() {
     }
   }, [settings, settingsOpen]);
 
+  const getStockFilterValue = useCallback((stock) => {
+    if (!stock) return "__none__";
+    if (stock.id != null) {
+      return `id:${stock.id}`;
+    }
+    if (stock.name) {
+      return `name:${stock.name}`;
+    }
+    return "__none__";
+  }, []);
+
+  const getStockLabel = useCallback(
+    (stock) => {
+      if (stock?.name) return stock.name;
+      if (stock?.id != null) return `ID ${stock.id}`;
+      return formatFallback(t, "item_info.stock_unknown", "Склад не указан");
+    },
+    [t]
+  );
+
+  const getDocTypeFilterValue = useCallback((operation) => {
+    const object = operation?.document_type;
+    if (object?.id != null) {
+      return `id:${object.id}`;
+    }
+    const name = operation?.doc_type_name || object?.name;
+    if (name) {
+      return `name:${name}`;
+    }
+    return "__none__";
+  }, []);
+
+  const getDocTypeLabel = useCallback(
+    (operation) => {
+      const object = operation?.document_type;
+      const name = operation?.doc_type_name || object?.name;
+      if (name) return name;
+      if (object?.id != null) return `ID ${object.id}`;
+      return formatFallback(
+        t,
+        "item_info.doc_type_unknown",
+        "Тип документа не указан"
+      );
+    },
+    [t]
+  );
+
+  const operationStockOptions = useMemo(() => {
+    const map = new Map();
+    operations.forEach((operation) => {
+      const value = getStockFilterValue(operation?.stock);
+      const label = getStockLabel(operation?.stock);
+      if (!map.has(value)) {
+        map.set(value, label);
+      }
+    });
+
+    return Array.from(map.entries()).map(([value, label]) => ({
+      value,
+      label,
+    }));
+  }, [getStockFilterValue, getStockLabel, operations]);
+
+  const operationDocTypeOptions = useMemo(() => {
+    const map = new Map();
+    operations.forEach((operation) => {
+      const value = getDocTypeFilterValue(operation);
+      const label = getDocTypeLabel(operation);
+      if (!map.has(value)) {
+        map.set(value, label);
+      }
+    });
+
+    return Array.from(map.entries()).map(([value, label]) => ({
+      value,
+      label,
+    }));
+  }, [getDocTypeFilterValue, getDocTypeLabel, operations]);
+
+  const filteredOperations = useMemo(() => {
+    const { stockId, positive, docType } = operationFilters;
+
+    return operations.filter((operation) => {
+      if (stockId !== "all") {
+        if (getStockFilterValue(operation?.stock) !== stockId) {
+          return false;
+        }
+      }
+
+      if (positive !== "all") {
+        const positiveValue = positive === "true";
+        if ((operation?.positive ?? null) !== positiveValue) {
+          return false;
+        }
+      }
+
+      if (docType !== "all") {
+        if (getDocTypeFilterValue(operation) !== docType) {
+          return false;
+        }
+      }
+
+      return true;
+    });
+  }, [
+    getDocTypeFilterValue,
+    getStockFilterValue,
+    operationFilters,
+    operations,
+  ]);
+
+  const operationFiltersActive =
+    operationFilters.stockId !== "all" ||
+    operationFilters.positive !== "all" ||
+    operationFilters.docType !== "all";
+
+  useEffect(() => {
+    setOperationFilters((prev) => {
+      let next = prev;
+      let modified = false;
+
+      if (
+        prev.stockId !== "all" &&
+        !operationStockOptions.some((option) => option.value === prev.stockId)
+      ) {
+        next = { ...next, stockId: "all" };
+        modified = true;
+      }
+
+      if (
+        prev.docType !== "all" &&
+        !operationDocTypeOptions.some((option) => option.value === prev.docType)
+      ) {
+        next = next === prev ? { ...next } : next;
+        next.docType = "all";
+        modified = true;
+      }
+
+      return modified ? next : prev;
+    });
+  }, [operationDocTypeOptions, operationStockOptions]);
+
+  useEffect(() => {
+    if (operationFiltersOpen) {
+      setOperationFiltersDraft({ ...operationFilters });
+    }
+  }, [operationFilters, operationFiltersOpen]);
+
   const ensureReader = useCallback(async () => {
     if (readerRef.current) return readerRef.current;
 
@@ -379,9 +545,6 @@ export default function ItemInfoPage() {
         activeSettings.limit ?? DEFAULT_LIMIT
       );
 
-      const stockIds = stockId ? [stockId] : undefined;
-      const priceTypeIds = priceTypeId ? [priceTypeId] : undefined;
-
       const loadErrorMessage = formatFallback(
         t,
         "item_info.load_error",
@@ -434,7 +597,7 @@ export default function ItemInfoPage() {
           path: "Item/GetExt",
           payload: {
             ids: `\${${SIMILAR_SEARCH_STEP_KEY}.result}`,
-            limit: DEFAULT_LIMIT,
+            limit: 100,
             ...(stockId ? { stock_id: stockId } : {}),
             ...(priceTypeId ? { price_type_id: priceTypeId } : {}),
           },
@@ -507,10 +670,7 @@ export default function ItemInfoPage() {
         };
 
         const extResponse = ensureStep("item", loadErrorMessage);
-        const similarSearchResponse = ensureStep(
-          SIMILAR_SEARCH_STEP_KEY,
-          similarErrorMessage
-        );
+        ensureStep(SIMILAR_SEARCH_STEP_KEY, similarErrorMessage);
         const similarExtResponse = ensureStep(
           SIMILAR_EXT_STEP_KEY,
           similarErrorMessage
@@ -618,8 +778,87 @@ export default function ItemInfoPage() {
       resetUI();
       await handlePickItem(item);
     },
-    [handlePickItem]
+    [handlePickItem, resetUI]
   );
+
+  const handleOperationFiltersOpen = useCallback(() => {
+    let anchor = null;
+
+    if (typeof window !== "undefined") {
+      const button = filterButtonRef.current;
+      if (button) {
+        const rect = button.getBoundingClientRect();
+        const scrollX = window.scrollX ?? window.pageXOffset ?? 0;
+        const scrollY = window.scrollY ?? window.pageYOffset ?? 0;
+        const viewportWidth =
+          window.innerWidth ??
+          document.documentElement?.clientWidth ??
+          FILTER_POPOVER_WIDTH + FILTER_POPOVER_MARGIN * 2;
+        const viewportHeight =
+          window.innerHeight ??
+          document.documentElement?.clientHeight ??
+          FILTER_POPOVER_HEIGHT + FILTER_POPOVER_MARGIN * 2;
+
+        const availableWidth = Math.max(
+          240,
+          viewportWidth - FILTER_POPOVER_MARGIN * 2
+        );
+        const popoverWidth = Math.min(FILTER_POPOVER_WIDTH, availableWidth);
+
+        const minLeft = scrollX + FILTER_POPOVER_MARGIN;
+        const maxLeft =
+          scrollX + viewportWidth - FILTER_POPOVER_MARGIN - popoverWidth;
+        let left = scrollX + rect.left;
+        left = Math.max(minLeft, Math.min(left, maxLeft));
+
+        const preferredTop = scrollY + rect.bottom + FILTER_POPOVER_OFFSET;
+        const maxTop =
+          scrollY +
+          viewportHeight -
+          FILTER_POPOVER_MARGIN -
+          FILTER_POPOVER_HEIGHT;
+
+        if (preferredTop <= maxTop) {
+          anchor = { top: preferredTop, left, width: popoverWidth };
+        } else {
+          const topAbove =
+            scrollY + rect.top - FILTER_POPOVER_OFFSET - FILTER_POPOVER_HEIGHT;
+          const clampedTop = Math.max(
+            scrollY + FILTER_POPOVER_MARGIN,
+            Math.min(topAbove, maxTop)
+          );
+          anchor = { top: clampedTop, left, width: popoverWidth };
+        }
+      }
+    }
+
+    setOperationFiltersAnchor(anchor);
+    setOperationFiltersOpen(true);
+  }, []);
+
+  const handleOperationFiltersChange = useCallback(
+    (field) => (event) => {
+      const value = event?.target?.value ?? "all";
+      setOperationFiltersDraft((prev) => ({ ...prev, [field]: value }));
+    },
+    []
+  );
+
+  const handleOperationFiltersApply = useCallback(() => {
+    setOperationFilters({ ...operationFiltersDraft });
+    setOperationFiltersOpen(false);
+    setOperationFiltersAnchor(null);
+  }, [operationFiltersDraft]);
+
+  const handleOperationFiltersCancel = useCallback(() => {
+    setOperationFiltersDraft({ ...operationFilters });
+    setOperationFiltersOpen(false);
+    setOperationFiltersAnchor(null);
+  }, [operationFilters]);
+
+  const handleOperationFiltersReset = useCallback(() => {
+    setOperationFiltersDraft({ ...DEFAULT_OPERATION_FILTERS });
+  }, []);
 
   const handleSearch = useCallback(
     async (queryText, mode = SEARCH_MODES.NAME) => {
@@ -641,7 +880,7 @@ export default function ItemInfoPage() {
 
         const payload = {
           search: normalized,
-          limit: DEFAULT_LIMIT,
+          limit: 100,
         };
         const stockId =
           settings.stockId ??
@@ -1350,13 +1589,74 @@ export default function ItemInfoPage() {
           <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-50">
             {formatFallback(t, "item_info.operations", "Последние операции")}
           </h2>
-          {operations.length === 0 ? (
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <p className={mutedTextClass()}>
-              {formatFallback(t, "item_info.operations_empty", "Нет операций")}
+              {formatFallback(
+                t,
+                "item_info.operations_visible",
+                "Показано операций"
+              )}
+              : {filteredOperations.length} / {operations.length}
+            </p>
+            <div className="flex items-center gap-2">
+              {operationFiltersActive ? (
+                <span className="rounded-full bg-slate-900/5 px-2 py-1 text-xs font-semibold text-slate-700 dark:bg-slate-100/10 dark:text-slate-200">
+                  {formatFallback(
+                    t,
+                    "item_info.filters_active",
+                    "Фильтры включены"
+                  )}
+                </span>
+              ) : null}
+              <button
+                type="button"
+                ref={filterButtonRef}
+                className={iconButtonClass({
+                  variant: operationFiltersActive ? "primary" : "ghost",
+                })}
+                onClick={handleOperationFiltersOpen}
+                title={formatFallback(
+                  t,
+                  "item_info.open_filters",
+                  "Настроить фильтры операций"
+                )}
+              >
+                <span className="sr-only">
+                  {formatFallback(
+                    t,
+                    "item_info.open_filters",
+                    "Настроить фильтры операций"
+                  )}
+                </span>
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  viewBox="0 0 20 20"
+                  fill="currentColor"
+                  className="h-5 w-5"
+                  aria-hidden="true"
+                >
+                  <path d="M4 4.75A.75.75 0 0 1 4.75 4h10.5a.75.75 0 0 1 .56 1.242l-3.81 4.51v4.248a.75.75 0 0 1-.326.622l-2.5 1.75A.75.75 0 0 1 8 15.75v-4.998l-3.81-4.51A.75.75 0 0 1 4 4.75Z" />
+                </svg>
+              </button>
+            </div>
+          </div>
+          {filteredOperations.length === 0 ? (
+            <p className={mutedTextClass()}>
+              {operationFiltersActive
+                ? formatFallback(
+                    t,
+                    "item_info.operations_filtered_empty",
+                    "Нет операций по выбранным фильтрам"
+                  )
+                : formatFallback(
+                    t,
+                    "item_info.operations_empty",
+                    "Нет операций"
+                  )}
             </p>
           ) : (
             <div className="space-y-2">
-              {operations.map((op, index) => (
+              {filteredOperations.map((op, index) => (
                 <div
                   key={`${op.document_id || index}-${op.date || "date"}`}
                   className="rounded-xl border border-slate-200 px-3 py-2 dark:border-slate-700"
@@ -1541,6 +1841,161 @@ export default function ItemInfoPage() {
                 onClick={closeResultModal}
               >
                 {formatFallback(t, "common.cancel", "Отмена")}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {operationFiltersOpen ? (
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="item-info-operations-filter-title"
+          onClick={handleOperationFiltersCancel}
+        >
+          <div
+            className={cardClass("absolute space-y-4 shadow-xl")}
+            style={{
+              top: operationFiltersAnchor?.top ?? "50%",
+              left: operationFiltersAnchor?.left ?? "50%",
+              width: operationFiltersAnchor?.width
+                ? `${operationFiltersAnchor.width}px`
+                : "min(360px, calc(100vw - 32px))",
+              transform: operationFiltersAnchor
+                ? "none"
+                : "translate(-50%, -50%)",
+            }}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h2
+              id="item-info-operations-filter-title"
+              className="text-lg font-semibold text-slate-900 dark:text-slate-50"
+            >
+              {formatFallback(
+                t,
+                "item_info.operations_filter_title",
+                "Фильтры операций"
+              )}
+            </h2>
+
+            <div className="space-y-4">
+              <div className="space-y-1">
+                <label
+                  className={labelClass()}
+                  htmlFor="item-info-operations-filter-stock"
+                >
+                  {formatFallback(t, "item_info.filter_stock", "Склад")}
+                </label>
+                <select
+                  id="item-info-operations-filter-stock"
+                  className={inputClass()}
+                  value={operationFiltersDraft.stockId}
+                  onChange={handleOperationFiltersChange("stockId")}
+                >
+                  <option value="all">
+                    {formatFallback(
+                      t,
+                      "item_info.filter_all_stocks",
+                      "Все склады"
+                    )}
+                  </option>
+                  {operationStockOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="space-y-1">
+                <label
+                  className={labelClass()}
+                  htmlFor="item-info-operations-filter-positive"
+                >
+                  {formatFallback(
+                    t,
+                    "item_info.filter_operation_type",
+                    "Тип движения"
+                  )}
+                </label>
+                <select
+                  id="item-info-operations-filter-positive"
+                  className={inputClass()}
+                  value={operationFiltersDraft.positive}
+                  onChange={handleOperationFiltersChange("positive")}
+                >
+                  <option value="all">
+                    {formatFallback(
+                      t,
+                      "item_info.filter_all_movements",
+                      "Все операции"
+                    )}
+                  </option>
+                  <option value="true">
+                    {formatFallback(t, "item_info.operation_income", "Приход")}
+                  </option>
+                  <option value="false">
+                    {formatFallback(t, "item_info.operation_outcome", "Расход")}
+                  </option>
+                </select>
+              </div>
+
+              <div className="space-y-1">
+                <label
+                  className={labelClass()}
+                  htmlFor="item-info-operations-filter-doc-type"
+                >
+                  {formatFallback(
+                    t,
+                    "item_info.filter_doc_type",
+                    "Тип документа"
+                  )}
+                </label>
+                <select
+                  id="item-info-operations-filter-doc-type"
+                  className={inputClass()}
+                  value={operationFiltersDraft.docType}
+                  onChange={handleOperationFiltersChange("docType")}
+                >
+                  <option value="all">
+                    {formatFallback(
+                      t,
+                      "item_info.filter_all_doc_types",
+                      "Все типы"
+                    )}
+                  </option>
+                  {operationDocTypeOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                className={buttonClass({ variant: "ghost", size: "sm" })}
+                onClick={handleOperationFiltersCancel}
+              >
+                {formatFallback(t, "common.cancel", "Отмена")}
+              </button>
+              <button
+                type="button"
+                className={buttonClass({ variant: "secondary", size: "sm" })}
+                onClick={handleOperationFiltersReset}
+              >
+                {formatFallback(t, "item_info.reset_filters", "Сбросить")}
+              </button>
+              <button
+                type="button"
+                className={buttonClass({ size: "sm" })}
+                onClick={handleOperationFiltersApply}
+              >
+                {formatFallback(t, "item_info.apply_filters", "Применить")}
               </button>
             </div>
           </div>
