@@ -120,6 +120,8 @@ export default function OpNewPage({ definition: definitionProp }) {
   const barcodeInputRef = useRef(null);
   const successSoundRef = useRef(null);
   const failSoundRef = useRef(null);
+  const instantQueueRef = useRef([]);
+  const instantProcessingRef = useRef(false);
 
   useEffect(() => {
     if (typeof window === "undefined" || typeof Audio === "undefined") return;
@@ -397,6 +399,150 @@ export default function OpNewPage({ definition: definitionProp }) {
     ]
   );
 
+  const handleInstantSearch = useCallback(
+    async (queryText) => {
+      const searchDescriptor = docDefinition?.operation?.search;
+      if (!searchDescriptor?.action || !searchDescriptor?.buildParams) {
+        console.warn("[op_new] search not configured for doc type");
+        showToast(
+          t("search_not_configured") ||
+            "Поиск для данного документа не настроен",
+          { type: "error" }
+        );
+        playFailSound();
+        setSearchStatus("error");
+        focusBarcodeInput();
+        return;
+      }
+
+      closeResultModal();
+      setPicked(null);
+      setSearchStatus("loading");
+
+      try {
+        const params = searchDescriptor.buildParams({
+          queryText,
+          docCtx,
+          docId,
+          mode: SEARCH_MODES.INSANT,
+        });
+
+        const { data } = await api(searchDescriptor.action, params);
+        const normalize = searchDescriptor.normalize || (() => []);
+        const normalizedItems = normalize(data, {
+          docCtx,
+          queryText,
+          mode: SEARCH_MODES.INSANT,
+          docId,
+        });
+
+        if (!Array.isArray(normalizedItems) || normalizedItems.length === 0) {
+          setSearchStatus("empty");
+          showToast(t("common.nothing") || "Ничего не найдено", {
+            type: "error",
+          });
+          playFailSound();
+          return;
+        }
+
+        if (normalizedItems.length > 1) {
+          setSearchStatus("multi");
+          showToast(
+            t("op.search.choose_prompt") ||
+              "Найдено несколько результатов, уточните запрос",
+            { type: "error" }
+          );
+          playFailSound();
+          return;
+        }
+
+        const item = normalizedItems[0];
+        const costFromItem =
+          autoFill.costFromItem &&
+          showCostField &&
+          item?.last_purchase_cost != null
+            ? item.last_purchase_cost
+            : undefined;
+        const priceFromItem =
+          autoFill.priceFromItem && showPriceField && item?.price != null
+            ? item.price
+            : undefined;
+
+        const success = await performAddOperation({
+          pickedItem: item,
+          quantityValue: 1,
+          costValue: costFromItem,
+          priceValue: priceFromItem,
+          descriptionValue: "",
+          resetForm: false,
+          onSuccess: playSuccessSound,
+          onFailure: playFailSound,
+        });
+
+        setSearchStatus(success ? "done" : "error");
+      } catch (err) {
+        console.warn("[search] instant error", err);
+        setSearchStatus("error");
+        showToast(t("search_error") || "Ошибка поиска", {
+          type: "error",
+        });
+        playFailSound();
+      } finally {
+        focusBarcodeInput();
+      }
+    },
+    [
+      api,
+      autoFill,
+      closeResultModal,
+      docCtx,
+      docDefinition,
+      docId,
+      focusBarcodeInput,
+      performAddOperation,
+      playFailSound,
+      playSuccessSound,
+      setPicked,
+      setSearchStatus,
+      showCostField,
+      showPriceField,
+      showToast,
+      t,
+    ]
+  );
+
+  const processInstantQueue = useCallback(async () => {
+    if (instantProcessingRef.current) return;
+    instantProcessingRef.current = true;
+    try {
+      while (instantQueueRef.current.length > 0) {
+        const nextBarcode = instantQueueRef.current.shift();
+        // eslint-disable-next-line no-await-in-loop
+        await handleInstantSearch(nextBarcode);
+      }
+    } finally {
+      instantProcessingRef.current = false;
+    }
+  }, [handleInstantSearch]);
+
+  const enqueueInstantSearch = useCallback(
+    (queryText) => {
+      const normalized = queryText?.trim();
+      if (!normalized) {
+        setBarcodeValue("");
+        focusBarcodeInput();
+        return;
+      }
+
+      instantQueueRef.current.push(normalized);
+      setBarcodeValue("");
+      setSearchStatus("loading");
+      focusBarcodeInput();
+      void processInstantQueue();
+    },
+    [focusBarcodeInput, processInstantQueue, setBarcodeValue, setSearchStatus]
+  );
+
   const runSearch = useCallback(
     async (value, mode = searchMode) => {
       const queryText = value?.trim();
@@ -405,6 +551,10 @@ export default function OpNewPage({ definition: definitionProp }) {
           setBarcodeValue("");
           focusBarcodeInput();
         }
+        return;
+      }
+      if (mode === SEARCH_MODES.INSANT) {
+        enqueueInstantSearch(queryText);
         return;
       }
       const searchDescriptor = docDefinition?.operation?.search;
@@ -449,49 +599,6 @@ export default function OpNewPage({ definition: definitionProp }) {
           return;
         }
 
-        if (mode === SEARCH_MODES.INSANT && normalizedItems.length > 1) {
-          setPicked(null);
-          closeResultModal();
-          setSearchStatus("multi");
-          playFailSound();
-          setBarcodeValue("");
-          focusBarcodeInput();
-          return;
-        }
-
-        if (mode === SEARCH_MODES.INSANT) {
-          const item = normalizedItems[0];
-          setPicked(null);
-          closeResultModal();
-          const costFromItem =
-            autoFill.costFromItem &&
-            showCostField &&
-            item?.last_purchase_cost != null
-              ? item.last_purchase_cost
-              : undefined;
-          const priceFromItem =
-            autoFill.priceFromItem && showPriceField && item?.price != null
-              ? item.price
-              : undefined;
-
-          const success = await performAddOperation({
-            pickedItem: item,
-            quantityValue: 1,
-            costValue: costFromItem,
-            priceValue: priceFromItem,
-            descriptionValue: "",
-            resetForm: false,
-            suppressSuccessToast: true,
-            onSuccess: playSuccessSound,
-            onFailure: playFailSound,
-          });
-
-          setBarcodeValue("");
-          focusBarcodeInput();
-          setSearchStatus(success ? "done" : "error");
-          return;
-        }
-
         handlePickItem(normalizedItems[0]);
       } catch (err) {
         console.warn("[search] error", err);
@@ -507,20 +614,16 @@ export default function OpNewPage({ definition: definitionProp }) {
     },
     [
       api,
-      autoFill,
       closeResultModal,
       docDefinition,
       docCtx,
       docId,
       focusBarcodeInput,
+      enqueueInstantSearch,
       handlePickItem,
-      performAddOperation,
       playFailSound,
-      playSuccessSound,
       searchMode,
       setBarcodeValue,
-      showCostField,
-      showPriceField,
     ]
   );
 
