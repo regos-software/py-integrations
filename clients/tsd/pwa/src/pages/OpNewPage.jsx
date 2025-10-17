@@ -49,6 +49,46 @@ const ZXING_FORMATS = [
   BarcodeFormat.CODE_128,
 ].filter(Boolean);
 
+const BATCH_SEARCH_STEP_KEY = "search_list";
+const BATCH_ADD_STEP_KEY = "add_operation";
+
+const toPascalCase = (value = "") =>
+  value
+    .split(/[_\s]+/g)
+    .filter(Boolean)
+    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+    .join("");
+
+const resolveBatchPathFromAction = (action) => {
+  if (!action || typeof action !== "string") return null;
+  const segments = action.split(".").filter(Boolean);
+  if (segments.length < 3) return null;
+  const resource = toPascalCase(segments[1]);
+  const method = toPascalCase(segments[2]);
+  if (!resource || !method) return null;
+  return `${resource}/${method}`;
+};
+
+const createBatchAddPayload = ({ definition, docId, itemPlaceholder }) => {
+  if (!definition?.key || !docId || !itemPlaceholder) return null;
+
+  switch (definition.key) {
+    case "inventory": {
+      return [
+        {
+          document_id: docId,
+          item_id: itemPlaceholder,
+          actual_quantity: 1,
+          datetime: Math.floor(Date.now() / 1000),
+          update_actual_quantity: false,
+        },
+      ];
+    }
+    default:
+      return null;
+  }
+};
+
 const normalizeAudioSrc = (src) => {
   if (typeof src !== "string") return src;
   if (src.startsWith("data:application/octet-stream;base64")) {
@@ -401,12 +441,113 @@ export default function OpNewPage({ definition: definitionProp }) {
 
   const handleInstantSearch = useCallback(
     async (queryText) => {
-      const searchDescriptor = docDefinition?.operation?.search;
-      if (!searchDescriptor?.action || !searchDescriptor?.buildParams) {
-        console.warn("[op_new] search not configured for doc type");
+      if (docDefinition?.key !== "inventory") {
+        const searchDescriptor = docDefinition?.operation?.search;
+        if (!searchDescriptor?.action || !searchDescriptor?.buildParams) {
+          console.warn("[op_new] search not configured for doc type");
+          showToast(
+            t("search_not_configured") ||
+              "Поиск для данного документа не настроен",
+            { type: "error" }
+          );
+          playFailSound();
+          setSearchStatus("error");
+          focusBarcodeInput();
+          return;
+        }
+
+        closeResultModal();
+        setPicked(null);
+        setSearchStatus("loading");
+
+        try {
+          const params = searchDescriptor.buildParams({
+            queryText,
+            docCtx,
+            docId,
+            mode: SEARCH_MODES.INSANT,
+          });
+
+          const { data } = await api(searchDescriptor.action, params);
+          const normalize = searchDescriptor.normalize || (() => []);
+          const normalizedItems = normalize(data, {
+            docCtx,
+            queryText,
+            mode: SEARCH_MODES.INSANT,
+            docId,
+          });
+
+          if (!Array.isArray(normalizedItems) || normalizedItems.length === 0) {
+            setSearchStatus("empty");
+            showToast(t("common.nothing") || "Ничего не найдено", {
+              type: "error",
+            });
+            playFailSound();
+            return;
+          }
+
+          if (normalizedItems.length > 1) {
+            setSearchStatus("multi");
+            showToast(
+              t("op.search.choose_prompt") ||
+                "Найдено несколько результатов, уточните запрос",
+              { type: "error" }
+            );
+            playFailSound();
+            return;
+          }
+
+          const item = normalizedItems[0];
+          const costFromItem =
+            autoFill.costFromItem &&
+            showCostField &&
+            item?.last_purchase_cost != null
+              ? item.last_purchase_cost
+              : undefined;
+          const priceFromItem =
+            autoFill.priceFromItem && showPriceField && item?.price != null
+              ? item.price
+              : undefined;
+
+          const success = await performAddOperation({
+            pickedItem: item,
+            quantityValue: 1,
+            costValue: costFromItem,
+            priceValue: priceFromItem,
+            descriptionValue: "",
+            resetForm: false,
+            onSuccess: playSuccessSound,
+            onFailure: playFailSound,
+          });
+
+          setSearchStatus(success ? "done" : "error");
+        } catch (err) {
+          console.warn("[search] instant error", err);
+          setSearchStatus("error");
+          showToast(t("search_error") || "Ошибка поиска", {
+            type: "error",
+          });
+          playFailSound();
+        } finally {
+          focusBarcodeInput();
+        }
+        return;
+      }
+
+      const addPath = resolveBatchPathFromAction(
+        docDefinition?.operation?.addAction
+      );
+      const addPayload = createBatchAddPayload({
+        definition: docDefinition,
+        docId,
+        itemPlaceholder: `\${${BATCH_SEARCH_STEP_KEY}.result.0}`,
+      });
+
+      if (!addPath || !addPayload) {
+        console.warn("[op_new] instant batch not configured for doc type");
         showToast(
-          t("search_not_configured") ||
-            "Поиск для данного документа не настроен",
+          t("instant.batch_not_supported") ||
+            "Мгновенный режим для этого документа пока недоступен",
           { type: "error" }
         );
         playFailSound();
@@ -415,78 +556,60 @@ export default function OpNewPage({ definition: definitionProp }) {
         return;
       }
 
+      const batchPayload = {
+        stop_on_error: true,
+        requests: [
+          {
+            key: BATCH_SEARCH_STEP_KEY,
+            path: "Item/Search",
+            payload: {
+              barcode: queryText,
+              limit: 1,
+            },
+          },
+          {
+            key: BATCH_ADD_STEP_KEY,
+            path: addPath,
+            payload: addPayload,
+          },
+        ],
+      };
+
       closeResultModal();
       setPicked(null);
       setSearchStatus("loading");
 
       try {
-        const params = searchDescriptor.buildParams({
-          queryText,
-          docCtx,
-          docId,
-          mode: SEARCH_MODES.INSANT,
-        });
+        const { data } = await api("batch.run", batchPayload);
+        let errored = false;
 
-        const { data } = await api(searchDescriptor.action, params);
-        const normalize = searchDescriptor.normalize || (() => []);
-        const normalizedItems = normalize(data, {
-          docCtx,
-          queryText,
-          mode: SEARCH_MODES.INSANT,
-          docId,
-        });
-
-        if (!Array.isArray(normalizedItems) || normalizedItems.length === 0) {
-          setSearchStatus("empty");
-          showToast(t("common.nothing") || "Ничего не найдено", {
-            type: "error",
-          });
+        if (!data?.ok || data.result.some((r) => !r.response?.ok)) {
+          errored = true;
+        }
+        if (errored) {
+          const description =
+            searchResponse?.result?.description ||
+            t("common.nothing") ||
+            "Ошибка выполнения";
+          setSearchStatus("error");
+          showToast(description, { type: "error" });
           playFailSound();
           return;
         }
 
-        if (normalizedItems.length > 1) {
-          setSearchStatus("multi");
-          showToast(
-            t("op.search.choose_prompt") ||
-              "Найдено несколько результатов, уточните запрос",
-            { type: "error" }
-          );
-          playFailSound();
-          return;
-        }
-
-        const item = normalizedItems[0];
-        const costFromItem =
-          autoFill.costFromItem &&
-          showCostField &&
-          item?.last_purchase_cost != null
-            ? item.last_purchase_cost
-            : undefined;
-        const priceFromItem =
-          autoFill.priceFromItem && showPriceField && item?.price != null
-            ? item.price
-            : undefined;
-
-        const success = await performAddOperation({
-          pickedItem: item,
-          quantityValue: 1,
-          costValue: costFromItem,
-          priceValue: priceFromItem,
-          descriptionValue: "",
-          resetForm: false,
-          onSuccess: playSuccessSound,
-          onFailure: playFailSound,
+        showToast(t("toast.op_added") || "Операция добавлена", {
+          type: "success",
         });
-
-        setSearchStatus(success ? "done" : "error");
+        playSuccessSound();
+        setSearchStatus("done");
       } catch (err) {
-        console.warn("[search] instant error", err);
-        setSearchStatus("error");
-        showToast(t("search_error") || "Ошибка поиска", {
-          type: "error",
-        });
+        console.warn("[op_new] instant batch error", err);
+        showToast(
+          err?.message || t("save_failed") || "Не удалось выполнить операцию",
+          { type: "error" }
+        );
         playFailSound();
+        setSearchStatus("error");
       } finally {
         focusBarcodeInput();
       }
