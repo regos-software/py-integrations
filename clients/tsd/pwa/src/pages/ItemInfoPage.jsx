@@ -63,6 +63,7 @@ function normalizeItemExt(ext) {
     id: Number(core.id ?? core.code ?? 0) || 0,
     name: core.name || "—",
     barcode: firstBarcode,
+    icps: core.icps || null,
     code: core.code != null ? String(core.code) : null,
     articul: core.articul || null,
     unit: unit.name || "шт",
@@ -104,7 +105,6 @@ export default function ItemInfoPage() {
   const [selectedExt, setSelectedExt] = useState(null);
   const [quantityInfo, setQuantityInfo] = useState([]);
   const [pricesInfo, setPricesInfo] = useState([]);
-  const [preCostInfo, setPreCostInfo] = useState([]);
   const [operations, setOperations] = useState([]);
   const [detailsLoading, setDetailsLoading] = useState(false);
 
@@ -210,10 +210,7 @@ export default function ItemInfoPage() {
         ),
         callApi(
           "references.price_type.get",
-          {
-            limit: 200,
-            sort_orders: [{ column: "Name", direction: "ASC" }],
-          },
+          {},
           formatFallback(
             t,
             "item_info.price_type_error",
@@ -235,8 +232,20 @@ export default function ItemInfoPage() {
           }))
         : [];
 
+      const defaultStockId = stockOptions[0]?.value ?? null;
+      const defaultPriceTypeId = priceTypeOptions[0]?.value ?? null;
+
       setStocks(stockOptions);
       setPriceTypes(priceTypeOptions);
+
+      setSettings((prev) => ({
+        stockId: prev.stockId ?? defaultStockId,
+        priceTypeId: prev.priceTypeId ?? defaultPriceTypeId,
+      }));
+      setSettingsDraft((prev) => ({
+        stockId: prev.stockId ?? defaultStockId,
+        priceTypeId: prev.priceTypeId ?? defaultPriceTypeId,
+      }));
     } catch (err) {
       console.warn("[item-info] load options", err);
       showToast(err.message, { type: "error" });
@@ -292,22 +301,25 @@ export default function ItemInfoPage() {
   const loadItemDetails = useCallback(
     async (itemId, overrideSettings) => {
       const activeSettings = overrideSettings ?? settings;
-      const stockId = activeSettings.stockId
-        ? Number(activeSettings.stockId)
-        : null;
-      const priceTypeId = activeSettings.priceTypeId
-        ? Number(activeSettings.priceTypeId)
-        : null;
+      const fallbackStockId = stocks[0]?.value ?? null;
+      const fallbackPriceTypeId = priceTypes[0]?.value ?? null;
+
+      const stockId =
+        activeSettings.stockId != null
+          ? Number(activeSettings.stockId)
+          : fallbackStockId != null
+          ? Number(fallbackStockId)
+          : null;
+      const priceTypeId =
+        activeSettings.priceTypeId != null
+          ? Number(activeSettings.priceTypeId)
+          : fallbackPriceTypeId != null
+          ? Number(fallbackPriceTypeId)
+          : null;
 
       setDetailsLoading(true);
       try {
-        console.log("[item-info] load details", {
-          itemId,
-          stockId,
-          priceTypeId,
-        });
-        const nowTs = Math.floor(Date.now() / 1000);
-        const [extData, quantityData, priceData, preCostData, operationData] =
+        const [extData, quantityData, priceData, operationData] =
           await Promise.all([
             callApi(
               "references.item.get_ext",
@@ -338,6 +350,7 @@ export default function ItemInfoPage() {
               "references.item_price.get",
               {
                 item_ids: [itemId],
+                price_type_ids: priceTypeId ? [priceTypeId] : undefined,
               },
               formatFallback(
                 t,
@@ -368,9 +381,6 @@ export default function ItemInfoPage() {
           Array.isArray(quantityData?.result) ? quantityData.result : []
         );
         setPricesInfo(Array.isArray(priceData?.result) ? priceData.result : []);
-        setPreCostInfo(
-          Array.isArray(preCostData?.result) ? preCostData.result : []
-        );
         setOperations(
           Array.isArray(operationData?.result) ? operationData.result : []
         );
@@ -381,7 +391,7 @@ export default function ItemInfoPage() {
         setDetailsLoading(false);
       }
     },
-    [callApi, settings, showToast, t]
+    [callApi, priceTypes, settings, showToast, stocks, t]
   );
 
   const handlePickItem = useCallback(
@@ -410,13 +420,22 @@ export default function ItemInfoPage() {
 
       setSearchStatus("loading");
       try {
+        const fallbackStockId = stocks[0]?.value ?? null;
+        const fallbackPriceTypeId = priceTypes[0]?.value ?? null;
+
         const payload = {
           search: normalized,
           limit: DEFAULT_LIMIT,
         };
-        if (settings.stockId) payload.stock_id = Number(settings.stockId);
-        if (settings.priceTypeId)
-          payload.price_type_id = Number(settings.priceTypeId);
+        const stockId =
+          settings.stockId ??
+          (fallbackStockId != null ? fallbackStockId : null);
+        const priceTypeId =
+          settings.priceTypeId ??
+          (fallbackPriceTypeId != null ? fallbackPriceTypeId : null);
+
+        if (stockId != null) payload.stock_id = Number(stockId);
+        if (priceTypeId != null) payload.price_type_id = Number(priceTypeId);
 
         console.log("search payload", payload);
 
@@ -440,7 +459,6 @@ export default function ItemInfoPage() {
           setSelectedExt(null);
           setQuantityInfo([]);
           setPricesInfo([]);
-          setPreCostInfo([]);
           setOperations([]);
           setSearchStatus("empty");
           showToast(formatFallback(t, "common.nothing", "Ничего не найдено"), {
@@ -472,9 +490,11 @@ export default function ItemInfoPage() {
       callApi,
       focusBarcodeInput,
       handlePickItem,
+      priceTypes,
       settings.priceTypeId,
       settings.stockId,
       showToast,
+      stocks,
       t,
     ]
   );
@@ -564,14 +584,21 @@ export default function ItemInfoPage() {
   }, [settings]);
 
   const selectedCore = selectedExt?.item || {};
-  const selectedUnit = selectedCore?.unit || {};
   const selectedQuantity = selectedExt?.quantity || null;
   const selectedPriceType = selectedExt?.pricetype || null;
   const selectedPrice = selectedExt?.price ?? null;
+  const lastPurchaseCost = selectedExt?.last_purchase_cost ?? null;
   const docCurrency =
     selectedPriceType?.currency?.code_chr ||
     selectedPriceType?.currency?.code ||
     "UZS";
+  const colorName = selectedCore.color?.name || "—";
+  const sizeName = selectedCore.size?.name || "—";
+  const producerName = selectedCore.producer?.name || "—";
+  const countryName = selectedCore.country?.name || "—";
+  const partnerName =
+    selectedCore.partner?.name ||
+    (selectedCore.partner_id != null ? String(selectedCore.partner_id) : "—");
 
   return (
     <section className={sectionClass()} id="item-info">
@@ -780,6 +807,11 @@ export default function ItemInfoPage() {
                   {selectedItem.barcode}
                 </span>
               ) : null}
+              {selectedItem?.icps ? (
+                <span>
+                  {formatFallback(t, "item.icps", "ИКПУ")}: {selectedItem.icps}
+                </span>
+              ) : null}
               <span>
                 {formatFallback(t, "item.unit", "Ед.изм.")}:{" "}
                 {selectedItem?.unit}
@@ -787,7 +819,7 @@ export default function ItemInfoPage() {
             </div>
           </div>
 
-          <div className="grid gap-3 sm:grid-cols-2">
+          <div className="grid gap-3 grid-cols-2">
             <div>
               <p className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
                 {formatFallback(t, "item_info.group", "Группа")}
@@ -822,6 +854,46 @@ export default function ItemInfoPage() {
                   : "—"}
               </p>
             </div>
+            <div>
+              <p className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                {formatFallback(t, "item_info.color", "Цвет")}
+              </p>
+              <p className="text-sm text-slate-900 dark:text-slate-100">
+                {colorName}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                {formatFallback(t, "item_info.size", "Размер")}
+              </p>
+              <p className="text-sm text-slate-900 dark:text-slate-100">
+                {sizeName}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                {formatFallback(t, "item_info.producer", "Производитель")}
+              </p>
+              <p className="text-sm text-slate-900 dark:text-slate-100">
+                {producerName}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                {formatFallback(t, "item_info.country", "Страна")}
+              </p>
+              <p className="text-sm text-slate-900 dark:text-slate-100">
+                {countryName}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                {formatFallback(t, "item_info.partner", "Код Контрагента")}
+              </p>
+              <p className="text-sm text-slate-900 dark:text-slate-100">
+                {partnerName}
+              </p>
+            </div>
           </div>
 
           {selectedQuantity ? (
@@ -840,7 +912,12 @@ export default function ItemInfoPage() {
                   )}
                 </p>
                 <p className="text-lg font-semibold text-slate-900 dark:text-slate-100">
-                  {fmt.number(selectedQuantity.common ?? 0)}
+                  {fmt.number(
+                    quantityInfo?.reduce(
+                      (acc, item) => acc + (item.common ?? 0),
+                      0
+                    )
+                  )}
                 </p>
               </div>
               <div
@@ -857,7 +934,12 @@ export default function ItemInfoPage() {
                   )}
                 </p>
                 <p className="text-lg font-semibold text-slate-900 dark:text-slate-100">
-                  {fmt.number(selectedQuantity.allowed ?? 0)}
+                  {fmt.number(
+                    quantityInfo?.reduce(
+                      (acc, item) => acc + (item.allowed ?? 0),
+                      0
+                    ) ?? 0
+                  )}
                 </p>
               </div>
               <div
@@ -874,13 +956,18 @@ export default function ItemInfoPage() {
                   )}
                 </p>
                 <p className="text-lg font-semibold text-slate-900 dark:text-slate-100">
-                  {fmt.number(selectedQuantity.booked ?? 0)}
+                  {fmt.number(
+                    quantityInfo?.reduce(
+                      (acc, item) => acc + (item.booked ?? 0),
+                      0
+                    ) ?? 0
+                  )}
                 </p>
               </div>
             </div>
           ) : null}
 
-          {selectedPrice != null ? (
+          <div className="flex flex-wrap gap-6">
             <div>
               <p className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
                 {formatFallback(t, "item_info.current_price", "Текущая цена")}
@@ -893,7 +980,15 @@ export default function ItemInfoPage() {
                 )}
               </p>
             </div>
-          ) : null}
+            <div>
+              <p className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                {formatFallback(t, "item_info.precost", "Себестоимость")}
+              </p>
+              <p className="text-lg font-semibold text-slate-900 dark:text-slate-100">
+                {fmt.money(lastPurchaseCost, docCurrency)}
+              </p>
+            </div>
+          </div>
 
           {selectedCore.description ? (
             <div>
@@ -919,7 +1014,6 @@ export default function ItemInfoPage() {
 
       <div className="grid gap-4 xl:grid-cols-2">
         <div className={cardClass("space-y-3")} id="item-info-quantity">
-          {JSON.stringify(settings)}
           <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-50">
             {formatFallback(t, "item_info.quantity", "Остатки по складам")}
           </h2>
@@ -950,24 +1044,16 @@ export default function ItemInfoPage() {
                   </p>
                   <div className="flex flex-wrap gap-3 text-sm text-slate-600 dark:text-slate-300">
                     <span>
-                      {formatFallback(
-                        t,
-                        "item_info.quantity_common",
-                        "Доступно"
-                      )}
-                      : {fmt.number(entry.common ?? 0)}
+                      {formatFallback(t, "item_info.quantity_common", "Дст")}:{" "}
+                      {fmt.number(entry.common ?? 0)}
                     </span>
                     <span>
-                      {formatFallback(
-                        t,
-                        "item_info.quantity_allowed",
-                        "Разрешено"
-                      )}
-                      : {fmt.number(entry.allowed ?? 0)}
+                      {formatFallback(t, "item_info.quantity_allowed", "Раз")}:{" "}
+                      {fmt.number(entry.allowed ?? 0)}
                     </span>
                     <span>
-                      {formatFallback(t, "item_info.quantity_booked", "Резерв")}
-                      : {fmt.number(entry.booked ?? 0)}
+                      {formatFallback(t, "item_info.quantity_booked", "Рез")}:{" "}
+                      {fmt.number(entry.booked ?? 0)}
                     </span>
                   </div>
                 </div>
@@ -1033,39 +1119,6 @@ export default function ItemInfoPage() {
                   </div>
                 );
               })}
-            </div>
-          )}
-        </div>
-
-        <div className={cardClass("space-y-3")} id="item-info-precost">
-          <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-50">
-            {formatFallback(t, "item_info.precost", "Себестоимость")}
-          </h2>
-          {preCostInfo.length === 0 ? (
-            <p className={mutedTextClass()}>
-              {formatFallback(
-                t,
-                "item_info.precost_empty",
-                "Нет данных о себестоимости"
-              )}
-            </p>
-          ) : (
-            <div className="space-y-2">
-              {preCostInfo.map((entry) => (
-                <div
-                  key={`${entry.item_id}-${entry.cost_date || "date"}`}
-                  className="rounded-xl border border-slate-200 px-3 py-2 dark:border-slate-700"
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                      {fmt.money(entry.value ?? 0, docCurrency)}
-                    </p>
-                    <p className={mutedTextClass()}>
-                      {entry.cost_date ? fmt.unix(entry.cost_date) : "—"}
-                    </p>
-                  </div>
-                </div>
-              ))}
             </div>
           )}
         </div>
