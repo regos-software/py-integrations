@@ -27,6 +27,22 @@ export default function HomePage() {
       </h1>
       <div className="flex flex-col gap-4">
         <button
+          id="btn-item-info"
+          type="button"
+          className={buttonClass({
+            variant: "primary",
+            size: "lg",
+            block: true,
+          })}
+          onClick={() => navigate("/item-info")}
+        >
+          <span id="btn-item-info-txt">
+            {t("item_info.menu") === "item_info.menu"
+              ? "Информация по номенклатуре"
+              : t("item_info.menu") || "Информация по номенклатуре"}
+          </span>
+        </button>
+        <button
           id="btn-doc-purchase"
           type="button"
           className={buttonClass({

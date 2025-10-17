@@ -10,6 +10,8 @@ from schemas.api.references.item import (
     Item,
     ItemExt,
     ItemGetExtRequest,
+    ItemGetQuantityRequest,
+    ItemGetQuantityResponse,
     ItemGetRequest,
     ItemSearchRequest,
 )
@@ -21,6 +23,7 @@ class ItemService:
     PATH_SEARCH = "Item/Search"
     PATH_GET = "Item/Get"
     PATH_GET_EXT = "Item/GetExt"
+    PATH_GET_QUANTITY = "Item/GetQuantity"
 
     def __init__(self, api):
         self.api = api
@@ -34,4 +37,13 @@ class ItemService:
     async def get_ext(self, req: ItemGetExtRequest) -> APIBaseResponse[List[ItemExt]]:
         return await self.api.call(
             self.PATH_GET_EXT, req, APIBaseResponse[List[ItemExt]]
+        )
+
+    async def get_quantity(
+        self, req: ItemGetQuantityRequest
+    ) -> ItemGetQuantityResponse:
+        return await self.api.call(
+            self.PATH_GET_QUANTITY,
+            req,
+            ItemGetQuantityResponse,
         )

@@ -8,41 +8,18 @@ from typing import List, Optional
 from pydantic import Field as PydField, field_validator
 from pydantic.config import ConfigDict
 
-from schemas.api.base import BaseSchema
+from schemas.api.base import APIBaseResponse, BaseSchema
+from schemas.api.references.tax_vat import TaxVat
 from schemas.api.references.brand import Brand
+from schemas.api.references.color import Color
+from schemas.api.references.country import Country
+from schemas.api.references.department import Department
 from schemas.api.references.price_type import PriceType
+from schemas.api.references.producer import Producer
+from schemas.api.references.size import SizeChart
 from schemas.api.references.stock import Stock
 from schemas.api.references.unit import Unit
-
-
-# ---------- Плейсхолдеры справочников ----------
-# (оставлены как есть для обратной совместимости с текущими импортами)
-class ItemGroup(BaseSchema):  # BC: прежнее имя и пустая структура сохранены
-    model_config = ConfigDict(extra="ignore")
-
-
-class Department(BaseSchema):  # BC
-    model_config = ConfigDict(extra="ignore")
-
-
-class TaxVat(BaseSchema):  # BC
-    model_config = ConfigDict(extra="ignore")
-
-
-class Color(BaseSchema):  # BC
-    model_config = ConfigDict(extra="ignore")
-
-
-class SizeChart(BaseSchema):  # BC
-    model_config = ConfigDict(extra="ignore")
-
-
-class Producer(BaseSchema):  # BC
-    model_config = ConfigDict(extra="ignore")
-
-
-class Country(BaseSchema):  # BC
-    model_config = ConfigDict(extra="ignore")
+from schemas.api.references.item_group import ItemGroup
 
 
 # ---------- Общие enum ----------
@@ -69,7 +46,7 @@ class Item(BaseSchema):
     model_config = ConfigDict(extra="ignore")
 
     id: int = PydField(..., description="ID номенклатуры.")
-    group: Optional[ItemGroup] = PydField(None, description="Группа номенклатуры.")
+    group: ItemGroup = PydField(None, description="Группа номенклатуры.")
     department: Optional[Department] = PydField(None, description="Подразделение.")
     vat: Optional[TaxVat] = PydField(None, description="Ставка НДС.")
     barcode_list: Optional[str] = PydField(
@@ -341,6 +318,29 @@ class ItemQuantity(BaseSchema):
     booked: Optional[Decimal] = PydField(None, description="Зарезервировано.")
 
 
+# ---------- GetQuantity ----------
+class ItemGetQuantityRequest(BaseSchema):
+    """Параметры запроса количества номенклатуры."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: int = PydField(..., ge=1, description="ID номенклатуры.")
+    stock_ids: Optional[List[int]] = PydField(
+        None, description="Список ID складов для выборки остатков."
+    )
+    date: Optional[int] = PydField(
+        None,
+        ge=0,
+        description="Дата, на которую требуется остаток (Unix time, секунд).",
+    )
+
+
+class ItemGetQuantityResponse(APIBaseResponse[List[ItemQuantity]]):
+    """Ответ на запрос /v1/Item/GetQuantity."""
+
+    model_config = ConfigDict(extra="ignore")
+
+
 class ItemExt(BaseSchema):
     """Элемент расширенной выдачи."""
 
@@ -483,10 +483,11 @@ __all__ = [
     "ItemGetExtImageSize",
     "ItemGetExtRequest",
     "ItemQuantity",
+    "ItemGetQuantityRequest",
+    "ItemGetQuantityResponse",
     "ItemExt",
     "ItemImportData",
     "ItemImportRequest",
-    # Плейсхолдеры (для текущей обратной совместимости импортов):
     "ItemGroup",
     "Department",
     "TaxVat",
