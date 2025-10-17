@@ -825,180 +825,183 @@ export default function OpNewPage({ definition: definitionProp }) {
         </div>
       )}
 
-      <div className={cardClass("space-y-4")}>
-        <div className="space-y-2">
-          <label className={labelClass()} htmlFor="qty">
-            {t("op.qty") || "Количество"}
-            <span className={cn(mutedTextClass(), "ml-1")}>*</span>
-          </label>
-          <input
-            id="qty"
-            type="number"
-            inputMode={picked?.unit_piece ? "numeric" : "decimal"}
-            step={picked?.unit_piece ? 1 : "0.01"}
-            value={quantity}
-            onChange={(event) => {
-              const nextValue = event.target.value;
-              if (picked?.unit_piece) {
-                if (/^\d*$/.test(nextValue)) {
-                  setQuantity(nextValue);
-                }
-                return;
-              }
-              setQuantity(nextValue);
-            }}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                if (showCostField) {
-                  document.getElementById("cost")?.focus();
-                } else if (showPriceField) {
-                  document.getElementById("price")?.focus();
-                } else {
-                  handleSubmit();
-                }
-              }
-            }}
-            className={inputClass()}
-          />
-          <div className="flex flex-wrap gap-2" id="qty-quick">
-            {QUICK_QTY.map((value) => (
-              <button
-                key={value}
-                type="button"
-                className={chipClass()}
-                data-inc={value}
-                onClick={() =>
-                  setQuantity((prev) => {
-                    const base = toNumber(prev);
-                    if (picked?.unit_piece) {
-                      const normalized = Number.isFinite(base)
-                        ? Math.trunc(base)
-                        : 0;
-                      return String(normalized + value);
+      {searchMode !== SEARCH_MODES.INSANT && (
+        <>
+          <div className={cardClass("space-y-4")}>
+            <div className="space-y-2">
+              <label className={labelClass()} htmlFor="qty">
+                {t("op.qty") || "Количество"}
+                <span className={cn(mutedTextClass(), "ml-1")}>*</span>
+              </label>
+              <input
+                id="qty"
+                type="number"
+                inputMode={picked?.unit_piece ? "numeric" : "decimal"}
+                step={picked?.unit_piece ? 1 : "0.01"}
+                value={quantity}
+                onChange={(event) => {
+                  const nextValue = event.target.value;
+                  if (picked?.unit_piece) {
+                    if (/^\d*$/.test(nextValue)) {
+                      setQuantity(nextValue);
                     }
-                    return String(base + value);
-                  })
-                }
-              >
-                +{value}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {showCostField && (
-          <div className="space-y-2">
-            <label className={labelClass()} htmlFor="cost">
-              {t("op.cost") || "Стоимость"}
-            </label>
-            <input
-              id="cost"
-              type="number"
-              inputMode="decimal"
-              value={cost}
-              onChange={(event) => setCost(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  if (showPriceField) {
-                    document.getElementById("price")?.focus();
-                  } else {
-                    handleSubmit();
+                    return;
                   }
-                }
-              }}
-              className={inputClass()}
-            />
-            {lpcLabel && (
-              <div className="flex flex-wrap gap-2" id="cost-hint-wrap">
-                <button
-                  type="button"
-                  id="cost-hint"
-                  className={chipClass()}
-                  onClick={() => setCost(String(picked.last_purchase_cost))}
-                >
-                  {lpcLabel}
-                </button>
+                  setQuantity(nextValue);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    if (showCostField) {
+                      document.getElementById("cost")?.focus();
+                    } else if (showPriceField) {
+                      document.getElementById("price")?.focus();
+                    } else {
+                      handleSubmit();
+                    }
+                  }
+                }}
+                className={inputClass()}
+              />
+              <div className="flex flex-wrap gap-2" id="qty-quick">
+                {QUICK_QTY.map((value) => (
+                  <button
+                    key={value}
+                    type="button"
+                    className={chipClass()}
+                    data-inc={value}
+                    onClick={() =>
+                      setQuantity((prev) => {
+                        const base = toNumber(prev);
+                        if (picked?.unit_piece) {
+                          const normalized = Number.isFinite(base)
+                            ? Math.trunc(base)
+                            : 0;
+                          return String(normalized + value);
+                        }
+                        return String(base + value);
+                      })
+                    }
+                  >
+                    +{value}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {showCostField && (
+              <div className="space-y-2">
+                <label className={labelClass()} htmlFor="cost">
+                  {t("op.cost") || "Стоимость"}
+                </label>
+                <input
+                  id="cost"
+                  type="number"
+                  inputMode="decimal"
+                  value={cost}
+                  onChange={(event) => setCost(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      if (showPriceField) {
+                        document.getElementById("price")?.focus();
+                      } else {
+                        handleSubmit();
+                      }
+                    }
+                  }}
+                  className={inputClass()}
+                />
+                {lpcLabel && (
+                  <div className="flex flex-wrap gap-2" id="cost-hint-wrap">
+                    <button
+                      type="button"
+                      id="cost-hint"
+                      className={chipClass()}
+                      onClick={() => setCost(String(picked.last_purchase_cost))}
+                    >
+                      {lpcLabel}
+                    </button>
+                  </div>
+                )}
               </div>
             )}
-          </div>
-        )}
 
-        {showPriceField && (
-          <div className="space-y-2">
-            <label className={labelClass()} htmlFor="price">
-              {t("op.price") || "Цена"}
-            </label>
-            <input
-              id="price"
-              type="number"
-              inputMode="decimal"
-              value={price}
-              onChange={(event) => setPrice(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  handleSubmit();
-                }
-              }}
-              className={inputClass()}
-            />
-            {priceLabel && (
-              <div className="flex flex-wrap gap-2" id="price-hint-wrap">
-                <button
-                  type="button"
-                  id="price-hint"
-                  className={chipClass()}
-                  onClick={() => setPrice(String(picked.price))}
-                >
-                  {priceLabel}
-                </button>
+            {showPriceField && (
+              <div className="space-y-2">
+                <label className={labelClass()} htmlFor="price">
+                  {t("op.price") || "Цена"}
+                </label>
+                <input
+                  id="price"
+                  type="number"
+                  inputMode="decimal"
+                  value={price}
+                  onChange={(event) => setPrice(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      handleSubmit();
+                    }
+                  }}
+                  className={inputClass()}
+                />
+                {priceLabel && (
+                  <div className="flex flex-wrap gap-2" id="price-hint-wrap">
+                    <button
+                      type="button"
+                      id="price-hint"
+                      className={chipClass()}
+                      onClick={() => setPrice(String(picked.price))}
+                    >
+                      {priceLabel}
+                    </button>
+                  </div>
+                )}
               </div>
             )}
+
+            <div className="space-y-2">
+              <label className={labelClass()} htmlFor="description">
+                {t("op.description") || "Описание"}
+              </label>
+              <input
+                id="description"
+                type="text"
+                value={description}
+                placeholder={
+                  t("op.description.placeholder") ||
+                  "Комментарий к операции (необяз.)"
+                }
+                onChange={(event) => setDescription(event.target.value)}
+                className={inputClass()}
+              />
+            </div>
           </div>
-        )}
-
-        <div className="space-y-2">
-          <label className={labelClass()} htmlFor="description">
-            {t("op.description") || "Описание"}
-          </label>
-          <input
-            id="description"
-            type="text"
-            value={description}
-            placeholder={
-              t("op.description.placeholder") ||
-              "Комментарий к операции (необяз.)"
-            }
-            onChange={(event) => setDescription(event.target.value)}
-            className={inputClass()}
-          />
-        </div>
-      </div>
-
-      <div className="flex flex-wrap items-center justify-end gap-3">
-        <button
-          id="btn-op-cancel"
-          type="button"
-          className={buttonClass({ variant: "ghost", size: "sm" })}
-          onClick={() => navigate(buildDocPath({ id: docId }))}
-          disabled={saving}
-        >
-          {t("common.cancel") || "Отмена"}
-        </button>
-        <button
-          id="btn-op-save"
-          type="button"
-          className={buttonClass({ variant: "primary", size: "sm" })}
-          onClick={handleSubmit}
-          disabled={saving}
-        >
-          {saving
-            ? t("op.saving") || "Сохранение..."
-            : t("common.save") || "Сохранить"}
-        </button>
-      </div>
+          <div className="flex flex-wrap items-center justify-end gap-3">
+            <button
+              id="btn-op-cancel"
+              type="button"
+              className={buttonClass({ variant: "ghost", size: "sm" })}
+              onClick={() => navigate(buildDocPath({ id: docId }))}
+              disabled={saving}
+            >
+              {t("common.cancel") || "Отмена"}
+            </button>
+            <button
+              id="btn-op-save"
+              type="button"
+              className={buttonClass({ variant: "primary", size: "sm" })}
+              onClick={handleSubmit}
+              disabled={saving}
+            >
+              {saving
+                ? t("op.saving") || "Сохранение..."
+                : t("common.save") || "Сохранить"}
+            </button>
+          </div>
+        </>
+      )}
 
       {resultModalOpen ? (
         <div
