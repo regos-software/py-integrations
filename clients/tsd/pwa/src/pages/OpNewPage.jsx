@@ -633,7 +633,7 @@ export default function OpNewPage({ definition: definitionProp }) {
   if (!docDefinition) {
     return (
       <section className={sectionClass()} id="op-new">
-        <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-50">
+        <h1 className="text-xs font-semibold text-slate-900 dark:text-slate-50">
           {operationTitle}
         </h1>
         <p className={mutedTextClass()}>
@@ -645,7 +645,7 @@ export default function OpNewPage({ definition: definitionProp }) {
 
   return (
     <section className={sectionClass()} id="op-new">
-      <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-50">
+      <h1 className="text-xs font-semibold text-slate-900 dark:text-slate-50">
         {operationTitle}
       </h1>
 
