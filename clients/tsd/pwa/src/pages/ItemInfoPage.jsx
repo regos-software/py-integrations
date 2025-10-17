@@ -336,72 +336,127 @@ export default function ItemInfoPage() {
         activeSettings.limit ?? DEFAULT_LIMIT
       );
 
+      const stockIds = stockId ? [stockId] : undefined;
+      const priceTypeIds = priceTypeId ? [priceTypeId] : undefined;
+
+      const loadErrorMessage = formatFallback(
+        t,
+        "item_info.load_error",
+        "Не удалось загрузить номенклатуру"
+      );
+      const quantityErrorMessage = formatFallback(
+        t,
+        "item_info.quantity_error",
+        "Не удалось получить остатки"
+      );
+      const priceErrorMessage = formatFallback(
+        t,
+        "item_info.price_error",
+        "Не удалось получить цены"
+      );
+      const operationsErrorMessage = formatFallback(
+        t,
+        "item_info.operations_error",
+        "Не удалось получить операции"
+      );
+
+      const batchPayload = {
+        stop_on_error: false,
+        requests: [
+          {
+            key: "item",
+            path: "Item/GetExt",
+            payload: {
+              ids: [itemId],
+              limit: 1,
+              ...(stockId ? { stock_id: stockId } : {}),
+              ...(priceTypeId ? { price_type_id: priceTypeId } : {}),
+            },
+          },
+          {
+            key: "quantity",
+            path: "Item/GetQuantity",
+            payload: {
+              item_id: itemId,
+            },
+          },
+          {
+            key: "prices",
+            path: "ItemPrice/Get",
+            payload: {
+              item_ids: [itemId],
+            },
+          },
+          {
+            key: "operations",
+            path: "ItemOperation/Get",
+            payload: {
+              item_id: itemId,
+              limit: operationLimit,
+            },
+          },
+        ],
+      };
+
       setDetailsLoading(true);
       try {
-        const [extData, quantityData, priceData, operationData] =
-          await Promise.all([
-            callApi(
-              "references.item.get_ext",
-              {
-                ids: [itemId],
-                limit: 1,
-                stock_id: stockId || undefined,
-                price_type_id: priceTypeId || undefined,
-              },
-              formatFallback(
-                t,
-                "item_info.load_error",
-                "Не удалось загрузить номенклатуру"
-              )
-            ),
-            callApi(
-              "references.item.get_quantity",
-              {
-                item_id: itemId,
-              },
-              formatFallback(
-                t,
-                "item_info.quantity_error",
-                "Не удалось получить остатки"
-              )
-            ),
-            callApi(
-              "references.item_price.get",
-              {
-                item_ids: [itemId],
-                price_type_ids: priceTypeId ? [priceTypeId] : undefined,
-              },
-              formatFallback(
-                t,
-                "item_info.price_error",
-                "Не удалось получить цены"
-              )
-            ),
-            callApi(
-              "references.item_operation.get",
-              {
-                item_id: itemId,
-                limit: operationLimit,
-              },
-              formatFallback(
-                t,
-                "item_info.operations_error",
-                "Не удалось получить операции"
-              )
-            ),
-          ]);
+        const {
+          ok: batchOk,
+          status,
+          data: batchData,
+        } = await api("batch.run", batchPayload);
 
-        console.log("ext", extData.result[0].item.group);
-        const ext = Array.isArray(extData?.result) ? extData.result[0] : null;
-        if (ext) {
-          setSelectedExt(ext);
+        if (!batchOk) {
+          const description =
+            batchData?.description || `${loadErrorMessage} (${status})`;
+          throw new Error(description || loadErrorMessage);
         }
-        setQuantityInfo(
-          Array.isArray(quantityData?.result) ? quantityData.result : []
+
+        if (!batchData?.ok) {
+          const description = batchData?.description || loadErrorMessage;
+          throw new Error(description || loadErrorMessage);
+        }
+
+        const steps = Array.isArray(batchData.result) ? batchData.result : [];
+        const findStep = (key) => steps.find((step) => step?.key === key);
+        const ensureStep = (key, fallback) => {
+          const step = findStep(key);
+          if (!step) {
+            throw new Error(fallback);
+          }
+          const response = step.response;
+          if (!response || response.ok === false) {
+            const description =
+              response?.result?.description ||
+              response?.description ||
+              fallback;
+            throw new Error(description || fallback);
+          }
+          return response;
+        };
+
+        const extResponse = ensureStep("item", loadErrorMessage);
+        const quantityResponse = ensureStep("quantity", quantityErrorMessage);
+        const priceResponse = ensureStep("prices", priceErrorMessage);
+        const operationsResponse = ensureStep(
+          "operations",
+          operationsErrorMessage
         );
-        setPricesInfo(Array.isArray(priceData?.result) ? priceData.result : []);
+
+        const ext = Array.isArray(extResponse?.result)
+          ? extResponse.result[0]
+          : null;
+        setSelectedExt(ext ?? null);
+        setQuantityInfo(
+          Array.isArray(quantityResponse?.result) ? quantityResponse.result : []
+        );
+        setPricesInfo(
+          Array.isArray(priceResponse?.result) ? priceResponse.result : []
+        );
         setOperations(
-          Array.isArray(operationData?.result) ? operationData.result : []
+          Array.isArray(operationsResponse?.result)
+            ? operationsResponse.result
+            : []
         );
       } catch (err) {
         console.warn("[item-info] load details", err);
@@ -410,7 +465,7 @@ export default function ItemInfoPage() {
         setDetailsLoading(false);
       }
     },
-    [callApi, priceTypes, settings, showToast, stocks, t]
+    [api, priceTypes, settings, showToast, stocks, t]
   );
 
   const handlePickItem = useCallback(
