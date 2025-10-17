@@ -42,7 +42,7 @@ const ZXING_FORMATS = [
   BarcodeFormat.CODE_128,
 ].filter(Boolean);
 
-const DEFAULT_LIMIT = 2;
+const DEFAULT_LIMIT = 20;
 const OPERATION_LIMIT_MIN = 1;
 const OPERATION_LIMIT_MAX = 1000;
 const SIMILAR_SEARCH_STEP_KEY = "similar_search";
@@ -1640,6 +1640,74 @@ export default function ItemInfoPage() {
               </button>
             </div>
           </div>
+          {similarItems.length > 0 ? (
+            <div
+              className={cardClass("space-y-3 xl:col-span-2")}
+              id="item-info-similar"
+            >
+              <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-50">
+                {formatFallback(
+                  t,
+                  "item_info.similar_items",
+                  "Похожие номенклатуры"
+                )}
+              </h2>
+              <div className="grid gap-3 xl:grid-cols-4">
+                {similarItems.map((item) => (
+                  <button
+                    key={`${item.id}-${item.barcode || "similar"}`}
+                    type="button"
+                    className={cardClass(
+                      "w-full text-left transition hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-500 focus-visible:ring-offset-2"
+                    )}
+                    onClick={() => handlePickSimilarItem(item)}
+                  >
+                    <div className="flex flex-col gap-1 ">
+                      <span className="text-sm font-semibold text-slate-900 dark:text-slate-50">
+                        {item.name || "—"}
+                      </span>
+                      <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                        {item.code ? (
+                          <span>
+                            {formatFallback(t, "item.code", "Код")}: {item.code}
+                          </span>
+                        ) : null}
+                        {item.articul ? (
+                          <span>
+                            {formatFallback(t, "item.articul", "Артикул")}:{" "}
+                            {item.articul}
+                          </span>
+                        ) : null}
+                        {item.barcode ? <span>{item.barcode}</span> : null}
+                        {item.color ? (
+                          <span>
+                            {formatFallback(t, "item_info.color", "Цвет")}:{" "}
+                            {item.color}
+                          </span>
+                        ) : null}
+                        {item.size ? (
+                          <span>
+                            {formatFallback(t, "item_info.size", "Размер")}:{" "}
+                            {item.size}
+                          </span>
+                        ) : null}
+                        {item.sizeChart ? (
+                          <span>
+                            {formatFallback(
+                              t,
+                              "item_info.size_chart",
+                              "Размерная сетка"
+                            )}
+                            : {item.sizeChart}
+                          </span>
+                        ) : null}
+                      </div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
           {filteredOperations.length === 0 ? (
             <p className={mutedTextClass()}>
               {operationFiltersActive
@@ -1707,75 +1775,6 @@ export default function ItemInfoPage() {
             </div>
           )}
         </div>
-
-        {similarItems.length > 0 ? (
-          <div
-            className={cardClass("space-y-3 xl:col-span-2")}
-            id="item-info-similar"
-          >
-            <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-50">
-              {formatFallback(
-                t,
-                "item_info.similar_items",
-                "Похожие номенклатуры"
-              )}
-            </h2>
-            <div className="grid gap-3 xl:grid-cols-4">
-              {similarItems.map((item) => (
-                <button
-                  key={`${item.id}-${item.barcode || "similar"}`}
-                  type="button"
-                  className={cardClass(
-                    "w-full text-left transition hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-500 focus-visible:ring-offset-2"
-                  )}
-                  onClick={() => handlePickSimilarItem(item)}
-                >
-                  <div className="flex flex-col gap-1 ">
-                    <span className="text-sm font-semibold text-slate-900 dark:text-slate-50">
-                      {item.name || "—"}
-                    </span>
-                    <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-                      {item.code ? (
-                        <span>
-                          {formatFallback(t, "item.code", "Код")}: {item.code}
-                        </span>
-                      ) : null}
-                      {item.articul ? (
-                        <span>
-                          {formatFallback(t, "item.articul", "Артикул")}:{" "}
-                          {item.articul}
-                        </span>
-                      ) : null}
-                      {item.barcode ? <span>{item.barcode}</span> : null}
-                      {item.color ? (
-                        <span>
-                          {formatFallback(t, "item_info.color", "Цвет")}:{" "}
-                          {item.color}
-                        </span>
-                      ) : null}
-                      {item.size ? (
-                        <span>
-                          {formatFallback(t, "item_info.size", "Размер")}:{" "}
-                          {item.size}
-                        </span>
-                      ) : null}
-                      {item.sizeChart ? (
-                        <span>
-                          {formatFallback(
-                            t,
-                            "item_info.size_chart",
-                            "Размерная сетка"
-                          )}
-                          : {item.sizeChart}
-                        </span>
-                      ) : null}
-                    </div>
-                  </div>
-                </button>
-              ))}
-            </div>
-          </div>
-        ) : null}
       </div>
 
       {resultModalOpen ? (
