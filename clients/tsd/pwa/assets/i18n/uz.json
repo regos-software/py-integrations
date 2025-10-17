@@ -21,6 +21,8 @@
   "doc.title_prefix": "Hujjat",
   "doc.to_list": "Ro'yxatga qaytish",
   "doc.inventory.responsible": "Mas'ul xodim",
+  "doc.inventory.close": "Yopish",
+  "doc.inventory.open": "Ochish",
   "doc_inventory": "Inventarizatsiya",
   "doc_purchase": "Kontragentdan kirim",
   "doc_sales": "Kontragentga jo'natish",

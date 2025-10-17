@@ -533,7 +533,8 @@ const inventoryDefinition = {
           document_id: docId,
           item_id: Number(picked.id),
           actual_quantity: quantity,
-          update_actual_quantity: true,
+          datetime: Math.floor(Date.now() / 1000),
+          update_actual_quantity: false,
         },
       ];
     },

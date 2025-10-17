@@ -21,6 +21,8 @@
   "doc.title_prefix": "Документ",
   "doc.to_list": "К списку",
   "doc.inventory.responsible": "Ответственный",
+  "doc.inventory.close": "Закрыть",
+  "doc.inventory.open": "Открыть",
   "doc_inventory": "Инвентаризация",
   "doc_purchase": "Поступление от контрагента",
   "doc_sales": "Отгрузка контрагенту",

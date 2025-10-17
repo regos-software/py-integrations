@@ -203,7 +203,7 @@ export default function DocsPage({ definition: definitionProp }) {
         );
       }
       setStocks(
-        data?.map((stock) => ({
+        data?.result?.map((stock) => ({
           id: Number(stock.id ?? stock.ID ?? stock.code ?? 0),
           name: stock.name || stock.Name || `#${stock.id || stock.ID}`,
         }))

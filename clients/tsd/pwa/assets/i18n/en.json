@@ -21,6 +21,8 @@
   "doc.title_prefix": "Document",
   "doc.to_list": "Back to list",
   "doc.inventory.responsible": "Responsible",
+  "doc.inventory.close": "Close",
+  "doc.inventory.open": "Open",
   "doc_inventory": "Inventory count",
   "doc_purchase": "Goods receipt (from supplier)",
   "doc_sales": "Shipment to counterparty",

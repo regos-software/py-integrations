@@ -598,88 +598,6 @@ export default function DocPage({ definition: definitionProp }) {
     }
   };
 
-  const status = useMemo(() => {
-    if (!doc) return "";
-    const segments = [];
-    const performed = t("docs.status.performed");
-    const performedLabel =
-      performed === "docs.status.performed" ? "проведён" : performed;
-    const newLabel = t("docs.status.new");
-    const newValue = newLabel === "docs.status.new" ? "новый" : newLabel;
-    segments.push(doc.performed ? performedLabel : newValue);
-    if (doc.blocked) {
-      const blocked = t("docs.status.blocked");
-      segments.push(blocked === "docs.status.blocked" ? "блок." : blocked);
-    }
-    return segments.join(" • ");
-  }, [doc, t]);
-
-  const backToDocsLabel = useMemo(() => {
-    const preferred = t("docs.back_to_list");
-    if (preferred && preferred !== "docs.back_to_list") return preferred;
-    const fallback = t("nav.back");
-    return fallback === "nav.back" ? "Назад" : fallback;
-  }, [t]);
-
-  const actionsLabel = useMemo(() => {
-    const value = t("doc.actions");
-    return value === "doc.actions" ? "Действия" : value;
-  }, [t]);
-
-  const addOperationLabel = useMemo(() => {
-    const value = t("doc.add_op");
-    return value === "doc.add_op" ? "Добавить" : value;
-  }, [t]);
-
-  const nothingLabel = useMemo(() => {
-    const value = t("doc.no_ops") || t("common.nothing");
-    return value || "Операций ещё нет";
-  }, [t]);
-
-  const metaSegments = useMemo(() => {
-    if (!doc) return [];
-    const currency = doc.currency?.code_chr || "UZS";
-    const roundTo = doc.price_type?.round_to ?? null;
-    return [
-      doc.date ? unixToLocal(doc.date) : null,
-      doc.partner?.name || null,
-      fmt.money(doc.amount ?? 0, currency, roundTo),
-    ].filter(Boolean);
-  }, [doc, fmt, unixToLocal]);
-
-  const partnerLabel = useMemo(() => {
-    const detail = docDefinition?.detail || {};
-    const key = detail.partnerLabelKey || "doc.partner";
-    const translated = t(key);
-    if (translated && translated !== key) return translated;
-    const fallbackKey = detail.partnerLabelFallback;
-    if (fallbackKey) return fallbackKey;
-    const generic = t("partner");
-    if (generic && generic !== "partner") return generic;
-    return "Партнёр";
-  }, [docDefinition, t]);
-
-  const goToDocs = useCallback(() => {
-    const buildDocsPath =
-      docDefinition?.navigation?.buildDocsPath || (() => "/docs");
-    navigate(buildDocsPath(doc), { replace: true });
-  }, [doc, docDefinition, navigate]);
-
-  const goToNewOperation = useCallback(() => {
-    const buildNewOperationPath =
-      docDefinition?.navigation?.buildNewOperationPath ||
-      ((docId) => `/doc/${docId}/op/new`);
-    navigate(buildNewOperationPath(docIdNumber));
-  }, [docDefinition, docIdNumber, navigate]);
-
-  const handleOpenActions = useCallback(() => {
-    setActionsOpen(true);
-  }, []);
-
-  const handleCloseActions = useCallback(() => {
-    setActionsOpen(false);
-  }, []);
-
   const handlePerform = useCallback(async () => {
     const detail = docDefinition?.detail || {};
     const action = detail.performAction;
@@ -857,6 +775,186 @@ export default function DocPage({ definition: definitionProp }) {
     });
     setActionsOpen(false);
   }, [doc?.id, docDefinition?.key, docIdNumber]);
+
+  const status = useMemo(() => {
+    if (!doc) return "";
+    const segments = [];
+    const performed = t("docs.status.performed");
+    const performedLabel =
+      performed === "docs.status.performed" ? "проведён" : performed;
+    const newLabel = t("docs.status.new");
+    const newValue = newLabel === "docs.status.new" ? "новый" : newLabel;
+    segments.push(doc.performed ? performedLabel : newValue);
+    if (doc.blocked) {
+      const blocked = t("docs.status.blocked");
+      segments.push(blocked === "docs.status.blocked" ? "блок." : blocked);
+    }
+    return segments.join(" • ");
+  }, [doc, t]);
+
+  const backToDocsLabel = useMemo(() => {
+    const preferred = t("docs.back_to_list");
+    if (preferred && preferred !== "docs.back_to_list") return preferred;
+    const fallback = t("nav.back");
+    return fallback === "nav.back" ? "Назад" : fallback;
+  }, [t]);
+
+  const actionsLabel = useMemo(() => {
+    const value = t("doc.actions");
+    return value === "doc.actions" ? "Действия" : value;
+  }, [t]);
+
+  const addOperationLabel = useMemo(() => {
+    const value = t("doc.add_op");
+    return value === "doc.add_op" ? "Добавить" : value;
+  }, [t]);
+
+  const actionButtons = useMemo(() => {
+    const detail = docDefinition?.detail || {};
+    const isInventory = docDefinition?.key === "inventory";
+
+    const performLabel = () => {
+      if (isInventory) {
+        const value = t("doc.inventory.close");
+        return value === "doc.inventory.close" ? "Закрыть" : value;
+      }
+      const value = t("doc.perform");
+      return value === "doc.perform" ? "Провести" : value || "Провести";
+    };
+
+    const cancelLabel = () => {
+      if (isInventory) {
+        const value = t("doc.inventory.open");
+        return value === "doc.inventory.open" ? "Открыть" : value;
+      }
+      const value = t("doc.cancel_perform");
+      return value === "doc.cancel_perform"
+        ? "Отменить проведение"
+        : value || "Отменить проведение";
+    };
+
+    const lockLabel = () => {
+      const value = t("doc.lock");
+      return value === "doc.lock" ? "Заблокировать" : value;
+    };
+
+    const unlockLabel = () => {
+      const value = t("doc.unlock");
+      return value === "doc.unlock" ? "Разблокировать" : value;
+    };
+
+    const results = [];
+
+    if (detail.performAction) {
+      results.push({
+        key: "perform",
+        visible: !doc?.performed,
+        onClick: handlePerform,
+        variant: "primary",
+        label: performLabel(),
+      });
+    }
+
+    if (detail.cancelPerformAction) {
+      results.push({
+        key: "cancel-perform",
+        visible: Boolean(doc?.performed),
+        onClick: handleCancelPerform,
+        variant: "ghost",
+        label: cancelLabel(),
+      });
+    }
+
+    if (detail.lockAction) {
+      results.push({
+        key: "lock",
+        visible: !doc?.blocked,
+        onClick: handleLock,
+        variant: "ghost",
+        label: lockLabel(),
+      });
+    }
+
+    if (detail.unlockAction) {
+      results.push({
+        key: "unlock",
+        visible: Boolean(doc?.blocked),
+        onClick: handleUnlock,
+        variant: "ghost",
+        label: unlockLabel(),
+      });
+    }
+
+    results.push({
+      key: "print",
+      visible: true,
+      onClick: handlePrint,
+      variant: "ghost",
+      label:
+        t("doc.print") === "doc.print" ? "Печать" : t("doc.print") || "Печать",
+    });
+
+    return results.filter((action) => action.visible);
+  }, [
+    doc?.blocked,
+    doc?.performed,
+    docDefinition,
+    handleCancelPerform,
+    handleLock,
+    handlePerform,
+    handlePrint,
+    handleUnlock,
+    t,
+  ]);
+
+  const nothingLabel = useMemo(() => {
+    const value = t("doc.no_ops") || t("common.nothing");
+    return value || "Операций ещё нет";
+  }, [t]);
+
+  const metaSegments = useMemo(() => {
+    if (!doc) return [];
+    const currency = doc.currency?.code_chr || "UZS";
+    const roundTo = doc.price_type?.round_to ?? null;
+    return [
+      doc.date ? unixToLocal(doc.date) : null,
+      doc.partner?.name || null,
+      fmt.money(doc.amount ?? 0, currency, roundTo),
+    ].filter(Boolean);
+  }, [doc, fmt, unixToLocal]);
+
+  const partnerLabel = useMemo(() => {
+    const detail = docDefinition?.detail || {};
+    const key = detail.partnerLabelKey || "doc.partner";
+    const translated = t(key);
+    if (translated && translated !== key) return translated;
+    const fallbackKey = detail.partnerLabelFallback;
+    if (fallbackKey) return fallbackKey;
+    const generic = t("partner");
+    if (generic && generic !== "partner") return generic;
+    return "Партнёр";
+  }, [docDefinition, t]);
+
+  const goToDocs = useCallback(() => {
+    const buildDocsPath =
+      docDefinition?.navigation?.buildDocsPath || (() => "/docs");
+    navigate(buildDocsPath(doc), { replace: true });
+  }, [doc, docDefinition, navigate]);
+
+  const goToNewOperation = useCallback(() => {
+    const buildNewOperationPath =
+      docDefinition?.navigation?.buildNewOperationPath ||
+      ((docId) => `/doc/${docId}/op/new`);
+    navigate(buildNewOperationPath(docIdNumber));
+  }, [docDefinition, docIdNumber, navigate]);
+
+  const handleOpenActions = useCallback(() => {
+    setActionsOpen(true);
+  }, []);
+
+  const handleCloseActions = useCallback(() => {
+    setActionsOpen(false);
+  }, []);
 
   if (!docDefinition) {
     return (
@@ -1072,59 +1170,19 @@ export default function DocPage({ definition: definitionProp }) {
             </div>
 
             <div className="flex flex-col gap-3">
-              {!doc?.performed ? (
+              {actionButtons.map((action) => (
                 <button
+                  key={action.key}
                   type="button"
-                  className={buttonClass({ variant: "primary", size: "md" })}
-                  onClick={handlePerform}
+                  className={buttonClass({
+                    variant: action.variant,
+                    size: "md",
+                  })}
+                  onClick={action.onClick}
                 >
-                  {t("doc.perform") === "doc.perform"
-                    ? "Провести"
-                    : t("doc.perform") || "Провести"}
+                  {action.label}
                 </button>
-              ) : null}
-              {doc?.performed ? (
-                <button
-                  type="button"
-                  className={buttonClass({ variant: "ghost", size: "md" })}
-                  onClick={handleCancelPerform}
-                >
-                  {t("doc.cancel_perform") === "doc.cancel_perform"
-                    ? "Отменить проведение"
-                    : t("doc.cancel_perform") || "Отменить проведение"}
-                </button>
-              ) : null}
-              {!doc?.blocked ? (
-                <button
-                  type="button"
-                  className={buttonClass({ variant: "ghost", size: "md" })}
-                  onClick={handleLock}
-                >
-                  {t("doc.lock") === "doc.lock"
-                    ? "Заблокировать"
-                    : t("doc.lock") || "Заблокировать"}
-                </button>
-              ) : null}
-              {doc?.blocked ? (
-                <button
-                  type="button"
-                  className={buttonClass({ variant: "ghost", size: "md" })}
-                  onClick={handleUnlock}
-                >
-                  {t("doc.unlock") === "doc.unlock"
-                    ? "Разблокировать"
-                    : t("doc.unlock") || "Разблокировать"}
-                </button>
-              ) : null}
-              <button
-                type="button"
-                className={buttonClass({ variant: "ghost", size: "md" })}
-                onClick={handlePrint}
-              >
-                {t("doc.print") === "doc.print"
-                  ? "Печать"
-                  : t("doc.print") || "Печать"}
-              </button>
+              ))}
             </div>
           </div>
         </div>

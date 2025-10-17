@@ -56,7 +56,7 @@ class ArrayResult(BaseSchema):
     row_affected: int = PydField(
         ..., ge=0, description="Количество обработанных записей."
     )
-    ids: list[int] = PydField(
+    ids: Optional[list[int]] = PydField(
         default_factory=list, description="Идентификаторы затронутых сущностей."
     )
 
