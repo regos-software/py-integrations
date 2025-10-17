@@ -45,6 +45,8 @@ const ZXING_FORMATS = [
 const DEFAULT_LIMIT = 20;
 const OPERATION_LIMIT_MIN = 1;
 const OPERATION_LIMIT_MAX = 1000;
+const SIMILAR_SEARCH_STEP_KEY = "similar_search";
+const SIMILAR_EXT_STEP_KEY = "similar_ext";
 
 function normalizeOperationLimit(value) {
   const parsed = Number(value);
@@ -77,9 +79,31 @@ function normalizeItemExt(ext) {
     icps: core.icps || null,
     code: core.code != null ? String(core.code) : null,
     articul: core.articul || null,
+    color: core.color?.name || null,
+    size: core.size?.name || null,
+    sizeChart:
+      core.sizechart?.name ||
+      core.size_chart?.name ||
+      core.size_chart_name ||
+      core.size?.sizechart?.name ||
+      core.size?.size_chart?.name ||
+      null,
     unit: unit.name || "шт",
     raw: ext,
   };
+}
+
+function normalizeArticulValue(value) {
+  if (value == null) return null;
+  const stringValue = String(value).trim();
+  return stringValue.length > 0 ? stringValue : null;
+}
+
+function normalizeNameValue(value) {
+  if (value == null) return null;
+  const trimmed = String(value).trim();
+  if (!trimmed) return null;
+  return trimmed.toLocaleLowerCase();
 }
 
 function formatFallback(t, key, fallback) {
@@ -118,6 +142,7 @@ export default function ItemInfoPage() {
   const [quantityInfo, setQuantityInfo] = useState([]);
   const [pricesInfo, setPricesInfo] = useState([]);
   const [operations, setOperations] = useState([]);
+  const [similarItems, setSimilarItems] = useState([]);
   const [detailsLoading, setDetailsLoading] = useState(false);
 
   const barcodeInputRef = useRef(null);
@@ -315,7 +340,25 @@ export default function ItemInfoPage() {
   useEffect(() => stopScan, [stopScan]);
 
   const loadItemDetails = useCallback(
-    async (itemId, overrideSettings) => {
+    async (itemInput, overrideSettings) => {
+      const itemInfo =
+        itemInput && typeof itemInput === "object" ? itemInput : null;
+      const itemIdCandidate = itemInfo?.id != null ? itemInfo.id : itemInput;
+      const itemIdNumber = Number(itemIdCandidate);
+
+      if (!itemIdNumber || !Number.isFinite(itemIdNumber)) {
+        setSelectedExt(null);
+        setQuantityInfo([]);
+        setPricesInfo([]);
+        setOperations([]);
+        setSimilarItems([]);
+        return;
+      }
+
+      const itemName =
+        typeof itemInfo?.name === "string" ? itemInfo.name.trim() : "";
+      const itemArticulRaw = itemInfo?.articul ?? null;
+
       const activeSettings = overrideSettings ?? settings;
       const fallbackStockId = stocks[0]?.value ?? null;
       const fallbackPriceTypeId = priceTypes[0]?.value ?? null;
@@ -359,46 +402,74 @@ export default function ItemInfoPage() {
         "item_info.operations_error",
         "Не удалось получить операции"
       );
+      const similarErrorMessage = formatFallback(
+        t,
+        "item_info.similar_error",
+        "Не удалось получить похожие позиции"
+      );
+
+      const similarSearchName =
+        itemName || itemInfo?.raw?.item?.name || "${item.result.0.item.name}";
+
+      const requests = [
+        {
+          key: "item",
+          path: "Item/GetExt",
+          payload: {
+            ids: [itemIdNumber],
+            limit: 1,
+            ...(stockId ? { stock_id: stockId } : {}),
+            ...(priceTypeId ? { price_type_id: priceTypeId } : {}),
+          },
+        },
+        {
+          key: SIMILAR_SEARCH_STEP_KEY,
+          path: "Item/Search",
+          payload: {
+            name: similarSearchName,
+          },
+        },
+        {
+          key: SIMILAR_EXT_STEP_KEY,
+          path: "Item/GetExt",
+          payload: {
+            ids: `\${${SIMILAR_SEARCH_STEP_KEY}.result}`,
+            limit: DEFAULT_LIMIT,
+            ...(stockId ? { stock_id: stockId } : {}),
+            ...(priceTypeId ? { price_type_id: priceTypeId } : {}),
+          },
+        },
+        {
+          key: "quantity",
+          path: "Item/GetQuantity",
+          payload: {
+            item_id: itemIdNumber,
+          },
+        },
+        {
+          key: "prices",
+          path: "ItemPrice/Get",
+          payload: {
+            item_ids: [itemIdNumber],
+          },
+        },
+        {
+          key: "operations",
+          path: "ItemOperation/Get",
+          payload: {
+            item_id: itemIdNumber,
+            limit: operationLimit,
+          },
+        },
+      ];
 
       const batchPayload = {
         stop_on_error: false,
-        requests: [
-          {
-            key: "item",
-            path: "Item/GetExt",
-            payload: {
-              ids: [itemId],
-              limit: 1,
-              ...(stockId ? { stock_id: stockId } : {}),
-              ...(priceTypeId ? { price_type_id: priceTypeId } : {}),
-            },
-          },
-          {
-            key: "quantity",
-            path: "Item/GetQuantity",
-            payload: {
-              item_id: itemId,
-            },
-          },
-          {
-            key: "prices",
-            path: "ItemPrice/Get",
-            payload: {
-              item_ids: [itemId],
-            },
-          },
-          {
-            key: "operations",
-            path: "ItemOperation/Get",
-            payload: {
-              item_id: itemId,
-              limit: operationLimit,
-            },
-          },
-        ],
+        requests,
       };
 
       setDetailsLoading(true);
+      setSimilarItems([]);
       try {
         const {
           ok: batchOk,
@@ -436,6 +507,14 @@ export default function ItemInfoPage() {
         };
 
         const extResponse = ensureStep("item", loadErrorMessage);
+        const similarSearchResponse = ensureStep(
+          SIMILAR_SEARCH_STEP_KEY,
+          similarErrorMessage
+        );
+        const similarExtResponse = ensureStep(
+          SIMILAR_EXT_STEP_KEY,
+          similarErrorMessage
+        );
         const quantityResponse = ensureStep("quantity", quantityErrorMessage);
         const priceResponse = ensureStep("prices", priceErrorMessage);
         const operationsResponse = ensureStep(
@@ -458,8 +537,47 @@ export default function ItemInfoPage() {
             ? operationsResponse.result
             : []
         );
+
+        const targetArticul =
+          normalizeArticulValue(itemArticulRaw) ??
+          normalizeArticulValue(ext?.item?.articul);
+        const targetName =
+          normalizeNameValue(itemInfo?.name) ??
+          normalizeNameValue(ext?.item?.name);
+
+        let similarList = [];
+        if (similarExtResponse && Array.isArray(similarExtResponse.result)) {
+          const seenIds = new Set();
+          similarList = similarExtResponse.result
+            .map((itemExt) => normalizeItemExt(itemExt))
+            .filter((similar) => {
+              if (!similar || !similar.id) return false;
+              if (similar.id === itemIdNumber) return false;
+
+              const articulValue = normalizeArticulValue(similar.articul);
+              const similarNameValue = normalizeNameValue(similar.name);
+
+              const matchesArticul =
+                targetArticul != null &&
+                articulValue != null &&
+                articulValue === targetArticul;
+
+              const matchesName =
+                targetArticul == null &&
+                targetName != null &&
+                similarNameValue != null &&
+                similarNameValue === targetName;
+
+              if (!matchesArticul && !matchesName) return false;
+              if (seenIds.has(similar.id)) return false;
+              seenIds.add(similar.id);
+              return true;
+            });
+        }
+        setSimilarItems(similarList);
       } catch (err) {
         console.warn("[item-info] load details", err);
+        setSimilarItems([]);
         showToast(err.message, { type: "error" });
       } finally {
         setDetailsLoading(false);
@@ -476,15 +594,38 @@ export default function ItemInfoPage() {
       setSearchStatus("done");
       setBarcodeValue("");
       setQueryValue("");
-      await loadItemDetails(item.id, settings);
+      await loadItemDetails(item, settings);
     },
     [loadItemDetails, settings]
+  );
+
+  const resetUI = useCallback(() => {
+    setSelectedItem(null);
+    setSelectedExt(null);
+    setQuantityInfo([]);
+    setPricesInfo([]);
+    setOperations([]);
+    setSimilarItems([]);
+  }, []);
+
+  const handlePickSimilarItem = useCallback(
+    async (item) => {
+      if (typeof window !== "undefined") {
+        window.requestAnimationFrame(() => {
+          window.scrollTo({ top: 0, behavior: "smooth" });
+        });
+      }
+      resetUI();
+      await handlePickItem(item);
+    },
+    [handlePickItem]
   );
 
   const handleSearch = useCallback(
     async (queryText, mode = SEARCH_MODES.NAME) => {
       const normalized = queryText.trim();
       if (!normalized) {
+        setSimilarItems([]);
         if (mode === SEARCH_MODES.SCAN) {
           setBarcodeValue("");
           focusBarcodeInput();
@@ -492,6 +633,7 @@ export default function ItemInfoPage() {
         return;
       }
 
+      setSimilarItems([]);
       setSearchStatus("loading");
       try {
         const fallbackStockId = stocks[0]?.value ?? null;
@@ -534,6 +676,7 @@ export default function ItemInfoPage() {
           setQuantityInfo([]);
           setPricesInfo([]);
           setOperations([]);
+          setSimilarItems([]);
           setSearchStatus("empty");
           showToast(formatFallback(t, "common.nothing", "Ничего не найдено"), {
             type: "error",
@@ -552,6 +695,7 @@ export default function ItemInfoPage() {
       } catch (err) {
         console.warn("[item-info] search error", err);
         setSearchStatus("error");
+        setSimilarItems([]);
         showToast(err.message, { type: "error" });
       } finally {
         if (mode === SEARCH_MODES.SCAN) {
@@ -649,7 +793,7 @@ export default function ItemInfoPage() {
     setSettings(normalized);
     setSettingsOpen(false);
     if (selectedItem) {
-      loadItemDetails(selectedItem.id, normalized);
+      loadItemDetails(selectedItem, normalized);
     }
   }, [loadItemDetails, selectedItem, settingsDraft]);
 
@@ -1263,6 +1407,75 @@ export default function ItemInfoPage() {
             </div>
           )}
         </div>
+
+        {similarItems.length > 0 ? (
+          <div
+            className={cardClass("space-y-3 xl:col-span-2")}
+            id="item-info-similar"
+          >
+            <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-50">
+              {formatFallback(
+                t,
+                "item_info.similar_items",
+                "Похожие номенклатуры"
+              )}
+            </h2>
+            <div className="grid gap-3 xl:grid-cols-4">
+              {similarItems.map((item) => (
+                <button
+                  key={`${item.id}-${item.barcode || "similar"}`}
+                  type="button"
+                  className={cardClass(
+                    "w-full text-left transition hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-500 focus-visible:ring-offset-2"
+                  )}
+                  onClick={() => handlePickSimilarItem(item)}
+                >
+                  <div className="flex flex-col gap-1 ">
+                    <span className="text-sm font-semibold text-slate-900 dark:text-slate-50">
+                      {item.name || "—"}
+                    </span>
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                      {item.code ? (
+                        <span>
+                          {formatFallback(t, "item.code", "Код")}: {item.code}
+                        </span>
+                      ) : null}
+                      {item.articul ? (
+                        <span>
+                          {formatFallback(t, "item.articul", "Артикул")}:{" "}
+                          {item.articul}
+                        </span>
+                      ) : null}
+                      {item.barcode ? <span>{item.barcode}</span> : null}
+                      {item.color ? (
+                        <span>
+                          {formatFallback(t, "item_info.color", "Цвет")}:{" "}
+                          {item.color}
+                        </span>
+                      ) : null}
+                      {item.size ? (
+                        <span>
+                          {formatFallback(t, "item_info.size", "Размер")}:{" "}
+                          {item.size}
+                        </span>
+                      ) : null}
+                      {item.sizeChart ? (
+                        <span>
+                          {formatFallback(
+                            t,
+                            "item_info.size_chart",
+                            "Размерная сетка"
+                          )}
+                          : {item.sizeChart}
+                        </span>
+                      ) : null}
+                    </div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : null}
       </div>
 
       {resultModalOpen ? (

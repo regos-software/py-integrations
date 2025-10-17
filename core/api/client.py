@@ -93,7 +93,7 @@ class APIClient:
                 raw = gzip.decompress(raw)
 
             text = raw.decode("utf-8", errors="replace")
-            logger.info(f"Response text (first 500 chars): {text[:500]}")
+            logger.debug(f"Response text (first 500 chars): {text[:500]}")
 
             data = json.loads(text)
             return response_model(**data)
