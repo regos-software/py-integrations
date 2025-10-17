@@ -11,6 +11,7 @@ class OperatingCash(BaseModel):
     """
     Модель, описывающая кассы розничной торговли.
     """
+
     id: int  # ID розничной кассы
     stock: Stock  # Склад
     key: str  # Ключ безопасности кассы

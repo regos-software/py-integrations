@@ -1,84 +1,127 @@
+"""Схемы документов поступлений."""
+
 from __future__ import annotations
 
 from decimal import Decimal
-from enum import Enum
 from typing import List, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import ConfigDict, Field as PydField, model_validator
 
-from schemas.api.base import APIBaseResponse
+from schemas.api.base import APIBaseResponse, BaseSchema
 from schemas.api.rbac.user import User
-from schemas.api.refrences.partner import Partner
-from schemas.api.refrences.stock import Stock
-from schemas.api.refrences.currency import Currency
-
-from schemas.api.refrences.price_type import PriceType
-from schemas.api.refrences.tax import VatCalculationType
-
-
-# ==== Модели ====
+from schemas.api.references.currency import Currency
+from schemas.api.references.partner import Partner
+from schemas.api.references.price_type import PriceType
+from schemas.api.references.stock import Stock
+from schemas.api.references.tax import VatCalculationType
 
 
-class DocPurchase(BaseModel):
-    """Документ поступления от контрагента"""
+class DocPurchase(BaseSchema):
+    """Рид-модель документа поступления."""
 
-    id: int
-    date: int  # unixtime sec
-    code: str
-    partner: Partner
-    stock: Stock
-    currency: Currency
-    #   contract: DocContractShort
-    description: Optional[str] = None
-    amount: Decimal
-    exchange_rate: Decimal
-    additional_expenses_amount: Decimal
-    vat_calculation_type: VatCalculationType
-    attached_user: Optional[User] = None
-    price_type: Optional[PriceType] = None
-    blocked: bool
-    current_user_blocked: Optional[bool] = None
-    performed: bool
-    deleted_mark: bool
-    last_update: int  # unixtime sec
+    model_config = ConfigDict(extra="ignore")
+
+    id: int = PydField(..., ge=1, description="ID документа.")
+    date: int = PydField(..., ge=0, description="Дата документа (Unix).")
+    code: str = PydField(..., description="Номер документа.")
+    partner: Partner = PydField(..., description="Контрагент.")
+    stock: Stock = PydField(..., description="Склад, на который поступает товар.")
+    currency: Currency = PydField(..., description="Валюта документа.")
+    description: Optional[str] = PydField(
+        default=None, description="Комментарий к документу."
+    )
+    amount: Decimal = PydField(..., description="Сумма документа.")
+    exchange_rate: Decimal = PydField(..., description="Курс валюты.")
+    additional_expenses_amount: Decimal = PydField(
+        ..., description="Дополнительные расходы."
+    )
+    vat_calculation_type: VatCalculationType = PydField(
+        ..., description="Тип расчёта НДС."
+    )
+    attached_user: Optional[User] = PydField(
+        default=None, description="Прикреплённый пользователь."
+    )
+    price_type: Optional[PriceType] = PydField(default=None, description="Тип цены.")
+    blocked: bool = PydField(..., description="Документ заблокирован.")
+    current_user_blocked: Optional[bool] = PydField(
+        default=None, description="Текущий пользователь заблокировал документ."
+    )
+    performed: bool = PydField(..., description="Документ проведён.")
+    deleted_mark: bool = PydField(..., description="Документ помечен на удаление.")
+    last_update: int = PydField(
+        ..., ge=0, description="Метка последнего изменения (Unix)."
+    )
 
 
-class DocPurchaseSortOrder(BaseModel):
-    column: Optional[str] = None
-    direction: Optional[str] = None
+class DocPurchaseSortOrder(BaseSchema):
+    """Пара сортировки для списка документов."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    column: Optional[str] = PydField(
+        default=None, description="Название колонки для сортировки."
+    )
+    direction: Optional[str] = PydField(
+        default=None, description="Направление сортировки (ASC|DESC)."
+    )
 
 
-class DocPurchaseGetRequest(BaseModel):
-    """
-    Параметры запроса для /v1/DocPurchase/Get
-    """
+class DocPurchaseGetRequest(BaseSchema):
+    """Фильтры получения документов поступления."""
 
-    # Период
-    start_date: Optional[int] = None  # unixtime sec
-    end_date: Optional[int] = None  # unixtime sec
+    model_config = ConfigDict(extra="forbid")
 
-    # Фильтры по идентификаторам
-    ids: Optional[List[int]] = None
-    firm_ids: Optional[List[int]] = None
-    stock_ids: Optional[List[int]] = None
-    partner_ids: Optional[List[int]] = None
-    contract_ids: Optional[List[int]] = None
-    attached_user_ids: Optional[List[int]] = None
-
-    # Прочие фильтры
-    vat_calculation_type: Optional[VatCalculationType] = None
-    performed: Optional[bool] = None
-    blocked: Optional[bool] = None
-    deleted_mark: Optional[bool] = None
-    search: Optional[str] = None
-
-    # Сортировка и пэйджинг
-    sort_orders: Optional[List[DocPurchaseSortOrder]] = None
-    limit: Optional[int] = Field(default=None, ge=1)
-    offset: Optional[int] = Field(default=None, ge=0)
+    start_date: Optional[int] = PydField(
+        default=None, ge=0, description="Начало периода (Unix)."
+    )
+    end_date: Optional[int] = PydField(
+        default=None, ge=0, description="Конец периода (Unix)."
+    )
+    ids: Optional[List[int]] = PydField(
+        default=None, description="Список ID документов."
+    )
+    firm_ids: Optional[List[int]] = PydField(
+        default=None, description="Фильтр по ID фирм."
+    )
+    stock_ids: Optional[List[int]] = PydField(
+        default=None, description="Фильтр по ID складов."
+    )
+    partner_ids: Optional[List[int]] = PydField(
+        default=None, description="Фильтр по ID контрагентов."
+    )
+    contract_ids: Optional[List[int]] = PydField(
+        default=None, description="Фильтр по ID договоров."
+    )
+    attached_user_ids: Optional[List[int]] = PydField(
+        default=None, description="Фильтр по ID прикреплённых пользователей."
+    )
+    vat_calculation_type: Optional[VatCalculationType] = PydField(
+        default=None, description="Тип расчёта НДС."
+    )
+    performed: Optional[bool] = PydField(
+        default=None, description="Фильтр по проведённым документам."
+    )
+    blocked: Optional[bool] = PydField(
+        default=None, description="Фильтр по заблокированным документам."
+    )
+    deleted_mark: Optional[bool] = PydField(
+        default=None, description="Фильтр по пометке удаления."
+    )
+    search: Optional[str] = PydField(
+        default=None, description="Поиск по номеру или описанию."
+    )
+    sort_orders: Optional[List[DocPurchaseSortOrder]] = PydField(
+        default=None, description="Список правил сортировки."
+    )
+    limit: Optional[int] = PydField(
+        default=None, ge=1, description="Количество записей в выдаче."
+    )
+    offset: Optional[int] = PydField(
+        default=None, ge=0, description="Смещение для пагинации."
+    )
 
     @model_validator(mode="after")
-    def _check_dates(cls, values: "DocPurchaseGetRequest"):
+    def _validate_dates(cls, values: "DocPurchaseGetRequest"):
         if (
             values.start_date
             and values.end_date
@@ -88,9 +131,15 @@ class DocPurchaseGetRequest(BaseModel):
         return values
 
 
-class DocPurchaseGetResponse(APIBaseResponse):
-    """Ответ /v1/DocPurchase/Get"""
+class DocPurchaseGetResponse(APIBaseResponse[List[DocPurchase]]):
+    """Ответ на запрос /v1/DocPurchase/Get."""
 
-    result: List[DocPurchase] = []
-    next_offset: Optional[int] = None
-    total: Optional[int] = None
+    model_config = ConfigDict(extra="ignore")
+
+
+__all__ = [
+    "DocPurchase",
+    "DocPurchaseGetRequest",
+    "DocPurchaseGetResponse",
+    "DocPurchaseSortOrder",
+]

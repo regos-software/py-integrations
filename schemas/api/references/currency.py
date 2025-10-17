@@ -7,9 +7,9 @@ from pydantic import BaseModel
 
 class Currency(BaseModel):
     id: int
-    code_num: Optional[int] = None 
-    code_chr: Optional[str] = None 
-    name: Optional[str] = None 
+    code_num: Optional[int] = None
+    code_chr: Optional[str] = None
+    name: Optional[str] = None
     exchange_rate: Decimal
     is_base: bool
     deleted: bool

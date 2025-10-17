@@ -9,6 +9,7 @@ class Firm(BaseModel):
     """
     Модель, описывающая предприятия.
     """
+
     id: int  # ID предприятия
     group: FirmGroup  # ID группы предприятия
     name: Optional[str] = None  # Наименование предприятия

@@ -1,5 +1,3 @@
-
-
 from typing import Optional
 from pydantic import BaseModel
 
@@ -8,6 +6,7 @@ class RetailCustomerGroup(BaseModel):
     """
     Группа покупателей.
     """
+
     id: int
     parent_id: Optional[int] = None
     name: str

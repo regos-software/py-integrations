@@ -38,12 +38,14 @@ def format_timestamp(ts: Optional[int]) -> str:
     Невалидные значения -> 'N/A'.
     """
     from datetime import datetime, timezone
+
     try:
         tz = timezone(timedelta(hours=5))  # UTC+5
 
         return datetime.fromtimestamp(int(ts), tz=tz).strftime("%Y-%m-%d %H:%M:%S")
     except Exception:
         return "N/A"
+
 
 def extract_chat_id(update: Dict) -> Optional[str]:
     """
@@ -83,7 +85,11 @@ def extract_chat_id(update: Dict) -> Optional[str]:
                     return str(chat["id"])
             # 2) приватный callback без message -> from.id
             from_user = cb.get("from")
-            if from_user and isinstance(from_user, dict) and from_user.get("id") is not None:
+            if (
+                from_user
+                and isinstance(from_user, dict)
+                and from_user.get("id") is not None
+            ):
                 return str(from_user["id"])
 
         my_chat_member = update.get("my_chat_member")

@@ -8,14 +8,12 @@ from typing import List, Optional
 from pydantic import Field as PydField, EmailStr, field_validator
 from pydantic.config import ConfigDict
 
-from schemas.api.base import APIBaseResponse, BaseSchema
+from schemas.api.base import BaseSchema
 from schemas.api.common.filters import Filters
 from schemas.api.common.sort_orders import SortOrders
-from schemas.api.docs.cheque import DocCheque
-from schemas.api.docs.cheque_operation import DocChequeOperation
-from schemas.api.refrences.fields import FieldValueAdds, FieldValueEdits, FieldValues
-from schemas.api.refrences.region import Region
-from schemas.api.refrences.retail_customer_group import RetailCustomerGroup
+from schemas.api.references.fields import FieldValueAdds, FieldValueEdits, FieldValues
+from schemas.api.references.region import Region
+from schemas.api.references.retail_customer_group import RetailCustomerGroup
 
 
 # ---------- Вспомогательные модели ----------
@@ -291,42 +289,3 @@ __all__ = [
     "RetailCustomerDeleteMarkRequest",
     "RetailCustomerDeleteRequest",
 ]
-
-
-class RetailCustomerGetResponse(APIBaseResponse):
-    """
-    Ответ от /v1/RetailCustomer/Get
-    """
-
-    result: List[RetailCustomer] = PydField(
-        ..., description="Массив покупателей (RetailCustomer[])."
-    )
-    next_offset: Optional[int] = PydField(
-        None, description="Смещение для следующего запроса."
-    )
-    total: Optional[int] = PydField(None, description="Общее количество записей.")
-
-
-class RetailCustomerGetLastChequeRequest(BaseSchema):
-    """
-    Параметры для тонкого метода get_last_cheque
-    """
-
-    model_config = ConfigDict(extra="forbid")
-    id: int = PydField(..., ge=1, description="ID покупателя.")
-    detail: bool = PydField(
-        False, description="Если true, возвращает детали чека (DocChequeOperations)."
-    )
-
-
-class RetailCustomerGetLastChequeResponse(BaseSchema):
-    """
-    Ответ от тонкого метода get_last_cheque
-    """
-
-    model_config = ConfigDict(extra="ignore")
-    ## object of Cheque type
-    cheque: Optional[DocCheque] = PydField(None, description="Чек.")
-    cheque_operations: Optional[List[DocChequeOperation]] = PydField(
-        None, description="Массив операций чека (DocChequeOperations[])."
-    )

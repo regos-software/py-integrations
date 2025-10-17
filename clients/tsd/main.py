@@ -1,26 +1,15 @@
-import asyncio
 import json
 import re
 import gzip
-from typing import Any, Dict, List, Optional, Sequence
-from email.message import EmailMessage
+from typing import Any, Dict, Optional
 
 from pathlib import Path
 from fastapi.encoders import jsonable_encoder
-from httpx import request
 from starlette.responses import JSONResponse
-from starlette.responses import FileResponse, HTMLResponse, Response, RedirectResponse
-import json
+from starlette.responses import FileResponse, HTMLResponse, Response
 
 
 from core.api.regos_api import RegosAPI
-from schemas.api.docs.cheque import SortOrder
-from schemas.api.docs.purchase import DocPurchaseGetRequest, DocPurchaseSortOrder
-from schemas.api.docs.purchase_operation import (
-    PurchaseOperationAddRequest,
-    PurchaseOperationDeleteItem,
-    PurchaseOperationEditItem,
-)
 from schemas.api.integrations.connected_integration_setting import (
     ConnectedIntegrationSettingRequest,
 )
@@ -30,10 +19,7 @@ from clients.base import ClientBase
 from core.logger import setup_logger
 from config.settings import settings
 from core.redis import redis_client
-from email.utils import formataddr
-from email.header import Header
 
-from schemas.integration.integration_base import IntegrationBase
 
 logger = setup_logger("tsd")
 
@@ -101,7 +87,7 @@ class TsdIntegration(ClientBase):
                         integration_key=self.INTEGRATION_KEY
                     )
                 )
-            )
+            ).result
 
         settings_map = {item.key.lower(): item.value for item in settings_response}
 

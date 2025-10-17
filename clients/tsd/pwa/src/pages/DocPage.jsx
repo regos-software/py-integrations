@@ -80,6 +80,90 @@ function OperationRow({ op, doc, onDelete, onSave, operationForm }) {
       ? priceValue * quantityNumber
       : null;
 
+  const metrics = useMemo(() => {
+    const conciseQuantity = Number.isFinite(quantityNumber)
+      ? fmt.number(quantityNumber)
+      : "—";
+    const quantityDisplay = `${conciseQuantity}${
+      unitName ? ` ${unitName}` : ""
+    }`.trim();
+
+    const showCost = formOptions.showCost !== false && op.cost != null;
+    const showPrice = formOptions.showPrice !== false && op.price != null;
+
+    const costUnit = showCost
+      ? fmt.money(costValue, currencyCode, priceRoundTo)
+      : "—";
+    const costTotalNumber =
+      showCost && Number.isFinite(quantityNumber)
+        ? costValue * quantityNumber
+        : null;
+    const costTotalDisplay = showCost
+      ? Number.isFinite(costTotalNumber)
+        ? fmt.money(costTotalNumber, currencyCode, priceRoundTo)
+        : fmt.money(costValue, currencyCode, priceRoundTo)
+      : "—";
+
+    const priceUnit = showPrice
+      ? fmt.money(priceValue, currencyCode, priceRoundTo)
+      : "—";
+    const priceTotalNumber =
+      showPrice && Number.isFinite(quantityNumber)
+        ? priceValue * quantityNumber
+        : null;
+    const priceTotalDisplay = showPrice
+      ? Number.isFinite(priceTotalNumber)
+        ? fmt.money(priceTotalNumber, currencyCode, priceRoundTo)
+        : fmt.money(priceValue, currencyCode, priceRoundTo)
+      : "—";
+
+    return [
+      {
+        key: "quantity",
+        value: quantityDisplay || "—",
+        accent: false,
+        title: t("op.qty") || "Количество",
+      },
+      {
+        key: "cost",
+        value: costUnit,
+        accent: false,
+        title: t("op.cost") || "Стоимость",
+      },
+      {
+        key: "cost-total",
+        value: costTotalDisplay,
+        accent: true,
+        title: t("op.cost_total") || "Сумма по себестоимости",
+      },
+      {
+        key: "price",
+        value: priceUnit,
+        accent: false,
+        title: t("op.price") || "Цена",
+      },
+      {
+        key: "price-total",
+        value: priceTotalDisplay,
+        accent: true,
+        title: t("op.price_total") || "Сумма по цене",
+      },
+    ];
+  }, [
+    currencyCode,
+    fmt,
+    formOptions.showCost,
+    formOptions.showPrice,
+    costValue,
+    op.cost,
+    op.price,
+    priceRoundTo,
+    priceValue,
+    quantityNumber,
+    t,
+    unitName,
+  ]);
+
   const handleFieldChange = (field) => (event) => {
     setForm((prev) => ({ ...prev, [field]: event.target.value }));
   };
@@ -127,7 +211,7 @@ function OperationRow({ op, doc, onDelete, onSave, operationForm }) {
   return (
     <div
       className={cardClass(
-        "space-y-4 transition hover:-translate-y-0.5 hover:shadow-md"
+        "space-y-3 transition hover:-translate-y-0.5 hover:shadow-md"
       )}
     >
       {!editing && (
@@ -174,71 +258,27 @@ function OperationRow({ op, doc, onDelete, onSave, operationForm }) {
               </button>
             </div>
           </div>
-          <div className="flex flex-col gap-3 text-sm text-slate-600 dark:text-slate-300">
-            <div className="flex flex-wrap items-center gap-2 font-medium">
-              <span>
-                <strong className="text-slate-900 dark:text-slate-100">
-                  {fmt.number(op.quantity)}
-                </strong>{" "}
-                {unitName}
-              </span>
-            </div>
-
-            {formOptions.showCost !== false && op.cost != null ? (
-              <div className="flex flex-col gap-1">
-                <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
-                  {t("op.cost") || "Стоимость"}
-                </span>
-                <div className="flex flex-wrap items-baseline justify-between gap-2">
-                  <span className="text-sm font-normal text-slate-500 dark:text-slate-400">
-                    {fmt.money(costValue, currencyCode, priceRoundTo)}
-                    {Number.isFinite(quantityNumber) && quantityNumber > 0
-                      ? ` × ${fmt.number(quantityNumber)}`
-                      : ""}
-                  </span>
-                  {Number.isFinite(costTotal) ? (
-                    <span className="text-lg font-semibold text-slate-900 dark:text-slate-100">
-                      {fmt.money(costTotal, currencyCode, priceRoundTo)}
-                    </span>
-                  ) : (
-                    <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
-                      {fmt.money(costValue, currencyCode, priceRoundTo)}
-                    </span>
-                  )}
-                </div>
+          <div className="grid grid-cols-5 items-center gap-2 text-[0.75rem] leading-tight">
+            {metrics.map((metric) => (
+              <div
+                key={metric.key}
+                title={metric.title}
+                className={cn(
+                  "flex min-w-0 items-center justify-end rounded-sm px-2 py-0.5",
+                  metric.accent && metric.value !== "—"
+                    ? "bg-slate-100 font-semibold text-slate-900 dark:bg-slate-800 dark:text-slate-100"
+                    : "text-slate-600 dark:text-slate-300"
+                )}
+              >
+                <span className="truncate">{metric.value}</span>
               </div>
-            ) : null}
-
-            {formOptions.showPrice !== false ? (
-              <div className="flex flex-col gap-1">
-                <span className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
-                  {t("op.price") || "Цена"}
-                </span>
-                <div className="flex flex-wrap items-baseline justify-between gap-2">
-                  <span className="text-sm font-normal text-slate-500 dark:text-slate-400">
-                    {fmt.money(priceValue, currencyCode, priceRoundTo)}
-                    {Number.isFinite(quantityNumber) && quantityNumber > 0
-                      ? ` × ${fmt.number(quantityNumber)}`
-                      : ""}
-                  </span>
-                  {Number.isFinite(priceTotal) ? (
-                    <span className="text-lg font-semibold text-slate-900 dark:text-slate-100">
-                      {fmt.money(priceTotal, currencyCode, priceRoundTo)}
-                    </span>
-                  ) : (
-                    <span className="text-sm font-medium text-slate-600 dark:text-slate-300">
-                      {fmt.money(priceValue, currencyCode, priceRoundTo)}
-                    </span>
-                  )}
-                </div>
-              </div>
-            ) : null}
+            ))}
           </div>
         </>
       )}
 
       {editing && (
-        <div className="flex flex-col gap-4">
+        <div className="flex flex-col gap-3">
           <div className="flex flex-col gap-2">
             <label className={labelClass()} htmlFor={`qty-${op.id}`}>
               {t("op.qty") || "Количество"}
@@ -364,12 +404,6 @@ export default function DocPage({ definition: definitionProp }) {
       const buildDocPayload = detail.buildDocPayload || ((docId) => docId);
       const buildOpsPayload =
         detail.buildOperationsPayload || ((docId) => docId);
-
-      const [docResponse, opsResponse] = await Promise.all([
-        api(detail.docAction, buildDocPayload(docIdNumber)),
-        api(detail.operationsAction, buildOpsPayload(docIdNumber)),
-      ]);
-
       const transformDoc = detail.transformDoc || ((data) => data);
       const transformOperations =
         detail.transformOperations ||
@@ -380,6 +414,83 @@ export default function DocPage({ definition: definitionProp }) {
           return [];
         });
 
+      const batchConfig = detail.batch;
+      if (batchConfig?.buildRequest) {
+        const batchPayload = batchConfig.buildRequest(docIdNumber, {
+          buildDocPayload,
+          buildOperationsPayload: buildOpsPayload,
+          definition: docDefinition,
+        });
+        const batchAction = batchConfig.action || "batch.run";
+        const {
+          ok: batchOk,
+          status,
+          data: batchData,
+        } = await api(batchAction, batchPayload);
+
+        if (!batchOk) {
+          const description =
+            batchData?.description ||
+            batchData?.error ||
+            "Batch request failed";
+          throw new Error(`${description} (${status})`);
+        }
+
+        const docKey = batchConfig.docKey || "doc";
+        const operationsKey = batchConfig.operationsKey || "operations";
+        const findStep = (key) =>
+          batchData?.result?.find?.((step) => step?.key === key);
+
+        const docStep = findStep(docKey);
+        if (!docStep) {
+          throw new Error(`Шаг batch '${docKey}' не найден`);
+        }
+        if (docStep.response?.ok === false) {
+          const description =
+            docStep.response?.result?.description ||
+            docStep.response?.description ||
+            `Batch step '${docKey}' failed`;
+          throw new Error(description);
+        }
+
+        const opsStep = findStep(operationsKey);
+        if (!opsStep) {
+          throw new Error(`Шаг batch '${operationsKey}' не найден`);
+        }
+        if (opsStep.response?.ok === false) {
+          const description =
+            opsStep.response?.result?.description ||
+            opsStep.response?.description ||
+            `Batch step '${operationsKey}' failed`;
+          throw new Error(description);
+        }
+
+        const extractDoc =
+          batchConfig.extractDoc ||
+          ((response) => {
+            if (!response) return null;
+            const { result } = response;
+            if (Array.isArray(result)) {
+              return result[0] ?? null;
+            }
+            return result ?? null;
+          });
+
+        const extractOperations =
+          batchConfig.extractOperations || ((response) => response);
+
+        const docData = extractDoc(docStep.response);
+        const operationsData = extractOperations(opsStep.response);
+
+        setDoc(transformDoc(docData));
+        setOperations(transformOperations(operationsData) || []);
+        return;
+      }
+
+      const [docResponse, opsResponse] = await Promise.all([
+        api(detail.docAction, buildDocPayload(docIdNumber)),
+        api(detail.operationsAction, buildOpsPayload(docIdNumber)),
+      ]);
       setDoc(transformDoc(docResponse?.data));
       setOperations(transformOperations(opsResponse?.data) || []);
     } catch (err) {
@@ -486,88 +597,6 @@ export default function DocPage({ definition: definitionProp }) {
       return false;
     }
   };
-
-  const status = useMemo(() => {
-    if (!doc) return "";
-    const segments = [];
-    const performed = t("docs.status.performed");
-    const performedLabel =
-      performed === "docs.status.performed" ? "проведён" : performed;
-    const newLabel = t("docs.status.new");
-    const newValue = newLabel === "docs.status.new" ? "новый" : newLabel;
-    segments.push(doc.performed ? performedLabel : newValue);
-    if (doc.blocked) {
-      const blocked = t("docs.status.blocked");
-      segments.push(blocked === "docs.status.blocked" ? "блок." : blocked);
-    }
-    return segments.join(" • ");
-  }, [doc, t]);
-
-  const backToDocsLabel = useMemo(() => {
-    const preferred = t("docs.back_to_list");
-    if (preferred && preferred !== "docs.back_to_list") return preferred;
-    const fallback = t("nav.back");
-    return fallback === "nav.back" ? "Назад" : fallback;
-  }, [t]);
-
-  const actionsLabel = useMemo(() => {
-    const value = t("doc.actions");
-    return value === "doc.actions" ? "Действия" : value;
-  }, [t]);
-
-  const addOperationLabel = useMemo(() => {
-    const value = t("doc.add_op");
-    return value === "doc.add_op" ? "Добавить" : value;
-  }, [t]);
-
-  const nothingLabel = useMemo(() => {
-    const value = t("doc.no_ops") || t("common.nothing");
-    return value || "Операций ещё нет";
-  }, [t]);
-
-  const metaSegments = useMemo(() => {
-    if (!doc) return [];
-    const currency = doc.currency?.code_chr || "UZS";
-    const roundTo = doc.price_type?.round_to ?? null;
-    return [
-      doc.date ? unixToLocal(doc.date) : null,
-      doc.partner?.name || null,
-      fmt.money(doc.amount ?? 0, currency, roundTo),
-    ].filter(Boolean);
-  }, [doc, fmt, unixToLocal]);
-
-  const partnerLabel = useMemo(() => {
-    const detail = docDefinition?.detail || {};
-    const key = detail.partnerLabelKey || "doc.partner";
-    const translated = t(key);
-    if (translated && translated !== key) return translated;
-    const fallbackKey = detail.partnerLabelFallback;
-    if (fallbackKey) return fallbackKey;
-    const generic = t("partner");
-    if (generic && generic !== "partner") return generic;
-    return "Партнёр";
-  }, [docDefinition, t]);
-
-  const goToDocs = useCallback(() => {
-    const buildDocsPath =
-      docDefinition?.navigation?.buildDocsPath || (() => "/docs");
-    navigate(buildDocsPath(doc), { replace: true });
-  }, [doc, docDefinition, navigate]);
-
-  const goToNewOperation = useCallback(() => {
-    const buildNewOperationPath =
-      docDefinition?.navigation?.buildNewOperationPath ||
-      ((docId) => `/doc/${docId}/op/new`);
-    navigate(buildNewOperationPath(docIdNumber));
-  }, [docDefinition, docIdNumber, navigate]);
-
-  const handleOpenActions = useCallback(() => {
-    setActionsOpen(true);
-  }, []);
-
-  const handleCloseActions = useCallback(() => {
-    setActionsOpen(false);
-  }, []);
 
   const handlePerform = useCallback(async () => {
     const detail = docDefinition?.detail || {};
@@ -746,6 +775,186 @@ export default function DocPage({ definition: definitionProp }) {
     });
     setActionsOpen(false);
   }, [doc?.id, docDefinition?.key, docIdNumber]);
+
+  const status = useMemo(() => {
+    if (!doc) return "";
+    const segments = [];
+    const performed = t("docs.status.performed");
+    const performedLabel =
+      performed === "docs.status.performed" ? "проведён" : performed;
+    const newLabel = t("docs.status.new");
+    const newValue = newLabel === "docs.status.new" ? "новый" : newLabel;
+    segments.push(doc.performed ? performedLabel : newValue);
+    if (doc.blocked) {
+      const blocked = t("docs.status.blocked");
+      segments.push(blocked === "docs.status.blocked" ? "блок." : blocked);
+    }
+    return segments.join(" • ");
+  }, [doc, t]);
+
+  const backToDocsLabel = useMemo(() => {
+    const preferred = t("docs.back_to_list");
+    if (preferred && preferred !== "docs.back_to_list") return preferred;
+    const fallback = t("nav.back");
+    return fallback === "nav.back" ? "Назад" : fallback;
+  }, [t]);
+
+  const actionsLabel = useMemo(() => {
+    const value = t("doc.actions");
+    return value === "doc.actions" ? "Действия" : value;
+  }, [t]);
+
+  const addOperationLabel = useMemo(() => {
+    const value = t("doc.add_op");
+    return value === "doc.add_op" ? "Добавить" : value;
+  }, [t]);
+
+  const actionButtons = useMemo(() => {
+    const detail = docDefinition?.detail || {};
+    const isInventory = docDefinition?.key === "inventory";
+
+    const performLabel = () => {
+      if (isInventory) {
+        const value = t("doc.inventory.close");
+        return value === "doc.inventory.close" ? "Закрыть" : value;
+      }
+      const value = t("doc.perform");
+      return value === "doc.perform" ? "Провести" : value || "Провести";
+    };
+
+    const cancelLabel = () => {
+      if (isInventory) {
+        const value = t("doc.inventory.open");
+        return value === "doc.inventory.open" ? "Открыть" : value;
+      }
+      const value = t("doc.cancel_perform");
+      return value === "doc.cancel_perform"
+        ? "Отменить проведение"
+        : value || "Отменить проведение";
+    };
+
+    const lockLabel = () => {
+      const value = t("doc.lock");
+      return value === "doc.lock" ? "Заблокировать" : value;
+    };
+
+    const unlockLabel = () => {
+      const value = t("doc.unlock");
+      return value === "doc.unlock" ? "Разблокировать" : value;
+    };
+
+    const results = [];
+
+    if (detail.performAction) {
+      results.push({
+        key: "perform",
+        visible: !doc?.performed,
+        onClick: handlePerform,
+        variant: "primary",
+        label: performLabel(),
+      });
+    }
+
+    if (detail.cancelPerformAction) {
+      results.push({
+        key: "cancel-perform",
+        visible: Boolean(doc?.performed),
+        onClick: handleCancelPerform,
+        variant: "ghost",
+        label: cancelLabel(),
+      });
+    }
+
+    if (detail.lockAction) {
+      results.push({
+        key: "lock",
+        visible: !doc?.blocked,
+        onClick: handleLock,
+        variant: "ghost",
+        label: lockLabel(),
+      });
+    }
+
+    if (detail.unlockAction) {
+      results.push({
+        key: "unlock",
+        visible: Boolean(doc?.blocked),
+        onClick: handleUnlock,
+        variant: "ghost",
+        label: unlockLabel(),
+      });
+    }
+
+    results.push({
+      key: "print",
+      visible: true,
+      onClick: handlePrint,
+      variant: "ghost",
+      label:
+        t("doc.print") === "doc.print" ? "Печать" : t("doc.print") || "Печать",
+    });
+
+    return results.filter((action) => action.visible);
+  }, [
+    doc?.blocked,
+    doc?.performed,
+    docDefinition,
+    handleCancelPerform,
+    handleLock,
+    handlePerform,
+    handlePrint,
+    handleUnlock,
+    t,
+  ]);
+
+  const nothingLabel = useMemo(() => {
+    const value = t("doc.no_ops") || t("common.nothing");
+    return value || "Операций ещё нет";
+  }, [t]);
+
+  const metaSegments = useMemo(() => {
+    if (!doc) return [];
+    const currency = doc.currency?.code_chr || "UZS";
+    const roundTo = doc.price_type?.round_to ?? null;
+    return [
+      doc.date ? unixToLocal(doc.date) : null,
+      doc.partner?.name || null,
+      fmt.money(doc.amount ?? 0, currency, roundTo),
+    ].filter(Boolean);
+  }, [doc, fmt, unixToLocal]);
+
+  const partnerLabel = useMemo(() => {
+    const detail = docDefinition?.detail || {};
+    const key = detail.partnerLabelKey || "doc.partner";
+    const translated = t(key);
+    if (translated && translated !== key) return translated;
+    const fallbackKey = detail.partnerLabelFallback;
+    if (fallbackKey) return fallbackKey;
+    const generic = t("partner");
+    if (generic && generic !== "partner") return generic;
+    return "Партнёр";
+  }, [docDefinition, t]);
+
+  const goToDocs = useCallback(() => {
+    const buildDocsPath =
+      docDefinition?.navigation?.buildDocsPath || (() => "/docs");
+    navigate(buildDocsPath(doc), { replace: true });
+  }, [doc, docDefinition, navigate]);
+
+  const goToNewOperation = useCallback(() => {
+    const buildNewOperationPath =
+      docDefinition?.navigation?.buildNewOperationPath ||
+      ((docId) => `/doc/${docId}/op/new`);
+    navigate(buildNewOperationPath(docIdNumber));
+  }, [docDefinition, docIdNumber, navigate]);
+
+  const handleOpenActions = useCallback(() => {
+    setActionsOpen(true);
+  }, []);
+
+  const handleCloseActions = useCallback(() => {
+    setActionsOpen(false);
+  }, []);
 
   if (!docDefinition) {
     return (
@@ -961,59 +1170,19 @@ export default function DocPage({ definition: definitionProp }) {
             </div>
 
             <div className="flex flex-col gap-3">
-              {!doc?.performed ? (
+              {actionButtons.map((action) => (
                 <button
+                  key={action.key}
                   type="button"
-                  className={buttonClass({ variant: "primary", size: "md" })}
-                  onClick={handlePerform}
+                  className={buttonClass({
+                    variant: action.variant,
+                    size: "md",
+                  })}
+                  onClick={action.onClick}
                 >
-                  {t("doc.perform") === "doc.perform"
-                    ? "Провести"
-                    : t("doc.perform") || "Провести"}
+                  {action.label}
                 </button>
-              ) : null}
-              {doc?.performed ? (
-                <button
-                  type="button"
-                  className={buttonClass({ variant: "ghost", size: "md" })}
-                  onClick={handleCancelPerform}
-                >
-                  {t("doc.cancel_perform") === "doc.cancel_perform"
-                    ? "Отменить проведение"
-                    : t("doc.cancel_perform") || "Отменить проведение"}
-                </button>
-              ) : null}
-              {!doc?.blocked ? (
-                <button
-                  type="button"
-                  className={buttonClass({ variant: "ghost", size: "md" })}
-                  onClick={handleLock}
-                >
-                  {t("doc.lock") === "doc.lock"
-                    ? "Заблокировать"
-                    : t("doc.lock") || "Заблокировать"}
-                </button>
-              ) : null}
-              {doc?.blocked ? (
-                <button
-                  type="button"
-                  className={buttonClass({ variant: "ghost", size: "md" })}
-                  onClick={handleUnlock}
-                >
-                  {t("doc.unlock") === "doc.unlock"
-                    ? "Разблокировать"
-                    : t("doc.unlock") || "Разблокировать"}
-                </button>
-              ) : null}
-              <button
-                type="button"
-                className={buttonClass({ variant: "ghost", size: "md" })}
-                onClick={handlePrint}
-              >
-                {t("doc.print") === "doc.print"
-                  ? "Печать"
-                  : t("doc.print") || "Печать"}
-              </button>
+              ))}
             </div>
           </div>
         </div>

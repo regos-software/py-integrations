@@ -15,6 +15,7 @@ class LegalStatus(str, Enum):
       - Legal   — юр. лицо
       - Natural — физ. лицо
     """
+
     Legal = "Legal"
     Natural = "Natural"
 
@@ -23,6 +24,7 @@ class Partner(BaseModel):
     """
     Контрагент.
     """
+
     id: int
     group: PartnerGroup
     legal_status: LegalStatus

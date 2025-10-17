@@ -7,6 +7,7 @@ class PartnerGroup(BaseModel):
     """
     Группа контрагентов.
     """
+
     id: int
     parent_id: int
     name: str

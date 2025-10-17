@@ -32,8 +32,9 @@ class APIClient:
         self.timeout = timeout
         self.client = httpx.AsyncClient(timeout=self.timeout)
 
-        # Общий лимитер на один integration_id (внутри текущего процесса)
-        self._limiter = get_shared_limiter(self.integration_id, self.RATE_PER_SEC, self.BURST)
+        self._limiter = get_shared_limiter(
+            self.integration_id, self.RATE_PER_SEC, self.BURST
+        )
 
         logger.debug(
             f"Инициализирован APIClient: base_url={self.base_url}, "
@@ -49,7 +50,7 @@ class APIClient:
         self,
         method_path: str,
         data: Any,
-        response_model: Type[TResponse] = APIBaseResponse
+        response_model: Type[TResponse] = APIBaseResponse,
     ) -> TResponse:
         """
         Универсальный POST-запрос к методам интеграции.
@@ -65,7 +66,10 @@ class APIClient:
         if isinstance(data, BaseModel):
             payload = data.model_dump(mode="json")
         elif isinstance(data, list):
-            payload = [item.model_dump(mode="json") if isinstance(item, BaseModel) else item for item in data]
+            payload = [
+                item.model_dump(mode="json") if isinstance(item, BaseModel) else item
+                for item in data
+            ]
         elif isinstance(data, dict):
             payload = data
         else:
@@ -98,7 +102,9 @@ class APIClient:
             logger.error(f"Ошибка запроса к {url}: {e}")
             raise
         except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP {e.response.status_code} при обращении к {url}: {e.response.text}")
+            logger.error(
+                f"HTTP {e.response.status_code} при обращении к {url}: {e.response.text}"
+            )
             raise
         except Exception as e:
             logger.exception(f"Непредвиденная ошибка при POST {url}: {e}")

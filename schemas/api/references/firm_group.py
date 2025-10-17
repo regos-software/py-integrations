@@ -7,6 +7,7 @@ class FirmGroup(BaseModel):
     """
     Модель, описывающая группы предприятий.
     """
+
     id: int  # ID группы
     parent_id: Optional[int] = None  # ID родительской группы
     name: str  # Наименование группы

@@ -9,11 +9,13 @@ from pydantic import BaseModel, Field as PydField, field_validator
 
 # ---------- Справочники ----------
 
+
 class EntityType(str, Enum):
     """
     Сущность, к которой привязано доп. поле.
     Расширяйте по мере добавления новых сущностей.
     """
+
     RetailCustomer = "RetailCustomer"
     Partner = "Partner"
     DocPurchase = "DocPurchase"
@@ -23,6 +25,7 @@ class FieldDataType(str, Enum):
     """
     Тип данных значения доп. поля.
     """
+
     string = "string"
     int = "int"
     decimal = "decimal"
@@ -31,11 +34,13 @@ class FieldDataType(str, Enum):
 
 # ---------- Метамодель доп. поля ----------
 
+
 class Field(BaseModel):
     """
     Дополнительное (кастомное) поле, привязанное к сущности.
     Содержит метаданные: ключ, название, тип, обязательность и пр.
     """
+
     id: int
     key: str  # machine-name, уникальный
     name: str  # человекочитаемое имя
@@ -55,12 +60,14 @@ class Field(BaseModel):
 
 # ---------- Значения доп. полей, используемые в моделях сущностей ----------
 
+
 class FieldValue(BaseModel):
     """
     Значение доп. поля в объекте сущности (рид-модель).
     В сущности хранится массив FieldValue[].
     value — всегда строка; сервер/клиент приводит к типу из data_type.
     """
+
     key: str
     name: str
     data_type: FieldDataType
@@ -77,6 +84,7 @@ class FieldValueAdd(BaseModel):
     Модель для передачи значения доп. поля при создании сущности.
     Передаётся массив FieldValueAdd[]. Обязательность определяется метаданными (required).
     """
+
     key: str
     value: str = PydField(..., description="Строковое представление значения")
 
@@ -88,6 +96,7 @@ class FieldValueEdit(BaseModel):
     - deleted = true  — удалить значение поля у сущности (value игнорируется)
     - deleted = false — оставить/обновить значение (value можно не передавать, если не меняется)
     """
+
     key: str
     value: Optional[str] = None
     deleted: bool = False
@@ -105,4 +114,3 @@ FieldValueEdits = List[FieldValueEdit]
   - fields: Optional[FieldValueAdds] = None
   - fields: Optional[FieldValueEdits] = None
   - fields: Optional[FieldValues] = None"""
-

@@ -1,4 +1,4 @@
-# schemas/api/refrences/item.py
+# schemas/api/references/item.py
 from __future__ import annotations
 
 from decimal import Decimal
@@ -9,10 +9,10 @@ from pydantic import Field as PydField, field_validator
 from pydantic.config import ConfigDict
 
 from schemas.api.base import BaseSchema
-from schemas.api.refrences.brand import Brand
-from schemas.api.refrences.price_type import PriceType
-from schemas.api.refrences.stock import Stock
-from schemas.api.refrences.unit import Unit
+from schemas.api.references.brand import Brand
+from schemas.api.references.price_type import PriceType
+from schemas.api.references.stock import Stock
+from schemas.api.references.unit import Unit
 
 
 # ---------- Плейсхолдеры справочников ----------

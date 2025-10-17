@@ -5,7 +5,6 @@ from schemas.api.integrations.connected_integration_setting import (
     ConnectedIntegrationSetting,
     ConnectedIntegrationSettingRequest,
     ConnectedIntegrationSettingEditRequest,
-    ConnectedIntegrationSettingEditItem
 )
 
 logger = setup_logger("ConnectedIntegrationSettingService")
@@ -18,23 +17,21 @@ class ConnectedIntegrationSettingService:
     def __init__(self, api):
         self.api = api
 
-    async def get(self, req: ConnectedIntegrationSettingRequest) -> List[ConnectedIntegrationSetting]:
+    async def get(
+        self, req: ConnectedIntegrationSettingRequest
+    ) -> APIBaseResponse[List[ConnectedIntegrationSetting]]:
         """Получить список настроек по ключу интеграции (и, опционально, firm_id)."""
-        resp = await self.api.call(self.PATH_GET, req, APIBaseResponse)
-        if not getattr(resp, "ok", False) or not isinstance(resp.result, list):
-            logger.warning(f"Не удалось получить настройки: {resp}")
-            return []
-        return [ConnectedIntegrationSetting.model_validate(x) for x in resp.result]
+        resp = await self.api.call(
+            self.PATH_GET, req, APIBaseResponse[List[ConnectedIntegrationSetting]]
+        )
+        return resp
 
-    async def edit(self, items: List[ConnectedIntegrationSettingEditItem]) -> bool:
+    async def edit(
+        self, req: ConnectedIntegrationSettingEditRequest
+    ) -> APIBaseResponse:
         """
         Массовое редактирование настроек.
         Возвращает True, если запрос выполнен успешно.
         """
-        req = ConnectedIntegrationSettingEditRequest(items)
         resp = await self.api.call(self.PATH_EDIT, req, APIBaseResponse)
-        if getattr(resp, "ok", False):
-            logger.info(f"Настройки обновлены: {items}")
-            return True
-        logger.error(f"Ошибка обновления настроек: {resp}")
-        return False
+        return resp

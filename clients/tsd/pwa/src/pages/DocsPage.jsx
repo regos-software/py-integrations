@@ -1,4 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useApp } from "../context/AppContext.jsx";
 import { useI18n } from "../context/I18nContext.jsx";
@@ -67,7 +73,14 @@ export default function DocsPage({ definition: definitionProp }) {
     setInputValue(query);
   }, [query]);
 
+  const resetFiltersOnTypeRef = useRef(true);
+
   useEffect(() => {
+    if (!docDefinition?.key) return;
+    if (resetFiltersOnTypeRef.current) {
+      resetFiltersOnTypeRef.current = false;
+      return;
+    }
     setFilters(createDefaultFilters());
     setFiltersDraft(createDefaultFilters());
   }, [docDefinition?.key]);
@@ -178,7 +191,7 @@ export default function DocsPage({ definition: definitionProp }) {
     setStocksLoading(true);
     setStocksError(null);
     try {
-      const { data } = await api("refrences.stock.get", {
+      const { data } = await api("references.stock.get", {
         deleted_mark: false,
         sort_orders: [{ column: "Name", direction: "asc" }],
       });
@@ -190,7 +203,7 @@ export default function DocsPage({ definition: definitionProp }) {
         );
       }
       setStocks(
-        data?.map((stock) => ({
+        data?.result?.map((stock) => ({
           id: Number(stock.id ?? stock.ID ?? stock.code ?? 0),
           name: stock.name || stock.Name || `#${stock.id || stock.ID}`,
         }))

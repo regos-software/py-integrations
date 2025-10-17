@@ -1,15 +1,12 @@
 import React, { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useI18n } from "../context/I18nContext.jsx";
-import { useToast } from "../context/ToastContext.jsx";
 import { useApp } from "../context/AppContext.jsx";
-import { badgeClass, buttonClass, sectionClass } from "../lib/ui";
-import { cn } from "../lib/utils";
+import { buttonClass, sectionClass } from "../lib/ui";
 
 export default function HomePage() {
   const { t, locale } = useI18n();
   const { setAppTitle } = useApp();
-  const { showToast } = useToast();
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -17,11 +14,6 @@ export default function HomePage() {
     const title = raw === "app.title" ? "TSD" : raw || "TSD";
     setAppTitle(title);
   }, [locale, setAppTitle, t]);
-
-  const soonLabelRaw = t("soon");
-  const soonLabel = soonLabelRaw === "soon" ? "Скоро" : soonLabelRaw || "Скоро";
-
-  const soon = () => showToast(soonLabel, { duration: 1500, type: "info" });
 
   return (
     <section className={sectionClass()} id="home">
@@ -68,36 +60,22 @@ export default function HomePage() {
           </span>
         </button>
 
-        {["doc_inventory"].map((key) => (
-          <button
-            key={key}
-            id={"btn-doc-inventory"}
-            type="button"
-            className={buttonClass({
-              variant: "ghost",
-              size: "lg",
-              block: true,
-            })}
-            onClick={soon}
-          >
-            <div className="flex w-full items-center justify-between gap-3">
-              <span id={`${key}-txt`} className="text-left">
-                {t(key) === key ? "Инвентаризация" : t(key) || "Инвентаризация"}
-              </span>
-              <span
-                className={cn(
-                  badgeClass(
-                    "bg-slate-200 text-slate-700 dark:bg-slate-700 dark:text-slate-200"
-                  ),
-                  "uppercase"
-                )}
-                id="pill-inventory"
-              >
-                {soonLabel}
-              </span>
-            </div>
-          </button>
-        ))}
+        <button
+          id="btn-doc-inventory"
+          type="button"
+          className={buttonClass({
+            variant: "primary",
+            size: "lg",
+            block: true,
+          })}
+          onClick={() => navigate("/docs?type=inventory")}
+        >
+          <span id="doc_inventory-txt">
+            {t("doc_inventory") === "doc_inventory"
+              ? "Инвентаризация"
+              : t("doc_inventory") || "Инвентаризация"}
+          </span>
+        </button>
       </div>
     </section>
   );

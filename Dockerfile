@@ -9,7 +9,7 @@ COPY clients/tsd/pwa ./
 RUN npm run build
 
 
-FROM python:3.9-slim
+FROM python:3.12-slim
 
 RUN pip install --upgrade pip python-multipart
 COPY requirements.txt .

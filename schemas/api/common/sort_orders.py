@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import List, Optional
+from typing import List
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator
 
 
 # ---------- SortOrders ----------
+
 
 class SortDirection(str, Enum):
     """
@@ -14,6 +15,7 @@ class SortDirection(str, Enum):
       - asc  — по возрастанию
       - desc — по убыванию
     """
+
     asc = "asc"
     desc = "desc"
 
@@ -25,8 +27,13 @@ class SortOrder(BaseModel):
     (например: id, name, code, last_update и т. п.). При передаче недопустимого
     значения сервер должен вернуть ошибку валидации.
     """
-    column: str = Field(..., description="Имя сортируемого поля (см. документацию конкретной модели).")
-    direction: SortDirection = Field(SortDirection.asc, description="Порядок сортировки.")
+
+    column: str = Field(
+        ..., description="Имя сортируемого поля (см. документацию конкретной модели)."
+    )
+    direction: SortDirection = Field(
+        SortDirection.asc, description="Порядок сортировки."
+    )
 
     # Принимаем 'ASC'/'DESC' и т. п. — нормализуем в нижний регистр.
     @field_validator("direction", mode="before")
