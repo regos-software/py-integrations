@@ -1,0 +1,1307 @@
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { useNavigate } from "react-router-dom";
+import {
+  BrowserMultiFormatReader,
+  BarcodeFormat,
+  DecodeHintType,
+} from "@zxing/library";
+import { useApp } from "../context/AppContext.jsx";
+import { useI18n } from "../context/I18nContext.jsx";
+import { useToast } from "../context/ToastContext.jsx";
+import {
+  buttonClass,
+  cardClass,
+  iconButtonClass,
+  inputClass,
+  labelClass,
+  mutedTextClass,
+  sectionClass,
+} from "../lib/ui";
+import { cn } from "../lib/utils";
+
+const SEARCH_MODES = {
+  SCAN: "scan",
+  NAME: "name",
+};
+
+const ZXING_FORMATS = [
+  BarcodeFormat.QR_CODE,
+  BarcodeFormat.UPC_A,
+  BarcodeFormat.UPC_E,
+  BarcodeFormat.EAN_8,
+  BarcodeFormat.EAN_13,
+  BarcodeFormat.ITF,
+  BarcodeFormat.PDF_417,
+  BarcodeFormat.CODE_39,
+  BarcodeFormat.CODE_128,
+].filter(Boolean);
+
+const DEFAULT_LIMIT = 20;
+
+function normalizeItemExt(ext) {
+  if (!ext) return null;
+  const core = ext.item || {};
+  const unit = core.unit || {};
+  const firstBarcode =
+    core.base_barcode ||
+    (core.barcode_list
+      ? String(core.barcode_list)
+          .split(",")
+          .map((value) => value.trim())
+          .filter(Boolean)[0]
+      : "") ||
+    core.code ||
+    "";
+
+  return {
+    id: Number(core.id ?? core.code ?? 0) || 0,
+    name: core.name || "—",
+    barcode: firstBarcode,
+    code: core.code != null ? String(core.code) : null,
+    articul: core.articul || null,
+    unit: unit.name || "шт",
+    raw: ext,
+  };
+}
+
+function formatFallback(t, key, fallback) {
+  const translated = t(key);
+  return translated === key ? fallback : translated;
+}
+
+export default function ItemInfoPage() {
+  const navigate = useNavigate();
+  const { api, setAppTitle } = useApp();
+  const { t, fmt, locale } = useI18n();
+  const { showToast } = useToast();
+
+  const [searchMode, setSearchMode] = useState(SEARCH_MODES.SCAN);
+  const [barcodeValue, setBarcodeValue] = useState("");
+  const [queryValue, setQueryValue] = useState("");
+  const [searchStatus, setSearchStatus] = useState("idle");
+  const [scanning, setScanning] = useState(false);
+
+  const [resultItems, setResultItems] = useState([]);
+  const [resultModalOpen, setResultModalOpen] = useState(false);
+
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settings, setSettings] = useState({
+    stockId: null,
+    priceTypeId: null,
+  });
+  const [settingsDraft, setSettingsDraft] = useState(settings);
+  const [optionsLoading, setOptionsLoading] = useState(false);
+  const [stocks, setStocks] = useState([]);
+  const [priceTypes, setPriceTypes] = useState([]);
+
+  const [selectedItem, setSelectedItem] = useState(null);
+  const [selectedExt, setSelectedExt] = useState(null);
+  const [quantityInfo, setQuantityInfo] = useState([]);
+  const [pricesInfo, setPricesInfo] = useState([]);
+  const [preCostInfo, setPreCostInfo] = useState([]);
+  const [operations, setOperations] = useState([]);
+  const [detailsLoading, setDetailsLoading] = useState(false);
+
+  const barcodeInputRef = useRef(null);
+  const videoRef = useRef(null);
+  const readerRef = useRef(null);
+
+  const title = useMemo(() => {
+    const translated = t("item_info.title");
+    return translated === "item_info.title"
+      ? "Информация по номенклатуре"
+      : translated;
+  }, [t]);
+
+  useEffect(() => {
+    setAppTitle(title);
+  }, [locale, setAppTitle, title]);
+
+  const focusBarcodeInput = useCallback(() => {
+    window.setTimeout(() => {
+      barcodeInputRef.current?.focus();
+    }, 0);
+  }, []);
+
+  useEffect(() => {
+    focusBarcodeInput();
+  }, [focusBarcodeInput, searchMode]);
+
+  const callApi = useCallback(
+    async (action, params, fallbackMessage) => {
+      const response = await api(action, params);
+      const defaultMessage = formatFallback(
+        t,
+        "common.error",
+        "Ошибка выполнения запроса"
+      );
+
+      if (!response.ok) {
+        const errMsg =
+          response.data?.description ||
+          response.data?.detail ||
+          fallbackMessage;
+        throw new Error(errMsg || defaultMessage);
+      }
+
+      const body = response.data;
+      if (body && Object.prototype.hasOwnProperty.call(body, "ok")) {
+        if (!body.ok) {
+          const errMsg = body.description || fallbackMessage;
+          throw new Error(errMsg || defaultMessage);
+        }
+      }
+      return body;
+    },
+    [api, t]
+  );
+
+  const loadOptions = useCallback(async () => {
+    setOptionsLoading(true);
+    try {
+      const [stockData, priceTypeData] = await Promise.all([
+        callApi(
+          "references.stock.get",
+          {
+            limit: 200,
+            deleted_mark: false,
+            sort_orders: [{ column: "Name", direction: "asc" }],
+          },
+          formatFallback(
+            t,
+            "item_info.stocks_error",
+            "Не удалось загрузить склады"
+          )
+        ),
+        callApi(
+          "references.price_type.get",
+          {
+            limit: 200,
+            sort_orders: [{ column: "Name", direction: "ASC" }],
+          },
+          formatFallback(
+            t,
+            "item_info.price_type_error",
+            "Не удалось загрузить виды цен"
+          )
+        ),
+      ]);
+
+      const stockOptions = Array.isArray(stockData?.result)
+        ? stockData.result.map((stock) => ({
+            value: stock.id,
+            label: stock.name || `ID ${stock.id}`,
+          }))
+        : [];
+      const priceTypeOptions = Array.isArray(priceTypeData?.result)
+        ? priceTypeData.result.map((pt) => ({
+            value: pt.id,
+            label: pt.name || `ID ${pt.id}`,
+          }))
+        : [];
+
+      setStocks(stockOptions);
+      setPriceTypes(priceTypeOptions);
+    } catch (err) {
+      console.warn("[item-info] load options", err);
+      showToast(err.message, { type: "error" });
+    } finally {
+      setOptionsLoading(false);
+    }
+  }, [callApi, showToast, t]);
+
+  useEffect(() => {
+    loadOptions();
+  }, [loadOptions]);
+
+  useEffect(() => {
+    if (settingsOpen) {
+      setSettingsDraft(settings);
+    }
+  }, [settings, settingsOpen]);
+
+  const ensureReader = useCallback(async () => {
+    if (readerRef.current) return readerRef.current;
+
+    const hints = new Map();
+    if (DecodeHintType?.POSSIBLE_FORMATS) {
+      hints.set(DecodeHintType.POSSIBLE_FORMATS, ZXING_FORMATS);
+    }
+    if (DecodeHintType?.TRY_HARDER) {
+      hints.set(DecodeHintType.TRY_HARDER, true);
+    }
+    if (DecodeHintType?.ALSO_INVERTED) {
+      hints.set(DecodeHintType.ALSO_INVERTED, true);
+    }
+
+    const reader = new BrowserMultiFormatReader(hints, 200);
+    reader.timeBetweenDecodingAttempts = 75;
+    readerRef.current = reader;
+    return readerRef.current;
+  }, []);
+
+  const stopScan = useCallback(() => {
+    setScanning(false);
+    if (readerRef.current) {
+      readerRef.current.reset();
+    }
+    if (videoRef.current?.srcObject) {
+      const tracks = videoRef.current.srcObject.getTracks();
+      tracks.forEach((track) => track.stop());
+      videoRef.current.srcObject = null;
+    }
+  }, []);
+
+  useEffect(() => stopScan, [stopScan]);
+
+  const loadItemDetails = useCallback(
+    async (itemId, overrideSettings) => {
+      const activeSettings = overrideSettings ?? settings;
+      const stockId = activeSettings.stockId
+        ? Number(activeSettings.stockId)
+        : null;
+      const priceTypeId = activeSettings.priceTypeId
+        ? Number(activeSettings.priceTypeId)
+        : null;
+
+      const stockIds = stockId ? [stockId] : undefined;
+      const priceTypeIds = priceTypeId ? [priceTypeId] : undefined;
+
+      setDetailsLoading(true);
+      try {
+        const nowTs = Math.floor(Date.now() / 1000);
+        const [extData, quantityData, priceData, preCostData, operationData] =
+          await Promise.all([
+            callApi(
+              "references.item.get_ext",
+              {
+                ids: [itemId],
+                limit: 1,
+                stock_id: stockId || undefined,
+                price_type_id: priceTypeId || undefined,
+              },
+              formatFallback(
+                t,
+                "item_info.load_error",
+                "Не удалось загрузить номенклатуру"
+              )
+            ),
+            callApi(
+              "references.item.get_quantity",
+              {
+                item_id: itemId,
+                stock_ids: stockIds,
+              },
+              formatFallback(
+                t,
+                "item_info.quantity_error",
+                "Не удалось получить остатки"
+              )
+            ),
+            callApi(
+              "references.item_price.get",
+              {
+                item_ids: [itemId],
+                price_type_ids: priceTypeIds,
+              },
+              formatFallback(
+                t,
+                "item_info.price_error",
+                "Не удалось получить цены"
+              )
+            ),
+            callApi(
+              "references.item_price.get_pre_cost",
+              {
+                item_ids: [itemId],
+                cost_date: nowTs,
+              },
+              formatFallback(
+                t,
+                "item_info.precost_error",
+                "Не удалось получить себестоимость"
+              )
+            ),
+            callApi(
+              "references.item_operation.get",
+              {
+                item_id: itemId,
+                stock_ids: stockIds,
+                limit: DEFAULT_LIMIT,
+              },
+              formatFallback(
+                t,
+                "item_info.operations_error",
+                "Не удалось получить операции"
+              )
+            ),
+          ]);
+
+        console.log("ext", extData.result[0].item.group);
+        const ext = Array.isArray(extData?.result) ? extData.result[0] : null;
+        if (ext) {
+          setSelectedExt(ext);
+        }
+        setQuantityInfo(
+          Array.isArray(quantityData?.result) ? quantityData.result : []
+        );
+        setPricesInfo(Array.isArray(priceData?.result) ? priceData.result : []);
+        setPreCostInfo(
+          Array.isArray(preCostData?.result) ? preCostData.result : []
+        );
+        setOperations(
+          Array.isArray(operationData?.result) ? operationData.result : []
+        );
+      } catch (err) {
+        console.warn("[item-info] load details", err);
+        showToast(err.message, { type: "error" });
+      } finally {
+        setDetailsLoading(false);
+      }
+    },
+    [callApi, settings, showToast, t]
+  );
+
+  const handlePickItem = useCallback(
+    async (item) => {
+      if (!item) return;
+      setSelectedItem(item);
+      setResultModalOpen(false);
+      setSearchStatus("done");
+      setBarcodeValue("");
+      setQueryValue("");
+      await loadItemDetails(item.id);
+    },
+    [loadItemDetails]
+  );
+
+  const handleSearch = useCallback(
+    async (queryText, mode = SEARCH_MODES.NAME) => {
+      const normalized = queryText.trim();
+      if (!normalized) {
+        if (mode === SEARCH_MODES.SCAN) {
+          setBarcodeValue("");
+          focusBarcodeInput();
+        }
+        return;
+      }
+
+      setSearchStatus("loading");
+      try {
+        const payload = {
+          search: normalized,
+          limit: DEFAULT_LIMIT,
+        };
+        if (settings.stockId) payload.stock_id = Number(settings.stockId);
+        if (settings.priceTypeId)
+          payload.price_type_id = Number(settings.priceTypeId);
+
+        const data = await callApi(
+          "references.item.get_ext",
+          payload,
+          formatFallback(
+            t,
+            "item_info.search_error",
+            "Не удалось выполнить поиск"
+          )
+        );
+
+        const items = Array.isArray(data?.result) ? data.result : [];
+        const normalizedItems = items
+          .map((ext) => normalizeItemExt(ext))
+          .filter((ext) => ext && ext.id);
+
+        if (normalizedItems.length === 0) {
+          setSelectedItem(null);
+          setSelectedExt(null);
+          setQuantityInfo([]);
+          setPricesInfo([]);
+          setPreCostInfo([]);
+          setOperations([]);
+          setSearchStatus("empty");
+          showToast(formatFallback(t, "common.nothing", "Ничего не найдено"), {
+            type: "error",
+          });
+          return;
+        }
+
+        if (normalizedItems.length === 1) {
+          await handlePickItem(normalizedItems[0]);
+          return;
+        }
+
+        setResultItems(normalizedItems);
+        setResultModalOpen(true);
+        setSearchStatus("multi");
+      } catch (err) {
+        console.warn("[item-info] search error", err);
+        setSearchStatus("error");
+        showToast(err.message, { type: "error" });
+      } finally {
+        if (mode === SEARCH_MODES.SCAN) {
+          setBarcodeValue("");
+          focusBarcodeInput();
+        }
+      }
+    },
+    [
+      callApi,
+      focusBarcodeInput,
+      handlePickItem,
+      settings.priceTypeId,
+      settings.stockId,
+      showToast,
+      t,
+    ]
+  );
+
+  const runSearch = useCallback(
+    async (value, mode = searchMode) => {
+      if (mode === SEARCH_MODES.SCAN) {
+        await handleSearch(value, SEARCH_MODES.SCAN);
+        return;
+      }
+      await handleSearch(value, SEARCH_MODES.NAME);
+    },
+    [handleSearch, searchMode]
+  );
+
+  const startScan = useCallback(async () => {
+    if (scanning) return;
+    if (searchMode !== SEARCH_MODES.SCAN) return;
+
+    try {
+      const reader = await ensureReader();
+      const constraints = {
+        video: { facingMode: { ideal: "environment" } },
+      };
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.setAttribute("playsinline", "true");
+        await videoRef.current.play();
+      }
+
+      setScanning(true);
+      reader.decodeFromVideoDevice(null, videoRef.current, (result, err) => {
+        if (result) {
+          const text = result.getText();
+          stopScan();
+          runSearch(text, SEARCH_MODES.SCAN);
+        }
+        if (
+          err &&
+          !(err.name === "NotFoundException" || err.name === "NotFoundError")
+        ) {
+          // swallow non-critical errors
+        }
+      });
+    } catch (err) {
+      console.warn("[item-info] start scan", err);
+      const messageKey =
+        err?.name === "NotAllowedError"
+          ? "camera_permission_denied"
+          : err?.name === "NotFoundError" ||
+            err?.name === "OverconstrainedError"
+          ? "camera_not_found"
+          : "camera_open_failed";
+      showToast(formatFallback(t, messageKey, "Не удалось открыть камеру"), {
+        type: "error",
+      });
+    }
+  }, [ensureReader, runSearch, scanning, searchMode, showToast, stopScan, t]);
+
+  const closeResultModal = useCallback(() => {
+    setResultModalOpen(false);
+    setResultItems([]);
+  }, []);
+
+  const handleSettingsApply = useCallback(() => {
+    const normalized = {
+      stockId:
+        settingsDraft.stockId === "" || settingsDraft.stockId == null
+          ? null
+          : Number(settingsDraft.stockId),
+      priceTypeId:
+        settingsDraft.priceTypeId === "" || settingsDraft.priceTypeId == null
+          ? null
+          : Number(settingsDraft.priceTypeId),
+    };
+    setSettings(normalized);
+    setSettingsOpen(false);
+    if (selectedItem) {
+      loadItemDetails(selectedItem.id, normalized);
+    }
+  }, [loadItemDetails, selectedItem, settingsDraft]);
+
+  const handleSettingsCancel = useCallback(() => {
+    setSettingsDraft(settings);
+    setSettingsOpen(false);
+  }, [settings]);
+
+  const selectedCore = selectedExt?.item || {};
+  const selectedUnit = selectedCore?.unit || {};
+  const selectedQuantity = selectedExt?.quantity || null;
+  const selectedPriceType = selectedExt?.pricetype || null;
+  const selectedPrice = selectedExt?.price ?? null;
+  const docCurrency =
+    selectedPriceType?.currency?.code_chr ||
+    selectedPriceType?.currency?.code ||
+    "UZS";
+
+  return (
+    <section className={sectionClass()} id="item-info">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-semibold text-slate-900 dark:text-slate-50">
+            {title}
+          </h1>
+          {selectedItem ? (
+            <p className={mutedTextClass()}>
+              {formatFallback(
+                t,
+                "item_info.selected_hint",
+                "Выбрана позиция, данные обновлены"
+              )}
+            </p>
+          ) : null}
+        </div>
+        <button
+          type="button"
+          className={buttonClass({ variant: "ghost", size: "sm" })}
+          onClick={() => navigate(-1)}
+        >
+          <i className="fa-solid fa-arrow-left" aria-hidden="true" />
+          <span className="ml-2">
+            {formatFallback(t, "common.back", "Назад")}
+          </span>
+        </button>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          className={iconButtonClass({
+            variant: searchMode === SEARCH_MODES.SCAN ? "primary" : "ghost",
+          })}
+          aria-label={formatFallback(t, "op.mode.scan", "Режим сканирования")}
+          title={formatFallback(t, "op.mode.scan", "Режим сканирования")}
+          onClick={() => {
+            setSearchMode(SEARCH_MODES.SCAN);
+            stopScan();
+            setBarcodeValue("");
+            focusBarcodeInput();
+          }}
+        >
+          <i className="fa-solid fa-barcode" aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          className={iconButtonClass({
+            variant: searchMode === SEARCH_MODES.NAME ? "primary" : "ghost",
+          })}
+          aria-label={formatFallback(t, "op.mode.name", "Поиск по названию")}
+          title={formatFallback(t, "op.mode.name", "Поиск по названию")}
+          onClick={() => {
+            setSearchMode(SEARCH_MODES.NAME);
+            stopScan();
+          }}
+        >
+          <i className="fa-solid fa-magnifying-glass" aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          className={buttonClass({ variant: "secondary", size: "sm" })}
+          onClick={() => setSettingsOpen(true)}
+        >
+          <i className="fa-solid fa-gear" aria-hidden="true" />
+          <span className="ml-2">
+            {formatFallback(t, "item_info.settings", "Настройки")}
+          </span>
+        </button>
+      </div>
+
+      {[SEARCH_MODES.SCAN].includes(searchMode) ? (
+        <>
+          <div
+            id="scanner"
+            className={cn(
+              scanning ? "space-y-4" : "hidden",
+              cardClass("space-y-4")
+            )}
+          >
+            <video
+              id="item-info-preview"
+              ref={videoRef}
+              playsInline
+              className="w-full rounded-xl"
+            />
+            <div className="flex items-center justify-between gap-3">
+              <span className={mutedTextClass()}>
+                {formatFallback(
+                  t,
+                  "scanner.hint",
+                  "Наведи камеру на штрих-код"
+                )}
+              </span>
+              <button
+                type="button"
+                className={iconButtonClass()}
+                onClick={stopScan}
+                aria-label={formatFallback(t, "common.cancel", "Отмена")}
+                title={formatFallback(t, "common.cancel", "Отмена")}
+              >
+                <i className="fa-solid fa-xmark" aria-hidden="true" />
+              </button>
+            </div>
+          </div>
+
+          <div className="flex flex-row items-center gap-3">
+            <input
+              id="item-info-barcode"
+              ref={barcodeInputRef}
+              type="search"
+              inputMode="search"
+              value={barcodeValue}
+              placeholder={formatFallback(
+                t,
+                "item_info.barcode_placeholder",
+                "Введите штрих-код и нажмите Enter"
+              )}
+              onChange={(event) => setBarcodeValue(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  runSearch(barcodeValue, SEARCH_MODES.SCAN);
+                }
+              }}
+              className={inputClass("flex-1")}
+            />
+            <button
+              type="button"
+              className={iconButtonClass()}
+              onClick={startScan}
+              aria-label={formatFallback(t, "op.scan", "Скан штрих-кода")}
+              title={formatFallback(t, "op.scan", "Скан штрих-кода")}
+            >
+              <i className="fa-solid fa-camera" aria-hidden="true" />
+            </button>
+          </div>
+        </>
+      ) : null}
+
+      {searchMode === SEARCH_MODES.NAME ? (
+        <div className="space-y-2">
+          <div className="flex flex-row items-center gap-3">
+            <input
+              id="item-info-query"
+              type="search"
+              value={queryValue}
+              placeholder={formatFallback(
+                t,
+                "item_info.search_placeholder",
+                "Наименование / артикул / код"
+              )}
+              onChange={(event) => setQueryValue(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  runSearch(queryValue, SEARCH_MODES.NAME);
+                }
+              }}
+              className={inputClass("flex-1")}
+            />
+            <button
+              type="button"
+              className={iconButtonClass()}
+              aria-label={formatFallback(t, "common.search", "Поиск")}
+              title={formatFallback(t, "common.search", "Поиск")}
+              onClick={() => runSearch(queryValue, SEARCH_MODES.NAME)}
+            >
+              <i className="fa-solid fa-magnifying-glass" aria-hidden="true" />
+            </button>
+          </div>
+          <div className={mutedTextClass()} aria-live="polite">
+            {searchStatus === "loading"
+              ? formatFallback(t, "searching", "Поиск...")
+              : searchStatus === "empty"
+              ? formatFallback(t, "common.nothing", "Ничего не найдено")
+              : searchStatus === "error"
+              ? formatFallback(t, "search_error", "Ошибка поиска")
+              : null}
+          </div>
+        </div>
+      ) : null}
+
+      {selectedExt ? (
+        <div className={cardClass("space-y-4")} id="item-info-summary">
+          <div>
+            <h2 className="text-xl font-semibold text-slate-900 dark:text-slate-50">
+              {selectedCore.name || "—"}
+            </h2>
+            <div className="flex flex-wrap gap-2 text-sm text-slate-600 dark:text-slate-300">
+              {selectedCore.code ? (
+                <span>
+                  {JSON.stringify(selectedCore)}
+                  {formatFallback(t, "item.code", "Код")}: {selectedCore.code}
+                </span>
+              ) : null}
+              {selectedCore.articul ? (
+                <span>
+                  {formatFallback(t, "item.articul", "Артикул")}:{" "}
+                  {selectedCore.articul}
+                </span>
+              ) : null}
+              {selectedItem?.barcode ? (
+                <span>
+                  {formatFallback(t, "item.barcode", "Штрихкод")}:{" "}
+                  {selectedItem.barcode}
+                </span>
+              ) : null}
+              <span>
+                {formatFallback(t, "item.unit", "Ед.изм.")}:{" "}
+                {selectedItem?.unit}
+              </span>
+            </div>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <p className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                {formatFallback(t, "item_info.group", "Группа")}
+              </p>
+              <p className="text-sm text-slate-900 dark:text-slate-100">
+                {selectedCore.group?.path || "—"}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                {formatFallback(t, "item_info.brand", "Бренд")}
+              </p>
+              <p className="text-sm text-slate-900 dark:text-slate-100">
+                {selectedCore.brand?.name || "—"}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                {formatFallback(t, "item_info.department", "Подразделение")}
+              </p>
+              <p className="text-sm text-slate-900 dark:text-slate-100">
+                {selectedCore.department?.name || "—"}
+              </p>
+            </div>
+            <div>
+              <p className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                {formatFallback(t, "item_info.updated", "Обновлено")}
+              </p>
+              <p className="text-sm text-slate-900 dark:text-slate-100">
+                {selectedCore.last_update
+                  ? fmt.unix(selectedCore.last_update)
+                  : "—"}
+              </p>
+            </div>
+          </div>
+
+          {selectedQuantity ? (
+            <div className="grid gap-3 md:grid-cols-3">
+              <div
+                className={cardClass(
+                  "space-y-1 bg-slate-50/80 dark:bg-slate-900/40"
+                )}
+                aria-label="quantity-common"
+              >
+                <p className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                  {formatFallback(
+                    t,
+                    "item_info.quantity_common",
+                    "Доступно всего"
+                  )}
+                </p>
+                <p className="text-lg font-semibold text-slate-900 dark:text-slate-100">
+                  {fmt.number(selectedQuantity.common ?? 0)}
+                </p>
+              </div>
+              <div
+                className={cardClass(
+                  "space-y-1 bg-slate-50/80 dark:bg-slate-900/40"
+                )}
+                aria-label="quantity-allowed"
+              >
+                <p className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                  {formatFallback(
+                    t,
+                    "item_info.quantity_allowed",
+                    "Разрешено к продаже"
+                  )}
+                </p>
+                <p className="text-lg font-semibold text-slate-900 dark:text-slate-100">
+                  {fmt.number(selectedQuantity.allowed ?? 0)}
+                </p>
+              </div>
+              <div
+                className={cardClass(
+                  "space-y-1 bg-slate-50/80 dark:bg-slate-900/40"
+                )}
+                aria-label="quantity-booked"
+              >
+                <p className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                  {formatFallback(
+                    t,
+                    "item_info.quantity_booked",
+                    "Зарезервировано"
+                  )}
+                </p>
+                <p className="text-lg font-semibold text-slate-900 dark:text-slate-100">
+                  {fmt.number(selectedQuantity.booked ?? 0)}
+                </p>
+              </div>
+            </div>
+          ) : null}
+
+          {selectedPrice != null ? (
+            <div>
+              <p className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                {formatFallback(t, "item_info.current_price", "Текущая цена")}
+              </p>
+              <p className="text-lg font-semibold text-slate-900 dark:text-slate-100">
+                {fmt.money(
+                  selectedPrice,
+                  docCurrency,
+                  selectedPriceType?.round_to
+                )}
+              </p>
+            </div>
+          ) : null}
+
+          {selectedCore.description ? (
+            <div>
+              <p className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                {formatFallback(t, "item_info.description", "Описание")}
+              </p>
+              <p className="text-sm text-slate-900 dark:text-slate-100">
+                {selectedCore.description}
+              </p>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {detailsLoading ? (
+        <div
+          className={cardClass("text-sm text-slate-600 dark:text-slate-300")}
+          aria-live="polite"
+        >
+          {formatFallback(t, "item_info.refreshing", "Обновляем данные...")}
+        </div>
+      ) : null}
+
+      <div className="grid gap-4 xl:grid-cols-2">
+        <div className={cardClass("space-y-3")} id="item-info-quantity">
+          <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-50">
+            {formatFallback(t, "item_info.quantity", "Остатки по складам")}
+          </h2>
+          {quantityInfo.length === 0 ? (
+            <p className={mutedTextClass()}>
+              {formatFallback(
+                t,
+                "item_info.quantity_empty",
+                "Нет данных об остатках"
+              )}
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {quantityInfo.map((entry) => (
+                <div
+                  key={`${entry.stock?.id || "na"}-${
+                    entry.stock?.name || "unknown"
+                  }`}
+                  className="rounded-xl border border-slate-200 px-3 py-2 dark:border-slate-700"
+                >
+                  <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                    {entry.stock?.name ||
+                      formatFallback(
+                        t,
+                        "item_info.stock_unknown",
+                        "Склад не указан"
+                      )}
+                  </p>
+                  <div className="flex flex-wrap gap-3 text-sm text-slate-600 dark:text-slate-300">
+                    <span>
+                      {formatFallback(
+                        t,
+                        "item_info.quantity_common",
+                        "Доступно"
+                      )}
+                      : {fmt.number(entry.common ?? 0)}
+                    </span>
+                    <span>
+                      {formatFallback(
+                        t,
+                        "item_info.quantity_allowed",
+                        "Разрешено"
+                      )}
+                      : {fmt.number(entry.allowed ?? 0)}
+                    </span>
+                    <span>
+                      {formatFallback(t, "item_info.quantity_booked", "Резерв")}
+                      : {fmt.number(entry.booked ?? 0)}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className={cardClass("space-y-3")} id="item-info-prices">
+          <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-50">
+            {formatFallback(t, "item_info.prices", "Цены")}
+          </h2>
+          {pricesInfo.length === 0 ? (
+            <p className={mutedTextClass()}>
+              {formatFallback(
+                t,
+                "item_info.prices_empty",
+                "Нет данных о ценах"
+              )}
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {pricesInfo.map((price) => {
+                const currencyCode =
+                  price.price_type?.currency?.code_chr ||
+                  price.price_type?.currency?.code ||
+                  docCurrency;
+                return (
+                  <div
+                    key={`${price.item_id}-${price.price_type?.id || "pt"}`}
+                    className="rounded-xl border border-slate-200 px-3 py-2 dark:border-slate-700"
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                          {price.price_type?.name ||
+                            formatFallback(
+                              t,
+                              "item_info.price_type_unknown",
+                              "Тип цены неизвестен"
+                            )}
+                        </p>
+                        <p className={mutedTextClass()}>
+                          {price.price_type?.markup != null
+                            ? `${formatFallback(
+                                t,
+                                "item_info.markup",
+                                "Наценка"
+                              )}: ${fmt.number(price.price_type.markup, {
+                                maximumFractionDigits: 2,
+                              })}`
+                            : null}
+                        </p>
+                      </div>
+                      <p className="text-base font-semibold text-slate-900 dark:text-slate-100">
+                        {fmt.money(
+                          price.value ?? 0,
+                          currencyCode,
+                          price.price_type?.round_to
+                        )}
+                      </p>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        <div className={cardClass("space-y-3")} id="item-info-precost">
+          <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-50">
+            {formatFallback(t, "item_info.precost", "Себестоимость")}
+          </h2>
+          {preCostInfo.length === 0 ? (
+            <p className={mutedTextClass()}>
+              {formatFallback(
+                t,
+                "item_info.precost_empty",
+                "Нет данных о себестоимости"
+              )}
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {preCostInfo.map((entry) => (
+                <div
+                  key={`${entry.item_id}-${entry.cost_date || "date"}`}
+                  className="rounded-xl border border-slate-200 px-3 py-2 dark:border-slate-700"
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                      {fmt.money(entry.value ?? 0, docCurrency)}
+                    </p>
+                    <p className={mutedTextClass()}>
+                      {entry.cost_date ? fmt.unix(entry.cost_date) : "—"}
+                    </p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div
+          className={cardClass("space-y-3 xl:col-span-2")}
+          id="item-info-operations"
+        >
+          <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-50">
+            {formatFallback(t, "item_info.operations", "Последние операции")}
+          </h2>
+          {operations.length === 0 ? (
+            <p className={mutedTextClass()}>
+              {formatFallback(t, "item_info.operations_empty", "Нет операций")}
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {operations.map((op, index) => (
+                <div
+                  key={`${op.document_id || index}-${op.date || "date"}`}
+                  className="rounded-xl border border-slate-200 px-3 py-2 dark:border-slate-700"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                        {op.doc_type_name || op.document_type?.name || "—"}
+                      </p>
+                      <div className="flex flex-wrap gap-2 text-xs text-slate-500 dark:text-slate-400">
+                        {op.doc_code ? <span>{op.doc_code}</span> : null}
+                        {op.stock?.name ? <span>• {op.stock.name}</span> : null}
+                      </div>
+                    </div>
+                    <p className="text-sm text-slate-900 dark:text-slate-100">
+                      {fmt.unix(op.date)}
+                    </p>
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-3 text-sm text-slate-600 dark:text-slate-300">
+                    <span>
+                      {formatFallback(t, "item_info.quantity", "Количество")}:{" "}
+                      {fmt.number(op.quantity ?? 0)}
+                    </span>
+                    {op.price != null ? (
+                      <span>
+                        {formatFallback(t, "item_info.current_price", "Цена")}:{" "}
+                        {fmt.money(op.price ?? 0, docCurrency)}
+                      </span>
+                    ) : null}
+                    {op.positive != null ? (
+                      <span>
+                        {op.positive
+                          ? formatFallback(
+                              t,
+                              "item_info.operation_income",
+                              "Приход"
+                            )
+                          : formatFallback(
+                              t,
+                              "item_info.operation_outcome",
+                              "Расход"
+                            )}
+                      </span>
+                    ) : null}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {resultModalOpen ? (
+        <div
+          className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/70 px-4 py-6"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="item-info-search-results"
+          onClick={closeResultModal}
+        >
+          <div
+            className={cardClass(
+              "relative mt-6 w-full max-w-lg space-y-4 shadow-xl"
+            )}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h2
+              id="item-info-search-results"
+              className="text-lg font-semibold text-slate-900 dark:text-slate-50"
+            >
+              {formatFallback(
+                t,
+                "item_info.choose_item",
+                "Выберите номенклатуру"
+              )}
+            </h2>
+            <div className="max-h-96 space-y-3 overflow-y-auto pr-1">
+              {resultItems.map((item) => (
+                <button
+                  key={`${item.id}-${item.barcode}`}
+                  type="button"
+                  className={cardClass(
+                    "w-full text-left transition hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-500 focus-visible:ring-offset-2"
+                  )}
+                  onClick={() => handlePickItem(item)}
+                >
+                  <div className="flex flex-col gap-1">
+                    <span className="text-sm font-semibold text-slate-900 dark:text-slate-50">
+                      {item.name}
+                    </span>
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                      {item.code ? (
+                        <span>
+                          {formatFallback(t, "item.code", "Код")}: {item.code}
+                        </span>
+                      ) : null}
+                      {item.barcode ? <span>{item.barcode}</span> : null}
+                    </div>
+                    {item.articul ? (
+                      <span className="text-xs text-slate-500 dark:text-slate-400">
+                        {formatFallback(t, "item.articul", "Артикул")}:{" "}
+                        {item.articul}
+                      </span>
+                    ) : null}
+                  </div>
+                </button>
+              ))}
+            </div>
+            <div className="flex justify-end">
+              <button
+                type="button"
+                className={buttonClass({ variant: "ghost", size: "sm" })}
+                onClick={closeResultModal}
+              >
+                {formatFallback(t, "common.cancel", "Отмена")}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {settingsOpen ? (
+        <div
+          className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/70 px-4 py-6"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="item-info-settings-title"
+          onClick={handleSettingsCancel}
+        >
+          <div
+            className={cardClass(
+              "relative mt-12 w-full max-w-md space-y-4 shadow-xl"
+            )}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h2
+              id="item-info-settings-title"
+              className="text-lg font-semibold text-slate-900 dark:text-slate-50"
+            >
+              {formatFallback(
+                t,
+                "item_info.settings_title",
+                "Настройки поиска"
+              )}
+            </h2>
+            {optionsLoading ? (
+              <p className={mutedTextClass()}>
+                {formatFallback(
+                  t,
+                  "item_info.settings_loading",
+                  "Загрузка параметров..."
+                )}
+              </p>
+            ) : null}
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <label
+                  className={labelClass()}
+                  htmlFor="item-info-settings-stock"
+                >
+                  {formatFallback(t, "item_info.stock", "Склад")}
+                </label>
+                <select
+                  id="item-info-settings-stock"
+                  className={inputClass()}
+                  value={settingsDraft.stockId ?? ""}
+                  onChange={(event) =>
+                    setSettingsDraft((prev) => ({
+                      ...prev,
+                      stockId: event.target.value,
+                    }))
+                  }
+                >
+                  <option value="">
+                    {formatFallback(t, "item_info.all_stocks", "Все склады")}
+                  </option>
+                  {stocks.map((stock) => (
+                    <option key={stock.value} value={stock.value}>
+                      {stock.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="space-y-2">
+                <label
+                  className={labelClass()}
+                  htmlFor="item-info-settings-price-type"
+                >
+                  {formatFallback(t, "item_info.price_type", "Вид цены")}
+                </label>
+                <select
+                  id="item-info-settings-price-type"
+                  className={inputClass()}
+                  value={settingsDraft.priceTypeId ?? ""}
+                  onChange={(event) =>
+                    setSettingsDraft((prev) => ({
+                      ...prev,
+                      priceTypeId: event.target.value,
+                    }))
+                  }
+                >
+                  <option value="">
+                    {formatFallback(
+                      t,
+                      "item_info.any_price_type",
+                      "Все виды цен"
+                    )}
+                  </option>
+                  {priceTypes.map((pt) => (
+                    <option key={pt.value} value={pt.value}>
+                      {pt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div className="flex justify-end gap-3">
+              <button
+                type="button"
+                className={buttonClass({ variant: "ghost", size: "sm" })}
+                onClick={handleSettingsCancel}
+              >
+                {formatFallback(t, "common.cancel", "Отмена")}
+              </button>
+              <button
+                type="button"
+                className={buttonClass({ variant: "primary", size: "sm" })}
+                onClick={handleSettingsApply}
+              >
+                {formatFallback(t, "common.apply", "Применить")}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}

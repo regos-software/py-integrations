@@ -69,7 +69,7 @@ class Item(BaseSchema):
     model_config = ConfigDict(extra="ignore")
 
     id: int = PydField(..., description="ID номенклатуры.")
-    group: Optional[ItemGroup] = PydField(None, description="Группа номенклатуры.")
+    group: ItemGroup = PydField(None, description="Группа номенклатуры.")
     department: Optional[Department] = PydField(None, description="Подразделение.")
     vat: Optional[TaxVat] = PydField(None, description="Ставка НДС.")
     barcode_list: Optional[str] = PydField(
