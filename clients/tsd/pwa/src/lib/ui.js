@@ -89,8 +89,8 @@ export function toastClass(open, type = "success") {
       ? "bg-blue-600 text-white"
       : "bg-emerald-600 text-white";
   return cn(
-    "pointer-events-none fixed bottom-6 left-1/2 z-50 w-[min(420px,90vw)] -translate-x-1/2 rounded-xl px-4 py-3 text-sm font-medium shadow-lg transition duration-200",
+    "pointer-events-auto w-full rounded-xl px-4 py-3 text-sm font-medium shadow-lg transition duration-200",
     palette,
-    open ? "opacity-100 translate-y-0" : "translate-y-4 opacity-0"
+    open ? "opacity-100 translate-y-0" : "translate-y-2 opacity-0"
   );
 }
