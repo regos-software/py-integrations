@@ -22,4 +22,5 @@ def create_app() -> FastAPI:
 
     return app
 
+
 app = create_app()
