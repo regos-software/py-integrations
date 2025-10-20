@@ -22,6 +22,7 @@ def create_app() -> FastAPI:
     logger.info("FastAPI app initialized")
 
     return app
+    
 
 app = create_app()
 
