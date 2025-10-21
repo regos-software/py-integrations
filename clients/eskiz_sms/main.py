@@ -1,18 +1,18 @@
 import httpx
 import json
 import uuid
-from typing import Any, Optional  
+from typing import Any, Optional
 from core.api.regos_api import RegosAPI
 from schemas.integration.sms_integration_base import IntegrationSmsBase
-from schemas.api.base import APIBaseResponse
-from schemas.api.integrations.connected_integration_setting import ConnectedIntegrationSettingRequest
+from schemas.api.integrations.connected_integration_setting import (
+    ConnectedIntegrationSettingRequest,
+)
 from schemas.integration.base import (
     IntegrationSuccessResponse,
     IntegrationErrorResponse,
     IntegrationErrorModel,
 )
 from clients.base import ClientBase
-from core.api.client import APIClient
 from core.logger import setup_logger
 from config.settings import settings
 from core.redis import redis_client
@@ -27,7 +27,7 @@ class EskizSmsIntegration(IntegrationSmsBase, ClientBase):
         "login": f"{BASE_URL}/auth/login",
         "refresh": f"{BASE_URL}/auth/refresh",
         "send_sms": f"{BASE_URL}/message/sms/send",
-        "send_batch": f"{BASE_URL}/message/sms/send-batch"
+        "send_batch": f"{BASE_URL}/message/sms/send-batch",
     }
     DEFAULT_TIMEOUT = 15
     BATCH_SIZE = 100
@@ -63,14 +63,16 @@ class EskizSmsIntegration(IntegrationSmsBase, ClientBase):
                 logger.warning(f"Ошибка Redis: {error}, загружаем из API")
 
         # 2. Если нет в кеше — API
-        logger.debug(f"Настройки не найдены в кеше, загружаем из API")
+        logger.debug("Настройки не найдены в кеше, загружаем из API")
         try:
-            async with RegosAPI(connected_integration_id=self.connected_integration_id) as api:
-                settings_response = await api.integrations.connected_integration_setting.get(
-                    ConnectedIntegrationSettingRequest(
-                        integration_key="sms_eskiz"
+            async with RegosAPI(
+                connected_integration_id=self.connected_integration_id
+            ) as api:
+                settings_response = (
+                    await api.integrations.connected_integration_setting.get(
+                        ConnectedIntegrationSettingRequest(integration_key="sms_eskiz")
                     )
-                )
+                ).result
 
             # settings_response — это список моделей ConnectedIntegrationSetting
             settings_map = {item.key.lower(): item.value for item in settings_response}
@@ -78,24 +80,33 @@ class EskizSmsIntegration(IntegrationSmsBase, ClientBase):
             # 3. Сохраняем в Redis
             if settings.redis_enabled and redis_client:
                 try:
-                    await redis_client.setex(cache_key, self.SETTINGS_TTL, json.dumps(settings_map))
+                    await redis_client.setex(
+                        cache_key, self.SETTINGS_TTL, json.dumps(settings_map)
+                    )
                 except Exception as error:
                     logger.warning(f"Не удалось сохранить настройки в Redis: {error}")
 
             return settings_map
         except Exception as error:
-            logger.error(f"Ошибка получения настроек для {self.connected_integration_id}: {error}")
+            logger.error(
+                f"Ошибка получения настроек для {self.connected_integration_id}: {error}"
+            )
             raise
 
-
-    async def _make_request(self, endpoint: str, data: dict, headers: dict, json: bool = False) -> Any:
+    async def _make_request(
+        self, endpoint: str, data: dict, headers: dict, json: bool = False
+    ) -> Any:
         try:
-            request_func = self.http_client.post if not endpoint.endswith("refresh") else self.http_client.patch
+            request_func = (
+                self.http_client.post
+                if not endpoint.endswith("refresh")
+                else self.http_client.patch
+            )
             response = await request_func(
                 endpoint,
                 json=data if json else None,
                 data=data if not json else None,
-                headers=headers
+                headers=headers,
             )
             if response.status_code == 401:
                 token = await self.refresh_token()
@@ -105,7 +116,7 @@ class EskizSmsIntegration(IntegrationSmsBase, ClientBase):
                         endpoint,
                         json=data if json else None,
                         data=data if not json else None,
-                        headers=headers
+                        headers=headers,
                     )
             response.raise_for_status()
             return response.json()
@@ -128,7 +139,7 @@ class EskizSmsIntegration(IntegrationSmsBase, ClientBase):
                 self.ENDPOINTS["login"],
                 data={"email": email, "password": password},
                 headers={},
-                json=False
+                json=False,
             )
             token = response.get("data", {}).get("token")
             if not token:
@@ -140,7 +151,7 @@ class EskizSmsIntegration(IntegrationSmsBase, ClientBase):
             logger.error(f"Ошибка получения токена: {e}")
             raise
 
-    async def refresh_token(self) -> Optional[str]:  
+    async def refresh_token(self) -> Optional[str]:
         token_cache_key = f"clients:token:eskiz:{self.connected_integration_id}"
         token = await redis_client.get(token_cache_key)
 
@@ -153,7 +164,7 @@ class EskizSmsIntegration(IntegrationSmsBase, ClientBase):
                 self.ENDPOINTS["refresh"],
                 data={},
                 headers={"Authorization": f"Bearer {token}"},
-                json=False
+                json=False,
             )
             new_token = new_token.get("data", {}).get("token")
             if new_token and settings.redis_enabled and redis_client:
@@ -205,26 +216,28 @@ class EskizSmsIntegration(IntegrationSmsBase, ClientBase):
                     self.ENDPOINTS["send_sms"],
                     data=data,
                     headers={"Authorization": f"Bearer {token}"},
-                    json=False
+                    json=False,
                 )
             except Exception as e:
-                return self._error_response(1004, f"Ошибка при отправке одиночного SMS: {e}")
+                return self._error_response(
+                    1004, f"Ошибка при отправке одиночного SMS: {e}"
+                )
 
         results = []
         for i in range(0, len(messages), self.BATCH_SIZE):
-            batch = messages[i:i + self.BATCH_SIZE]
+            batch = messages[i : i + self.BATCH_SIZE]
             dispatch_id = str(uuid.uuid4())
             payload = {
                 "messages": [
                     {
                         "user_sms_id": f"sms_{i}_{j}",
                         "to": int(msg["recipient"].lstrip("+")),
-                        "text": msg["message"]
+                        "text": msg["message"],
                     }
                     for j, msg in enumerate(batch)
                 ],
                 "from": sender,
-                "dispatch_id": dispatch_id
+                "dispatch_id": dispatch_id,
             }
             if callback_url:
                 payload["callback_url"] = callback_url
@@ -234,14 +247,11 @@ class EskizSmsIntegration(IntegrationSmsBase, ClientBase):
                     self.ENDPOINTS["send_batch"],
                     data=payload,
                     headers={"Authorization": f"Bearer {token}"},
-                    json=True
+                    json=True,
                 )
                 results.append(result)
             except Exception as e:
                 logger.error(f"Ошибка при отправке пакета {i}-{i + len(batch)}: {e}")
                 results.append({"error": str(e), "batch_index": i})
 
-        return {
-            "sent_batches": len(results),
-            "details": results
-        }
+        return {"sent_batches": len(results), "details": results}

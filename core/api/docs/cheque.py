@@ -5,17 +5,16 @@ from schemas.api.docs.cheque import DocChequeGetRequest, DocCheque
 
 logger = setup_logger("docs.cheque")
 
+
 class DocsChequeService:
     PATH_GET = "DocCheque/Get"
 
     def __init__(self, api):
         self.api = api
 
-    async def get(self, req: DocChequeGetRequest) -> List[DocCheque]:
+    async def get(self, req: DocChequeGetRequest) -> APIBaseResponse[List[DocCheque]]:
         resp = await self.api.call(self.PATH_GET, req, APIBaseResponse)
-        if not getattr(resp, "ok", False) or not isinstance(resp.result, list):
-            return []
-        return [DocCheque.model_validate(x) for x in resp.result]
+        return resp
 
-    async def get_by_uuids(self, uuids: Iterable) -> List[DocCheque]:
+    async def get_by_uuids(self, uuids: Iterable) -> APIBaseResponse[List[DocCheque]]:
         return await self.get(DocChequeGetRequest(uuids=list(uuids)))

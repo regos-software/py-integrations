@@ -1,0 +1,35 @@
+{
+  "name": "tsd-pwa",
+  "version": "2.3.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently \"npm:css:watch\" \"node esbuild.config.mjs --watch\"",
+    "build": "npm run css:build && node esbuild.config.mjs",
+    "serve": "live-server --port=4173 --no-browser",
+    "css:build": "tailwindcss -i ./src/styles.css -o ./assets/app.css --minify",
+    "css:watch": "tailwindcss -i ./src/styles.css -o ./assets/app.css --watch",
+    "i18n:scan": "i18next-scanner --config i18next-scanner.config.cjs"
+  },
+  "dependencies": {
+    "@zxing/library": "^0.21.3",
+    "qrcode": "^1.5.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.26.2"
+  },
+  "devDependencies": {
+    "braces": "^3.0.3",
+    "chokidar": "^4.0.3",
+    "concurrently": "^8.2.2",
+    "esbuild": "^0.25.10",
+    "eslint": "^8.57.0",
+    "eslint-plugin-jsx-a11y": "^6.8.0",
+    "eslint-plugin-react": "^7.34.3",
+    "eslint-plugin-react-hooks": "^4.6.0",
+    "i18next-scanner": "^4.6.0",
+    "live-server": "^1.2.0",
+    "micromatch": "^4.0.8",
+    "tailwindcss": "^3.4.14"
+  }
+}

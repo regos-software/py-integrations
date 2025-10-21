@@ -22,7 +22,7 @@ class User(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     middle_name: Optional[str] = None
-    sex: str = "none"  
+    sex: str = "none"
     date_of_birth: Optional[str] = None
     address: Optional[str] = None
     phones: Optional[str] = None

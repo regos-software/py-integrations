@@ -1,7 +1,11 @@
 from abc import ABC
 from typing import Any, Optional
 from schemas.integration.integration_base import IntegrationBase
-from schemas.integration.base import IntegrationSuccessResponse, IntegrationErrorResponse, IntegrationErrorModel
+from schemas.integration.base import (
+    IntegrationSuccessResponse,
+    IntegrationErrorResponse,
+    IntegrationErrorModel,
+)
 
 
 class IntegrationEmailBase(IntegrationBase, ABC):
@@ -30,5 +34,7 @@ class IntegrationEmailBase(IntegrationBase, ABC):
 
     async def send_messages(self, messages: list[dict]) -> Any:
         return IntegrationErrorResponse(
-            result=IntegrationErrorModel(error=9999, description="send_messages not implemented")
+            result=IntegrationErrorModel(
+                error=9999, description="send_messages not implemented"
+            )
         )

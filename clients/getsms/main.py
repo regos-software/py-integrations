@@ -3,20 +3,21 @@ import json
 from typing import Any
 from core.api.regos_api import RegosAPI
 from schemas.integration.sms_integration_base import IntegrationSmsBase
-from schemas.api.base import APIBaseResponse
-from schemas.api.integrations.connected_integration_setting import ConnectedIntegrationSettingRequest
+from schemas.api.integrations.connected_integration_setting import (
+    ConnectedIntegrationSettingRequest,
+)
 from schemas.integration.base import (
     IntegrationSuccessResponse,
     IntegrationErrorResponse,
     IntegrationErrorModel,
 )
 from clients.base import ClientBase
-from core.api.client import APIClient
 from core.logger import setup_logger
 from config.settings import settings
 from core.redis import redis_client
 
 logger = setup_logger("getsms")
+
 
 class GetSmsIntegration(IntegrationSmsBase, ClientBase):
     BASE_URL = "http://185.8.212.184/smsgateway/"
@@ -26,7 +27,7 @@ class GetSmsIntegration(IntegrationSmsBase, ClientBase):
     SETTINGS_KEYS = {
         "login": "getsms_login",
         "password": "getsms_password",
-        "nickname": "getsms_nickname"
+        "nickname": "getsms_nickname",
     }
 
     def __init__(self, *args, **kwargs):
@@ -59,14 +60,16 @@ class GetSmsIntegration(IntegrationSmsBase, ClientBase):
                 logger.warning(f"Ошибка Redis: {error}, загружаем из API")
 
         # 2. Если нет в кеше — API
-        logger.debug(f"Настройки не найдены в кеше, загружаем из API")
+        logger.debug("Настройки не найдены в кеше, загружаем из API")
         try:
-            async with RegosAPI(connected_integration_id=self.connected_integration_id) as api:
-                settings_response = await api.integrations.connected_integration_setting.get(
-                    ConnectedIntegrationSettingRequest(
-                        integration_key="sms_getsms"
+            async with RegosAPI(
+                connected_integration_id=self.connected_integration_id
+            ) as api:
+                settings_response = (
+                    await api.integrations.connected_integration_setting.get(
+                        ConnectedIntegrationSettingRequest(integration_key="sms_getsms")
                     )
-                )
+                ).result
 
             # settings_response — это список моделей ConnectedIntegrationSetting
             settings_map = {item.key.lower(): item.value for item in settings_response}
@@ -74,22 +77,25 @@ class GetSmsIntegration(IntegrationSmsBase, ClientBase):
             # 3. Сохраняем в Redis
             if settings.redis_enabled and redis_client:
                 try:
-                    await redis_client.setex(cache_key, self.SETTINGS_TTL, json.dumps(settings_map))
+                    await redis_client.setex(
+                        cache_key, self.SETTINGS_TTL, json.dumps(settings_map)
+                    )
                 except Exception as error:
                     logger.warning(f"Не удалось сохранить настройки в Redis: {error}")
 
             return settings_map
         except Exception as error:
-            logger.error(f"Ошибка получения настроек для {self.connected_integration_id}: {error}")
+            logger.error(
+                f"Ошибка получения настроек для {self.connected_integration_id}: {error}"
+            )
             raise
-
 
     async def _make_request(self, data: dict) -> Any:
         try:
             response = await self.http_client.post(
                 self.BASE_URL,
                 data=data,
-                headers={"Content-Type": "application/x-www-form-urlencoded"}
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
             response.raise_for_status()
             logger.debug(f"Ответ от шлюза: {response.text}")
@@ -97,6 +103,7 @@ class GetSmsIntegration(IntegrationSmsBase, ClientBase):
         except Exception as e:
             logger.error(f"Ошибка отправки запроса: {e}")
             raise
+
     async def handle_external(self, data: dict) -> Any:
         """
         Обработка внешних запросов (не от REGOS).
@@ -118,23 +125,24 @@ class GetSmsIntegration(IntegrationSmsBase, ClientBase):
             nickname = settings_map.get(self.SETTINGS_KEYS["nickname"])
 
             if not all([login, password]):
-                return self._error_response(1002, "Настройки интеграции не содержат login или password")
+                return self._error_response(
+                    1002, "Настройки интеграции не содержат login или password"
+                )
         except Exception as e:
             return self._error_response(1001, f"Ошибка при получении настроек: {e}")
 
         results = []
         for i in range(0, len(messages), self.BATCH_SIZE):
-            batch = messages[i:i + self.BATCH_SIZE]
+            batch = messages[i : i + self.BATCH_SIZE]
             payload = {
                 "login": login,
                 "password": password,
-                "data": json.dumps([
-                    {
-                        "phone": msg["recipient"].lstrip("+"),
-                        "text": msg["message"]
-                    }
-                    for msg in batch
-                ])
+                "data": json.dumps(
+                    [
+                        {"phone": msg["recipient"].lstrip("+"), "text": msg["message"]}
+                        for msg in batch
+                    ]
+                ),
             }
             if nickname:
                 payload["nickname"] = nickname
@@ -147,7 +155,4 @@ class GetSmsIntegration(IntegrationSmsBase, ClientBase):
                 results.append({"error": str(e), "batch_index": i})
 
         logger.info(f"Отправка завершена. Обработано пакетов: {len(results)}")
-        return {
-            "sent_batches": len(results),
-            "details": results
-        }
+        return {"sent_batches": len(results), "details": results}
