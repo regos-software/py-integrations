@@ -5,7 +5,7 @@ uvicorn
 python-dotenv
 redis
 pydantic-settings
-pydantic[email]
 aiogram
 tenacity
 aiosmtplib
+pydantic[email]
