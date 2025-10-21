@@ -8,5 +8,4 @@ pydantic-settings
 aiogram
 tenacity
 aiosmtplib
-fast_bitrix24
 pydantic[email]
