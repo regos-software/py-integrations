@@ -214,7 +214,7 @@ export default function DocsPage({ definition: definitionProp }) {
     } finally {
       setStocksLoading(false);
     }
-  }, [api, stocks.length, stocksLoading, t]);
+  }, [api, stocks?.length, stocksLoading, t]);
 
   const handleOpenFilters = () => {
     setFiltersDraft((prev) => ({

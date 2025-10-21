@@ -5,7 +5,6 @@ from routes.clients import router as clients
 from core.exception_handlers import add_exception_handlers
 from fastapi.middleware.gzip import GZipMiddleware
 
-
 logger = setup_logger("server")
 
 def create_app() -> FastAPI:
