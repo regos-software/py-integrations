@@ -9,4 +9,3 @@ pydantic[email]
 aiogram
 tenacity
 aiosmtplib
-fast_bitrix24
