@@ -1,35 +1,42 @@
+# core/logger.py
 import logging
 import sys
 from config.settings import settings
 
-
-def setup_logger(name: str = "app") -> logging.Logger:
-    """Настраивает логгер с заданным именем и уровнем логирования из настроек.
-
-    Args:
-        name (str): Имя логгера. По умолчанию 'app'.
-
-    Returns:
-        logging.Logger: Настроенный объект логгера.
-
-    Raises:
-        ValueError: Если указан недопустимый уровень логирования.
-    """
-    logger = logging.getLogger(name)
-
-    log_level = settings.log_level.upper()
-    if not hasattr(logging, log_level):
-        raise ValueError(f"Недопустимый уровень логирования: {log_level}")
-
-    logger.setLevel(log_level)
-
-    if not logger.handlers:
-        formatter = logging.Formatter(
+def _ensure_root_handler(level: int):
+    root = logging.getLogger()
+    # Если root без хендлеров — добавим консоль
+    if not root.handlers:
+        fmt = logging.Formatter(
             fmt="%(asctime)s %(levelname)s [%(name)s] %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         )
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setFormatter(formatter)
-        logger.addHandler(console_handler)
+        ch = logging.StreamHandler(sys.stdout)
+        ch.setLevel(logging.NOTSET)  # пропускать всё, фильтрует уровень логгеров
+        ch.setFormatter(fmt)
+        root.addHandler(ch)
+    # Приведём уровень root к нужному (чтобы DEBUG показывался)
+    root.setLevel(level)
+    root.disabled = False
+
+def setup_logger(name: str = "app") -> logging.Logger:
+    logger = logging.getLogger(name)
+
+    # уровень из настроек
+    level_name = (settings.log_level or "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+
+    # 1) root точно настроен и пишет в консоль
+    _ensure_root_handler(level)
+
+    # 2) уберём NullHandler'ы, если их кто-то повесил
+    for h in list(logger.handlers):
+        if isinstance(h, logging.NullHandler):
+            logger.removeHandler(h)
+
+    # 3) уровень и проброс к root
+    logger.setLevel(level)
+    logger.disabled = False
+    logger.propagate = True  # пишем через root; не добавляем свои хендлеры
 
     return logger
