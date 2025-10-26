@@ -4,8 +4,12 @@ import sys
 from config.settings import settings
 
 def _ensure_root_handler(level: int):
+    """
+    Гарантируем, что root-логгер пишет в консоль и не отключён.
+    Вызывается из setup_logger() при каждом импорте — idempotent.
+    """
     root = logging.getLogger()
-    # Если root без хендлеров — добавим консоль
+    # если на root нет ни одного хендлера — добавим консоль
     if not root.handlers:
         fmt = logging.Formatter(
             fmt="%(asctime)s %(levelname)s [%(name)s] %(message)s",
@@ -15,28 +19,35 @@ def _ensure_root_handler(level: int):
         ch.setLevel(logging.NOTSET)  # пропускать всё, фильтрует уровень логгеров
         ch.setFormatter(fmt)
         root.addHandler(ch)
-    # Приведём уровень root к нужному (чтобы DEBUG показывался)
+    # уровень и включение
     root.setLevel(level)
     root.disabled = False
 
 def setup_logger(name: str = "app") -> logging.Logger:
-    logger = logging.getLogger(name)
-
-    # уровень из настроек
+    """
+    Возвращает именованный логгер, который гарантированно пишет в консоль.
+    - Включает root-логгер и его консольный хендлер (если не был настроен).
+    - Снимает NullHandler'ы с именованного логгера.
+    - Не добавляет своих хендлеров (чтобы не было дублей) — пишем через root.
+    - Снимает флаг disabled, если кто-то его выставил (dictConfig с disable_existing_loggers=True).
+    """
     level_name = (settings.log_level or "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
 
-    # 1) root точно настроен и пишет в консоль
+    # 1) гарантируем рабочий root
     _ensure_root_handler(level)
 
-    # 2) уберём NullHandler'ы, если их кто-то повесил
+    # 2) берём наш логгер
+    logger = logging.getLogger(name)
+
+    # 3) если кто-то повесил NullHandler — уберём
     for h in list(logger.handlers):
         if isinstance(h, logging.NullHandler):
             logger.removeHandler(h)
 
-    # 3) уровень и проброс к root
+    # 4) уровень/пропагация/включение
     logger.setLevel(level)
-    logger.disabled = False
-    logger.propagate = True  # пишем через root; не добавляем свои хендлеры
+    logger.propagate = True      # отдаём в root
+    logger.disabled = False      # на случай disable_existing_loggers=True
 
     return logger
