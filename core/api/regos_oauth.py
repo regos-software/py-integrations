@@ -19,7 +19,7 @@ except Exception:
     shared_redis = None
 
 
-class RedisClientCredentialsProvider:
+class RegosOAuthProvider:
     """
     OAuth2 Client Credentials c кэшированием access_token в Redis.
     Минимальный протокол: grant_type=client_credentials, client_id, client_secret.
