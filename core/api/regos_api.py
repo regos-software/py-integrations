@@ -1,167 +1,122 @@
-# core/api/client.py
 from __future__ import annotations
-
-import gzip
-import json
-from typing import Any, Type, TypeVar
-
+from typing import Type, TypeVar, Any
 import httpx
-from pydantic import BaseModel
+from tenacity import (
+    retry,
+    wait_exponential,
+    stop_after_attempt,
+    retry_if_exception_type,
+)
 
-from core.api.rate_limiter import get_shared_limiter
-from schemas.api.base import APIBaseResponse
+from core.api.batch import BatchService
+from core.api.client import APIClient
+
 from core.logger import setup_logger
-from config.settings import settings
 
-from core.regos_oauth import RedisClientCredentialsProvider
-
-logger = setup_logger("api_client")
-TResponse = TypeVar("TResponse", bound=BaseModel)
+logger = setup_logger("regos_api")
+T = TypeVar("T")
 
 
 class RegosAPI:
-    """
-    Клиент REGOS API под конкретный integration_id.
+    def __init__(self, connected_integration_id: str):
+        self.connected_integration_id = connected_integration_id
+        self._client = APIClient(connected_integration_id=connected_integration_id)
+        self.batch = BatchService(self)
 
-    Возможности:
-      - Рейтлимит: RATE_PER_SEC (rps) + BURST (bucket) общие для всех экземпляров
-        с одинаковым integration_id в процессе (через get_shared_limiter).
-      - Авторизация: OAuth2 client_credentials с кэшированием токена в Redis.
-      - Автоповтор при 401 Unauthorized с принудительным обновлением токена.
-      - Поддержка gzip-ответов (ручная распаковка при необходимости).
+        self.docs: "RegosAPI.Docs" = self.Docs(self)
+        self.integrations: "RegosAPI.Integrations" = self.Integrations(self)
+        self.reports: "RegosAPI.Reports" = self.Reports(self)
+        self.references: "RegosAPI.References" = self.References(self)
 
-    Пример:
-        async with APIClient("your_integration_id") as api:
-            resp = await api.post("orders/list", {"page": 1, "size": 20})
-            print(resp)
-    """
-
-    BASE_URL = settings.integration_url
-    RATE_PER_SEC = settings.integration_rps
-    BURST = settings.integration_burst
-
-    def __init__(self, connected_integration_id: str, timeout: int = 90):
-        self.base_url = self.BASE_URL.rstrip("/")
-        self.integration_id = connected_integration_id
-        self.timeout = timeout
-        self.client = httpx.AsyncClient(timeout=self.timeout)
-
-        # Общий рейт-лимитер по integration_id
-        self._limiter = get_shared_limiter(
-            self.integration_id,
-            self.RATE_PER_SEC,
-            self.BURST,
+    @retry(
+        wait=wait_exponential(min=0.2, max=5),
+        stop=stop_after_attempt(3),
+        retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)),
+        reraise=True,
+    )
+    async def call(self, path: str, body: Any, response_model: Type[T]) -> T:
+        return await self._client.post(
+            method_path=path, data=body, response_model=response_model
         )
 
-        # OAuth2 (client credentials) провайдер с кэшем в Redis
-        self._oauth = RedisClientCredentialsProvider()
+    async def close(self) -> None:
+        await self._client.close()
 
-        logger.debug(
-            "Инициализирован APIClient: base_url=%s, integration_id=%s, rate=%s/s, burst=%s",
-            self.base_url,
-            self.integration_id,
-            self.RATE_PER_SEC,
-            self.BURST,
-        )
-
-    async def _headers(self, force_refresh_token: bool = False) -> dict[str, str]:
-        token = await self._oauth.get_access_token(force_refresh=force_refresh_token)
-        return {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Accept-Encoding": "gzip",
-            "Authorization": f"Bearer {token}",
-        }
-
-    async def post(
-        self,
-        method_path: str,
-        data: Any,
-        response_model: Type[TResponse] = APIBaseResponse,
-    ) -> TResponse:
-        """
-        Универсальный POST-запрос:
-          - сериализует pydantic-модели/списки/словари,
-          - применяет рейтлимит,
-          - добавляет Bearer-токен,
-          - при 401 обновляет токен и повторяет запрос один раз,
-          - распаковывает gzip (если пришёл сырой gzip),
-          - валидирует ответ через response_model (pydantic).
-        """
-        url = f"{self.base_url}/gateway/out/{self.integration_id}/v1/{method_path.lstrip('/')}"
-        await self._limiter.acquire()
-
-        # Сериализация payload
-        if isinstance(data, BaseModel):
-            payload = data.model_dump(mode="json")
-        elif isinstance(data, list):
-            payload = [
-                item.model_dump(mode="json") if isinstance(item, BaseModel) else item
-                for item in data
-            ]
-        elif isinstance(data, dict):
-            payload = data
-        else:
-            raise TypeError(f"Unsupported data type for POST: {type(data)}")
-
-        logger.info("POST %s", url)
-        logger.debug("Payload: %s", payload)
-
-        async def _do(force_refresh: bool = False) -> httpx.Response:
-            headers = await self._headers(force_refresh_token=force_refresh)
-            return await self.client.post(url, json=payload, headers=headers)
-
-        try:
-            resp = await _do(force_refresh=False)
-            try:
-                resp.raise_for_status()
-            except httpx.HTTPStatusError as e:
-                if e.response is not None and e.response.status_code == 401:
-                    logger.warning("401 Unauthorized — обновляю токен и повторяю запрос")
-                    resp = await _do(force_refresh=True)
-                    resp.raise_for_status()
-                else:
-                    raise
-
-            # Читаем сырые байты (минуя авто-декодинг) и, при необходимости, разgzip-ваем вручную
-            raw = await resp.aread()
-            if raw.startswith(b"\x1f\x8b"):
-                logger.debug("Response is gzip-compressed, decompressing...")
-                raw = gzip.decompress(raw)
-
-            text = raw.decode("utf-8", errors="replace")
-            logger.debug("Response text (first 500 chars): %s", text[:500])
-
-            parsed = json.loads(text)
-            return response_model(**parsed)
-
-        except httpx.RequestError as e:
-            logger.error("Ошибка запроса к %s: %s", url, e)
-            raise
-        except httpx.HTTPStatusError as e:
-            body_preview = ""
-            try:
-                body_preview = e.response.text[:500] if e.response is not None else ""
-            except Exception:
-                pass
-            logger.error(
-                "HTTP %s при обращении к %s: %s",
-                getattr(e.response, "status_code", "<?>"),
-                url,
-                body_preview,
-            )
-            raise
-        except Exception as e:
-            logger.exception("Непредвиденная ошибка при POST %s: %s", url, e)
-            raise
-
-    async def close(self):
-        logger.debug("Закрытие httpx.AsyncClient")
-        await self.client.aclose()
-
-    # Контекстный менеджер
-    async def __aenter__(self):
+    async def __aenter__(self) -> "RegosAPI":
         return self
 
-    async def __aexit__(self, exc_type, exc, tb):
+    async def __aexit__(self, *_):
         await self.close()
+
+    # ------- Namespaces -------
+    class Docs:
+        def __init__(self, api: "RegosAPI"):
+            from core.api.docs.cheque import DocsChequeService
+            from core.api.docs.cash_session import DocCashSessionService
+            from core.api.docs.cheque_operation import DocChequeOperationService
+            from core.api.docs.cheque_payment import DocChequePaymentService
+            from core.api.docs.cash_operation import CashOperationService
+            from core.api.docs.purchase import DocPurchaseService
+            from core.api.docs.purchase_operation import PurchaseOperationService
+            from core.api.docs.wholesale import DocWholeSaleService
+            from core.api.docs.wholesale_operation import WholeSaleOperationService
+            from core.api.docs.inventory import DocInventoryService
+            from core.api.docs.inventory_operation import InventoryOperationService
+
+            # Initialize services
+
+            self.cheque = DocsChequeService(api)
+            self.cash_session = DocCashSessionService(api)
+            self.cheque_operation = DocChequeOperationService(api)
+            self.cheque_payment = DocChequePaymentService(api)
+            self.cash_operation = CashOperationService(api)
+            self.purchase = DocPurchaseService(api)
+            self.purchase_operation = PurchaseOperationService(api)
+            self.wholesale = DocWholeSaleService(api)
+            self.wholesale_operation = WholeSaleOperationService(api)
+            self.inventory = DocInventoryService(api)
+            self.inventory_operation = InventoryOperationService(api)
+
+    class Integrations:
+        def __init__(self, api: "RegosAPI"):
+            from core.api.integrations.connected_integration_setting import (
+                ConnectedIntegrationSettingService,
+            )
+
+            self.connected_integration_setting = ConnectedIntegrationSettingService(api)
+
+    class Reports:
+        def __init__(self, api: "RegosAPI"):
+            from core.api.reports.retail_report import RetailReportService
+
+            self.retail_report = RetailReportService(api)
+
+    class References:
+        def __init__(self, api: "RegosAPI"):
+
+            from core.api.references.brand import BrandService
+            from core.api.references.item import ItemService
+            from core.api.references.item_group import ItemGroupService
+            from core.api.references.retail_customer import RetailCustomerService
+            from core.api.references.stock import StockService
+            from core.api.references.item_price import ItemPriceService
+            from core.api.references.item_operation import ItemOperationService
+            from core.api.references.price_type import PriceTypeService
+
+            self.brand = BrandService(api)
+            self.retail_customer = RetailCustomerService(api)
+            self.item = ItemService(api)
+            self.item_group = ItemGroupService(api)
+            self.stock = StockService(api)
+            self.item_price = ItemPriceService(api)
+            self.item_operation = ItemOperationService(api)
+            self.price_type = PriceTypeService(api)
+
+    class Batch:
+        def __init__(self, api: "RegosAPI"):
+            self._service = BatchService(api)
+
+        async def run(self, req):
+            return await self._service.run(req)
+
+        # add helpers (map/result/etc.) here if you want them reachable via router
