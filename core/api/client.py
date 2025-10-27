@@ -5,6 +5,7 @@ import gzip
 import json
 import time
 import uuid
+import logging
 from typing import Any, Dict, Type, TypeVar
 
 import httpx
@@ -22,23 +23,23 @@ TResponse = TypeVar("TResponse", bound=BaseModel)
 
 class APIClient:
     """
-    Простой и поддерживаемый клиент REGOS API под конкретный integration_id.
+    Лёгкий клиент REGOS API с минималистичным логированием.
 
-    Делает:
-      • рейтлимит по integration_id (RPS + burst)
-      • авторизацию через OAuth2 Client Credentials (кэш токена: память + Redis)
-      • один повтор при 401 (рефреш токена)
-      • аккуратную распаковку gzip-ответов
-      • понятное логирование запроса и ответа
+    INFO:
+      → перед отправкой: метод, URL, объём отправки
+      ← после ответа: статус, время, объём приёма, gzip yes/no
+
+    DEBUG:
+      - Request headers + короткий превью тела запроса (до 2 KB)
+      - Response headers + короткий превью тела ответа ТОЛЬКО при статусе >= 400
     """
 
     BASE_URL: str = settings.integration_url.rstrip("/")
     RATE_PER_SEC: int = settings.integration_rps
     BURST: int = settings.integration_burst
 
-    # ограничения на превью тел в логах
-    REQ_PREVIEW_LIMIT = 64_000   # bytes
-    RESP_PREVIEW_LIMIT = 64_000  # chars
+    REQ_PREVIEW_LIMIT = 2_048    # bytes
+    RESP_PREVIEW_LIMIT = 2_048   # chars
 
     def __init__(self, connected_integration_id: str, timeout: int = 90) -> None:
         self.integration_id = connected_integration_id
@@ -50,7 +51,7 @@ class APIClient:
             self.BURST,
         )
 
-        # Важно: можно реюзать self.client в провайдере, чтобы не плодить соединения
+        # реюзаем общий httpx-клиент в провайдере токена
         self._oauth = RegosOAuthProvider(http_client=self.client)
 
         logger.debug(
@@ -58,7 +59,7 @@ class APIClient:
             self.BASE_URL, self.integration_id, self.RATE_PER_SEC, self.BURST
         )
 
-    # ------------------------ служебные ------------------------
+    # ------------------------ helpers ------------------------
 
     @staticmethod
     def _new_trace_id() -> str:
@@ -66,7 +67,7 @@ class APIClient:
 
     @staticmethod
     def _mask_bearer(header_val: str) -> str:
-        if not header_val.lower().startswith("bearer "):
+        if not isinstance(header_val, str) or not header_val.lower().startswith("bearer "):
             return header_val
         token = header_val.split(" ", 1)[1]
         if len(token) <= 10:
@@ -74,22 +75,21 @@ class APIClient:
         return f"Bearer {token[:6]}...{token[-4:]}"
 
     @staticmethod
-    def _prettify_json(text: str) -> str:
-        try:
-            obj = json.loads(text)
-            return json.dumps(obj, ensure_ascii=False, indent=2)
-        except Exception:
-            return text
-
-    @staticmethod
     def _decompress_if_gzip(raw: bytes) -> tuple[bytes, bool]:
         if raw.startswith(b"\x1f\x8b"):
             try:
                 return gzip.decompress(raw), True
             except Exception:
-                # Если распаковка не удалась — вернём как есть
                 return raw, True
         return raw, False
+
+    @staticmethod
+    def _fmt_size(n: int) -> str:
+        for unit in ("B", "KB", "MB", "GB"):
+            if n < 1024:
+                return f"{n}{unit}"
+            n //= 1024
+        return f"{n}GB"
 
     @staticmethod
     def _serialize_payload(data: Any) -> Any:
@@ -121,14 +121,7 @@ class APIClient:
     ) -> TResponse:
         """
         POST {BASE_URL}/gateway/out/{integration_id}/v1/{method_path}
-
-        Правила:
-          - сериализация pydantic/словаря/списка
-          - рейтлимит
-          - Bearer заголовок
-          - 401 -> рефреш + один повтор
-          - распаковка gzip и json.loads
-          - валидация через response_model
+        Сериализация -> рейтлимит -> Bearer -> запрос -> (401→рефреш) -> JSON -> валидация.
         """
         await self._limiter.acquire()
 
@@ -140,31 +133,42 @@ class APIClient:
             headers = await self._auth_headers(trace_id=trace_id, force_refresh=force_refresh)
             req = self.client.build_request("POST", url, json=payload, headers=headers)
 
-            # ---- LOG: кратко и понятно ----
-            masked_auth = self._mask_bearer(headers["Authorization"])
+            # INFO: кратко
             body_bytes = req.content or b""
-            body_preview = body_bytes[: self.REQ_PREVIEW_LIMIT].decode("utf-8", errors="replace")
-            logger.info("↗️  [trace:%s] POST %s | send=%dB | auth=%s",
-                        trace_id, url, len(body_bytes), masked_auth)
-            logger.debug("Request headers: %s", {**headers, "Authorization": masked_auth})
-            logger.debug("Request body (preview): %s", self._prettify_json(body_preview))
+            logger.info("→ [trace:%s] POST %s | send=%s",
+                        trace_id, url, self._fmt_size(len(body_bytes)))
 
-            # ---- Отправка ----
+            # DEBUG: заголовки + короткий превью тела запроса
+            if logger.isEnabledFor(logging.DEBUG):
+                masked_headers = dict(headers)
+                masked_headers["Authorization"] = self._mask_bearer(headers.get("Authorization", ""))
+                preview = body_bytes[: self.REQ_PREVIEW_LIMIT].decode("utf-8", errors="replace")
+                logger.debug("Request headers: %s", masked_headers)
+                logger.debug("Request body (%dB, preview): %s", len(body_bytes), preview)
+
+            # отправляем
             t0 = time.perf_counter()
             resp = await self.client.send(req)
             elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
-            # ---- Лог ответа ----
-            await resp.aread()  # гарантируем, что resp.content заполнен
+            # читаем тело
+            await resp.aread()
             raw = resp.content or b""
             raw_dec, gz = self._decompress_if_gzip(raw)
             text = raw_dec.decode("utf-8", errors="replace")
-            text_preview = text[: self.RESP_PREVIEW_LIMIT]
 
-            logger.info("↘️  [trace:%s] %s -> %s in %.1fms | recv=%dB (gzipped=%s)",
-                        trace_id, url, resp.status_code, elapsed_ms, len(raw), gz)
-            logger.debug("Response headers: %s", dict(resp.headers))
-            logger.debug("Response body (preview): %s", self._prettify_json(text_preview))
+            # INFO: кратко
+            logger.info("← [trace:%s] %s -> %s in %.1fms | recv=%s | gz=%s",
+                        trace_id, url, resp.status_code, elapsed_ms, self._fmt_size(len(raw)), "yes" if gz else "no")
+
+            # DEBUG: заголовки + тело ТОЛЬКО при ошибках
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("Response headers: %s", dict(resp.headers))
+                if resp.status_code >= 400:
+                    logger.debug("Response body (preview): %s", text[: self.RESP_PREVIEW_LIMIT])
+
+            # положим обратно уже декодированный текст для последующего парсинга
+            resp._decoded_text = text  # внутреннее поле для нашего использования
             return resp
 
         # Первая попытка
@@ -178,10 +182,12 @@ class APIClient:
         # Ошибки статуса
         resp.raise_for_status()
 
-        # Парс тела (возможно, gzip)
-        raw = resp.content or b""
-        raw_dec, _ = self._decompress_if_gzip(raw)
-        text = raw_dec.decode("utf-8", errors="replace")
+        # Парс JSON
+        text = getattr(resp, "_decoded_text", None)
+        if text is None:
+            raw = resp.content or b""
+            raw_dec, _ = self._decompress_if_gzip(raw)
+            text = raw_dec.decode("utf-8", errors="replace")
 
         try:
             parsed = json.loads(text)
@@ -196,7 +202,6 @@ class APIClient:
     async def close(self) -> None:
         logger.debug("Закрытие httpx.AsyncClient")
         await self.client.aclose()
-        # провайдер использует тот же клиент — отдельного закрытия не требуется
 
     async def __aenter__(self) -> "APIClient":
         return self
