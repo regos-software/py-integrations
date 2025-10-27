@@ -45,9 +45,9 @@ class APIClient:
         self.client = httpx.AsyncClient(timeout=timeout)
 
         self._limiter = get_shared_limiter(
-            integration_id=self.integration_id,
-            rate_per_sec=self.RATE_PER_SEC,
-            burst=self.BURST,
+            self.integration_id,
+            self.RATE_PER_SEC,
+            self.BURST,
         )
 
         # Важно: можно реюзать self.client в провайдере, чтобы не плодить соединения
