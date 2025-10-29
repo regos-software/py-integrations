@@ -16,7 +16,7 @@ from clients.telegram_bot_notification.services.message_formatters import (
     format_session_details,
     format_session_notification,
 )
-from schemas.api.docs.cash_amount_details import CashAmountDetailsGetRequest
+from schemas.api.docs.cash_amount_details import CashAmountDetails, CashAmountDetailsGetRequest
 from schemas.api.docs.cheque import DocCheque
 from schemas.api.docs.cheque_payment import DocChequePayment, DocChequePaymentGetRequest
 from schemas.api.reports.retail_report.count import CountsGetRequest
@@ -331,14 +331,15 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             try:
                 async with RegosAPI(self.connected_integration_id) as api:
                     sessions_resp = await api.docs.cash_session.get_by_uuids([uuid])
-                    sessions = sessions_resp.result
+                    sessions = sessions_resp.result or []
                     if not sessions:
                         await callback_query.answer("Смена не найдена", show_alert=True)
                         return
 
                     session = sessions[0]
 
-                    operations = (
+                    # --- Исправлено: приводим все результаты к Pydantic моделям ---
+                    operations_raw = (
                         await api.docs.cash_operation.get_amount_details(
                             CashAmountDetailsGetRequest(
                                 start_date=session.start_date,
@@ -346,7 +347,13 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                                 operating_cash_id=session.operating_cash_id,
                             )
                         )
-                    ).result
+                    ).result or []
+                    operations = [
+                        op if isinstance(op, CashAmountDetails)
+                        else CashAmountDetails.model_validate(op)
+                        for op in operations_raw
+                    ]
+
                     counts = (
                         await api.reports.retail_report.get_counts(
                             CountsGetRequest(
@@ -355,7 +362,8 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                                 operating_cash_ids=[session.operating_cash_id],
                             )
                         )
-                    ).result
+                    ).result or []
+
                     payments = (
                         await api.reports.retail_report.get_payments(
                             PaymentGetRequest(
@@ -364,12 +372,14 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                                 operating_cash_ids=[session.operating_cash_id],
                             )
                         )
-                    ).result
+                    ).result or []
+
             except Exception as error:
                 logger.error(f"Error fetching session details {uuid}: {error}")
                 await callback_query.answer("Ошибка получения данных", show_alert=True)
                 return
 
+            # Передаём уже Pydantic-объекты
             message_text = format_session_details(
                 session=session, operations=operations, counts=counts, payments=payments
             )
@@ -385,7 +395,8 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                     "Не удалось обновить сообщение", show_alert=True
                 )
 
-        self.handlers_registered = True
+
+                self.handlers_registered = True
 
    
     @retry(
