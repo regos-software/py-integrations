@@ -16,7 +16,7 @@ class RetailReportService:
     def __init__(self, api):
         self.api = api
 
-    async def counts(self, req: CountsGetRequest) -> APIBaseResponse[List[Counts]]:
+    async def get_counts(self, req: CountsGetRequest) -> APIBaseResponse[List[Counts]]:
         """
         POST …/v1/RetailReport/Counts
         Возвращает список агрегатов Counts (по всему периоду и выбранным кассам).
