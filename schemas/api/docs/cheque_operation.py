@@ -31,7 +31,7 @@ class DocChequeOperation(BaseSchema):
     price: Decimal = PydField(..., description="Цена продажи.")
     price2: Decimal = PydField(..., description="Дополнительная цена (если есть).")
     promo_id: Optional[int] = PydField(
-        default=None, ge=1, description="ID применённой акции."
+        default=None, description="ID применённой акции."
     )
     vat_value: Decimal = PydField(..., description="Значение НДС.")
     last_update: int = PydField(
