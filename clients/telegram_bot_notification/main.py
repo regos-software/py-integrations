@@ -148,7 +148,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                 async with RegosAPI(
                     connected_integration_id=self.connected_integration_id
                 ) as api:
-                    success = await api.integrations.connected_integration_setting.edit(
+                    edit_resp = await api.integrations.connected_integration_setting.edit(
                         [
                             ConnectedIntegrationSettingEditItem(
                                 key=TelegramSettings.CHAT_IDS.value,
@@ -157,6 +157,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                             )
                         ]
                     )
+                success = getattr(edit_resp, "result", edit_resp)
                 if not success:
                     raise RuntimeError("Failed to update settings")
                 if settings.redis_enabled and redis_client:
@@ -181,7 +182,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                 async with RegosAPI(
                     connected_integration_id=self.connected_integration_id
                 ) as api:
-                    success = await api.integrations.connected_integration_setting.edit(
+                    edit_resp = await api.integrations.connected_integration_setting.edit(
                         [
                             ConnectedIntegrationSettingEditItem(
                                 key=TelegramSettings.CHAT_IDS.value,
@@ -190,6 +191,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                             )
                         ]
                     )
+                success = getattr(edit_resp, "result", edit_resp)
                 if not success:
                     raise RuntimeError("Failed to update settings")
                 if settings.redis_enabled and redis_client:
@@ -312,34 +314,41 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
 
             try:
                 async with RegosAPI(self.connected_integration_id) as api:
-                    sessions = await api.docs.cash_session.get_by_uuids([uuid])
+                    sessions_resp = await api.docs.cash_session.get_by_uuids([uuid])
+                    sessions = sessions_resp.result
                     if not sessions:
                         await callback_query.answer("Смена не найдена", show_alert=True)
                         return
 
-                    session = sessions.result
-                    session = session[0]
-                    operations = await api.docs.cash_operation.get_amount_details(
-                        CashAmountDetailsGetRequest(
-                            start_date=session.start_date,
-                            end_date=session.close_date,
-                            operating_cash_id=session.operating_cash_id,
+                    session = sessions[0]
+
+                    operations = (
+                        await api.docs.cash_operation.get_amount_details(
+                            CashAmountDetailsGetRequest(
+                                start_date=session.start_date,
+                                end_date=session.close_date,
+                                operating_cash_id=session.operating_cash_id,
+                            )
                         )
-                    )
-                    counts = await api.reports.retail_report.get_counts(
-                        CountsGetRequest(
-                            start_date=session.start_date,
-                            end_date=session.close_date,
-                            operating_cash_ids=[session.operating_cash_id],
+                    ).result
+                    counts = (
+                        await api.reports.retail_report.get_counts(
+                            CountsGetRequest(
+                                start_date=session.start_date,
+                                end_date=session.close_date,
+                                operating_cash_ids=[session.operating_cash_id],
+                            )
                         )
-                    )
-                    payments = await api.reports.retail_report.get_payments(
-                        PaymentGetRequest(
-                            start_date=session.start_date,
-                            end_date=session.close_date,
-                            operating_cash_ids=[session.operating_cash_id],
+                    ).result
+                    payments = (
+                        await api.reports.retail_report.get_payments(
+                            PaymentGetRequest(
+                                start_date=session.start_date,
+                                end_date=session.close_date,
+                                operating_cash_ids=[session.operating_cash_id],
+                            )
                         )
-                    )
+                    ).result
             except Exception as error:
                 logger.error(f"Error fetching session details {uuid}: {error}")
                 await callback_query.answer("Ошибка получения данных", show_alert=True)
@@ -494,7 +503,8 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         try:
             if webhook_action in {"DocChequeClosed", "DocChequeCanceled"}:
                 async with RegosAPI(self.connected_integration_id) as api:
-                    cheques = await api.docs.cheque.get_by_uuids([uuid])
+                    cheques_resp = await api.docs.cheque.get_by_uuids([uuid])
+                cheques = getattr(cheques_resp, "result", cheques_resp)
                 if not cheques:
                     logger.warning(f"Cheque with UUID {uuid} not found")
                     message_text = f"*Event:* `{webhook_action}`\nUUID: `{uuid}`\nDetails: Cheque not found"
@@ -516,7 +526,8 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                     )
             elif webhook_action in {"DocSessionOpened", "DocSessionClosed"}:
                 async with RegosAPI(self.connected_integration_id) as api:
-                    sessions = await api.docs.cash_session.get_by_uuids([uuid])
+                    sessions_resp = await api.docs.cash_session.get_by_uuids([uuid])
+                sessions = getattr(sessions_resp, "result", sessions_resp)
                 if not sessions:
                     logger.warning(f"Session with UUID {uuid} not found")
                     message_text = f"*Event:* `{webhook_action}`\nUUID: `{uuid}`\nDetails: Session not found"
@@ -525,7 +536,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                     message_text = format_session_notification(
                         session=session, action=webhook_action
                     )
-                    if session.closed:
+                    if getattr(session, "closed", False):
                         # Create details button
                         keyboard = InlineKeyboardMarkup(
                             inline_keyboard=[

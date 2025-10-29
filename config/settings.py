@@ -17,8 +17,9 @@ class Settings(BaseSettings):
     redis_password: str = "psw"
     redis_cache_ttl: int = 60
 
+    oauth_endpoint: str = "https://auth.regos.uz/" # oath/token
     oauth_client_id: str = ""
-
+    oauth_secret: str = ""
     class Config:
         env_file = ".env"
 
