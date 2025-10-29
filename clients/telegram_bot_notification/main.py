@@ -338,7 +338,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
 
                     session = sessions[0]
 
-                    # --- Исправлено: приводим все результаты к Pydantic моделям ---
+            
                     operations_raw = (
                         await api.docs.cash_operation.get_amount_details(
                             CashAmountDetailsGetRequest(
@@ -347,12 +347,20 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                                 operating_cash_id=session.operating_cash_id,
                             )
                         )
-                    ).result or []
-                    operations = [
-                        op if isinstance(op, CashAmountDetails)
-                        else CashAmountDetails.model_validate(op)
-                        for op in operations_raw
-                    ]
+                    ).result
+
+                    
+                    if isinstance(operations_raw, list):
+                        operations = [
+                            op if isinstance(op, CashAmountDetails)
+                            else CashAmountDetails.model_validate(op)
+                            for op in operations_raw
+                        ]
+                    
+                    elif isinstance(operations_raw, dict):
+                        operations = CashAmountDetails.model_validate(operations_raw)
+                    else:
+                        operations = operations_raw  
 
                     counts = (
                         await api.reports.retail_report.get_counts(
@@ -379,7 +387,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                 await callback_query.answer("Ошибка получения данных", show_alert=True)
                 return
 
-            # Передаём уже Pydantic-объекты
+            
             message_text = format_session_details(
                 session=session, operations=operations, counts=counts, payments=payments
             )
@@ -391,14 +399,9 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                 await callback_query.answer()
             except Exception as error:
                 logger.error(f"Error editing session details {uuid}: {error}")
-                await callback_query.answer(
-                    "Не удалось обновить сообщение", show_alert=True
-                )
+                await callback_query.answer("Не удалось обновить сообщение", show_alert=True)
 
 
-                self.handlers_registered = True
-
-   
     @retry(
         stop=stop_after_attempt(TelegramBotConfig.RETRY_ATTEMPTS),
         wait=wait_fixed(TelegramBotConfig.RETRY_WAIT_SECONDS),
