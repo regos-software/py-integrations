@@ -17,7 +17,8 @@ from clients.telegram_bot_notification.services.message_formatters import (
     format_session_notification,
 )
 from schemas.api.docs.cash_amount_details import CashAmountDetailsGetRequest
-from schemas.api.docs.cheque_payment import DocChequePaymentGetRequest
+from schemas.api.docs.cheque import DocCheque
+from schemas.api.docs.cheque_payment import DocChequePayment, DocChequePaymentGetRequest
 from schemas.api.reports.retail_report.count import CountsGetRequest
 from schemas.api.reports.retail_report.payment import PaymentGetRequest
 from .utils import parse_chat_ids, extract_chat_id
@@ -32,7 +33,7 @@ from schemas.integration.base import (
     IntegrationErrorResponse,
     IntegrationErrorModel,
 )
-from schemas.api.docs.cheque_operation import DocChequeOperationGetRequest
+from schemas.api.docs.cheque_operation import DocChequeOperation, DocChequeOperationGetRequest
 from clients.base import ClientBase
 from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
@@ -260,28 +261,45 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             try:
                 _, uuid, _ = callback_query.data.split("_", 2)
             except Exception:
-                await callback_query.answer(
-                    "Некорректные данные кнопки", show_alert=False
-                )
+                await callback_query.answer("Некорректные данные кнопки", show_alert=False)
                 return
 
             try:
                 async with RegosAPI(self.connected_integration_id) as api:
-                    cheques = (await api.docs.cheque.get_by_uuids([uuid])).result
-                    if not cheques:
+                    # Приводим чек к DocCheque
+                    raw_cheques = (await api.docs.cheque.get_by_uuids([uuid])).result or []
+                    if not raw_cheques:
                         await callback_query.answer("Чек не найден", show_alert=True)
                         return
-                    cheque = cheques[0]
-                    operations = (
+                    cheque = (
+                        raw_cheques[0]
+                        if isinstance(raw_cheques[0], DocCheque)
+                        else DocCheque.model_validate(raw_cheques[0])
+                    )
+
+                    # Приводим операции к DocChequeOperation
+                    operations_raw = (
                         await api.docs.cheque_operation.get(
                             DocChequeOperationGetRequest(doc_sale_uuid=uuid)
                         )
-                    ).result
-                    payments = (
+                    ).result or []
+                    operations = [
+                        op if isinstance(op, DocChequeOperation)
+                        else DocChequeOperation.model_validate(op)
+                        for op in operations_raw
+                    ]
+
+                    # Приводим оплаты к DocChequePayment
+                    payments_raw = (
                         await api.docs.cheque_payment.get(
                             DocChequePaymentGetRequest(doc_sale_uuid=uuid)
                         )
-                    ).result
+                    ).result or []
+                    payments = [
+                        p if isinstance(p, DocChequePayment)
+                        else DocChequePayment.model_validate(p)
+                        for p in payments_raw
+                    ]
             except Exception as error:
                 logger.error(f"Error fetching cheque details {uuid}: {error}")
                 await callback_query.answer("Ошибка получения данных", show_alert=True)
@@ -307,9 +325,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             try:
                 _, uuid, _ = callback_query.data.split("_", 2)
             except Exception:
-                await callback_query.answer(
-                    "Некорректные данные кнопки", show_alert=False
-                )
+                await callback_query.answer("Некорректные данные кнопки", show_alert=False)
                 return
 
             try:
@@ -371,6 +387,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
 
         self.handlers_registered = True
 
+   
     @retry(
         stop=stop_after_attempt(TelegramBotConfig.RETRY_ATTEMPTS),
         wait=wait_fixed(TelegramBotConfig.RETRY_WAIT_SECONDS),
@@ -447,6 +464,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         await self.connect()
         return IntegrationSuccessResponse(result={"status": "settings updated"})
 
+
     async def handle_webhook(
         self, action: Optional[str] = None, data: Optional[Dict] = None, **kwargs
     ) -> Dict:
@@ -469,15 +487,11 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             "DocChequeCanceled",
         }
         if webhook_action not in supported_actions:
-            return self._create_error_response(
-                1006, f"Unsupported action: {webhook_action}"
-            )
+            return self._create_error_response(1006, f"Unsupported action: {webhook_action}")
 
         uuid = webhook_data.get("uuid") or webhook_data.get("session_uuid")
         if not uuid:
-            return self._create_error_response(
-                1007, "Webhook missing uuid/session_uuid"
-            )
+            return self._create_error_response(1007, "Webhook missing uuid/session_uuid")
 
         # Fetch settings
         cache_key = f"clients:settings:telegram:{self.connected_integration_id}"
@@ -493,9 +507,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                 return {"status": "ok", "message": "No subscribers"}
         except Exception as error:
             logger.error(f"Error fetching settings: {error}")
-            return self._create_error_response(
-                1001, f"Settings retrieval error: {error}"
-            )
+            return self._create_error_response(1001, f"Settings retrieval error: {error}")
 
         await self._initialize_bot()
         message_text = ""
@@ -504,16 +516,24 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             if webhook_action in {"DocChequeClosed", "DocChequeCanceled"}:
                 async with RegosAPI(self.connected_integration_id) as api:
                     cheques_resp = await api.docs.cheque.get_by_uuids([uuid])
-                cheques = getattr(cheques_resp, "result", cheques_resp)
-                if not cheques:
+
+                # Минимальный фикс: принудительно приводим к DocCheque
+                raw_cheques = getattr(cheques_resp, "result", cheques_resp) or []
+                if not raw_cheques:
                     logger.warning(f"Cheque with UUID {uuid} not found")
-                    message_text = f"*Event:* `{webhook_action}`\nUUID: `{uuid}`\nDetails: Cheque not found"
+                    message_text = (
+                        f"*Event:* `{webhook_action}`\nUUID: `{uuid}`\nDetails: Cheque not found"
+                    )
                 else:
-                    cheque = cheques[0]
+                    cheque = (
+                        raw_cheques[0]
+                        if isinstance(raw_cheques[0], DocCheque)
+                        else DocCheque.model_validate(raw_cheques[0])
+                    )
                     message_text = format_cheque_notification(
                         cheque=cheque, action=webhook_action
                     )
-                    # Create details button
+                    # Кнопка деталей
                     keyboard = InlineKeyboardMarkup(
                         inline_keyboard=[
                             [
@@ -524,20 +544,22 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                             ]
                         ]
                     )
+
             elif webhook_action in {"DocSessionOpened", "DocSessionClosed"}:
                 async with RegosAPI(self.connected_integration_id) as api:
                     sessions_resp = await api.docs.cash_session.get_by_uuids([uuid])
                 sessions = getattr(sessions_resp, "result", sessions_resp)
                 if not sessions:
                     logger.warning(f"Session with UUID {uuid} not found")
-                    message_text = f"*Event:* `{webhook_action}`\nUUID: `{uuid}`\nDetails: Session not found"
+                    message_text = (
+                        f"*Event:* `{webhook_action}`\nUUID: `{uuid}`\nDetails: Session not found"
+                    )
                 else:
                     session = sessions[0]
                     message_text = format_session_notification(
                         session=session, action=webhook_action
                     )
                     if getattr(session, "closed", False):
-                        # Create details button
                         keyboard = InlineKeyboardMarkup(
                             inline_keyboard=[
                                 [
@@ -553,7 +575,9 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
 
         except Exception as error:
             logger.error(f"Error formatting message: {error}")
-            message_text = f"*Event:* `{webhook_action}`\nUUID: `{uuid}`\nDetails unavailable: `{str(error)}`"
+            message_text = (
+                f"*Event:* `{webhook_action}`\nUUID: `{uuid}`\nDetails unavailable: `{str(error)}`"
+            )
 
         results = []
         for chat_id in subscribers:
@@ -566,19 +590,16 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                 results.append({"status": "sent", "chat_id": chat_id})
             except Exception as error:
                 logger.error(f"Error sending message to chat {chat_id}: {error}")
-                results.append(
-                    {"status": "error", "chat_id": chat_id, "error": str(error)}
-                )
+                results.append({"status": "error", "chat_id": chat_id, "error": str(error)})
 
         return {
             "status": "webhook processed",
             "action": webhook_action,
             "uuid": uuid,
-            "sent_to": len(
-                [result for result in results if result["status"] == "sent"]
-            ),
+            "sent_to": len([result for result in results if result["status"] == "sent"]),
             "details": results,
         }
+
 
     async def send_messages(self, messages: List[Dict]) -> Dict:
         """Send multiple messages to Telegram in batches."""
