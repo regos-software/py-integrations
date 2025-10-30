@@ -48,6 +48,7 @@ logger = setup_logger("telegram_bot_notification")
 class TelegramSettings(Enum):
     BOT_TOKEN = "BOT_TOKEN"
     CHAT_IDS = "CHAT_IDS"
+    CHEQUE_NOTIFICATION = "CHEQUE_NOTIFICATION"
 
 
 # Configuration for Telegram bot
@@ -88,6 +89,19 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         return IntegrationErrorResponse(
             result=IntegrationErrorModel(error=error_code, description=description)
         )
+
+    def _cheque_notifications_enabled(self, settings_map: Dict[str, str]) -> bool:
+        """
+        Возвращает True, если уведомления по чекам включены.
+        Отсутствие настройки трактуем как включенные уведомления.
+        Отключаем только при 'false' или '0' (регистр/пробелы игнорируются).
+        """
+        raw = settings_map.get(TelegramSettings.CHEQUE_NOTIFICATION.value.lower())
+        if raw is None:
+            return True  # настройки нет — включено по умолчанию
+
+        s = str(raw).strip().lower()
+        return s not in {"false", "0"}
 
     async def _fetch_settings(self, cache_key: str) -> Optional[Dict[str, str]]:
         """Retrieve settings from Redis cache or API."""
@@ -519,6 +533,18 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             if not subscribers:
                 logger.warning(f"No subscribers for {webhook_action} (uuid={uuid})")
                 return {"status": "ok", "message": "No subscribers"}
+            if webhook_action in {"DocChequeClosed", "DocChequeCanceled"}:
+                if not self._cheque_notifications_enabled(settings_map):
+                    logger.info(
+                        f"Cheque notifications disabled by settings "
+                        f"(ID={self.connected_integration_id}, uuid={uuid})"
+                    )
+                    return {
+                        "status": "ok",
+                        "message": "Cheque notifications disabled by CHEQUE_NOTIFICATION setting",
+                        "action": webhook_action,
+                        "uuid": uuid,
+                    }
         except Exception as error:
             logger.error(f"Error fetching settings: {error}")
             return self._create_error_response(1001, f"Settings retrieval error: {error}")
