@@ -712,7 +712,8 @@ export default function OpNewPage({ definition: definitionProp }) {
   );
 
   const runSearch = useCallback(
-    async (value, mode = searchMode) => {
+    async (value, mode = searchMode, options = {}) => {
+      const { source = "manual" } = options || {};
       const queryText = value?.trim();
       if (!queryText) {
         if (mode === SEARCH_MODES.INSANT) {
@@ -725,6 +726,14 @@ export default function OpNewPage({ definition: definitionProp }) {
         enqueueInstantSearch(queryText);
         return;
       }
+
+      if (mode === SEARCH_MODES.SCAN) {
+        setBarcodeValue("");
+        setCameraError(null);
+      } else if (mode === SEARCH_MODES.NAME) {
+        setQueryValue("");
+      }
+
       const searchDescriptor = docDefinition?.operation?.search;
       if (!searchDescriptor?.action || !searchDescriptor?.buildParams) {
         console.warn("[op_new] search not configured for doc type");
@@ -752,9 +761,15 @@ export default function OpNewPage({ definition: definitionProp }) {
           setPicked(null);
           closeResultModal();
           setSearchStatus("empty");
-          if (mode === SEARCH_MODES.INSANT) {
+          if (mode === SEARCH_MODES.SCAN) {
             playFailSound();
-            setBarcodeValue("");
+            if (source === "camera") {
+              const notFoundMessage =
+                t("search.item_not_found") ||
+                t("common.nothing") ||
+                "Item not found";
+              showToast(notFoundMessage, { type: "error" });
+            }
             focusBarcodeInput();
           }
           return;
@@ -773,8 +788,15 @@ export default function OpNewPage({ definition: definitionProp }) {
         setPicked(null);
         closeResultModal();
         setSearchStatus("error");
-        if (mode === SEARCH_MODES.INSANT) {
+        if (mode === SEARCH_MODES.SCAN) {
           playFailSound();
+          if (source === "camera") {
+            const notFoundMessage =
+              t("search.item_not_found") ||
+              t("common.nothing") ||
+              "Item not found";
+            showToast(notFoundMessage, { type: "error" });
+          }
           setBarcodeValue("");
           focusBarcodeInput();
         }
@@ -786,12 +808,16 @@ export default function OpNewPage({ definition: definitionProp }) {
       docDefinition,
       docCtx,
       docId,
-      focusBarcodeInput,
       enqueueInstantSearch,
+      focusBarcodeInput,
       handlePickItem,
       playFailSound,
       searchMode,
       setBarcodeValue,
+      setCameraError,
+      showToast,
+      setQueryValue,
+      t,
     ]
   );
 
@@ -992,7 +1018,7 @@ export default function OpNewPage({ definition: definitionProp }) {
           lastScannedValueRef.current = text;
           const nextMode = searchModeRef.current;
           stopScan();
-          runSearch(text, nextMode);
+          runSearch(text, nextMode, { source: "camera" });
           return;
         }
 
@@ -1217,7 +1243,7 @@ export default function OpNewPage({ definition: definitionProp }) {
             <input
               id="barcode"
               type="search"
-              inputMode="search"
+              inputMode="none"
               ref={barcodeInputRef}
               value={barcodeValue}
               placeholder={
@@ -1244,6 +1270,12 @@ export default function OpNewPage({ definition: definitionProp }) {
               <i className="fa-solid fa-camera" aria-hidden="true" />
             </button>
           </div>
+          {[SEARCH_MODES.SCAN, SEARCH_MODES.INSANT].includes(searchMode) &&
+          searchStatus === "loading" ? (
+            <p className={mutedTextClass()} aria-live="polite">
+              {t("searching") || "Поиск..."}
+            </p>
+          ) : null}
           {cameraError ? (
             <p
               className={cn(
