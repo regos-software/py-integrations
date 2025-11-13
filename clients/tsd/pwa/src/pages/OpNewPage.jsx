@@ -6,11 +6,8 @@ import React, {
   useState,
 } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import {
-  BrowserMultiFormatReader,
-  BarcodeFormat,
-  DecodeHintType,
-} from "@zxing/library";
+import { BrowserMultiFormatReader, BarcodeFormat } from "@zxing/browser";
+import { DecodeHintType } from "@zxing/library";
 import { useApp } from "../context/AppContext.jsx";
 import { useI18n } from "../context/I18nContext.jsx";
 import { useToast } from "../context/ToastContext.jsx";
@@ -48,6 +45,19 @@ const ZXING_FORMATS = [
   BarcodeFormat.CODE_39,
   BarcodeFormat.CODE_128,
 ].filter(Boolean);
+
+const PASSIVE_DECODE_ERRORS = new Set([
+  "NotFoundException",
+  "ChecksumException",
+  "FormatException",
+]);
+
+const DEFAULT_SCAN_CONSTRAINTS = {
+  audio: false,
+  video: {
+    facingMode: { ideal: "environment" },
+  },
+};
 
 const BATCH_SEARCH_STEP_KEY = "search_list";
 const BATCH_ADD_STEP_KEY = "add_operation";
@@ -152,16 +162,32 @@ export default function OpNewPage({ definition: definitionProp }) {
   const [searchMode, setSearchMode] = useState(SEARCH_MODES.SCAN);
   const [resultModalOpen, setResultModalOpen] = useState(false);
   const [resultItems, setResultItems] = useState([]);
+  const [cameraOptions, setCameraOptions] = useState([]);
+  const [selectedCameraId, setSelectedCameraId] = useState("default");
+  const [cameraError, setCameraError] = useState(null);
   const priceRoundTo = docCtx?.price_type_round_to ?? null;
   const docCurrency = docCtx?.doc_currency ?? null;
 
   const videoRef = useRef(null);
   const readerRef = useRef(null);
+  const hintsRef = useRef(null);
+  const readerControlsRef = useRef(null);
+  const lastScannedValueRef = useRef(null);
+  const searchModeRef = useRef(SEARCH_MODES.SCAN);
+  const selectedCameraRef = useRef("default");
   const barcodeInputRef = useRef(null);
   const successSoundRef = useRef(null);
   const failSoundRef = useRef(null);
   const instantQueueRef = useRef([]);
   const instantProcessingRef = useRef(false);
+
+  useEffect(() => {
+    searchModeRef.current = searchMode;
+  }, [searchMode]);
+
+  useEffect(() => {
+    selectedCameraRef.current = selectedCameraId;
+  }, [selectedCameraId]);
 
   useEffect(() => {
     if (typeof window === "undefined" || typeof Audio === "undefined") return;
@@ -581,17 +607,36 @@ export default function OpNewPage({ definition: definitionProp }) {
 
       try {
         const { data } = await api("batch.run", batchPayload);
-        let errored = false;
+        const steps = Array.isArray(data?.result) ? data.result : [];
+        const searchStep = steps.find(
+          (step) => step.key === BATCH_SEARCH_STEP_KEY
+        );
+        const addStep = steps.find((step) => step.key === BATCH_ADD_STEP_KEY);
 
-        if (!data?.ok || data.result.some((r) => !r.response?.ok)) {
-          errored = true;
-        }
-        if (errored) {
+        const searchResponse = searchStep?.response;
+        const addResponse = addStep?.response;
+        const searchItems = Array.isArray(searchResponse?.result)
+          ? searchResponse.result
+          : Array.isArray(searchResponse?.data)
+          ? searchResponse.data
+          : [];
+
+        if (
+          !data?.ok ||
+          searchResponse?.ok === false ||
+          addResponse?.ok === false ||
+          searchItems.length === 0
+        ) {
           const description =
-            searchResponse?.result?.description ||
-            t("common.nothing") ||
+            searchResponse?.description ||
+            addResponse?.description ||
+            data?.description ||
+            (searchItems.length === 0
+              ? t("common.nothing") || "Ничего не найдено"
+              : undefined) ||
+            t("common.error") ||
             "Ошибка выполнения";
-          setSearchStatus("error");
+          setSearchStatus(searchItems.length === 0 ? "empty" : "error");
           showToast(description, { type: "error" });
           playFailSound();
           return;
@@ -750,44 +795,115 @@ export default function OpNewPage({ definition: definitionProp }) {
     ]
   );
 
+  const updateCameraOptions = useCallback(async () => {
+    if (!navigator?.mediaDevices?.enumerateDevices) {
+      return [];
+    }
+
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const videoDevices = devices.filter(
+        (device) => device.kind === "videoinput"
+      );
+      setCameraOptions(videoDevices);
+      setSelectedCameraId((prev) => {
+        if (prev === "default") {
+          return prev;
+        }
+        return videoDevices.some((device) => device.deviceId === prev)
+          ? prev
+          : videoDevices[0]?.deviceId || "default";
+      });
+      return videoDevices;
+    } catch (err) {
+      console.warn("[op_new] failed to enumerate cameras", err);
+      return [];
+    }
+  }, []);
+
+  useEffect(() => {
+    if (
+      searchMode === SEARCH_MODES.SCAN ||
+      searchMode === SEARCH_MODES.INSANT
+    ) {
+      void updateCameraOptions();
+    }
+  }, [searchMode, updateCameraOptions]);
+
   const ensureReader = useCallback(async () => {
-    if (readerRef.current) return readerRef.current;
+    if (!readerRef.current) {
+      const hints = new Map();
+      if (DecodeHintType?.POSSIBLE_FORMATS) {
+        hints.set(DecodeHintType.POSSIBLE_FORMATS, ZXING_FORMATS);
+      }
+      if (DecodeHintType?.TRY_HARDER) {
+        hints.set(DecodeHintType.TRY_HARDER, true);
+      }
+      if (DecodeHintType?.ALSO_INVERTED) {
+        hints.set(DecodeHintType.ALSO_INVERTED, true);
+      }
+      hintsRef.current = hints;
 
-    const hints = new Map();
-    if (DecodeHintType?.POSSIBLE_FORMATS) {
-      hints.set(DecodeHintType.POSSIBLE_FORMATS, ZXING_FORMATS);
+      const reader = new BrowserMultiFormatReader(hints, 150);
+      reader.timeBetweenDecodingAttempts = 75;
+      readerRef.current = reader;
+    } else if (
+      hintsRef.current &&
+      typeof readerRef.current.setHints === "function"
+    ) {
+      readerRef.current.setHints(hintsRef.current);
     }
-    if (DecodeHintType?.TRY_HARDER) {
-      hints.set(DecodeHintType.TRY_HARDER, true);
-    }
-    if (DecodeHintType?.ALSO_INVERTED) {
-      hints.set(DecodeHintType.ALSO_INVERTED, true);
-    }
-
-    const reader = new BrowserMultiFormatReader(hints, 200);
-    reader.timeBetweenDecodingAttempts = 50;
-    readerRef.current = reader;
     return readerRef.current;
   }, []);
 
   const stopScan = useCallback(() => {
-    setScanning(false);
-    if (readerRef.current) {
-      console.log("Stopping scanner...");
+    const controls = readerControlsRef.current;
+    readerControlsRef.current = null;
 
-      readerRef.current.reset();
+    if (controls?.stop) {
+      try {
+        const stopResult = controls.stop();
+        if (stopResult && typeof stopResult.then === "function") {
+          stopResult.catch((err) =>
+            console.warn("[op_new] failed to stop scanner controls", err)
+          );
+        }
+      } catch (err) {
+        console.warn("[op_new] failed to stop scanner controls", err);
+      }
     }
-    if (videoRef.current?.srcObject) {
-      console.log("Stopping video stream...");
 
-      const tracks = videoRef.current.srcObject.getTracks();
-      tracks.forEach((track) => track.stop());
-      videoRef.current.srcObject = null;
+    if (readerRef.current?.reset) {
+      try {
+        readerRef.current.reset();
+      } catch (err) {
+        console.warn("[op_new] failed to reset scanner", err);
+      }
     }
-    console.log("Scanner stopped.");
 
+    const videoElement = videoRef.current;
+    if (videoElement?.srcObject) {
+      const tracks = videoElement.srcObject.getTracks();
+      tracks.forEach((track) => {
+        try {
+          track.stop();
+        } catch (err) {
+          console.warn("[op_new] failed to stop track", err);
+        }
+      });
+      videoElement.srcObject = null;
+    }
+
+    lastScannedValueRef.current = null;
     setScanning(false);
   }, []);
+
+  useEffect(
+    () => () => {
+      stopScan();
+    },
+    [stopScan]
+  );
 
   const handleModalDismiss = useCallback(() => {
     closeResultModal();
@@ -806,64 +922,157 @@ export default function OpNewPage({ definition: definitionProp }) {
       return;
     }
 
+    setCameraError(null);
     focusBarcodeInput();
   }, [searchMode, closeResultModal, stopScan, focusBarcodeInput]);
 
-  const startScan = async () => {
+  const startScan = useCallback(async () => {
     if (scanning) return;
+
+    const currentMode = searchModeRef.current;
     if (
-      searchMode !== SEARCH_MODES.SCAN &&
-      searchMode !== SEARCH_MODES.INSANT
+      currentMode !== SEARCH_MODES.SCAN &&
+      currentMode !== SEARCH_MODES.INSANT
     ) {
       return;
     }
 
-    try {
-      const reader = await ensureReader();
-      console.log("reader", reader);
+    if (!navigator?.mediaDevices?.getUserMedia) {
+      const fallback =
+        t("camera_not_supported") ||
+        "Камера на этом устройстве не поддерживается";
+      setCameraError(fallback);
+      showToast(fallback, {
+        type: "error",
+      });
+      return;
+    }
 
-      const constraints = {
-        video: { facingMode: { ideal: "environment" } },
-      };
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+    try {
+      setCameraError(null);
+      const reader = await ensureReader();
+      await updateCameraOptions();
+
+      const activeCameraId = selectedCameraRef.current;
+
       if (videoRef.current) {
-        videoRef.current.srcObject = stream;
         videoRef.current.setAttribute("playsinline", "true");
-        await videoRef.current.play();
       }
 
-      console.log("Video started, starting scan...");
+      const constraints = {
+        audio: DEFAULT_SCAN_CONSTRAINTS.audio ?? false,
+        video: {
+          ...(DEFAULT_SCAN_CONSTRAINTS.video || {}),
+        },
+      };
+
+      if (activeCameraId && activeCameraId !== "default") {
+        const { facingMode, ...restVideo } = constraints.video || {};
+        constraints.video = {
+          ...restVideo,
+          deviceId: { exact: activeCameraId },
+        };
+      }
 
       setScanning(true);
+      lastScannedValueRef.current = null;
 
-      reader.decodeFromVideoDevice(null, videoRef.current, (result, err) => {
-        console.log("scan result", { result, err });
+      const scanCallback = (result, err) => {
         if (result) {
-          const text = result.getText();
+          const text =
+            typeof result.getText === "function"
+              ? result.getText()
+              : result.text;
+          if (!text) {
+            return;
+          }
+          if (text === lastScannedValueRef.current) {
+            return;
+          }
+          lastScannedValueRef.current = text;
+          const nextMode = searchModeRef.current;
           stopScan();
-          runSearch(text, searchMode);
+          runSearch(text, nextMode);
+          return;
         }
-        if (
-          err &&
-          !(err.name === "Камера не найдена" || err.name === "NotFoundError")
-        ) {
-          // console.error(err);
+
+        if (err && !PASSIVE_DECODE_ERRORS.has(err.name)) {
+          console.warn("[op_new] active scan error", err);
         }
-      });
+      };
+
+      let controlsPromise;
+      if (typeof reader.decodeFromConstraints === "function") {
+        controlsPromise = reader.decodeFromConstraints(
+          constraints,
+          videoRef.current,
+          scanCallback
+        );
+      } else {
+        const deviceId =
+          activeCameraId && activeCameraId !== "default"
+            ? activeCameraId
+            : undefined;
+        controlsPromise = reader.decodeFromVideoDevice(
+          deviceId || null,
+          videoRef.current,
+          scanCallback
+        );
+      }
+
+      if (controlsPromise && typeof controlsPromise.then === "function") {
+        try {
+          readerControlsRef.current = await controlsPromise;
+        } catch (ctrlErr) {
+          console.warn("[op_new] failed to acquire reader controls", ctrlErr);
+        }
+      } else if (controlsPromise) {
+        readerControlsRef.current = controlsPromise;
+      }
+
+      void updateCameraOptions();
     } catch (err) {
       console.error("[scan] start error", err);
+      stopScan();
       const messageKey =
         err?.name === "NotAllowedError"
           ? "camera_permission_denied"
           : err?.name === "NotFoundError" ||
             err?.name === "OverconstrainedError"
           ? "camera_not_found"
+          : err?.name === "NotReadableError"
+          ? "camera_in_use"
           : "camera_open_failed";
-      showToast(t(messageKey) || "Не удалось открыть камеру", {
+      const fallback = t(messageKey) || "Не удалось открыть камеру";
+      setCameraError(fallback);
+      showToast(fallback, {
         type: "error",
       });
     }
-  };
+  }, [
+    ensureReader,
+    runSearch,
+    scanning,
+    showToast,
+    stopScan,
+    t,
+    updateCameraOptions,
+  ]);
+
+  const handleCameraSelectionChange = useCallback(
+    (event) => {
+      const nextId = event.target.value;
+      setSelectedCameraId(nextId);
+      setCameraError(null);
+      if (scanning) {
+        stopScan();
+        window.setTimeout(() => {
+          void startScan();
+        }, 0);
+      }
+    },
+    [scanning, startScan, stopScan]
+  );
 
   const handleSubmit = async () => {
     await performAddOperation({
@@ -955,6 +1164,32 @@ export default function OpNewPage({ definition: definitionProp }) {
               cardClass("space-y-4")
             )}
           >
+            {cameraOptions.length > 0 ? (
+              <div className="space-y-1">
+                <label className={labelClass()} htmlFor="camera-selector">
+                  {t("scanner.camera") || "Камера"}
+                </label>
+                <select
+                  id="camera-selector"
+                  value={selectedCameraId}
+                  onChange={handleCameraSelectionChange}
+                  className={inputClass()}
+                >
+                  <option value="default">
+                    {t("scanner.camera_auto") || "Автовыбор"}
+                  </option>
+                  {cameraOptions.map((camera, index) => (
+                    <option
+                      key={camera.deviceId || index}
+                      value={camera.deviceId}
+                    >
+                      {camera.label ||
+                        `${t("scanner.camera") || "Камера"} ${index + 1}`}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
             <video
               id="preview"
               ref={videoRef}
@@ -1009,6 +1244,16 @@ export default function OpNewPage({ definition: definitionProp }) {
               <i className="fa-solid fa-camera" aria-hidden="true" />
             </button>
           </div>
+          {cameraError ? (
+            <p
+              className={cn(
+                mutedTextClass(),
+                "text-xs text-red-600 dark:text-red-400"
+              )}
+            >
+              {cameraError}
+            </p>
+          ) : null}
         </>
       )}
 

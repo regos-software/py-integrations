@@ -622,6 +622,7 @@ export default function ItemInfoPage() {
           payload: {
             item_id: itemIdNumber,
             limit: operationLimit,
+            sort_orders: [{ column: "date", direction: "desc" }],
           },
         },
       ];
