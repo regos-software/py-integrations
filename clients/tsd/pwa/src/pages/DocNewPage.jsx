@@ -1,4 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useApp } from "../context/AppContext.jsx";
 import { useI18n } from "../context/I18nContext.jsx";
@@ -108,6 +114,240 @@ function extractCreatedId(response) {
   if (result?.id != null) return Number(result.id);
   if (response?.new_id != null) return Number(response.new_id);
   return null;
+}
+
+function AutocompleteSelectField({
+  id,
+  value,
+  options = [],
+  placeholder,
+  disabled,
+  allowEmptyOption,
+  loading,
+  loadingText,
+  noResultsText,
+  clearLabel,
+  onChange,
+}) {
+  const containerRef = useRef(null);
+  const [inputValue, setInputValue] = useState("");
+  const [isOpen, setIsOpen] = useState(false);
+  const [hasFocus, setHasFocus] = useState(false);
+  const [highlightedIndex, setHighlightedIndex] = useState(0);
+
+  const selectedOption = useMemo(() => {
+    return options.find(
+      (option) => String(option.value) === String(value ?? "")
+    );
+  }, [options, value]);
+
+  useEffect(() => {
+    if (!hasFocus && !isOpen) {
+      setInputValue(selectedOption ? selectedOption.label : "");
+    }
+  }, [hasFocus, isOpen, selectedOption]);
+
+  useEffect(() => {
+    function handleOutsideClick(event) {
+      if (
+        containerRef.current &&
+        !containerRef.current.contains(event.target)
+      ) {
+        setIsOpen(false);
+        setHasFocus(false);
+      }
+    }
+
+    document.addEventListener("mousedown", handleOutsideClick);
+    return () => {
+      document.removeEventListener("mousedown", handleOutsideClick);
+    };
+  }, []);
+
+  const normalizedInput = useMemo(() => {
+    return inputValue.trim().toLowerCase();
+  }, [inputValue]);
+
+  const filteredOptions = useMemo(() => {
+    if (!normalizedInput) {
+      return options;
+    }
+    return options.filter((option) => {
+      return option.label?.toLowerCase().includes(normalizedInput);
+    });
+  }, [normalizedInput, options]);
+
+  const displayedOptions = useMemo(() => {
+    const limited = filteredOptions.slice(0, 50);
+    if (allowEmptyOption) {
+      return [{ value: "", label: clearLabel, isClear: true }, ...limited];
+    }
+    return limited;
+  }, [allowEmptyOption, clearLabel, filteredOptions]);
+
+  useEffect(() => {
+    setHighlightedIndex(0);
+  }, [displayedOptions]);
+
+  const handleSelect = useCallback(
+    (option) => {
+      if (!option || option.isClear) {
+        onChange("");
+        setInputValue("");
+      } else {
+        onChange(option.value);
+        setInputValue(option.label);
+      }
+      setIsOpen(false);
+      setHasFocus(false);
+    },
+    [onChange]
+  );
+
+  const handleInputChange = useCallback((event) => {
+    const nextValue = event.target.value;
+    setInputValue(nextValue);
+    setIsOpen(true);
+    setHasFocus(true);
+  }, []);
+
+  const handleInputFocus = useCallback(() => {
+    setHasFocus(true);
+    setIsOpen(true);
+    setInputValue((prev) => prev || selectedOption?.label || "");
+  }, [selectedOption]);
+
+  const handleBlur = useCallback(() => {
+    const schedule =
+      typeof window !== "undefined" &&
+      typeof window.requestAnimationFrame === "function"
+        ? window.requestAnimationFrame
+        : (fn) => setTimeout(fn, 0);
+    schedule(() => {
+      const activeEl = document.activeElement;
+      if (containerRef.current && containerRef.current.contains(activeEl)) {
+        return;
+      }
+      setIsOpen(false);
+      setHasFocus(false);
+    });
+  }, []);
+
+  const handleKeyDown = useCallback(
+    (event) => {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        if (!isOpen) {
+          setIsOpen(true);
+          return;
+        }
+        setHighlightedIndex((prev) => {
+          if (displayedOptions.length === 0) return 0;
+          return (prev + 1) % displayedOptions.length;
+        });
+      } else if (event.key === "ArrowUp") {
+        event.preventDefault();
+        if (!isOpen) {
+          setIsOpen(true);
+          return;
+        }
+        setHighlightedIndex((prev) => {
+          if (displayedOptions.length === 0) return 0;
+          return (prev - 1 + displayedOptions.length) % displayedOptions.length;
+        });
+      } else if (event.key === "Enter") {
+        if (isOpen && displayedOptions[highlightedIndex]) {
+          event.preventDefault();
+          handleSelect(displayedOptions[highlightedIndex]);
+        }
+      } else if (event.key === "Escape") {
+        if (isOpen) {
+          event.preventDefault();
+          setIsOpen(false);
+          setHasFocus(false);
+          setInputValue(selectedOption ? selectedOption.label : "");
+        }
+      }
+    },
+    [displayedOptions, handleSelect, highlightedIndex, isOpen, selectedOption]
+  );
+
+  const showDropdown = !disabled && isOpen;
+  const listboxId = `${id}-listbox`;
+  const activeOption = displayedOptions[highlightedIndex];
+  const activeId =
+    showDropdown && activeOption
+      ? `${id}-option-${highlightedIndex}`
+      : undefined;
+
+  return (
+    <div ref={containerRef} className="relative">
+      <input
+        id={id}
+        type="text"
+        role="combobox"
+        aria-autocomplete="list"
+        aria-expanded={showDropdown}
+        aria-controls={showDropdown ? listboxId : undefined}
+        aria-activedescendant={showDropdown ? activeId : undefined}
+        value={inputValue}
+        onChange={handleInputChange}
+        onFocus={handleInputFocus}
+        onBlur={handleBlur}
+        onKeyDown={handleKeyDown}
+        className={inputClass()}
+        placeholder={placeholder}
+        autoComplete="off"
+        disabled={disabled}
+      />
+      {showDropdown ? (
+        <div
+          id={listboxId}
+          role="listbox"
+          className="absolute z-10 mt-1 max-h-56 w-full overflow-y-auto rounded-md border border-slate-200 bg-white shadow-lg dark:border-slate-700 dark:bg-slate-800"
+        >
+          {loading ? (
+            <div className="px-3 py-2 text-sm text-slate-500 dark:text-slate-300">
+              {loadingText}
+            </div>
+          ) : displayedOptions.length === 0 ? (
+            <div className="px-3 py-2 text-sm text-slate-500 dark:text-slate-300">
+              {noResultsText}
+            </div>
+          ) : (
+            displayedOptions.map((option, index) => (
+              <button
+                key={`${option.isClear ? "clear" : option.value}-${index}`}
+                id={`${id}-option-${index}`}
+                type="button"
+                className={cn(
+                  "flex w-full items-center justify-between px-3 py-2 text-left text-sm",
+                  index === highlightedIndex
+                    ? "bg-slate-100 text-slate-900 dark:bg-slate-700 dark:text-slate-50"
+                    : "text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-700"
+                )}
+                onMouseDown={(event) => {
+                  event.preventDefault();
+                  handleSelect(option);
+                }}
+                onMouseEnter={() => setHighlightedIndex(index)}
+              >
+                <span className="truncate">{option.label}</span>
+                {selectedOption &&
+                !option.isClear &&
+                String(selectedOption.value) === String(option.value) ? (
+                  <i
+                    className="fa-solid fa-check text-xs text-slate-500"
+                    aria-hidden="true"
+                  />
+                ) : null}
+              </button>
+            ))
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 export default function DocNewPage({ definition: definitionProp }) {
@@ -594,12 +834,49 @@ export default function DocNewPage({ definition: definitionProp }) {
           options = references[field.referenceKey] || [];
         }
 
-        const hasOptions = Array.isArray(options) && options.length > 0;
+        const normalizedOptions = Array.isArray(options) ? options : [];
+        const includeEmptyOption =
+          field.allowEmptyOption !== false &&
+          (!field.required || field.allowEmptyOption);
+
+        if (field.autocomplete) {
+          const placeholderText = getLocalizedText(
+            t,
+            field.placeholderKey,
+            field.placeholderFallback || ""
+          );
+          const loadingLabel = getLocalizedText(
+            t,
+            "common.loading",
+            "Загрузка..."
+          );
+          const noResultsLabel = getLocalizedText(
+            t,
+            "common.nothing",
+            "Ничего не найдено"
+          );
+          const clearLabel = getLocalizedText(t, "common.clear", "Очистить");
+
+          return (
+            <AutocompleteSelectField
+              id={fieldId}
+              value={value}
+              options={normalizedOptions}
+              placeholder={placeholderText}
+              disabled={selectDisabled}
+              allowEmptyOption={includeEmptyOption}
+              loading={referencesLoading}
+              loadingText={loadingLabel}
+              noResultsText={noResultsLabel}
+              clearLabel={clearLabel}
+              onChange={(nextValue) => handleFieldChange(field.key, nextValue)}
+            />
+          );
+        }
+
+        const hasOptions = normalizedOptions.length > 0;
 
         if (hasOptions) {
-          const includeEmptyOption =
-            field.allowEmptyOption !== false &&
-            (!field.required || field.allowEmptyOption);
           return (
             <select
               id={fieldId}
@@ -615,7 +892,7 @@ export default function DocNewPage({ definition: definitionProp }) {
                   {getLocalizedText(t, "common.not_selected", "Не выбрано")}
                 </option>
               ) : null}
-              {options.map((option) => (
+              {normalizedOptions.map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
                 </option>

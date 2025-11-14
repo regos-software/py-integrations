@@ -312,6 +312,7 @@ const purchaseDefinition = {
       {
         key: "partner_id",
         type: "select",
+        autocomplete: true,
         required: true,
         referenceKey: "partners",
         autoSelectFirst: true,
@@ -321,6 +322,7 @@ const purchaseDefinition = {
       },
       {
         key: "stock_id",
+        autocomplete: true,
         type: "select",
         required: true,
         referenceKey: "stocks",

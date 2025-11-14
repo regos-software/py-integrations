@@ -348,17 +348,6 @@ export default function DocsPage({ definition: definitionProp }) {
             return value;
           })()}
         </h1>
-        {createConfig ? (
-          <button
-            id="btn-docs-add"
-            type="button"
-            className={buttonClass({ variant: "primary", size: "sm" })}
-            onClick={handleCreateDoc}
-          >
-            <i className="fa-solid fa-plus mr-2" aria-hidden="true" />
-            <span>{addDocLabel}</span>
-          </button>
-        ) : null}
       </div>
 
       <form
@@ -420,6 +409,18 @@ export default function DocsPage({ definition: definitionProp }) {
             </span>
           ) : null}
         </button>
+        {createConfig ? (
+          <button
+            id="btn-docs-add"
+            type="button"
+            className={iconButtonClass({ variant: "primary" })}
+            onClick={handleCreateDoc}
+            aria-label={addDocLabel || undefined}
+            title={addDocLabel || undefined}
+          >
+            <i className="fa-solid fa-plus" aria-hidden="true" />
+          </button>
+        ) : null}
       </form>
 
       <div className="flex flex-wrap items-center justify-between gap-3">

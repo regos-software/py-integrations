@@ -27,6 +27,7 @@ class RegosAPI:
         self.integrations: "RegosAPI.Integrations" = self.Integrations(self)
         self.reports: "RegosAPI.Reports" = self.Reports(self)
         self.references: "RegosAPI.References" = self.References(self)
+        self.rbac: "RegosAPI.Rbac" = self.Rbac(self)
 
     @retry(
         wait=wait_exponential(min=0.2, max=5),
@@ -95,8 +96,10 @@ class RegosAPI:
         def __init__(self, api: "RegosAPI"):
 
             from core.api.references.brand import BrandService
+            from core.api.references.currency import CurrencyService
             from core.api.references.item import ItemService
             from core.api.references.item_group import ItemGroupService
+            from core.api.references.partner import PartnerService
             from core.api.references.retail_customer import RetailCustomerService
             from core.api.references.stock import StockService
             from core.api.references.item_price import ItemPriceService
@@ -104,6 +107,7 @@ class RegosAPI:
             from core.api.references.price_type import PriceTypeService
 
             self.brand = BrandService(api)
+            self.currency = CurrencyService(api)
             self.retail_customer = RetailCustomerService(api)
             self.item = ItemService(api)
             self.item_group = ItemGroupService(api)
@@ -111,6 +115,13 @@ class RegosAPI:
             self.item_price = ItemPriceService(api)
             self.item_operation = ItemOperationService(api)
             self.price_type = PriceTypeService(api)
+            self.partner = PartnerService(api)
+
+    class Rbac:
+        def __init__(self, api: "RegosAPI"):
+            from core.api.rbac.user import UserService
+
+            self.user = UserService(api)
 
     class Batch:
         def __init__(self, api: "RegosAPI"):
