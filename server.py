@@ -7,6 +7,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 
 logger = setup_logger("server")
 
+
 def create_app() -> FastAPI:
     app = FastAPI(title="Python REGOS Integrations Service", version="1.0.0")
 
