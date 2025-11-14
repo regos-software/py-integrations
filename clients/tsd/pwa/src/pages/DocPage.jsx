@@ -1,4 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useApp } from "../context/AppContext.jsx";
 import { useI18n } from "../context/I18nContext.jsx";
@@ -390,117 +396,184 @@ export default function DocPage({ definition: definitionProp }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [actionsOpen, setActionsOpen] = useState(false);
+  const operationSearchRef = useRef("");
+  const [operationSearch, setOperationSearch] = useState("");
 
-  const loadDoc = useCallback(async () => {
-    const detail = docDefinition?.detail || {};
-    if (!detail.docAction || !detail.operationsAction) {
-      setLoading(false);
-      return;
-    }
+  useEffect(() => {
+    operationSearchRef.current = "";
+    setOperationSearch("");
+  }, [docDefinition?.key, docIdNumber]);
 
-    setLoading(true);
-    setError(null);
-    try {
-      const buildDocPayload = detail.buildDocPayload || ((docId) => docId);
-      const buildOpsPayload =
-        detail.buildOperationsPayload || ((docId) => docId);
-      const transformDoc = detail.transformDoc || ((data) => data);
-      const transformOperations =
-        detail.transformOperations ||
-        ((data) => {
-          if (Array.isArray(data)) return data;
-          if (Array.isArray(data?.result)) return data.result;
-          if (Array.isArray(data?.operations)) return data.operations;
-          return [];
-        });
-
-      const batchConfig = detail.batch;
-      if (batchConfig?.buildRequest) {
-        const batchPayload = batchConfig.buildRequest(docIdNumber, {
-          buildDocPayload,
-          buildOperationsPayload: buildOpsPayload,
-          definition: docDefinition,
-        });
-        const batchAction = batchConfig.action || "batch.run";
-        const {
-          ok: batchOk,
-          status,
-          data: batchData,
-        } = await api(batchAction, batchPayload);
-
-        if (!batchOk) {
-          const description =
-            batchData?.description ||
-            batchData?.error ||
-            "Batch request failed";
-          throw new Error(`${description} (${status})`);
-        }
-
-        const docKey = batchConfig.docKey || "doc";
-        const operationsKey = batchConfig.operationsKey || "operations";
-        const findStep = (key) =>
-          batchData?.result?.find?.((step) => step?.key === key);
-
-        const docStep = findStep(docKey);
-        if (!docStep) {
-          throw new Error(`Шаг batch '${docKey}' не найден`);
-        }
-        if (docStep.response?.ok === false) {
-          const description =
-            docStep.response?.result?.description ||
-            docStep.response?.description ||
-            `Batch step '${docKey}' failed`;
-          throw new Error(description);
-        }
-
-        const opsStep = findStep(operationsKey);
-        if (!opsStep) {
-          throw new Error(`Шаг batch '${operationsKey}' не найден`);
-        }
-        if (opsStep.response?.ok === false) {
-          const description =
-            opsStep.response?.result?.description ||
-            opsStep.response?.description ||
-            `Batch step '${operationsKey}' failed`;
-          throw new Error(description);
-        }
-
-        const extractDoc =
-          batchConfig.extractDoc ||
-          ((response) => {
-            if (!response) return null;
-            const { result } = response;
-            if (Array.isArray(result)) {
-              return result[0] ?? null;
-            }
-            return result ?? null;
-          });
-
-        const extractOperations =
-          batchConfig.extractOperations || ((response) => response);
-
-        const docData = extractDoc(docStep.response);
-        const operationsData = extractOperations(opsStep.response);
-
-        setDoc(transformDoc(docData));
-        setOperations(transformOperations(operationsData) || []);
+  const loadDoc = useCallback(
+    async (options = {}) => {
+      const detail = docDefinition?.detail || {};
+      if (!detail.docAction || !detail.operationsAction) {
+        setLoading(false);
         return;
       }
 
-      const [docResponse, opsResponse] = await Promise.all([
-        api(detail.docAction, buildDocPayload(docIdNumber)),
-        api(detail.operationsAction, buildOpsPayload(docIdNumber)),
-      ]);
-      setDoc(transformDoc(docResponse?.data));
-      setOperations(transformOperations(opsResponse?.data) || []);
-    } catch (err) {
-      setError(err);
-      setDoc(null);
-      setOperations([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [api, docDefinition, docIdNumber]);
+      setLoading(true);
+      setError(null);
+      try {
+        const requestedSearch =
+          typeof options.search === "string"
+            ? options.search.trim()
+            : operationSearchRef.current;
+        const searchValue = requestedSearch || "";
+        if (Object.prototype.hasOwnProperty.call(options, "search")) {
+          operationSearchRef.current = searchValue;
+        }
+        const buildDocPayload = detail.buildDocPayload || ((docId) => docId);
+        const buildOpsPayload =
+          detail.buildOperationsPayload ||
+          ((docId, params) => {
+            if (docDefinition?.key === "inventory" && params?.search) {
+              return {
+                docId,
+                search: params.search,
+              };
+            }
+            return docId;
+          });
+        const transformDoc = detail.transformDoc || ((data) => data);
+        const transformOperations =
+          detail.transformOperations ||
+          ((data) => {
+            if (Array.isArray(data)) return data;
+            if (Array.isArray(data?.result)) return data.result;
+            if (Array.isArray(data?.operations)) return data.operations;
+            return [];
+          });
+
+        const batchConfig = detail.batch;
+        const shouldUseBatch =
+          Boolean(batchConfig?.buildRequest) && searchValue.length === 0;
+
+        const mergeInventorySearch = (payload) => {
+          if (docDefinition?.key !== "inventory") {
+            return payload;
+          }
+          if (searchValue.length === 0) {
+            return payload;
+          }
+
+          if (
+            payload &&
+            typeof payload === "object" &&
+            !Array.isArray(payload)
+          ) {
+            return {
+              id: docIdNumber,
+              doc_id: docIdNumber,
+              document_id: docIdNumber,
+              document_ids: [docIdNumber],
+              ...payload,
+              search: searchValue,
+            };
+          }
+
+          return {
+            id: docIdNumber,
+            doc_id: docIdNumber,
+            document_id: docIdNumber,
+            document_ids: [docIdNumber],
+            search: searchValue,
+          };
+        };
+
+        if (shouldUseBatch) {
+          const batchPayload = batchConfig.buildRequest(docIdNumber, {
+            buildDocPayload,
+            buildOperationsPayload: buildOpsPayload,
+            definition: docDefinition,
+          });
+          const batchAction = batchConfig.action || "batch.run";
+          const {
+            ok: batchOk,
+            status,
+            data: batchData,
+          } = await api(batchAction, batchPayload);
+
+          if (!batchOk) {
+            const description =
+              batchData?.description ||
+              batchData?.error ||
+              "Batch request failed";
+            throw new Error(`${description} (${status})`);
+          }
+
+          const docKey = batchConfig.docKey || "doc";
+          const operationsKey = batchConfig.operationsKey || "operations";
+          const findStep = (key) =>
+            batchData?.result?.find?.((step) => step?.key === key);
+
+          const docStep = findStep(docKey);
+          if (!docStep) {
+            throw new Error(`Шаг batch '${docKey}' не найден`);
+          }
+          if (docStep.response?.ok === false) {
+            const description =
+              docStep.response?.result?.description ||
+              docStep.response?.description ||
+              `Batch step '${docKey}' failed`;
+            throw new Error(description);
+          }
+
+          const opsStep = findStep(operationsKey);
+          if (!opsStep) {
+            throw new Error(`Шаг batch '${operationsKey}' не найден`);
+          }
+          if (opsStep.response?.ok === false) {
+            const description =
+              opsStep.response?.result?.description ||
+              opsStep.response?.description ||
+              `Batch step '${operationsKey}' failed`;
+            throw new Error(description);
+          }
+
+          const extractDoc =
+            batchConfig.extractDoc ||
+            ((response) => {
+              if (!response) return null;
+              const { result } = response;
+              if (Array.isArray(result)) {
+                return result[0] ?? null;
+              }
+              return result ?? null;
+            });
+
+          const extractOperations =
+            batchConfig.extractOperations || ((response) => response);
+
+          const docData = extractDoc(docStep.response);
+          const operationsData = extractOperations(opsStep.response);
+
+          setDoc(transformDoc(docData));
+          setOperations(transformOperations(operationsData) || []);
+          return;
+        }
+
+        const operationsPayloadBase = buildOpsPayload(docIdNumber, {
+          search: searchValue || undefined,
+        });
+        const operationsPayload = mergeInventorySearch(operationsPayloadBase);
+
+        const [docResponse, opsResponse] = await Promise.all([
+          api(detail.docAction, buildDocPayload(docIdNumber)),
+          api(detail.operationsAction, operationsPayload),
+        ]);
+        setDoc(transformDoc(docResponse?.data));
+        setOperations(transformOperations(opsResponse?.data) || []);
+      } catch (err) {
+        setError(err);
+        setDoc(null);
+        setOperations([]);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [api, docDefinition, docIdNumber]
+  );
 
   useEffect(() => {
     loadDoc();
@@ -956,6 +1029,50 @@ export default function DocPage({ definition: definitionProp }) {
     setActionsOpen(false);
   }, []);
 
+  const operationSearchPlaceholder = useMemo(() => {
+    const detailKey = docDefinition?.detail?.operationSearchPlaceholder;
+    if (detailKey) {
+      const translated = t(detailKey);
+      if (translated && translated !== detailKey) {
+        return translated;
+      }
+    }
+    const labelKey = docDefinition?.labels?.operationSearchPlaceholder;
+    if (labelKey) {
+      const translated = t(labelKey);
+      if (translated && translated !== labelKey) {
+        return translated;
+      }
+    }
+    const fallbackKey = "doc.inventory.operations.search";
+    const fallback = t(fallbackKey);
+    if (fallback && fallback !== fallbackKey) {
+      return fallback;
+    }
+    return "Поиск по операциям";
+  }, [docDefinition, t]);
+
+  const handleOperationSearchChange = useCallback((event) => {
+    setOperationSearch(event.target.value);
+  }, []);
+
+  const handleOperationSearchSubmit = useCallback(() => {
+    const trimmed = operationSearch.trim();
+    operationSearchRef.current = trimmed;
+    setOperationSearch(trimmed);
+    loadDoc({ search: trimmed });
+  }, [loadDoc, operationSearch]);
+
+  const handleOperationSearchKeyDown = useCallback(
+    (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        handleOperationSearchSubmit();
+      }
+    },
+    [handleOperationSearchSubmit]
+  );
+
   if (!docDefinition) {
     return (
       <section className={sectionClass()} id="doc">
@@ -1076,6 +1193,28 @@ export default function DocPage({ definition: definitionProp }) {
             <i className="fa-solid fa-plus" aria-hidden="true" />
           </button>
         </div>
+        {docDefinition?.key === "inventory" ? (
+          <div className="mt-2 w-full flex items-center gap-2">
+            <input
+              type="search"
+              value={operationSearch}
+              onChange={handleOperationSearchChange}
+              onKeyDown={handleOperationSearchKeyDown}
+              placeholder={operationSearchPlaceholder}
+              className={inputClass("flex-1")}
+              aria-label={operationSearchPlaceholder}
+            />
+            <button
+              type="button"
+              className={iconButtonClass({ variant: "secondary" })}
+              onClick={handleOperationSearchSubmit}
+              aria-label={t("common.search") || "Поиск"}
+              title={t("common.search") || "Поиск"}
+            >
+              <i className="fa-solid fa-magnifying-glass" aria-hidden="true" />
+            </button>
+          </div>
+        ) : null}
       </div>
 
       <div

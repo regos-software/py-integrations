@@ -27,6 +27,8 @@ import { getDocDefinition } from "../config/docDefinitions.js";
 
 const QUICK_QTY = [1, 5, 10, 12];
 
+const BARCODE_INPUT_MODES = ["none", "search"];
+
 const SEARCH_MODES = {
   SCAN: "scan",
   NAME: "name",
@@ -136,6 +138,9 @@ export default function OpNewPage({ definition: definitionProp }) {
   const [resultModalOpen, setResultModalOpen] = useState(false);
   const [resultItems, setResultItems] = useState([]);
   const [selectedCameraId, setSelectedCameraId] = useState("default");
+  const [barcodeInputMode, setBarcodeInputMode] = useState("none");
+  const [scanHistory, setScanHistory] = useState([]);
+  const [historyClock, setHistoryClock] = useState(() => Date.now());
   const priceRoundTo = docCtx?.price_type_round_to ?? null;
   const docCurrency = docCtx?.doc_currency ?? null;
 
@@ -146,10 +151,22 @@ export default function OpNewPage({ definition: definitionProp }) {
   const failSoundRef = useRef(null);
   const instantQueueRef = useRef([]);
   const instantProcessingRef = useRef(false);
+  const restartTimeoutRef = useRef(null);
+  const nextScanIdRef = useRef(1);
 
   useEffect(() => {
     searchModeRef.current = searchMode;
   }, [searchMode]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    const intervalId = window.setInterval(() => {
+      setHistoryClock(Date.now());
+    }, 1000);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, []);
 
   useEffect(() => {
     if (typeof window === "undefined" || typeof Audio === "undefined") return;
@@ -207,6 +224,81 @@ export default function OpNewPage({ definition: definitionProp }) {
   const playFailSound = useCallback(() => {
     playSound(failSoundRef);
   }, [playSound]);
+
+  const barcodeInputModeLabels = useMemo(
+    () => ({
+      none: t("op.input_mode.none") || "Без клавиатуры",
+      search: t("op.input_mode.search") || "Поиск",
+    }),
+    [t]
+  );
+
+  const toggleBarcodeInputMode = useCallback(() => {
+    setBarcodeInputMode((prev) =>
+      prev === BARCODE_INPUT_MODES[0]
+        ? BARCODE_INPUT_MODES[1]
+        : BARCODE_INPUT_MODES[0]
+    );
+  }, []);
+
+  const inputModeToggleLabel = useMemo(() => {
+    const currentLabel =
+      barcodeInputModeLabels[barcodeInputMode] || barcodeInputMode;
+    const prefix = t("op.input_mode.toggle") || "Переключить режим ввода";
+    return `${prefix}: ${currentLabel}`;
+  }, [barcodeInputMode, barcodeInputModeLabels, t]);
+
+  const formatTimeAgo = useCallback(
+    (timestamp) => {
+      const now = historyClock;
+      const diffMs = Math.max(0, now - timestamp);
+      const diffSeconds = Math.floor(diffMs / 1000);
+      if (diffSeconds < 1) return "just now";
+      if (diffSeconds < 60) {
+        const seconds = diffSeconds;
+        return `${seconds} sec${seconds === 1 ? "" : "s"} ago`;
+      }
+      const diffMinutes = Math.floor(diffSeconds / 60);
+      if (diffMinutes < 60) {
+        return `${diffMinutes} min${diffMinutes === 1 ? "" : "s"} ago`;
+      }
+      const diffHours = Math.floor(diffMinutes / 60);
+      if (diffHours < 24) {
+        return `${diffHours} hr${diffHours === 1 ? "" : "s"} ago`;
+      }
+      const diffDays = Math.floor(diffHours / 24);
+      return `${diffDays} day${diffDays === 1 ? "" : "s"} ago`;
+    },
+    [historyClock]
+  );
+
+  const addHistoryEntry = useCallback((value) => {
+    const nextId = nextScanIdRef.current++;
+    const entry = {
+      id: nextId,
+      value,
+      status: "pending",
+      timestamp: Date.now(),
+    };
+    setScanHistory((prev) => {
+      const next = [entry, ...prev];
+      return next.slice(0, 10);
+    });
+    return nextId;
+  }, []);
+
+  const updateHistoryEntryStatus = useCallback((id, status) => {
+    setScanHistory((prev) =>
+      prev.map((entry) =>
+        entry.id === id
+          ? {
+              ...entry,
+              status,
+            }
+          : entry
+      )
+    );
+  }, []);
 
   const scannerLabels = useMemo(
     () => ({
@@ -486,7 +578,7 @@ export default function OpNewPage({ definition: definitionProp }) {
           playFailSound();
           setSearchStatus("error");
           focusBarcodeInput();
-          return;
+          return false;
         }
 
         closeResultModal();
@@ -516,7 +608,7 @@ export default function OpNewPage({ definition: definitionProp }) {
               type: "error",
             });
             playFailSound();
-            return;
+            return false;
           }
 
           if (normalizedItems.length > 1) {
@@ -527,7 +619,7 @@ export default function OpNewPage({ definition: definitionProp }) {
               { type: "error" }
             );
             playFailSound();
-            return;
+            return false;
           }
 
           const item = normalizedItems[0];
@@ -554,6 +646,7 @@ export default function OpNewPage({ definition: definitionProp }) {
           });
 
           setSearchStatus(success ? "done" : "error");
+          return success;
         } catch (err) {
           console.warn("[search] instant error", err);
           setSearchStatus("error");
@@ -561,10 +654,10 @@ export default function OpNewPage({ definition: definitionProp }) {
             type: "error",
           });
           playFailSound();
+          return false;
         } finally {
           focusBarcodeInput();
         }
-        return;
       }
 
       const addPath = resolveBatchPathFromAction(
@@ -586,7 +679,7 @@ export default function OpNewPage({ definition: definitionProp }) {
         playFailSound();
         setSearchStatus("error");
         focusBarcodeInput();
-        return;
+        return false;
       }
 
       const batchPayload = {
@@ -646,7 +739,7 @@ export default function OpNewPage({ definition: definitionProp }) {
           setSearchStatus(searchItems.length === 0 ? "empty" : "error");
           showToast(description, { type: "error" });
           playFailSound();
-          return;
+          return false;
         }
 
         showToast(t("toast.op_added") || "Операция добавлена", {
@@ -654,6 +747,7 @@ export default function OpNewPage({ definition: definitionProp }) {
         });
         playSuccessSound();
         setSearchStatus("done");
+        return true;
       } catch (err) {
         console.warn("[op_new] instant batch error", err);
         showToast(
@@ -662,9 +756,12 @@ export default function OpNewPage({ definition: definitionProp }) {
         );
         playFailSound();
         setSearchStatus("error");
+        return false;
       } finally {
         focusBarcodeInput();
       }
+
+      return false;
     },
     [
       api,
@@ -691,14 +788,27 @@ export default function OpNewPage({ definition: definitionProp }) {
     instantProcessingRef.current = true;
     try {
       while (instantQueueRef.current.length > 0) {
-        const nextBarcode = instantQueueRef.current.shift();
-        // eslint-disable-next-line no-await-in-loop
-        await handleInstantSearch(nextBarcode);
+        const nextItem = instantQueueRef.current.shift();
+        if (!nextItem) {
+          continue;
+        }
+        const { value: nextBarcode, historyId } = nextItem;
+        let success = false;
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          success = await handleInstantSearch(nextBarcode);
+        } catch (err) {
+          console.warn("[op_new] instant queue error", err);
+          success = false;
+        }
+        if (historyId != null) {
+          updateHistoryEntryStatus(historyId, success ? "success" : "error");
+        }
       }
     } finally {
       instantProcessingRef.current = false;
     }
-  }, [handleInstantSearch]);
+  }, [handleInstantSearch, updateHistoryEntryStatus]);
 
   const enqueueInstantSearch = useCallback(
     (queryText) => {
@@ -709,13 +819,20 @@ export default function OpNewPage({ definition: definitionProp }) {
         return;
       }
 
-      instantQueueRef.current.push(normalized);
+      const historyId = addHistoryEntry(normalized);
+      instantQueueRef.current.push({ value: normalized, historyId });
       setBarcodeValue("");
       setSearchStatus("loading");
       focusBarcodeInput();
       void processInstantQueue();
     },
-    [focusBarcodeInput, processInstantQueue, setBarcodeValue, setSearchStatus]
+    [
+      addHistoryEntry,
+      focusBarcodeInput,
+      processInstantQueue,
+      setBarcodeValue,
+      setSearchStatus,
+    ]
   );
 
   const runSearch = useCallback(
@@ -830,8 +947,33 @@ export default function OpNewPage({ definition: definitionProp }) {
   const handleScannerResult = useCallback(
     (value) => {
       if (!value) return;
+      if (restartTimeoutRef.current != null) {
+        window.clearTimeout(restartTimeoutRef.current);
+        restartTimeoutRef.current = null;
+      }
       const nextMode = searchModeRef.current;
       runSearch(value, nextMode, { source: "camera" });
+      if (nextMode === SEARCH_MODES.INSANT) {
+        restartTimeoutRef.current = window.setTimeout(() => {
+          if (searchModeRef.current !== SEARCH_MODES.INSANT) {
+            return;
+          }
+          // Automatically resume scanning so instant mode can keep processing without manual input.
+          const startMethod = scannerRef.current?.start;
+          if (typeof startMethod === "function") {
+            try {
+              const result = startMethod();
+              if (result && typeof result.catch === "function") {
+                result.catch((err) =>
+                  console.warn("[op_new] scanner restart failed", err)
+                );
+              }
+            } catch (err) {
+              console.warn("[op_new] scanner restart threw", err);
+            }
+          }
+        }, 1000);
+      }
     },
     [runSearch]
   );
@@ -843,6 +985,16 @@ export default function OpNewPage({ definition: definitionProp }) {
     [stopScan]
   );
 
+  useEffect(
+    () => () => {
+      if (restartTimeoutRef.current != null) {
+        window.clearTimeout(restartTimeoutRef.current);
+        restartTimeoutRef.current = null;
+      }
+    },
+    []
+  );
+
   const handleModalDismiss = useCallback(() => {
     closeResultModal();
     setSearchStatus("idle");
@@ -851,6 +1003,15 @@ export default function OpNewPage({ definition: definitionProp }) {
   useEffect(() => {
     setSearchStatus("idle");
     closeResultModal();
+
+    if (
+      searchMode !== SEARCH_MODES.INSANT &&
+      restartTimeoutRef.current != null
+    ) {
+      window.clearTimeout(restartTimeoutRef.current);
+      restartTimeoutRef.current = null;
+    }
+
     if (searchMode === SEARCH_MODES.NAME) {
       stopScan();
       window.setTimeout(
@@ -968,7 +1129,7 @@ export default function OpNewPage({ definition: definitionProp }) {
             <input
               id="barcode"
               type="search"
-              inputMode="none"
+              inputMode={barcodeInputMode}
               ref={barcodeInputRef}
               value={barcodeValue}
               placeholder={
@@ -985,6 +1146,18 @@ export default function OpNewPage({ definition: definitionProp }) {
               className={inputClass("flex-1")}
             />
             <button
+              type="button"
+              className={iconButtonClass({
+                variant: barcodeInputMode === "search" ? "primary" : "ghost",
+              })}
+              onClick={toggleBarcodeInputMode}
+              aria-label={inputModeToggleLabel}
+              title={inputModeToggleLabel}
+              aria-pressed={barcodeInputMode === "search"}
+            >
+              <i className="fa-solid fa-keyboard" aria-hidden="true" />
+            </button>
+            <button
               id="btn-scan"
               type="button"
               className={iconButtonClass()}
@@ -995,6 +1168,28 @@ export default function OpNewPage({ definition: definitionProp }) {
               <i className="fa-solid fa-camera" aria-hidden="true" />
             </button>
           </div>
+          {searchMode === SEARCH_MODES.INSANT && scanHistory.length > 0 ? (
+            <div className="mt-2 space-y-1" id="instant-scan-history">
+              {scanHistory.map((entry) => {
+                const statusClass =
+                  entry.status === "success"
+                    ? "text-emerald-600 dark:text-emerald-400"
+                    : entry.status === "error"
+                    ? "text-red-600 dark:text-red-400"
+                    : "text-slate-500 dark:text-slate-400";
+                return (
+                  <p
+                    key={entry.id}
+                    className={cn("text-xs font-medium", statusClass)}
+                  >
+                    {`${entry.id}. ${entry.value || "—"} (${formatTimeAgo(
+                      entry.timestamp
+                    )})`}
+                  </p>
+                );
+              })}
+            </div>
+          ) : null}
           {[SEARCH_MODES.SCAN, SEARCH_MODES.INSANT].includes(searchMode) &&
           searchStatus === "loading" ? (
             <p className={mutedTextClass()} aria-live="polite">

@@ -348,13 +348,13 @@ const inventoryDefinition = {
   detail: {
     docAction: "docs.inventory.get_by_id",
     buildDocPayload: (docId) => docId,
-    operationsAction: "docs.inventory_operation.get_by_document_id",
-    buildOperationsPayload: (docId) => docId,
+    operationsAction: "docs.inventory_operation.get",
+    buildOperationsPayload: (docId, search) => ({ docId, search }),
     batch: {
       action: "batch.run",
       docKey: "doc",
       operationsKey: "operations",
-      buildRequest: (docId) => ({
+      buildRequest: ({ docId, search }) => ({
         stop_on_error: false,
         requests: [
           {
@@ -365,7 +365,7 @@ const inventoryDefinition = {
           {
             key: "operations",
             path: "InventoryOperation/Get",
-            payload: { document_ids: [docId], limit: 100 },
+            payload: { document_ids: [docId], search, limit: 100 },
           },
         ],
       }),
@@ -527,12 +527,13 @@ const inventoryDefinition = {
       },
     },
     addAction: "docs.inventory_operation.add",
-    buildAddPayload: ({ docId, picked, quantity }) => {
+    buildAddPayload: ({ docId, picked, quantity, description }) => {
       return [
         {
           document_id: docId,
           item_id: Number(picked.id),
           actual_quantity: quantity,
+          description: description,
           datetime: Math.floor(Date.now() / 1000),
           update_actual_quantity: false,
         },

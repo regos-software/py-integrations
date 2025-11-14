@@ -25,6 +25,8 @@ const SEARCH_MODES = {
   NAME: "name",
 };
 
+const BARCODE_INPUT_MODES = ["none", "search"];
+
 const DEFAULT_LIMIT = 20;
 const OPERATION_LIMIT_MIN = 1;
 const OPERATION_LIMIT_MAX = 1000;
@@ -144,6 +146,7 @@ export default function ItemInfoPage() {
   }));
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [selectedCameraId, setSelectedCameraId] = useState("default");
+  const [barcodeInputMode, setBarcodeInputMode] = useState("none");
 
   const barcodeInputRef = useRef(null);
   const scannerRef = useRef(null);
@@ -165,6 +168,33 @@ export default function ItemInfoPage() {
       barcodeInputRef.current?.focus();
     }, 0);
   }, []);
+
+  const barcodeInputModeLabels = useMemo(
+    () => ({
+      none: formatFallback(t, "input_mode.none", "Без клавиатуры"),
+      search: formatFallback(t, "input_mode.search", "Поиск"),
+    }),
+    [t]
+  );
+
+  const toggleBarcodeInputMode = useCallback(() => {
+    setBarcodeInputMode((prev) =>
+      prev === BARCODE_INPUT_MODES[0]
+        ? BARCODE_INPUT_MODES[1]
+        : BARCODE_INPUT_MODES[0]
+    );
+  }, []);
+
+  const inputModeToggleLabel = useMemo(() => {
+    const currentLabel =
+      barcodeInputModeLabels[barcodeInputMode] || barcodeInputMode;
+    const prefix = formatFallback(
+      t,
+      "input_mode.toggle",
+      "Изменить режим ввода"
+    );
+    return `${prefix}: ${currentLabel}`;
+  }, [barcodeInputMode, barcodeInputModeLabels, t]);
 
   const scannerLabels = useMemo(
     () => ({
@@ -1137,7 +1167,7 @@ export default function ItemInfoPage() {
               id="item-info-barcode"
               ref={barcodeInputRef}
               type="search"
-              inputMode="search"
+              inputMode={barcodeInputMode}
               value={barcodeValue}
               placeholder={formatFallback(
                 t,
@@ -1153,6 +1183,18 @@ export default function ItemInfoPage() {
               }}
               className={inputClass("flex-1")}
             />
+            <button
+              type="button"
+              className={iconButtonClass({
+                variant: barcodeInputMode === "search" ? "primary" : "ghost",
+              })}
+              onClick={toggleBarcodeInputMode}
+              aria-label={inputModeToggleLabel}
+              title={inputModeToggleLabel}
+              aria-pressed={barcodeInputMode === "search"}
+            >
+              <i className="fa-solid fa-keyboard" aria-hidden="true" />
+            </button>
             <button
               type="button"
               className={iconButtonClass()}
