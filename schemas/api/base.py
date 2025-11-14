@@ -61,6 +61,14 @@ class ArrayResult(BaseSchema):
     )
 
 
+class AddResult(BaseSchema):
+    """Ответ методов Add с идентификатором добавленной записи."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    new_id: int = PydField(..., ge=1, description="Идентификатор добавленной записи.")
+
+
 class IDRequest(BaseSchema):
     """Запрос на работу с одной записью по идентификатору."""
 

@@ -6,14 +6,10 @@ import React, {
   useState,
 } from "react";
 import { useNavigate } from "react-router-dom";
-import {
-  BrowserMultiFormatReader,
-  BarcodeFormat,
-  DecodeHintType,
-} from "@zxing/library";
 import { useApp } from "../context/AppContext.jsx";
 import { useI18n } from "../context/I18nContext.jsx";
 import { useToast } from "../context/ToastContext.jsx";
+import CameraBarcodeScanner from "../components/CameraBarcodeScanner.jsx";
 import {
   buttonClass,
   cardClass,
@@ -23,24 +19,13 @@ import {
   mutedTextClass,
   sectionClass,
 } from "../lib/ui";
-import { cn } from "../lib/utils";
 
 const SEARCH_MODES = {
   SCAN: "scan",
   NAME: "name",
 };
 
-const ZXING_FORMATS = [
-  BarcodeFormat.QR_CODE,
-  BarcodeFormat.UPC_A,
-  BarcodeFormat.UPC_E,
-  BarcodeFormat.EAN_8,
-  BarcodeFormat.EAN_13,
-  BarcodeFormat.ITF,
-  BarcodeFormat.PDF_417,
-  BarcodeFormat.CODE_39,
-  BarcodeFormat.CODE_128,
-].filter(Boolean);
+const BARCODE_INPUT_MODES = ["none", "search"];
 
 const DEFAULT_LIMIT = 20;
 const OPERATION_LIMIT_MIN = 1;
@@ -130,7 +115,6 @@ export default function ItemInfoPage() {
   const [barcodeValue, setBarcodeValue] = useState("");
   const [queryValue, setQueryValue] = useState("");
   const [searchStatus, setSearchStatus] = useState("idle");
-  const [scanning, setScanning] = useState(false);
 
   const [resultItems, setResultItems] = useState([]);
   const [resultModalOpen, setResultModalOpen] = useState(false);
@@ -161,10 +145,11 @@ export default function ItemInfoPage() {
     ...DEFAULT_OPERATION_FILTERS,
   }));
   const [detailsLoading, setDetailsLoading] = useState(false);
+  const [selectedCameraId, setSelectedCameraId] = useState("default");
+  const [barcodeInputMode, setBarcodeInputMode] = useState("none");
 
   const barcodeInputRef = useRef(null);
-  const videoRef = useRef(null);
-  const readerRef = useRef(null);
+  const scannerRef = useRef(null);
   const filterButtonRef = useRef(null);
 
   const title = useMemo(() => {
@@ -183,6 +168,98 @@ export default function ItemInfoPage() {
       barcodeInputRef.current?.focus();
     }, 0);
   }, []);
+
+  const barcodeInputModeLabels = useMemo(
+    () => ({
+      none: formatFallback(t, "input_mode.none", "Без клавиатуры"),
+      search: formatFallback(t, "input_mode.search", "Поиск"),
+    }),
+    [t]
+  );
+
+  const toggleBarcodeInputMode = useCallback(() => {
+    setBarcodeInputMode((prev) =>
+      prev === BARCODE_INPUT_MODES[0]
+        ? BARCODE_INPUT_MODES[1]
+        : BARCODE_INPUT_MODES[0]
+    );
+  }, []);
+
+  const inputModeToggleLabel = useMemo(() => {
+    const currentLabel =
+      barcodeInputModeLabels[barcodeInputMode] || barcodeInputMode;
+    const prefix = formatFallback(
+      t,
+      "input_mode.toggle",
+      "Изменить режим ввода"
+    );
+    return `${prefix}: ${currentLabel}`;
+  }, [barcodeInputMode, barcodeInputModeLabels, t]);
+
+  const scannerLabels = useMemo(
+    () => ({
+      camera: formatFallback(t, "scanner.camera", "Камера"),
+      cameraAuto: formatFallback(t, "scanner.camera_auto", "Автовыбор"),
+      hint: formatFallback(t, "scanner.hint", "Наведи камеру на штрих-код"),
+      cancel: formatFallback(t, "common.cancel", "Отмена"),
+    }),
+    [t]
+  );
+
+  const scannerErrors = useMemo(
+    () => ({
+      camera_not_supported: formatFallback(
+        t,
+        "camera_not_supported",
+        "Камера на этом устройстве не поддерживается"
+      ),
+      camera_permission_denied: formatFallback(
+        t,
+        "camera_permission_denied",
+        "Доступ к камере запрещен"
+      ),
+      camera_not_found: formatFallback(
+        t,
+        "camera_not_found",
+        "Камера не найдена"
+      ),
+      camera_in_use: formatFallback(
+        t,
+        "camera_in_use",
+        "Камера уже используется"
+      ),
+      camera_open_failed: formatFallback(
+        t,
+        "camera_open_failed",
+        "Не удалось открыть камеру"
+      ),
+    }),
+    [t]
+  );
+
+  const handleScannerError = useCallback(
+    (message) => {
+      if (!message) return;
+      showToast(message, { type: "error" });
+    },
+    [showToast]
+  );
+
+  const stopScan = useCallback(() => {
+    scannerRef.current?.stop();
+  }, []);
+
+  useEffect(
+    () => () => {
+      stopScan();
+    },
+    [stopScan]
+  );
+
+  const startScan = useCallback(() => {
+    if (searchMode !== SEARCH_MODES.SCAN) return;
+    void scannerRef.current?.start();
+  }, [searchMode]);
 
   useEffect(() => {
     console.log("stocks", stocks, settingsDraft);
@@ -216,8 +293,12 @@ export default function ItemInfoPage() {
   }, [priceTypes]);
 
   useEffect(() => {
+    if (searchMode !== SEARCH_MODES.SCAN) {
+      stopScan();
+    }
+    scannerRef.current?.clearError();
     focusBarcodeInput();
-  }, [focusBarcodeInput, searchMode]);
+  }, [focusBarcodeInput, searchMode, stopScan]);
 
   const callApi = useCallback(
     async (action, params, fallbackMessage) => {
@@ -471,40 +552,6 @@ export default function ItemInfoPage() {
     }
   }, [operationFilters, operationFiltersOpen]);
 
-  const ensureReader = useCallback(async () => {
-    if (readerRef.current) return readerRef.current;
-
-    const hints = new Map();
-    if (DecodeHintType?.POSSIBLE_FORMATS) {
-      hints.set(DecodeHintType.POSSIBLE_FORMATS, ZXING_FORMATS);
-    }
-    if (DecodeHintType?.TRY_HARDER) {
-      hints.set(DecodeHintType.TRY_HARDER, true);
-    }
-    if (DecodeHintType?.ALSO_INVERTED) {
-      hints.set(DecodeHintType.ALSO_INVERTED, true);
-    }
-
-    const reader = new BrowserMultiFormatReader(hints, 200);
-    reader.timeBetweenDecodingAttempts = 75;
-    readerRef.current = reader;
-    return readerRef.current;
-  }, []);
-
-  const stopScan = useCallback(() => {
-    setScanning(false);
-    if (readerRef.current) {
-      readerRef.current.reset();
-    }
-    if (videoRef.current?.srcObject) {
-      const tracks = videoRef.current.srcObject.getTracks();
-      tracks.forEach((track) => track.stop());
-      videoRef.current.srcObject = null;
-    }
-  }, []);
-
-  useEffect(() => stopScan, [stopScan]);
-
   const loadItemDetails = useCallback(
     async (itemInput, overrideSettings) => {
       const itemInfo =
@@ -622,6 +669,7 @@ export default function ItemInfoPage() {
           payload: {
             item_id: itemIdNumber,
             limit: operationLimit,
+            sort_orders: [{ column: "date", direction: "desc" }],
           },
         },
       ];
@@ -959,6 +1007,7 @@ export default function ItemInfoPage() {
   const runSearch = useCallback(
     async (value, mode = searchMode) => {
       if (mode === SEARCH_MODES.SCAN) {
+        scannerRef.current?.clearError();
         await handleSearch(value, SEARCH_MODES.SCAN);
         return;
       }
@@ -967,50 +1016,13 @@ export default function ItemInfoPage() {
     [handleSearch, searchMode]
   );
 
-  const startScan = useCallback(async () => {
-    if (scanning) return;
-    if (searchMode !== SEARCH_MODES.SCAN) return;
-
-    try {
-      const reader = await ensureReader();
-      const constraints = {
-        video: { facingMode: { ideal: "environment" } },
-      };
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.setAttribute("playsinline", "true");
-        await videoRef.current.play();
-      }
-
-      setScanning(true);
-      reader.decodeFromVideoDevice(null, videoRef.current, (result, err) => {
-        if (result) {
-          const text = result.getText();
-          stopScan();
-          runSearch(text, SEARCH_MODES.SCAN);
-        }
-        if (
-          err &&
-          !(err.name === "NotFoundException" || err.name === "NotFoundError")
-        ) {
-          // swallow non-critical errors
-        }
-      });
-    } catch (err) {
-      console.warn("[item-info] start scan", err);
-      const messageKey =
-        err?.name === "NotAllowedError"
-          ? "camera_permission_denied"
-          : err?.name === "NotFoundError" ||
-            err?.name === "OverconstrainedError"
-          ? "camera_not_found"
-          : "camera_open_failed";
-      showToast(formatFallback(t, messageKey, "Не удалось открыть камеру"), {
-        type: "error",
-      });
-    }
-  }, [ensureReader, runSearch, scanning, searchMode, showToast, stopScan, t]);
+  const handleScannerResult = useCallback(
+    (value) => {
+      if (!value) return;
+      runSearch(value, SEARCH_MODES.SCAN);
+    },
+    [runSearch]
+  );
 
   const closeResultModal = useCallback(() => {
     setResultModalOpen(false);
@@ -1131,45 +1143,31 @@ export default function ItemInfoPage() {
 
       {[SEARCH_MODES.SCAN].includes(searchMode) ? (
         <>
-          <div
-            id="scanner"
-            className={cn(
-              scanning ? "space-y-4" : "hidden",
-              cardClass("space-y-4")
-            )}
-          >
-            <video
-              id="item-info-preview"
-              ref={videoRef}
-              playsInline
-              className="w-full rounded-xl"
-            />
-            <div className="flex items-center justify-between gap-3">
-              <span className={mutedTextClass()}>
-                {formatFallback(
-                  t,
-                  "scanner.hint",
-                  "Наведи камеру на штрих-код"
-                )}
-              </span>
-              <button
-                type="button"
-                className={iconButtonClass()}
-                onClick={stopScan}
-                aria-label={formatFallback(t, "common.cancel", "Отмена")}
-                title={formatFallback(t, "common.cancel", "Отмена")}
-              >
-                <i className="fa-solid fa-xmark" aria-hidden="true" />
-              </button>
-            </div>
-          </div>
+          <CameraBarcodeScanner
+            ref={scannerRef}
+            active={searchMode === SEARCH_MODES.SCAN}
+            containerId="scanner"
+            videoId="item-info-preview"
+            closeButtonId="item-info-close-scan"
+            selectId="item-info-camera-selector"
+            labels={scannerLabels}
+            errorMessages={scannerErrors}
+            readerOptions={{
+              captureInterval: 200,
+              timeBetweenDecodingAttempts: 75,
+            }}
+            selectedCameraId={selectedCameraId}
+            onCameraChange={setSelectedCameraId}
+            onScan={handleScannerResult}
+            onError={handleScannerError}
+          />
 
           <div className="flex flex-row items-center gap-3">
             <input
               id="item-info-barcode"
               ref={barcodeInputRef}
               type="search"
-              inputMode="search"
+              inputMode={barcodeInputMode}
               value={barcodeValue}
               placeholder={formatFallback(
                 t,
@@ -1185,6 +1183,18 @@ export default function ItemInfoPage() {
               }}
               className={inputClass("flex-1")}
             />
+            <button
+              type="button"
+              className={iconButtonClass({
+                variant: barcodeInputMode === "search" ? "primary" : "ghost",
+              })}
+              onClick={toggleBarcodeInputMode}
+              aria-label={inputModeToggleLabel}
+              title={inputModeToggleLabel}
+              aria-pressed={barcodeInputMode === "search"}
+            >
+              <i className="fa-solid fa-keyboard" aria-hidden="true" />
+            </button>
             <button
               type="button"
               className={iconButtonClass()}

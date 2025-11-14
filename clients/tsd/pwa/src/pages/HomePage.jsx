@@ -60,6 +60,23 @@ export default function HomePage() {
         </button>
 
         <button
+          id="btn-doc-movement"
+          type="button"
+          className={buttonClass({
+            variant: "primary",
+            size: "lg",
+            block: true,
+          })}
+          onClick={() => navigate("/docs?type=movement")}
+        >
+          <span id="btn-doc-movement-txt">
+            {t("doc_movement") === "doc_movement"
+              ? "Перемещение между складами"
+              : t("doc_movement") || "Перемещение между складами"}
+          </span>
+        </button>
+
+        <button
           id="btn-doc-wholesale"
           type="button"
           className={buttonClass({

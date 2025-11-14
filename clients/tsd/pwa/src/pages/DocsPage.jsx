@@ -52,6 +52,8 @@ export default function DocsPage({ definition: definitionProp }) {
     [definitionProp, typeParam]
   );
 
+  const createConfig = docDefinition?.create ?? null;
+
   const pageSize = docDefinition?.list?.pageSize || DEFAULT_PAGE_SIZE;
 
   const [inputValue, setInputValue] = useState(query);
@@ -302,9 +304,35 @@ export default function DocsPage({ definition: definitionProp }) {
     return value === "common.cancel" ? "Отмена" : value;
   }, [t]);
 
+  const addDocLabel = useMemo(() => {
+    if (!createConfig) return null;
+    const key = createConfig.buttonLabelKey || "doc.create_button";
+    const value = t(key);
+    if (value !== key) return value;
+    const submitFallback = createConfig.submitLabelFallback;
+    const commonCreate = t("common.create");
+    if (submitFallback) return submitFallback;
+    if (commonCreate && commonCreate !== "common.create") return commonCreate;
+    return "Создать документ";
+  }, [createConfig, t]);
+
+  const createPath = useMemo(() => {
+    if (!createConfig) return null;
+    const builder = docDefinition?.navigation?.buildNewDocPath;
+    if (typeof builder === "function") {
+      return builder();
+    }
+    return typeParam ? `/doc/new?type=${typeParam}` : "/doc/new";
+  }, [createConfig, docDefinition, typeParam]);
+
+  const handleCreateDoc = useCallback(() => {
+    if (!createPath) return;
+    navigate(createPath);
+  }, [createPath, navigate]);
+
   return (
     <section className={sectionClass()} id="docs">
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <h1
           className="text-2xl font-semibold text-slate-900 dark:text-slate-50"
           id="docs-title"
@@ -381,6 +409,18 @@ export default function DocsPage({ definition: definitionProp }) {
             </span>
           ) : null}
         </button>
+        {createConfig ? (
+          <button
+            id="btn-docs-add"
+            type="button"
+            className={iconButtonClass({ variant: "primary" })}
+            onClick={handleCreateDoc}
+            aria-label={addDocLabel || undefined}
+            title={addDocLabel || undefined}
+          >
+            <i className="fa-solid fa-plus" aria-hidden="true" />
+          </button>
+        ) : null}
       </form>
 
       <div className="flex flex-wrap items-center justify-between gap-3">

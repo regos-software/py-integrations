@@ -7,7 +7,6 @@ const PRECACHE_ASSETS = [
   "/assets/font-awesome.min.css",
   "/assets/icon-192.png",
   "/assets/icon-512.png",
-  "/assets/manifest.json",
 ];
 
 self.addEventListener("install", (event) => {
@@ -88,6 +87,12 @@ function refresh(response) {
 self.addEventListener("fetch", (event) => {
   const { request } = event;
   if (!shouldHandleFetch(request)) {
+    return;
+  }
+
+  const url = new URL(request.url);
+  if (url.pathname.endsWith("manifest.json")) {
+    event.respondWith(fetch(request));
     return;
   }
 

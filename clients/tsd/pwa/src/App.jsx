@@ -4,6 +4,7 @@ import AppLayout from "./components/AppLayout.jsx";
 import HomePage from "./pages/HomePage.jsx";
 import DocsPage from "./pages/DocsPage.jsx";
 import DocPage from "./pages/DocPage.jsx";
+import DocNewPage from "./pages/DocNewPage.jsx";
 import OpNewPage from "./pages/OpNewPage.jsx";
 import ItemInfoPage from "./pages/ItemInfoPage.jsx";
 import { AppProvider } from "./context/AppContext.jsx";
@@ -18,6 +19,7 @@ function Router() {
           <Route index element={<Navigate to="/home" replace />} />
           <Route path="/home" element={<HomePage />} />
           <Route path="/docs" element={<DocsPage />} />
+          <Route path="/doc/new" element={<DocNewPage />} />
           <Route path="/doc/:id" element={<DocPage />} />
           <Route path="/doc/:id/op/new" element={<OpNewPage />} />
           <Route path="/item-info" element={<ItemInfoPage />} />

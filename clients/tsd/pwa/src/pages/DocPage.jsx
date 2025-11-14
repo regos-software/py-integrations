@@ -1,4 +1,10 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useApp } from "../context/AppContext.jsx";
 import { useI18n } from "../context/I18nContext.jsx";
@@ -16,7 +22,11 @@ import {
 import { cn } from "../lib/utils";
 import { getDocDefinition } from "../config/docDefinitions.js";
 
-const DEFAULT_OPERATION_FORM = { showCost: true, showPrice: true };
+const DEFAULT_OPERATION_FORM = {
+  showCost: true,
+  showPrice: true,
+  showDescription: true,
+};
 
 function MetaSeparator() {
   return (
@@ -188,8 +198,11 @@ function OperationRow({ op, doc, onDelete, onSave, operationForm }) {
     setSaving(true);
     const payload = {
       quantity: toNumber(form.quantity),
-      description: form.description || undefined,
     };
+    if (formOptions.showDescription !== false) {
+      const trimmedDescription = form.description?.trim();
+      payload.description = trimmedDescription || undefined;
+    }
     if (formOptions.showCost !== false) {
       const costNumber = toNumber(form.cost);
       if (Number.isFinite(costNumber)) payload.cost = costNumber;
@@ -323,18 +336,20 @@ function OperationRow({ op, doc, onDelete, onSave, operationForm }) {
               />
             </div>
           ) : null}
-          <div className="flex flex-col gap-2">
-            <label className={labelClass()} htmlFor={`description-${op.id}`}>
-              {t("op.description") || "Описание"}
-            </label>
-            <input
-              id={`description-${op.id}`}
-              type="text"
-              value={form.description}
-              onChange={handleFieldChange("description")}
-              className={inputClass()}
-            />
-          </div>
+          {formOptions.showDescription !== false ? (
+            <div className="flex flex-col gap-2">
+              <label className={labelClass()} htmlFor={`description-${op.id}`}>
+                {t("op.description") || "Описание"}
+              </label>
+              <input
+                id={`description-${op.id}`}
+                type="text"
+                value={form.description}
+                onChange={handleFieldChange("description")}
+                className={inputClass()}
+              />
+            </div>
+          ) : null}
           <div className="flex flex-wrap gap-3" id={`op-actions-${op.id}`}>
             <button
               type="button"
@@ -390,117 +405,182 @@ export default function DocPage({ definition: definitionProp }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [actionsOpen, setActionsOpen] = useState(false);
+  const operationSearchRef = useRef("");
+  const [operationSearch, setOperationSearch] = useState("");
 
-  const loadDoc = useCallback(async () => {
-    const detail = docDefinition?.detail || {};
-    if (!detail.docAction || !detail.operationsAction) {
-      setLoading(false);
-      return;
-    }
+  useEffect(() => {
+    operationSearchRef.current = "";
+    setOperationSearch("");
+  }, [docDefinition?.key, docIdNumber]);
 
-    setLoading(true);
-    setError(null);
-    try {
-      const buildDocPayload = detail.buildDocPayload || ((docId) => docId);
-      const buildOpsPayload =
-        detail.buildOperationsPayload || ((docId) => docId);
-      const transformDoc = detail.transformDoc || ((data) => data);
-      const transformOperations =
-        detail.transformOperations ||
-        ((data) => {
-          if (Array.isArray(data)) return data;
-          if (Array.isArray(data?.result)) return data.result;
-          if (Array.isArray(data?.operations)) return data.operations;
-          return [];
-        });
-
-      const batchConfig = detail.batch;
-      if (batchConfig?.buildRequest) {
-        const batchPayload = batchConfig.buildRequest(docIdNumber, {
-          buildDocPayload,
-          buildOperationsPayload: buildOpsPayload,
-          definition: docDefinition,
-        });
-        const batchAction = batchConfig.action || "batch.run";
-        const {
-          ok: batchOk,
-          status,
-          data: batchData,
-        } = await api(batchAction, batchPayload);
-
-        if (!batchOk) {
-          const description =
-            batchData?.description ||
-            batchData?.error ||
-            "Batch request failed";
-          throw new Error(`${description} (${status})`);
-        }
-
-        const docKey = batchConfig.docKey || "doc";
-        const operationsKey = batchConfig.operationsKey || "operations";
-        const findStep = (key) =>
-          batchData?.result?.find?.((step) => step?.key === key);
-
-        const docStep = findStep(docKey);
-        if (!docStep) {
-          throw new Error(`Шаг batch '${docKey}' не найден`);
-        }
-        if (docStep.response?.ok === false) {
-          const description =
-            docStep.response?.result?.description ||
-            docStep.response?.description ||
-            `Batch step '${docKey}' failed`;
-          throw new Error(description);
-        }
-
-        const opsStep = findStep(operationsKey);
-        if (!opsStep) {
-          throw new Error(`Шаг batch '${operationsKey}' не найден`);
-        }
-        if (opsStep.response?.ok === false) {
-          const description =
-            opsStep.response?.result?.description ||
-            opsStep.response?.description ||
-            `Batch step '${operationsKey}' failed`;
-          throw new Error(description);
-        }
-
-        const extractDoc =
-          batchConfig.extractDoc ||
-          ((response) => {
-            if (!response) return null;
-            const { result } = response;
-            if (Array.isArray(result)) {
-              return result[0] ?? null;
-            }
-            return result ?? null;
-          });
-
-        const extractOperations =
-          batchConfig.extractOperations || ((response) => response);
-
-        const docData = extractDoc(docStep.response);
-        const operationsData = extractOperations(opsStep.response);
-
-        setDoc(transformDoc(docData));
-        setOperations(transformOperations(operationsData) || []);
+  const loadDoc = useCallback(
+    async (options = {}) => {
+      const detail = docDefinition?.detail || {};
+      if (!detail.docAction || !detail.operationsAction) {
+        setLoading(false);
         return;
       }
 
-      const [docResponse, opsResponse] = await Promise.all([
-        api(detail.docAction, buildDocPayload(docIdNumber)),
-        api(detail.operationsAction, buildOpsPayload(docIdNumber)),
-      ]);
-      setDoc(transformDoc(docResponse?.data));
-      setOperations(transformOperations(opsResponse?.data) || []);
-    } catch (err) {
-      setError(err);
-      setDoc(null);
-      setOperations([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [api, docDefinition, docIdNumber]);
+      setLoading(true);
+      setError(null);
+      try {
+        const requestedSearch =
+          typeof options.search === "string"
+            ? options.search.trim()
+            : operationSearchRef.current;
+        const searchValue = requestedSearch || "";
+        if (Object.prototype.hasOwnProperty.call(options, "search")) {
+          operationSearchRef.current = searchValue;
+        }
+        const buildDocPayload = detail.buildDocPayload || ((docId) => docId);
+        const buildOpsPayload =
+          detail.buildOperationsPayload ||
+          ((docId, params) => {
+            if (docDefinition?.key === "inventory") {
+              return {
+                document_ids: [docId],
+                search: params?.search || undefined,
+                limit: params?.limit ?? 100,
+              };
+            }
+            return docId;
+          });
+        const transformDoc = detail.transformDoc || ((data) => data);
+        const transformOperations =
+          detail.transformOperations ||
+          ((data) => {
+            if (Array.isArray(data)) return data;
+            if (Array.isArray(data?.result)) return data.result;
+            if (Array.isArray(data?.operations)) return data.operations;
+            return [];
+          });
+
+        const batchConfig = detail.batch;
+        const shouldUseBatch =
+          Boolean(batchConfig?.buildRequest) && searchValue.length === 0;
+
+        const mergeInventorySearch = (payload) => {
+          if (docDefinition?.key !== "inventory") {
+            return payload;
+          }
+          if (searchValue.length === 0) {
+            return payload;
+          }
+
+          const base =
+            payload && typeof payload === "object" && !Array.isArray(payload)
+              ? { ...payload }
+              : { document_ids: [docIdNumber] };
+
+          if (
+            !Array.isArray(base.document_ids) ||
+            base.document_ids.length === 0
+          ) {
+            base.document_ids = [docIdNumber];
+          }
+
+          base.search = searchValue;
+
+          if (!Object.prototype.hasOwnProperty.call(base, "limit")) {
+            base.limit = 100;
+          }
+
+          return base;
+        };
+
+        if (shouldUseBatch) {
+          const batchPayload = batchConfig.buildRequest(docIdNumber, {
+            buildDocPayload,
+            buildOperationsPayload: buildOpsPayload,
+            definition: docDefinition,
+          });
+          const batchAction = batchConfig.action || "batch.run";
+          const {
+            ok: batchOk,
+            status,
+            data: batchData,
+          } = await api(batchAction, batchPayload);
+
+          if (!batchOk) {
+            const description =
+              batchData?.description ||
+              batchData?.error ||
+              "Batch request failed";
+            throw new Error(`${description} (${status})`);
+          }
+
+          const docKey = batchConfig.docKey || "doc";
+          const operationsKey = batchConfig.operationsKey || "operations";
+          const findStep = (key) =>
+            batchData?.result?.find?.((step) => step?.key === key);
+
+          const docStep = findStep(docKey);
+          if (!docStep) {
+            throw new Error(`Шаг batch '${docKey}' не найден`);
+          }
+          if (docStep.response?.ok === false) {
+            const description =
+              docStep.response?.result?.description ||
+              docStep.response?.description ||
+              `Batch step '${docKey}' failed`;
+            throw new Error(description);
+          }
+
+          const opsStep = findStep(operationsKey);
+          if (!opsStep) {
+            throw new Error(`Шаг batch '${operationsKey}' не найден`);
+          }
+          if (opsStep.response?.ok === false) {
+            const description =
+              opsStep.response?.result?.description ||
+              opsStep.response?.description ||
+              `Batch step '${operationsKey}' failed`;
+            throw new Error(description);
+          }
+
+          const extractDoc =
+            batchConfig.extractDoc ||
+            ((response) => {
+              if (!response) return null;
+              const { result } = response;
+              if (Array.isArray(result)) {
+                return result[0] ?? null;
+              }
+              return result ?? null;
+            });
+
+          const extractOperations =
+            batchConfig.extractOperations || ((response) => response);
+
+          const docData = extractDoc(docStep.response);
+          const operationsData = extractOperations(opsStep.response);
+
+          setDoc(transformDoc(docData));
+          setOperations(transformOperations(operationsData) || []);
+          return;
+        }
+
+        const operationsPayloadBase = buildOpsPayload(docIdNumber, {
+          search: searchValue || undefined,
+        });
+        const operationsPayload = mergeInventorySearch(operationsPayloadBase);
+
+        const [docResponse, opsResponse] = await Promise.all([
+          api(detail.docAction, buildDocPayload(docIdNumber)),
+          api(detail.operationsAction, operationsPayload),
+        ]);
+        setDoc(transformDoc(docResponse?.data));
+        setOperations(transformOperations(opsResponse?.data) || []);
+      } catch (err) {
+        setError(err);
+        setDoc(null);
+        setOperations([]);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [api, docDefinition, docIdNumber]
+  );
 
   useEffect(() => {
     loadDoc();
@@ -914,6 +994,17 @@ export default function DocPage({ definition: definitionProp }) {
 
   const metaSegments = useMemo(() => {
     if (!doc) return [];
+    const builder = docDefinition?.detail?.buildMetaSegments;
+    if (typeof builder === "function") {
+      try {
+        const built = builder(doc, { fmt, unixToLocal, t });
+        if (Array.isArray(built)) {
+          return built.filter(Boolean);
+        }
+      } catch (err) {
+        console.warn("[doc_page] meta builder failed", err);
+      }
+    }
     const currency = doc.currency?.code_chr || "UZS";
     const roundTo = doc.price_type?.round_to ?? null;
     return [
@@ -921,7 +1012,7 @@ export default function DocPage({ definition: definitionProp }) {
       doc.partner?.name || null,
       fmt.money(doc.amount ?? 0, currency, roundTo),
     ].filter(Boolean);
-  }, [doc, fmt, unixToLocal]);
+  }, [doc, docDefinition, fmt, t, unixToLocal]);
 
   const partnerLabel = useMemo(() => {
     const detail = docDefinition?.detail || {};
@@ -934,6 +1025,22 @@ export default function DocPage({ definition: definitionProp }) {
     if (generic && generic !== "partner") return generic;
     return "Партнёр";
   }, [docDefinition, t]);
+
+  const partnerValue = useMemo(() => {
+    if (!doc) return "—";
+    const detail = docDefinition?.detail || {};
+    if (typeof detail.buildPartnerValue === "function") {
+      try {
+        const value = detail.buildPartnerValue(doc);
+        if (value !== undefined && value !== null && value !== "") {
+          return value;
+        }
+      } catch (err) {
+        console.warn("[doc_page] partner builder failed", err);
+      }
+    }
+    return doc.partner?.name || "—";
+  }, [doc, docDefinition]);
 
   const goToDocs = useCallback(() => {
     const buildDocsPath =
@@ -955,6 +1062,50 @@ export default function DocPage({ definition: definitionProp }) {
   const handleCloseActions = useCallback(() => {
     setActionsOpen(false);
   }, []);
+
+  const operationSearchPlaceholder = useMemo(() => {
+    const detailKey = docDefinition?.detail?.operationSearchPlaceholder;
+    if (detailKey) {
+      const translated = t(detailKey);
+      if (translated && translated !== detailKey) {
+        return translated;
+      }
+    }
+    const labelKey = docDefinition?.labels?.operationSearchPlaceholder;
+    if (labelKey) {
+      const translated = t(labelKey);
+      if (translated && translated !== labelKey) {
+        return translated;
+      }
+    }
+    const fallbackKey = "doc.inventory.operations.search";
+    const fallback = t(fallbackKey);
+    if (fallback && fallback !== fallbackKey) {
+      return fallback;
+    }
+    return "Поиск по операциям";
+  }, [docDefinition, t]);
+
+  const handleOperationSearchChange = useCallback((event) => {
+    setOperationSearch(event.target.value);
+  }, []);
+
+  const handleOperationSearchSubmit = useCallback(() => {
+    const trimmed = operationSearch.trim();
+    operationSearchRef.current = trimmed;
+    setOperationSearch(trimmed);
+    loadDoc({ search: trimmed });
+  }, [loadDoc, operationSearch]);
+
+  const handleOperationSearchKeyDown = useCallback(
+    (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        handleOperationSearchSubmit();
+      }
+    },
+    [handleOperationSearchSubmit]
+  );
 
   if (!docDefinition) {
     return (
@@ -1076,6 +1227,28 @@ export default function DocPage({ definition: definitionProp }) {
             <i className="fa-solid fa-plus" aria-hidden="true" />
           </button>
         </div>
+        {docDefinition?.key === "inventory" ? (
+          <div className="mt-2 w-full flex items-center gap-2">
+            <input
+              type="search"
+              value={operationSearch}
+              onChange={handleOperationSearchChange}
+              onKeyDown={handleOperationSearchKeyDown}
+              placeholder={operationSearchPlaceholder}
+              className={inputClass("flex-1")}
+              aria-label={operationSearchPlaceholder}
+            />
+            <button
+              type="button"
+              className={iconButtonClass({ variant: "secondary" })}
+              onClick={handleOperationSearchSubmit}
+              aria-label={t("common.search") || "Поиск"}
+              title={t("common.search") || "Поиск"}
+            >
+              <i className="fa-solid fa-magnifying-glass" aria-hidden="true" />
+            </button>
+          </div>
+        ) : null}
       </div>
 
       <div
@@ -1089,7 +1262,7 @@ export default function DocPage({ definition: definitionProp }) {
             {partnerLabel}
           </span>
           <MetaSeparator />
-          <span className="truncate">{doc.partner?.name || "—"}</span>
+          <span className="truncate">{partnerValue}</span>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-semibold text-slate-900 dark:text-slate-100">
