@@ -994,6 +994,17 @@ export default function DocPage({ definition: definitionProp }) {
 
   const metaSegments = useMemo(() => {
     if (!doc) return [];
+    const builder = docDefinition?.detail?.buildMetaSegments;
+    if (typeof builder === "function") {
+      try {
+        const built = builder(doc, { fmt, unixToLocal, t });
+        if (Array.isArray(built)) {
+          return built.filter(Boolean);
+        }
+      } catch (err) {
+        console.warn("[doc_page] meta builder failed", err);
+      }
+    }
     const currency = doc.currency?.code_chr || "UZS";
     const roundTo = doc.price_type?.round_to ?? null;
     return [
@@ -1001,7 +1012,7 @@ export default function DocPage({ definition: definitionProp }) {
       doc.partner?.name || null,
       fmt.money(doc.amount ?? 0, currency, roundTo),
     ].filter(Boolean);
-  }, [doc, fmt, unixToLocal]);
+  }, [doc, docDefinition, fmt, t, unixToLocal]);
 
   const partnerLabel = useMemo(() => {
     const detail = docDefinition?.detail || {};
@@ -1014,6 +1025,22 @@ export default function DocPage({ definition: definitionProp }) {
     if (generic && generic !== "partner") return generic;
     return "Партнёр";
   }, [docDefinition, t]);
+
+  const partnerValue = useMemo(() => {
+    if (!doc) return "—";
+    const detail = docDefinition?.detail || {};
+    if (typeof detail.buildPartnerValue === "function") {
+      try {
+        const value = detail.buildPartnerValue(doc);
+        if (value !== undefined && value !== null && value !== "") {
+          return value;
+        }
+      } catch (err) {
+        console.warn("[doc_page] partner builder failed", err);
+      }
+    }
+    return doc.partner?.name || "—";
+  }, [doc, docDefinition]);
 
   const goToDocs = useCallback(() => {
     const buildDocsPath =
@@ -1235,7 +1262,7 @@ export default function DocPage({ definition: definitionProp }) {
             {partnerLabel}
           </span>
           <MetaSeparator />
-          <span className="truncate">{doc.partner?.name || "—"}</span>
+          <span className="truncate">{partnerValue}</span>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-semibold text-slate-900 dark:text-slate-100">

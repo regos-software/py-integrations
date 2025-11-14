@@ -12,6 +12,7 @@ from schemas.api.references.currency import Currency
 
 from schemas.api.references.price_type import PriceType
 from schemas.api.references.tax import VatCalculationType
+from schemas.api.base import APIBaseResponse
 
 
 # ==== Модели ====
@@ -81,6 +82,12 @@ class DocMovementGetRequest(BaseModel):
         return values
 
 
+class DocMovementGetResponse(APIBaseResponse[List[DocMovement]]):
+    """Ответ на запрос /v1/DocMovement/Get."""
+
+    pass
+
+
 class DocMovementAddRequest(BaseModel):
     """
         Параметры создания документа оптовой продажи.
@@ -100,3 +107,11 @@ class DocMovementAddRequest(BaseModel):
     attached_user_id: Optional[int] = Field(
         default=None, ge=1, description="ID прикреплённого пользователя."
     )
+
+
+__all__ = [
+    "DocMovement",
+    "DocMovementGetRequest",
+    "DocMovementGetResponse",
+    "DocMovementAddRequest",
+]
