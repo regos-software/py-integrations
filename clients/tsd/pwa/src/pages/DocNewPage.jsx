@@ -128,6 +128,7 @@ function AutocompleteSelectField({
   noResultsText,
   clearLabel,
   onChange,
+  getOptionDetails,
 }) {
   const containerRef = useRef(null);
   const [inputValue, setInputValue] = useState("");
@@ -315,34 +316,47 @@ function AutocompleteSelectField({
               {noResultsText}
             </div>
           ) : (
-            displayedOptions.map((option, index) => (
-              <button
-                key={`${option.isClear ? "clear" : option.value}-${index}`}
-                id={`${id}-option-${index}`}
-                type="button"
-                className={cn(
-                  "flex w-full items-center justify-between px-3 py-2 text-left text-sm",
-                  index === highlightedIndex
-                    ? "bg-slate-100 text-slate-900 dark:bg-slate-700 dark:text-slate-50"
-                    : "text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-700"
-                )}
-                onMouseDown={(event) => {
-                  event.preventDefault();
-                  handleSelect(option);
-                }}
-                onMouseEnter={() => setHighlightedIndex(index)}
-              >
-                <span className="truncate">{option.label}</span>
-                {selectedOption &&
-                !option.isClear &&
-                String(selectedOption.value) === String(option.value) ? (
-                  <i
-                    className="fa-solid fa-check text-xs text-slate-500"
-                    aria-hidden="true"
-                  />
-                ) : null}
-              </button>
-            ))
+            displayedOptions.map((option, index) => {
+              const details =
+                getOptionDetails && !option.isClear
+                  ? getOptionDetails(option)
+                  : null;
+              return (
+                <button
+                  key={`${option.isClear ? "clear" : option.value}-${index}`}
+                  id={`${id}-option-${index}`}
+                  type="button"
+                  className={cn(
+                    "flex w-full items-center justify-between px-3 py-2 text-left text-sm",
+                    index === highlightedIndex
+                      ? "bg-slate-100 text-slate-900 dark:bg-slate-700 dark:text-slate-50"
+                      : "text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-slate-700"
+                  )}
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                    handleSelect(option);
+                  }}
+                  onMouseEnter={() => setHighlightedIndex(index)}
+                >
+                  <span className="flex w-full flex-col">
+                    <span className="truncate font-medium">{option.label}</span>
+                    {details ? (
+                      <span className="truncate text-xs text-slate-500 dark:text-slate-300">
+                        {details}
+                      </span>
+                    ) : null}
+                  </span>
+                  {selectedOption &&
+                  !option.isClear &&
+                  String(selectedOption.value) === String(option.value) ? (
+                    <i
+                      className="fa-solid fa-check text-xs text-slate-500"
+                      aria-hidden="true"
+                    />
+                  ) : null}
+                </button>
+              );
+            })
           )}
         </div>
       ) : null}
@@ -839,7 +853,32 @@ export default function DocNewPage({ definition: definitionProp }) {
           field.allowEmptyOption !== false &&
           (!field.required || field.allowEmptyOption);
 
-        if (field.autocomplete) {
+        const shouldAutocomplete =
+          Boolean(field.autocomplete) || field.referenceKey === "partners";
+
+        const optionDetailsGetter =
+          field.referenceKey === "partners"
+            ? (option) => {
+                const raw = option?.raw ?? {};
+                const names = [
+                  option.groupLabel,
+                  raw.partner_group?.name,
+                  raw.partner_group?.Name,
+                  raw.partner_group_name,
+                  raw.partnerGroup?.name,
+                  raw.partnerGroup?.Name,
+                  raw.partnerGroupName,
+                  raw.group?.name,
+                  raw.group?.Name,
+                  raw.group_name,
+                ]
+                  .map((item) => (typeof item === "string" ? item.trim() : ""))
+                  .filter(Boolean);
+                return names[0] || null;
+              }
+            : undefined;
+
+        if (shouldAutocomplete) {
           const placeholderText = getLocalizedText(
             t,
             field.placeholderKey,
@@ -869,6 +908,7 @@ export default function DocNewPage({ definition: definitionProp }) {
               loadingText={loadingLabel}
               noResultsText={noResultsLabel}
               clearLabel={clearLabel}
+              getOptionDetails={optionDetailsGetter}
               onChange={(nextValue) => handleFieldChange(field.key, nextValue)}
             />
           );

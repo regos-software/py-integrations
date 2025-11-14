@@ -183,9 +183,24 @@ const purchaseDefinition = {
                 item?.Name ||
                 item?.FullName ||
                 `#${id}`;
+              const groupName =
+                item?.partner_group?.name ||
+                item?.partner_group?.Name ||
+                item?.partner_group_name ||
+                item?.partnerGroup?.name ||
+                item?.partnerGroup?.Name ||
+                item?.partnerGroupName ||
+                item?.group?.name ||
+                item?.group?.Name ||
+                item?.group_name ||
+                null;
               return {
                 value: String(id),
                 label: name,
+                groupLabel:
+                  typeof groupName === "string"
+                    ? groupName.trim() || null
+                    : null,
                 raw: item,
               };
             })
@@ -1033,9 +1048,24 @@ const wholesaleDefinition = {
                 item?.Name ||
                 item?.FullName ||
                 `#${id}`;
+              const groupName =
+                item?.partner_group?.name ||
+                item?.partner_group?.Name ||
+                item?.partner_group_name ||
+                item?.partnerGroup?.name ||
+                item?.partnerGroup?.Name ||
+                item?.partnerGroupName ||
+                item?.group?.name ||
+                item?.group?.Name ||
+                item?.group_name ||
+                null;
               return {
                 value: String(id),
                 label: name,
+                groupLabel:
+                  typeof groupName === "string"
+                    ? groupName.trim() || null
+                    : null,
                 raw: item,
               };
             })
