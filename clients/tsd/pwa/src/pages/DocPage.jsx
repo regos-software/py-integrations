@@ -427,10 +427,11 @@ export default function DocPage({ definition: definitionProp }) {
         const buildOpsPayload =
           detail.buildOperationsPayload ||
           ((docId, params) => {
-            if (docDefinition?.key === "inventory" && params?.search) {
+            if (docDefinition?.key === "inventory") {
               return {
-                docId,
-                search: params.search,
+                document_ids: [docId],
+                search: params?.search || undefined,
+                limit: params?.limit ?? 100,
               };
             }
             return docId;
@@ -457,28 +458,25 @@ export default function DocPage({ definition: definitionProp }) {
             return payload;
           }
 
+          const base =
+            payload && typeof payload === "object" && !Array.isArray(payload)
+              ? { ...payload }
+              : { document_ids: [docIdNumber] };
+
           if (
-            payload &&
-            typeof payload === "object" &&
-            !Array.isArray(payload)
+            !Array.isArray(base.document_ids) ||
+            base.document_ids.length === 0
           ) {
-            return {
-              id: docIdNumber,
-              doc_id: docIdNumber,
-              document_id: docIdNumber,
-              document_ids: [docIdNumber],
-              ...payload,
-              search: searchValue,
-            };
+            base.document_ids = [docIdNumber];
           }
 
-          return {
-            id: docIdNumber,
-            doc_id: docIdNumber,
-            document_id: docIdNumber,
-            document_ids: [docIdNumber],
-            search: searchValue,
-          };
+          base.search = searchValue;
+
+          if (!Object.prototype.hasOwnProperty.call(base, "limit")) {
+            base.limit = 100;
+          }
+
+          return base;
         };
 
         if (shouldUseBatch) {

@@ -349,12 +349,20 @@ const inventoryDefinition = {
     docAction: "docs.inventory.get_by_id",
     buildDocPayload: (docId) => docId,
     operationsAction: "docs.inventory_operation.get",
-    buildOperationsPayload: (docId, search) => ({ docId, search }),
+    buildOperationsPayload: (docId, params = {}) => {
+      const searchParam = params.search;
+      return {
+        document_ids: [docId],
+        search:
+          searchParam === undefined || searchParam === "" ? null : searchParam,
+        limit: params.limit ?? 100,
+      };
+    },
     batch: {
       action: "batch.run",
       docKey: "doc",
       operationsKey: "operations",
-      buildRequest: ({ docId, search }) => ({
+      buildRequest: (docId) => ({
         stop_on_error: false,
         requests: [
           {
@@ -365,7 +373,7 @@ const inventoryDefinition = {
           {
             key: "operations",
             path: "InventoryOperation/Get",
-            payload: { document_ids: [docId], search, limit: 100 },
+            payload: { document_ids: [docId], search: null, limit: 100 },
           },
         ],
       }),
