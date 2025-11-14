@@ -6,16 +6,12 @@ import React, {
   useState,
 } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import {
-  BrowserMultiFormatReader,
-  BarcodeFormat,
-  DecodeHintType,
-} from "@zxing/library";
 import { useApp } from "../context/AppContext.jsx";
 import { useI18n } from "../context/I18nContext.jsx";
 import { useToast } from "../context/ToastContext.jsx";
 import scanSuccessSfx from "../audio/scan_success.mp3";
 import scanFailSfx from "../audio/scan_fail.mp3";
+import CameraBarcodeScanner from "../components/CameraBarcodeScanner.jsx";
 import {
   buttonClass,
   cardClass,
@@ -29,25 +25,15 @@ import {
 import { cn } from "../lib/utils";
 import { getDocDefinition } from "../config/docDefinitions.js";
 
-const QUICK_QTY = [1, 5, 10, 12];
+const QUICK_QTY = [-1, 1, 2, 3, 5, 10, 14, 20];
+
+const BARCODE_INPUT_MODES = ["none", "search"];
 
 const SEARCH_MODES = {
   SCAN: "scan",
   NAME: "name",
   INSANT: "insant",
 };
-
-const ZXING_FORMATS = [
-  BarcodeFormat.QR_CODE,
-  BarcodeFormat.UPC_A,
-  BarcodeFormat.UPC_E,
-  BarcodeFormat.EAN_8,
-  BarcodeFormat.EAN_13,
-  BarcodeFormat.ITF,
-  BarcodeFormat.PDF_417,
-  BarcodeFormat.CODE_39,
-  BarcodeFormat.CODE_128,
-].filter(Boolean);
 
 const BATCH_SEARCH_STEP_KEY = "search_list";
 const BATCH_ADD_STEP_KEY = "add_operation";
@@ -127,6 +113,7 @@ export default function OpNewPage({ definition: definitionProp }) {
   const formOptions = docDefinition?.operation?.form || {};
   const showCostField = formOptions.showCost !== false;
   const showPriceField = formOptions.showPrice !== false;
+  const showDescriptionField = formOptions.showDescription !== false;
   const autoFill = docDefinition?.operation?.autoFill || {};
 
   const initialDocContext = useMemo(
@@ -148,20 +135,39 @@ export default function OpNewPage({ definition: definitionProp }) {
   const [searchStatus, setSearchStatus] = useState("idle");
   const [picked, setPicked] = useState(null);
   const [saving, setSaving] = useState(false);
-  const [scanning, setScanning] = useState(false);
   const [searchMode, setSearchMode] = useState(SEARCH_MODES.SCAN);
   const [resultModalOpen, setResultModalOpen] = useState(false);
   const [resultItems, setResultItems] = useState([]);
+  const [selectedCameraId, setSelectedCameraId] = useState("default");
+  const [barcodeInputMode, setBarcodeInputMode] = useState("none");
+  const [scanHistory, setScanHistory] = useState([]);
+  const [historyClock, setHistoryClock] = useState(() => Date.now());
   const priceRoundTo = docCtx?.price_type_round_to ?? null;
   const docCurrency = docCtx?.doc_currency ?? null;
 
-  const videoRef = useRef(null);
-  const readerRef = useRef(null);
+  const scannerRef = useRef(null);
+  const searchModeRef = useRef(SEARCH_MODES.SCAN);
   const barcodeInputRef = useRef(null);
   const successSoundRef = useRef(null);
   const failSoundRef = useRef(null);
   const instantQueueRef = useRef([]);
   const instantProcessingRef = useRef(false);
+  const restartTimeoutRef = useRef(null);
+  const nextScanIdRef = useRef(1);
+
+  useEffect(() => {
+    searchModeRef.current = searchMode;
+  }, [searchMode]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+    const intervalId = window.setInterval(() => {
+      setHistoryClock(Date.now());
+    }, 1000);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, []);
 
   useEffect(() => {
     if (typeof window === "undefined" || typeof Audio === "undefined") return;
@@ -219,6 +225,126 @@ export default function OpNewPage({ definition: definitionProp }) {
   const playFailSound = useCallback(() => {
     playSound(failSoundRef);
   }, [playSound]);
+
+  const barcodeInputModeLabels = useMemo(
+    () => ({
+      none: t("op.input_mode.none") || "Без клавиатуры",
+      search: t("op.input_mode.search") || "Поиск",
+    }),
+    [t]
+  );
+
+  const toggleBarcodeInputMode = useCallback(() => {
+    setBarcodeInputMode((prev) =>
+      prev === BARCODE_INPUT_MODES[0]
+        ? BARCODE_INPUT_MODES[1]
+        : BARCODE_INPUT_MODES[0]
+    );
+  }, []);
+
+  const inputModeToggleLabel = useMemo(() => {
+    const currentLabel =
+      barcodeInputModeLabels[barcodeInputMode] || barcodeInputMode;
+    const prefix = t("op.input_mode.toggle") || "Переключить режим ввода";
+    return `${prefix}: ${currentLabel}`;
+  }, [barcodeInputMode, barcodeInputModeLabels, t]);
+
+  const formatTimeAgo = useCallback(
+    (timestamp) => {
+      const now = historyClock;
+      const diffMs = Math.max(0, now - timestamp);
+      const diffSeconds = Math.floor(diffMs / 1000);
+      if (diffSeconds < 1) return "just now";
+      if (diffSeconds < 60) {
+        const seconds = diffSeconds;
+        return `${seconds} sec${seconds === 1 ? "" : "s"} ago`;
+      }
+      const diffMinutes = Math.floor(diffSeconds / 60);
+      if (diffMinutes < 60) {
+        return `${diffMinutes} min${diffMinutes === 1 ? "" : "s"} ago`;
+      }
+      const diffHours = Math.floor(diffMinutes / 60);
+      if (diffHours < 24) {
+        return `${diffHours} hr${diffHours === 1 ? "" : "s"} ago`;
+      }
+      const diffDays = Math.floor(diffHours / 24);
+      return `${diffDays} day${diffDays === 1 ? "" : "s"} ago`;
+    },
+    [historyClock]
+  );
+
+  const addHistoryEntry = useCallback((value) => {
+    const nextId = nextScanIdRef.current++;
+    const entry = {
+      id: nextId,
+      value,
+      status: "pending",
+      timestamp: Date.now(),
+    };
+    setScanHistory((prev) => {
+      const next = [entry, ...prev];
+      return next.slice(0, 10);
+    });
+    return nextId;
+  }, []);
+
+  const updateHistoryEntryStatus = useCallback((id, status) => {
+    setScanHistory((prev) =>
+      prev.map((entry) =>
+        entry.id === id
+          ? {
+              ...entry,
+              status,
+            }
+          : entry
+      )
+    );
+  }, []);
+
+  const scannerLabels = useMemo(
+    () => ({
+      camera: t("scanner.camera") || "Камера",
+      cameraAuto: t("scanner.camera_auto") || "Автовыбор",
+      hint: t("scanner.hint") || "Наведи камеру на штрих-код",
+      cancel: t("common.cancel") || "Отмена",
+    }),
+    [t]
+  );
+
+  const scannerErrors = useMemo(
+    () => ({
+      camera_not_supported:
+        t("camera_not_supported") ||
+        "Камера на этом устройстве не поддерживается",
+      camera_permission_denied:
+        t("camera_permission_denied") || "Доступ к камере запрещен",
+      camera_not_found: t("camera_not_found") || "Камера не найдена",
+      camera_in_use: t("camera_in_use") || "Камера уже используется",
+      camera_open_failed:
+        t("camera_open_failed") || "Не удалось открыть камеру",
+    }),
+    [t]
+  );
+
+  const handleScannerError = useCallback(
+    (message) => {
+      if (!message) return;
+      showToast(message, { type: "error" });
+    },
+    [showToast]
+  );
+
+  const stopScan = useCallback(() => {
+    scannerRef.current?.stop();
+  }, []);
+
+  const startScan = useCallback(() => {
+    const mode = searchModeRef.current;
+    if (mode !== SEARCH_MODES.SCAN && mode !== SEARCH_MODES.INSANT) {
+      return;
+    }
+    void scannerRef.current?.start();
+  }, []);
 
   useEffect(() => {
     setDocCtx(initialDocContext);
@@ -303,6 +429,7 @@ export default function OpNewPage({ definition: definitionProp }) {
     if (showPriceField) setPrice("");
     setBarcodeValue("");
     setQueryValue("");
+    setDescription("");
     setPicked(null);
     setSearchStatus("idle");
     setResultModalOpen(false);
@@ -368,7 +495,9 @@ export default function OpNewPage({ definition: definitionProp }) {
           ? toNumber(priceValue)
           : undefined;
       const trimmedDescription =
-        typeof descriptionValue === "string" ? descriptionValue.trim() : "";
+        showDescriptionField && typeof descriptionValue === "string"
+          ? descriptionValue.trim()
+          : "";
 
       const buildPayload =
         docDefinition?.operation?.buildAddPayload || (() => null);
@@ -378,7 +507,10 @@ export default function OpNewPage({ definition: definitionProp }) {
         quantity: qtyNumber,
         cost: costNumber,
         price: priceNumber,
-        description: trimmedDescription,
+        description:
+          showDescriptionField && trimmedDescription
+            ? trimmedDescription
+            : undefined,
         docCtx,
       });
 
@@ -431,6 +563,7 @@ export default function OpNewPage({ definition: definitionProp }) {
       docCtx,
       docDefinition,
       resetFormState,
+      showDescriptionField,
       showCostField,
       showPriceField,
       showToast,
@@ -453,7 +586,7 @@ export default function OpNewPage({ definition: definitionProp }) {
           playFailSound();
           setSearchStatus("error");
           focusBarcodeInput();
-          return;
+          return false;
         }
 
         closeResultModal();
@@ -483,7 +616,7 @@ export default function OpNewPage({ definition: definitionProp }) {
               type: "error",
             });
             playFailSound();
-            return;
+            return false;
           }
 
           if (normalizedItems.length > 1) {
@@ -494,7 +627,7 @@ export default function OpNewPage({ definition: definitionProp }) {
               { type: "error" }
             );
             playFailSound();
-            return;
+            return false;
           }
 
           const item = normalizedItems[0];
@@ -521,6 +654,7 @@ export default function OpNewPage({ definition: definitionProp }) {
           });
 
           setSearchStatus(success ? "done" : "error");
+          return success;
         } catch (err) {
           console.warn("[search] instant error", err);
           setSearchStatus("error");
@@ -528,10 +662,10 @@ export default function OpNewPage({ definition: definitionProp }) {
             type: "error",
           });
           playFailSound();
+          return false;
         } finally {
           focusBarcodeInput();
         }
-        return;
       }
 
       const addPath = resolveBatchPathFromAction(
@@ -553,7 +687,7 @@ export default function OpNewPage({ definition: definitionProp }) {
         playFailSound();
         setSearchStatus("error");
         focusBarcodeInput();
-        return;
+        return false;
       }
 
       const batchPayload = {
@@ -581,20 +715,39 @@ export default function OpNewPage({ definition: definitionProp }) {
 
       try {
         const { data } = await api("batch.run", batchPayload);
-        let errored = false;
+        const steps = Array.isArray(data?.result) ? data.result : [];
+        const searchStep = steps.find(
+          (step) => step.key === BATCH_SEARCH_STEP_KEY
+        );
+        const addStep = steps.find((step) => step.key === BATCH_ADD_STEP_KEY);
 
-        if (!data?.ok || data.result.some((r) => !r.response?.ok)) {
-          errored = true;
-        }
-        if (errored) {
+        const searchResponse = searchStep?.response;
+        const addResponse = addStep?.response;
+        const searchItems = Array.isArray(searchResponse?.result)
+          ? searchResponse.result
+          : Array.isArray(searchResponse?.data)
+          ? searchResponse.data
+          : [];
+
+        if (
+          !data?.ok ||
+          searchResponse?.ok === false ||
+          addResponse?.ok === false ||
+          searchItems.length === 0
+        ) {
           const description =
-            searchResponse?.result?.description ||
-            t("common.nothing") ||
+            searchResponse?.description ||
+            addResponse?.description ||
+            data?.description ||
+            (searchItems.length === 0
+              ? t("common.nothing") || "Ничего не найдено"
+              : undefined) ||
+            t("common.error") ||
             "Ошибка выполнения";
-          setSearchStatus("error");
+          setSearchStatus(searchItems.length === 0 ? "empty" : "error");
           showToast(description, { type: "error" });
           playFailSound();
-          return;
+          return false;
         }
 
         showToast(t("toast.op_added") || "Операция добавлена", {
@@ -602,6 +755,7 @@ export default function OpNewPage({ definition: definitionProp }) {
         });
         playSuccessSound();
         setSearchStatus("done");
+        return true;
       } catch (err) {
         console.warn("[op_new] instant batch error", err);
         showToast(
@@ -610,9 +764,12 @@ export default function OpNewPage({ definition: definitionProp }) {
         );
         playFailSound();
         setSearchStatus("error");
+        return false;
       } finally {
         focusBarcodeInput();
       }
+
+      return false;
     },
     [
       api,
@@ -639,14 +796,27 @@ export default function OpNewPage({ definition: definitionProp }) {
     instantProcessingRef.current = true;
     try {
       while (instantQueueRef.current.length > 0) {
-        const nextBarcode = instantQueueRef.current.shift();
-        // eslint-disable-next-line no-await-in-loop
-        await handleInstantSearch(nextBarcode);
+        const nextItem = instantQueueRef.current.shift();
+        if (!nextItem) {
+          continue;
+        }
+        const { value: nextBarcode, historyId } = nextItem;
+        let success = false;
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          success = await handleInstantSearch(nextBarcode);
+        } catch (err) {
+          console.warn("[op_new] instant queue error", err);
+          success = false;
+        }
+        if (historyId != null) {
+          updateHistoryEntryStatus(historyId, success ? "success" : "error");
+        }
       }
     } finally {
       instantProcessingRef.current = false;
     }
-  }, [handleInstantSearch]);
+  }, [handleInstantSearch, updateHistoryEntryStatus]);
 
   const enqueueInstantSearch = useCallback(
     (queryText) => {
@@ -657,17 +827,25 @@ export default function OpNewPage({ definition: definitionProp }) {
         return;
       }
 
-      instantQueueRef.current.push(normalized);
+      const historyId = addHistoryEntry(normalized);
+      instantQueueRef.current.push({ value: normalized, historyId });
       setBarcodeValue("");
       setSearchStatus("loading");
       focusBarcodeInput();
       void processInstantQueue();
     },
-    [focusBarcodeInput, processInstantQueue, setBarcodeValue, setSearchStatus]
+    [
+      addHistoryEntry,
+      focusBarcodeInput,
+      processInstantQueue,
+      setBarcodeValue,
+      setSearchStatus,
+    ]
   );
 
   const runSearch = useCallback(
-    async (value, mode = searchMode) => {
+    async (value, mode = searchMode, options = {}) => {
+      const { source = "manual" } = options || {};
       const queryText = value?.trim();
       if (!queryText) {
         if (mode === SEARCH_MODES.INSANT) {
@@ -680,6 +858,14 @@ export default function OpNewPage({ definition: definitionProp }) {
         enqueueInstantSearch(queryText);
         return;
       }
+
+      if (mode === SEARCH_MODES.SCAN) {
+        setBarcodeValue("");
+        scannerRef.current?.clearError();
+      } else if (mode === SEARCH_MODES.NAME) {
+        setQueryValue("");
+      }
+
       const searchDescriptor = docDefinition?.operation?.search;
       if (!searchDescriptor?.action || !searchDescriptor?.buildParams) {
         console.warn("[op_new] search not configured for doc type");
@@ -707,9 +893,15 @@ export default function OpNewPage({ definition: definitionProp }) {
           setPicked(null);
           closeResultModal();
           setSearchStatus("empty");
-          if (mode === SEARCH_MODES.INSANT) {
+          if (mode === SEARCH_MODES.SCAN) {
             playFailSound();
-            setBarcodeValue("");
+            if (source === "camera") {
+              const notFoundMessage =
+                t("search.item_not_found") ||
+                t("common.nothing") ||
+                "Item not found";
+              showToast(notFoundMessage, { type: "error" });
+            }
             focusBarcodeInput();
           }
           return;
@@ -728,8 +920,15 @@ export default function OpNewPage({ definition: definitionProp }) {
         setPicked(null);
         closeResultModal();
         setSearchStatus("error");
-        if (mode === SEARCH_MODES.INSANT) {
+        if (mode === SEARCH_MODES.SCAN) {
           playFailSound();
+          if (source === "camera") {
+            const notFoundMessage =
+              t("search.item_not_found") ||
+              t("common.nothing") ||
+              "Item not found";
+            showToast(notFoundMessage, { type: "error" });
+          }
           setBarcodeValue("");
           focusBarcodeInput();
         }
@@ -741,53 +940,68 @@ export default function OpNewPage({ definition: definitionProp }) {
       docDefinition,
       docCtx,
       docId,
-      focusBarcodeInput,
       enqueueInstantSearch,
+      focusBarcodeInput,
       handlePickItem,
       playFailSound,
       searchMode,
       setBarcodeValue,
+      showToast,
+      setQueryValue,
+      t,
     ]
   );
 
-  const ensureReader = useCallback(async () => {
-    if (readerRef.current) return readerRef.current;
+  const handleScannerResult = useCallback(
+    (value) => {
+      if (!value) return;
+      if (restartTimeoutRef.current != null) {
+        window.clearTimeout(restartTimeoutRef.current);
+        restartTimeoutRef.current = null;
+      }
+      const nextMode = searchModeRef.current;
+      runSearch(value, nextMode, { source: "camera" });
+      if (nextMode === SEARCH_MODES.INSANT) {
+        restartTimeoutRef.current = window.setTimeout(() => {
+          if (searchModeRef.current !== SEARCH_MODES.INSANT) {
+            return;
+          }
+          // Automatically resume scanning so instant mode can keep processing without manual input.
+          const startMethod = scannerRef.current?.start;
+          if (typeof startMethod === "function") {
+            try {
+              const result = startMethod();
+              if (result && typeof result.catch === "function") {
+                result.catch((err) =>
+                  console.warn("[op_new] scanner restart failed", err)
+                );
+              }
+            } catch (err) {
+              console.warn("[op_new] scanner restart threw", err);
+            }
+          }
+        }, 1000);
+      }
+    },
+    [runSearch]
+  );
 
-    const hints = new Map();
-    if (DecodeHintType?.POSSIBLE_FORMATS) {
-      hints.set(DecodeHintType.POSSIBLE_FORMATS, ZXING_FORMATS);
-    }
-    if (DecodeHintType?.TRY_HARDER) {
-      hints.set(DecodeHintType.TRY_HARDER, true);
-    }
-    if (DecodeHintType?.ALSO_INVERTED) {
-      hints.set(DecodeHintType.ALSO_INVERTED, true);
-    }
+  useEffect(
+    () => () => {
+      stopScan();
+    },
+    [stopScan]
+  );
 
-    const reader = new BrowserMultiFormatReader(hints, 200);
-    reader.timeBetweenDecodingAttempts = 50;
-    readerRef.current = reader;
-    return readerRef.current;
-  }, []);
-
-  const stopScan = useCallback(() => {
-    setScanning(false);
-    if (readerRef.current) {
-      console.log("Stopping scanner...");
-
-      readerRef.current.reset();
-    }
-    if (videoRef.current?.srcObject) {
-      console.log("Stopping video stream...");
-
-      const tracks = videoRef.current.srcObject.getTracks();
-      tracks.forEach((track) => track.stop());
-      videoRef.current.srcObject = null;
-    }
-    console.log("Scanner stopped.");
-
-    setScanning(false);
-  }, []);
+  useEffect(
+    () => () => {
+      if (restartTimeoutRef.current != null) {
+        window.clearTimeout(restartTimeoutRef.current);
+        restartTimeoutRef.current = null;
+      }
+    },
+    []
+  );
 
   const handleModalDismiss = useCallback(() => {
     closeResultModal();
@@ -797,6 +1011,15 @@ export default function OpNewPage({ definition: definitionProp }) {
   useEffect(() => {
     setSearchStatus("idle");
     closeResultModal();
+
+    if (
+      searchMode !== SEARCH_MODES.INSANT &&
+      restartTimeoutRef.current != null
+    ) {
+      window.clearTimeout(restartTimeoutRef.current);
+      restartTimeoutRef.current = null;
+    }
+
     if (searchMode === SEARCH_MODES.NAME) {
       stopScan();
       window.setTimeout(
@@ -806,64 +1029,9 @@ export default function OpNewPage({ definition: definitionProp }) {
       return;
     }
 
+    scannerRef.current?.clearError();
     focusBarcodeInput();
   }, [searchMode, closeResultModal, stopScan, focusBarcodeInput]);
-
-  const startScan = async () => {
-    if (scanning) return;
-    if (
-      searchMode !== SEARCH_MODES.SCAN &&
-      searchMode !== SEARCH_MODES.INSANT
-    ) {
-      return;
-    }
-
-    try {
-      const reader = await ensureReader();
-      console.log("reader", reader);
-
-      const constraints = {
-        video: { facingMode: { ideal: "environment" } },
-      };
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        videoRef.current.setAttribute("playsinline", "true");
-        await videoRef.current.play();
-      }
-
-      console.log("Video started, starting scan...");
-
-      setScanning(true);
-
-      reader.decodeFromVideoDevice(null, videoRef.current, (result, err) => {
-        console.log("scan result", { result, err });
-        if (result) {
-          const text = result.getText();
-          stopScan();
-          runSearch(text, searchMode);
-        }
-        if (
-          err &&
-          !(err.name === "Камера не найдена" || err.name === "NotFoundError")
-        ) {
-          // console.error(err);
-        }
-      });
-    } catch (err) {
-      console.error("[scan] start error", err);
-      const messageKey =
-        err?.name === "NotAllowedError"
-          ? "camera_permission_denied"
-          : err?.name === "NotFoundError" ||
-            err?.name === "OverconstrainedError"
-          ? "camera_not_found"
-          : "camera_open_failed";
-      showToast(t(messageKey) || "Не удалось открыть камеру", {
-        type: "error",
-      });
-    }
-  };
 
   const handleSubmit = async () => {
     await performAddOperation({
@@ -871,15 +1039,15 @@ export default function OpNewPage({ definition: definitionProp }) {
       quantityValue: quantity,
       costValue: cost,
       priceValue: price,
-      descriptionValue: description,
+      descriptionValue: showDescriptionField ? description : "",
       resetForm: true,
     });
   };
 
   const descriptionPreview = useMemo(() => {
-    if (!description.trim() || !picked) return "";
+    if (!showDescriptionField || !description.trim() || !picked) return "";
     return `${t("op.description") || "Описание"}: ${description.trim()}`;
-  }, [description, picked, t]);
+  }, [description, picked, showDescriptionField, t]);
 
   const lpcLabel = useMemo(() => {
     if (!showCostField || picked?.last_purchase_cost == null) return null;
@@ -948,41 +1116,28 @@ export default function OpNewPage({ definition: definitionProp }) {
 
       {[SEARCH_MODES.SCAN, SEARCH_MODES.INSANT].includes(searchMode) && (
         <>
-          <div
-            id="scanner"
-            className={cn(
-              scanning ? "space-y-4" : "hidden",
-              cardClass("space-y-4")
+          <CameraBarcodeScanner
+            ref={scannerRef}
+            active={[SEARCH_MODES.SCAN, SEARCH_MODES.INSANT].includes(
+              searchMode
             )}
-          >
-            <video
-              id="preview"
-              ref={videoRef}
-              playsInline
-              className="w-full rounded-xl"
-            />
-            <div className="flex items-center justify-between gap-3">
-              <span className={mutedTextClass()}>
-                {t("scanner.hint") || "Наведи камеру на штрих-код"}
-              </span>
-              <button
-                id="btn-close-scan"
-                type="button"
-                className={iconButtonClass()}
-                onClick={stopScan}
-                aria-label={t("common.cancel") || "Отмена"}
-                title={t("common.cancel") || "Отмена"}
-              >
-                <i className="fa-solid fa-xmark" aria-hidden="true" />
-              </button>
-            </div>
-          </div>
+            containerId="scanner"
+            videoId="preview"
+            closeButtonId="btn-close-scan"
+            selectId="camera-selector"
+            labels={scannerLabels}
+            errorMessages={scannerErrors}
+            selectedCameraId={selectedCameraId}
+            onCameraChange={setSelectedCameraId}
+            onScan={handleScannerResult}
+            onError={handleScannerError}
+          />
 
           <div className="flex gap-3 flex-row items-center">
             <input
               id="barcode"
               type="search"
-              inputMode="search"
+              inputMode={barcodeInputMode}
               ref={barcodeInputRef}
               value={barcodeValue}
               placeholder={
@@ -999,6 +1154,18 @@ export default function OpNewPage({ definition: definitionProp }) {
               className={inputClass("flex-1")}
             />
             <button
+              type="button"
+              className={iconButtonClass({
+                variant: barcodeInputMode === "search" ? "primary" : "ghost",
+              })}
+              onClick={toggleBarcodeInputMode}
+              aria-label={inputModeToggleLabel}
+              title={inputModeToggleLabel}
+              aria-pressed={barcodeInputMode === "search"}
+            >
+              <i className="fa-solid fa-keyboard" aria-hidden="true" />
+            </button>
+            <button
               id="btn-scan"
               type="button"
               className={iconButtonClass()}
@@ -1009,6 +1176,34 @@ export default function OpNewPage({ definition: definitionProp }) {
               <i className="fa-solid fa-camera" aria-hidden="true" />
             </button>
           </div>
+          {searchMode === SEARCH_MODES.INSANT && scanHistory.length > 0 ? (
+            <div className="mt-2 space-y-1" id="instant-scan-history">
+              {scanHistory.map((entry) => {
+                const statusClass =
+                  entry.status === "success"
+                    ? "text-emerald-600 dark:text-emerald-400"
+                    : entry.status === "error"
+                    ? "text-red-600 dark:text-red-400"
+                    : "text-slate-500 dark:text-slate-400";
+                return (
+                  <p
+                    key={entry.id}
+                    className={cn("text-xs font-medium", statusClass)}
+                  >
+                    {`${entry.id}. ${entry.value || "—"} (${formatTimeAgo(
+                      entry.timestamp
+                    )})`}
+                  </p>
+                );
+              })}
+            </div>
+          ) : null}
+          {[SEARCH_MODES.SCAN, SEARCH_MODES.INSANT].includes(searchMode) &&
+          searchStatus === "loading" ? (
+            <p className={mutedTextClass()} aria-live="polite">
+              {t("searching") || "Поиск..."}
+            </p>
+          ) : null}
         </>
       )}
 
@@ -1144,7 +1339,7 @@ export default function OpNewPage({ definition: definitionProp }) {
                       })
                     }
                   >
-                    +{value}
+                    {value > 0 ? `+${value}` : String(value)}
                   </button>
                 ))}
               </div>
@@ -1222,22 +1417,24 @@ export default function OpNewPage({ definition: definitionProp }) {
               </div>
             )}
 
-            <div className="space-y-2">
-              <label className={labelClass()} htmlFor="description">
-                {t("op.description") || "Описание"}
-              </label>
-              <input
-                id="description"
-                type="text"
-                value={description}
-                placeholder={
-                  t("op.description.placeholder") ||
-                  "Комментарий к операции (необяз.)"
-                }
-                onChange={(event) => setDescription(event.target.value)}
-                className={inputClass()}
-              />
-            </div>
+            {showDescriptionField ? (
+              <div className="space-y-2">
+                <label className={labelClass()} htmlFor="description">
+                  {t("op.description") || "Описание"}
+                </label>
+                <input
+                  id="description"
+                  type="text"
+                  value={description}
+                  placeholder={
+                    t("op.description.placeholder") ||
+                    "Комментарий к операции (необяз.)"
+                  }
+                  onChange={(event) => setDescription(event.target.value)}
+                  className={inputClass()}
+                />
+              </div>
+            ) : null}
           </div>
           <div className="flex flex-wrap items-center justify-end gap-3">
             <button

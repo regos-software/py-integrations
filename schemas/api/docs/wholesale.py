@@ -86,3 +86,21 @@ class DocWholeSaleGetRequest(BaseModel):
         ):
             raise ValueError("end_date не может быть меньше start_date")
         return values
+
+
+class DocWholeSaleAddRequest(BaseModel):
+    """
+    Параметры создания документа оптовой продажи.
+    """
+
+    date: int  # unixtime sec
+    partner_id: int
+    stock_id: int
+    currency_id: int
+    contract_id: Optional[int] = None
+    exchange_rate: Optional[Decimal] = None
+    description: Optional[str] = None
+    vat_calculation_type: Optional[VatCalculationType] = None
+    attached_user_id: Optional[int] = None
+    price_type_id: Optional[int] = None
+    seller_id: Optional[int] = None

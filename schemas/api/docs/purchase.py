@@ -137,9 +137,39 @@ class DocPurchaseGetResponse(APIBaseResponse[List[DocPurchase]]):
     model_config = ConfigDict(extra="ignore")
 
 
+class DocPurchaseAddRequest(BaseSchema):
+    """Модель для добавления документа поступления."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    date: int = PydField(..., ge=0, description="Дата документа (Unix).")
+    partner_id: int = PydField(..., ge=1, description="ID контрагента.")
+    stock_id: int = PydField(..., ge=1, description="ID склада.")
+    currency_id: int = PydField(..., ge=1, description="ID валюты.")
+    contract_id: Optional[int] = PydField(
+        default=None, ge=1, description="ID договора."
+    )
+    exchange_rate: Optional[Decimal] = PydField(
+        default=None, description="Курс валюты."
+    )
+    description: Optional[str] = PydField(
+        default=None, description="Комментарий к документу."
+    )
+    vat_calculation_type: Optional[VatCalculationType] = PydField(
+        default=None, description="Тип расчёта НДС."
+    )
+    attached_user_id: int = PydField(
+        ..., ge=1, description="ID прикреплённого пользователя."
+    )
+    price_type_id: Optional[int] = PydField(
+        default=None, ge=1, description="ID типа цены."
+    )
+
+
 __all__ = [
     "DocPurchase",
     "DocPurchaseGetRequest",
     "DocPurchaseGetResponse",
     "DocPurchaseSortOrder",
+    "DocPurchaseAddRequest",
 ]

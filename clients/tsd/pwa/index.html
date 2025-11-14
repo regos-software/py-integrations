@@ -3,12 +3,103 @@
   <head>
     <meta charset="utf-8" />
     <link rel="icon" type="image/x-icon" href="?assets=favicon.ico">
-    <link rel="manifest" href="?assets=manifest.json" />
+    <link id="pwa-manifest" rel="manifest" />
+    <script>
+      (function () {
+        const manifestLink = document.getElementById("pwa-manifest");
+        if (!manifestLink) {
+          return;
+        }
+
+        const { location } = window;
+        const defaultManifest = {
+          name: "REGOS:TSD",
+          short_name: "REGOS:TSD",
+          display: "standalone",
+          background_color: "#f7fafc",
+          theme_color: "#111827",
+          icons: [
+            {
+              src: "?assets=icon-192.png",
+              sizes: "192x192",
+              type: "image/png",
+            },
+            {
+              src: "?assets=icon-512.png",
+              sizes: "512x512",
+              type: "image/png",
+            },
+          ],
+        };
+
+        function buildManifest(baseManifest) {
+          const normalizedPath = location.pathname.replace(/\/+$/, "");
+          const pathWithSlash = normalizedPath === "" ? "/" : normalizedPath;
+          const scopePath = pathWithSlash === "/" ? "/" : `${pathWithSlash}/`;
+          const startUrl = `${location.origin}${pathWithSlash}${location.search}`;
+          const scopeUrl = `${location.origin}${scopePath}`;
+
+          const icons = Array.isArray(baseManifest.icons)
+            ? baseManifest.icons.map((icon) => {
+                try {
+                  const iconUrl = new URL(icon.src, location.href);
+                  return {
+                    ...icon,
+                    src: iconUrl.href,
+                  };
+                } catch (err) {
+                  return icon;
+                }
+              })
+            : baseManifest.icons;
+
+          return {
+            ...baseManifest,
+            start_url: startUrl,
+            scope: scopeUrl,
+            id: startUrl,
+            icons,
+          };
+        }
+
+        function setManifest(manifest) {
+          const blob = new Blob([JSON.stringify(manifest)], {
+            type: "application/manifest+json",
+          });
+          const objectUrl = URL.createObjectURL(blob);
+          manifestLink.href = objectUrl;
+          manifestLink.dataset.dynamicManifest = "true";
+          window.addEventListener(
+            "beforeunload",
+            () => URL.revokeObjectURL(objectUrl),
+            { once: true }
+          );
+        }
+
+        fetch("?assets=manifest.json", { cache: "no-store" })
+          .then((response) => {
+            if (!response.ok) {
+              throw new Error(`Failed to fetch manifest: ${response.status}`);
+            }
+            return response.json();
+          })
+          .catch(() => defaultManifest)
+          .then((manifest) => buildManifest(manifest || defaultManifest))
+          .then(setManifest)
+          .catch((error) => {
+            console.warn("Failed to build dynamic manifest", error);
+            setManifest(buildManifest(defaultManifest));
+          });
+      })();
+    </script>
     <link rel="stylesheet" href="?assets=app.css" />
     <link rel="stylesheet" href="?assets=fontawesome/css/all.min.css"/>
     <meta name="theme-color" content="#000000" />
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <title>REGOS TSD</title>
+    <meta
+      name="viewport"
+      content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"
+    />
+    <title>REGOS:TSD</title>
   </head>
   <body>
     <div id="root"></div>
