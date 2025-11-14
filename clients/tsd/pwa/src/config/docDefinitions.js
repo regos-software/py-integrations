@@ -204,63 +204,6 @@ const purchaseDefinition = {
                 raw: item,
               };
             })
-              buildMetaSegments: (doc, helpers) => {
-                const { unixToLocal, fmt } = helpers;
-                const segments = [];
-                if (doc?.date) {
-                  segments.push(unixToLocal(doc.date));
-                }
-                const senderName =
-                  doc?.stock_sender?.name ||
-                  doc?.stockSender?.name ||
-                  doc?.stock_sender_name ||
-                  null;
-                const receiverName =
-                  doc?.stock_receiver?.name ||
-                  doc?.stockReceiver?.name ||
-                  doc?.stock_receiver_name ||
-                  null;
-                if (senderName || receiverName) {
-                  segments.push(
-                    senderName && receiverName
-                      ? `${senderName} → ${receiverName}`
-                      : senderName || receiverName
-                  );
-                }
-                const partnerName =
-                  doc?.partner?.name ||
-                  doc?.partner?.Name ||
-                  doc?.partner_name ||
-                  null;
-                if (partnerName) {
-                  segments.push(partnerName);
-                }
-                const currency = doc?.currency?.code_chr || "UZS";
-                const roundTo = doc?.price_type?.round_to ?? null;
-                if (doc?.amount != null) {
-                  const amountNumber = Number(doc.amount);
-                  segments.push(fmt.money(amountNumber, currency, roundTo));
-                }
-                return segments;
-              },
-              buildPartnerValue: (doc) => {
-                const senderName =
-                  doc?.stock_sender?.name ||
-                  doc?.stockSender?.name ||
-                  doc?.stock_sender_name ||
-                  null;
-                const receiverName =
-                  doc?.stock_receiver?.name ||
-                  doc?.stockReceiver?.name ||
-                  doc?.stock_receiver_name ||
-                  null;
-                if (senderName || receiverName) {
-                  return senderName && receiverName
-                    ? `${senderName} → ${receiverName}`
-                    : senderName || receiverName;
-                }
-                return doc?.partner?.name || doc?.partner?.Name || "—";
-              },
             .filter(Boolean);
         },
       },
@@ -1671,10 +1614,7 @@ const movementDefinition = {
         );
       }
       const partnerName =
-        doc?.partner?.name ||
-        doc?.partner?.Name ||
-        doc?.partner_name ||
-        null;
+        doc?.partner?.name || doc?.partner?.Name || doc?.partner_name || null;
       if (partnerName) {
         segments.push(partnerName);
       }
@@ -1914,15 +1854,15 @@ const movementDefinition = {
         const items = data.result || [];
         return items
           .map((ext) => {
-          const core = ext?.item || {};
-          const unit = core?.unit || {};
-          const firstBarcode =
-            core?.base_barcode ||
-            (core?.barcode_list
-              ? String(core.barcode_list).split(",")[0]?.trim()
-              : "") ||
-            core?.code ||
-            "";
+            const core = ext?.item || {};
+            const unit = core?.unit || {};
+            const firstBarcode =
+              core?.base_barcode ||
+              (core?.barcode_list
+                ? String(core.barcode_list).split(",")[0]?.trim()
+                : "") ||
+              core?.code ||
+              "";
 
             const rawId = core.id ?? core.code;
             const id = Number(rawId);
@@ -1930,21 +1870,21 @@ const movementDefinition = {
               return null;
             }
 
-          return {
-            id,
-            name: core.name || "—",
-            barcode: firstBarcode,
-            code: core?.code != null ? String(core.code) : null,
-            vat_value: Number(core?.vat?.value ?? 0),
-            last_purchase_cost:
-              ext?.last_purchase_cost != null
-                ? Number(ext.last_purchase_cost)
-                : null,
-            quantity_common: ext?.quantity?.common ?? null,
-            unit: unit?.name || "шт",
-            unit_piece: unit?.type === "pcs",
-          };
-        })
+            return {
+              id,
+              name: core.name || "—",
+              barcode: firstBarcode,
+              code: core?.code != null ? String(core.code) : null,
+              vat_value: Number(core?.vat?.value ?? 0),
+              last_purchase_cost:
+                ext?.last_purchase_cost != null
+                  ? Number(ext.last_purchase_cost)
+                  : null,
+              quantity_common: ext?.quantity?.common ?? null,
+              unit: unit?.name || "шт",
+              unit_piece: unit?.type === "pcs",
+            };
+          })
           .filter(Boolean);
       },
     },

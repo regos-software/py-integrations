@@ -28,13 +28,13 @@ class DocMovement(BaseModel):
     stock: Stock
     contract: Optional[str] = None
     seller: Optional[User] = None
-    currency: Currency
+    currency: Optional[Currency] = None
     #   contract: DocContractShort
     description: Optional[str] = None
     amount: Decimal
     exchange_rate: Decimal
-    additional_expenses_amount: Decimal = Decimal("0")
-    vat_calculation_type: VatCalculationType
+    additional_expenses_amount: Optional[Decimal] = Decimal("0")
+    vat_calculation_type: Optional[VatCalculationType]
     attached_user: Optional[User] = None
     price_type: Optional[PriceType] = None
     blocked: bool
