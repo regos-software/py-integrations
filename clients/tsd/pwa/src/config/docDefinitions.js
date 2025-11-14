@@ -1544,7 +1544,7 @@ const movementDefinition = {
       return {
         id: doc.id,
         title: doc.code || doc.id,
-        subtitle: partnerName || primaryStock,
+        subtitle: "",
         rightTop: doc.date ? unixToLocal(doc.date) : "",
         rightBottom: statusParts.filter(Boolean).join(" • "),
         amountLabel:
