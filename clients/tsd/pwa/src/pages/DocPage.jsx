@@ -22,7 +22,11 @@ import {
 import { cn } from "../lib/utils";
 import { getDocDefinition } from "../config/docDefinitions.js";
 
-const DEFAULT_OPERATION_FORM = { showCost: true, showPrice: true };
+const DEFAULT_OPERATION_FORM = {
+  showCost: true,
+  showPrice: true,
+  showDescription: true,
+};
 
 function MetaSeparator() {
   return (
@@ -194,8 +198,11 @@ function OperationRow({ op, doc, onDelete, onSave, operationForm }) {
     setSaving(true);
     const payload = {
       quantity: toNumber(form.quantity),
-      description: form.description || undefined,
     };
+    if (formOptions.showDescription !== false) {
+      const trimmedDescription = form.description?.trim();
+      payload.description = trimmedDescription || undefined;
+    }
     if (formOptions.showCost !== false) {
       const costNumber = toNumber(form.cost);
       if (Number.isFinite(costNumber)) payload.cost = costNumber;
@@ -329,18 +336,20 @@ function OperationRow({ op, doc, onDelete, onSave, operationForm }) {
               />
             </div>
           ) : null}
-          <div className="flex flex-col gap-2">
-            <label className={labelClass()} htmlFor={`description-${op.id}`}>
-              {t("op.description") || "Описание"}
-            </label>
-            <input
-              id={`description-${op.id}`}
-              type="text"
-              value={form.description}
-              onChange={handleFieldChange("description")}
-              className={inputClass()}
-            />
-          </div>
+          {formOptions.showDescription !== false ? (
+            <div className="flex flex-col gap-2">
+              <label className={labelClass()} htmlFor={`description-${op.id}`}>
+                {t("op.description") || "Описание"}
+              </label>
+              <input
+                id={`description-${op.id}`}
+                type="text"
+                value={form.description}
+                onChange={handleFieldChange("description")}
+                className={inputClass()}
+              />
+            </div>
+          ) : null}
           <div className="flex flex-wrap gap-3" id={`op-actions-${op.id}`}>
             <button
               type="button"

@@ -17,7 +17,7 @@ from schemas.api.references.tax import VatCalculationType
 # ==== Модели ====
 
 
-class DocWholeSale(BaseModel):
+class DocMovement(BaseModel):
     """Документ отгрузки контрагенту"""
 
     id: int
@@ -48,37 +48,30 @@ class DocPurchaseSortOrder(BaseModel):
     direction: Optional[str] = None
 
 
-class DocWholeSaleGetRequest(BaseModel):
-    """
-    Параметры запроса для /v1/DocWholeSale/Get
-    """
+class DocMovementGetRequest(BaseModel):
+    """ """
 
     # Период
     start_date: Optional[int] = None  # unixtime sec
     end_date: Optional[int] = None  # unixtime sec
-
     # Фильтры по идентификаторам
     ids: Optional[List[int]] = None
-    firm_ids: Optional[List[int]] = None
-    stock_ids: Optional[List[int]] = None
-    partner_ids: Optional[List[int]] = None
-    contract_ids: Optional[List[int]] = None
+    firm_sender_ids: Optional[List[int]] = None
+    firm_receiver_ids: Optional[List[int]] = None
+    stock_sender_ids: Optional[List[int]] = None
+    stock_receiver_ids: Optional[List[int]] = None
     attached_user_ids: Optional[List[int]] = None
-
-    # Прочие фильтры
-    vat_calculation_type: Optional[VatCalculationType] = None
     performed: Optional[bool] = None
     blocked: Optional[bool] = None
     deleted_mark: Optional[bool] = None
     search: Optional[str] = None
 
-    # Сортировка и пэйджинг
     sort_orders: Optional[List[DocPurchaseSortOrder]] = None
     limit: Optional[int] = Field(default=None, ge=1)
     offset: Optional[int] = Field(default=None, ge=0)
 
     @model_validator(mode="after")
-    def _check_dates(cls, values: "DocWholeSaleGetRequest"):
+    def _check_dates(cls, values: "DocMovementGetRequest"):
         if (
             values.start_date
             and values.end_date
@@ -88,19 +81,22 @@ class DocWholeSaleGetRequest(BaseModel):
         return values
 
 
-class DocWholeSaleAddRequest(BaseModel):
+class DocMovementAddRequest(BaseModel):
     """
-    Параметры создания документа оптовой продажи.
+        Параметры создания документа оптовой продажи.
+        {
+        "date": 1534151629,
+        "stock_sender_id": 2,
+        "stock_receiver_id":3,
+        "description": "example",
+        "attached_user_id": 2
+    }
     """
 
-    date: int  # unixtime sec
-    partner_id: int
-    stock_id: int
-    currency_id: int
-    contract_id: Optional[int] = None
-    exchange_rate: Optional[Decimal] = None
-    description: Optional[str] = None
-    vat_calculation_type: Optional[VatCalculationType] = None
-    attached_user_id: Optional[int] = None
-    price_type_id: Optional[int] = None
-    seller_id: Optional[int] = None
+    date: int = Field(..., ge=0, description="Дата документа (Unix).")
+    stock_sender_id: int = Field(..., ge=1, description="ID склада-отправителя.")
+    stock_receiver_id: int = Field(..., ge=1, description="ID склада-получателя.")
+    description: Optional[str] = Field(default=None, description="Описание документа.")
+    attached_user_id: Optional[int] = Field(
+        default=None, ge=1, description="ID прикреплённого пользователя."
+    )

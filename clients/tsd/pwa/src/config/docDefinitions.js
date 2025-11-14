@@ -12,6 +12,7 @@ const purchaseDefinition = {
     buildDocPath: (doc) => `/doc/${doc.id}`,
     buildDocsPath: () => "/docs",
     buildNewOperationPath: (docId) => `/doc/${docId}/op/new`,
+    buildNewDocPath: () => "/doc/new?type=purchase",
   },
   list: {
     action: "docs.purchase.get",
@@ -150,6 +151,313 @@ const purchaseDefinition = {
     },
     partnerLabelKey: "doc.partner",
     partnerLabelFallback: "Поставщик",
+  },
+  create: {
+    addAction: "docs.purchase.add",
+    titleKey: "doc.purchase.create.title",
+    titleFallback: "Новый документ закупки",
+    submitLabelKey: "common.create",
+    submitLabelFallback: "Создать",
+    successMessageKey: "toast.doc_purchase_created",
+    successMessageFallback: "Документ создан",
+    initialValues: () => ({
+      vat_calculation_type: "No",
+    }),
+    references: {
+      partners: {
+        action: "references.partner.get",
+        params: {
+          deleted_mark: false,
+          limit: 200,
+          sort_orders: [{ column: "Name", direction: "asc" }],
+        },
+        transform: (data = {}) => {
+          const list = Array.isArray(data.result) ? data.result : [];
+          return list
+            .map((item) => {
+              const id = item?.id ?? item?.ID ?? item?.code ?? null;
+              if (!id) return null;
+              const name =
+                item?.name ||
+                item?.fullname ||
+                item?.Name ||
+                item?.FullName ||
+                `#${id}`;
+              return {
+                value: String(id),
+                label: name,
+                raw: item,
+              };
+            })
+            .filter(Boolean);
+        },
+      },
+      stocks: {
+        action: "references.stock.get",
+        params: {
+          deleted_mark: false,
+          limit: 200,
+          sort_orders: [{ column: "Name", direction: "asc" }],
+        },
+        transform: (data = {}) => {
+          const list = Array.isArray(data.result) ? data.result : [];
+          return list
+            .map((item) => {
+              const id = item?.id ?? item?.ID ?? item?.code ?? null;
+              if (!id) return null;
+              const name = item?.name || item?.Name || `#${id}`;
+              return {
+                value: String(id),
+                label: name,
+                raw: item,
+              };
+            })
+            .filter(Boolean);
+        },
+      },
+      currencies: {
+        action: "references.currency.get",
+        params: {
+          limit: 200,
+          deleted: false,
+        },
+        transform: (data = {}) => {
+          const list = Array.isArray(data.result) ? data.result : [];
+          return list
+            .map((item) => {
+              const id = item?.id ?? item?.ID ?? item?.code_num ?? null;
+              if (!id) return null;
+              const code =
+                item?.code_chr ||
+                item?.CodeChr ||
+                item?.code ||
+                item?.Code ||
+                `#${id}`;
+              const name = item?.name || item?.Name || code;
+              const label = `${code}${name ? ` — ${name}` : ""}`.trim();
+              return {
+                value: String(id),
+                label,
+                raw: item,
+              };
+            })
+            .filter(Boolean);
+        },
+      },
+      priceTypes: {
+        action: "references.price_type.get",
+        params: {
+          limit: 200,
+          sort_orders: [{ column: "Name", direction: "asc" }],
+        },
+        transform: (data = {}) => {
+          const list = Array.isArray(data.result) ? data.result : [];
+          return list
+            .map((item) => {
+              const id = item?.id ?? item?.ID ?? null;
+              if (!id) return null;
+              const name = item?.name || item?.Name || `#${id}`;
+              const currencyCode =
+                item?.currency?.code_chr ||
+                item?.currency?.code ||
+                item?.Currency?.code_chr ||
+                item?.Currency?.code ||
+                null;
+              const label = currencyCode ? `${name} (${currencyCode})` : name;
+              return {
+                value: String(id),
+                label,
+                raw: item,
+              };
+            })
+            .filter(Boolean);
+        },
+      },
+      users: {
+        action: "rbac.user.get",
+        params: {
+          active: true,
+          limit: 200,
+        },
+        optional: true,
+        transform: (data = {}) => {
+          const list = Array.isArray(data.result) ? data.result : [];
+          return list
+            .map((item) => {
+              const id = item?.id ?? item?.ID ?? null;
+              if (!id) return null;
+              const name =
+                item?.full_name ||
+                `${item?.last_name || ""} ${item?.first_name || ""}`.trim() ||
+                item?.login ||
+                `#${id}`;
+              return {
+                value: String(id),
+                label: name.trim() || `#${id}`,
+                raw: item,
+              };
+            })
+            .filter(Boolean);
+        },
+      },
+    },
+    fields: [
+      {
+        key: "date",
+        type: "date",
+        required: true,
+        labelKey: "doc.date",
+        fallbackLabel: "Дата документа",
+      },
+      {
+        key: "partner_id",
+        type: "select",
+        required: true,
+        referenceKey: "partners",
+        autoSelectFirst: true,
+        labelKey: "doc.partner",
+        fallbackLabel: "Контрагент",
+        fallbackType: "number",
+      },
+      {
+        key: "stock_id",
+        type: "select",
+        required: true,
+        referenceKey: "stocks",
+        autoSelectFirst: true,
+        labelKey: "doc.stock",
+        fallbackLabel: "Склад",
+        fallbackType: "number",
+      },
+      {
+        key: "currency_id",
+        type: "select",
+        required: true,
+        referenceKey: "currencies",
+        autoSelectFirst: true,
+        labelKey: "doc.currency",
+        fallbackLabel: "Валюта",
+        fallbackType: "number",
+      },
+      {
+        key: "price_type_id",
+        type: "select",
+        required: false,
+        allowEmptyOption: true,
+        referenceKey: "priceTypes",
+        labelKey: "doc.price_type",
+        fallbackLabel: "Тип цены",
+      },
+      {
+        key: "vat_calculation_type",
+        type: "select",
+        required: false,
+        labelKey: "doc.vat_calculation_type",
+        fallbackLabel: "Расчёт НДС",
+        options: () => [
+          { value: "No", label: "Не начислять" },
+          { value: "Exclude", label: "В сумме" },
+          { value: "Include", label: "Начислить сверху" },
+        ],
+        defaultValue: "No",
+      },
+      {
+        key: "exchange_rate",
+        type: "number",
+        required: false,
+        step: "0.0001",
+        labelKey: "doc.exchange_rate",
+        fallbackLabel: "Курс валюты",
+      },
+      {
+        key: "attached_user_id",
+        type: "select",
+        required: true,
+        referenceKey: "users",
+        allowEmptyOption: false,
+        labelKey: "doc.employee",
+        fallbackLabel: "Ответственный",
+        fallbackType: "number",
+      },
+      {
+        key: "contract_id",
+        type: "number",
+        required: false,
+        labelKey: "doc.contract",
+        fallbackLabel: "Договор",
+      },
+      {
+        key: "description",
+        type: "textarea",
+        required: false,
+        labelKey: "doc.description",
+        fallbackLabel: "Комментарий",
+      },
+    ],
+    buildPayload: (form, helpers) => {
+      const parseId = (value) => {
+        if (value == null || value === "") return null;
+        const numeric = Number(value);
+        return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
+      };
+
+      const dateUnix = helpers.toUnixTime(form.date);
+      if (!dateUnix) {
+        throw new Error("invalid_date");
+      }
+
+      const partnerId = parseId(form.partner_id);
+      const stockId = parseId(form.stock_id);
+      const currencyId = parseId(form.currency_id);
+      const attachedUserId = parseId(form.attached_user_id);
+
+      if (!partnerId || !stockId || !currencyId || !attachedUserId) {
+        throw new Error("missing_required");
+      }
+
+      const payload = {
+        date: dateUnix,
+        partner_id: partnerId,
+        stock_id: stockId,
+        currency_id: currencyId,
+        attached_user_id: attachedUserId,
+      };
+
+      const priceTypeId = parseId(form.price_type_id);
+      if (priceTypeId) payload.price_type_id = priceTypeId;
+
+      const contractId = parseId(form.contract_id);
+      if (contractId) payload.contract_id = contractId;
+
+      if (form.vat_calculation_type) {
+        payload.vat_calculation_type = form.vat_calculation_type;
+      }
+
+      if (form.exchange_rate) {
+        const rate = Number(form.exchange_rate);
+        if (!Number.isNaN(rate) && rate > 0) {
+          payload.exchange_rate = rate;
+        }
+      }
+
+      if (form.description) {
+        const trimmed = form.description.trim();
+        if (trimmed) payload.description = trimmed;
+      }
+
+      return payload;
+    },
+    resolveCreatedId: (response) => {
+      if (!response) return null;
+      const { result } = response;
+      if (result?.new_id) return Number(result.new_id);
+      if (Array.isArray(result?.ids) && result.ids[0] != null) {
+        return Number(result.ids[0]);
+      }
+      if (result?.id) return Number(result.id);
+      if (response?.new_id) return Number(response.new_id);
+      return null;
+    },
   },
   operation: {
     titleKey: "op.title",
@@ -429,29 +737,11 @@ const inventoryDefinition = {
           operation.actual_quantity != null
             ? Number(operation.actual_quantity)
             : null;
-        const registered =
-          operation.registered_quantity != null
-            ? Number(operation.registered_quantity)
-            : null;
-        const diff =
-          actual != null && registered != null ? actual - registered : null;
-        const diffParts = [];
-        if (registered != null) {
-          diffParts.push(`Учёт: ${registered}`);
-        }
-        if (diff != null && diff !== 0) {
-          const sign = diff > 0 ? "+" : "";
-          diffParts.push(`Δ: ${sign}${diff}`);
-        }
-        const metaDescription = diffParts.join(" • ");
 
         return {
           ...operation,
           quantity: actual,
           cost: null,
-          description: [operation.description, metaDescription]
-            .filter(Boolean)
-            .join(" | "),
         };
       });
     },
@@ -478,6 +768,7 @@ const inventoryDefinition = {
     operationForm: {
       showCost: false,
       showPrice: false,
+      showDescription: false,
     },
     partnerLabelKey: "doc.inventory.responsible",
     partnerLabelFallback: "Ответственный",
@@ -535,13 +826,12 @@ const inventoryDefinition = {
       },
     },
     addAction: "docs.inventory_operation.add",
-    buildAddPayload: ({ docId, picked, quantity, description }) => {
+    buildAddPayload: ({ docId, picked, quantity }) => {
       return [
         {
           document_id: docId,
           item_id: Number(picked.id),
           actual_quantity: quantity,
-          description: description,
           datetime: Math.floor(Date.now() / 1000),
           update_actual_quantity: false,
         },
@@ -551,6 +841,7 @@ const inventoryDefinition = {
     form: {
       showCost: false,
       showPrice: false,
+      showDescription: false,
     },
   },
 };
@@ -569,6 +860,7 @@ const wholesaleDefinition = {
     buildDocPath: (doc) => `/doc/${doc.id}?type=wholesale`,
     buildDocsPath: () => "/docs?type=wholesale",
     buildNewOperationPath: (docId) => `/doc/${docId}/op/new?type=wholesale`,
+    buildNewDocPath: () => "/doc/new?type=wholesale",
   },
   list: {
     action: "docs.wholesale.get",
@@ -707,6 +999,327 @@ const wholesaleDefinition = {
     },
     partnerLabelKey: "doc.wholesale.partner",
     partnerLabelFallback: "Покупатель",
+  },
+  create: {
+    addAction: "docs.wholesale.add",
+    titleKey: "doc.wholesale.create.title",
+    titleFallback: "Новый документ отгрузки",
+    submitLabelKey: "common.create",
+    submitLabelFallback: "Создать",
+    successMessageKey: "toast.doc_wholesale_created",
+    successMessageFallback: "Документ создан",
+    initialValues: () => ({
+      vat_calculation_type: "No",
+    }),
+    references: {
+      partners: {
+        action: "references.partner.get",
+        params: {
+          deleted_mark: false,
+          limit: 200,
+          sort_orders: [{ column: "Name", direction: "asc" }],
+        },
+        transform: (data = {}) => {
+          const list = Array.isArray(data.result) ? data.result : [];
+          return list
+            .map((item) => {
+              const id = item?.id ?? item?.ID ?? item?.code ?? null;
+              if (!id) return null;
+              const name =
+                item?.name ||
+                item?.fullname ||
+                item?.Name ||
+                item?.FullName ||
+                `#${id}`;
+              return {
+                value: String(id),
+                label: name,
+                raw: item,
+              };
+            })
+            .filter(Boolean);
+        },
+      },
+      stocks: {
+        action: "references.stock.get",
+        params: {
+          deleted_mark: false,
+          limit: 200,
+          sort_orders: [{ column: "Name", direction: "asc" }],
+        },
+        transform: (data = {}) => {
+          const list = Array.isArray(data.result) ? data.result : [];
+          return list
+            .map((item) => {
+              const id = item?.id ?? item?.ID ?? item?.code ?? null;
+              if (!id) return null;
+              const name = item?.name || item?.Name || `#${id}`;
+              return {
+                value: String(id),
+                label: name,
+                raw: item,
+              };
+            })
+            .filter(Boolean);
+        },
+      },
+      currencies: {
+        action: "references.currency.get",
+        params: {
+          limit: 200,
+          deleted: false,
+        },
+        transform: (data = {}) => {
+          const list = Array.isArray(data.result) ? data.result : [];
+          return list
+            .map((item) => {
+              const id = item?.id ?? item?.ID ?? item?.code_num ?? null;
+              if (!id) return null;
+              const code =
+                item?.code_chr ||
+                item?.CodeChr ||
+                item?.code ||
+                item?.Code ||
+                `#${id}`;
+              const name = item?.name || item?.Name || code;
+              const label = `${code}${name ? ` — ${name}` : ""}`.trim();
+              return {
+                value: String(id),
+                label,
+                raw: item,
+              };
+            })
+            .filter(Boolean);
+        },
+      },
+      priceTypes: {
+        action: "references.price_type.get",
+        params: {
+          limit: 200,
+          sort_orders: [{ column: "Name", direction: "asc" }],
+        },
+        transform: (data = {}) => {
+          const list = Array.isArray(data.result) ? data.result : [];
+          return list
+            .map((item) => {
+              const id = item?.id ?? item?.ID ?? null;
+              if (!id) return null;
+              const name = item?.name || item?.Name || `#${id}`;
+              const currencyCode =
+                item?.currency?.code_chr ||
+                item?.currency?.code ||
+                item?.Currency?.code_chr ||
+                item?.Currency?.code ||
+                null;
+              const label = currencyCode ? `${name} (${currencyCode})` : name;
+              return {
+                value: String(id),
+                label,
+                raw: item,
+              };
+            })
+            .filter(Boolean);
+        },
+      },
+      users: {
+        action: "rbac.user.get",
+        params: {
+          active: true,
+          limit: 200,
+        },
+        optional: true,
+        transform: (data = {}) => {
+          const list = Array.isArray(data.result) ? data.result : [];
+          return list
+            .map((item) => {
+              const id = item?.id ?? item?.ID ?? null;
+              if (!id) return null;
+              const name =
+                item?.full_name ||
+                `${item?.last_name || ""} ${item?.first_name || ""}`.trim() ||
+                item?.login ||
+                `#${id}`;
+              return {
+                value: String(id),
+                label: name.trim() || `#${id}`,
+                raw: item,
+              };
+            })
+            .filter(Boolean);
+        },
+      },
+    },
+    fields: [
+      {
+        key: "date",
+        type: "date",
+        required: true,
+        labelKey: "doc.date",
+        fallbackLabel: "Дата документа",
+      },
+      {
+        key: "partner_id",
+        type: "select",
+        required: true,
+        referenceKey: "partners",
+        autoSelectFirst: true,
+        labelKey: "doc.wholesale.partner",
+        fallbackLabel: "Контрагент",
+        fallbackType: "number",
+      },
+      {
+        key: "stock_id",
+        type: "select",
+        required: true,
+        referenceKey: "stocks",
+        autoSelectFirst: true,
+        labelKey: "doc.stock",
+        fallbackLabel: "Склад",
+        fallbackType: "number",
+      },
+      {
+        key: "currency_id",
+        type: "select",
+        required: true,
+        referenceKey: "currencies",
+        autoSelectFirst: true,
+        labelKey: "doc.currency",
+        fallbackLabel: "Валюта",
+        fallbackType: "number",
+      },
+      {
+        key: "price_type_id",
+        type: "select",
+        required: false,
+        allowEmptyOption: true,
+        referenceKey: "priceTypes",
+        labelKey: "doc.price_type",
+        fallbackLabel: "Тип цены",
+      },
+      {
+        key: "vat_calculation_type",
+        type: "select",
+        required: false,
+        labelKey: "doc.vat_calculation_type",
+        fallbackLabel: "Расчёт НДС",
+        options: () => [
+          { value: "No", label: "Не начислять" },
+          { value: "Exclude", label: "В сумме" },
+          { value: "Include", label: "Начислить сверху" },
+        ],
+        defaultValue: "No",
+      },
+      {
+        key: "exchange_rate",
+        type: "number",
+        required: false,
+        step: "0.0001",
+        labelKey: "doc.exchange_rate",
+        fallbackLabel: "Курс валюты",
+      },
+      {
+        key: "attached_user_id",
+        type: "select",
+        required: false,
+        referenceKey: "users",
+        allowEmptyOption: true,
+        labelKey: "doc.employee",
+        fallbackLabel: "Ответственный",
+        fallbackType: "number",
+      },
+      {
+        key: "seller_id",
+        type: "select",
+        required: false,
+        referenceKey: "users",
+        allowEmptyOption: true,
+        labelKey: "doc.wholesale.seller",
+        fallbackLabel: "Продавец",
+        fallbackType: "number",
+      },
+      {
+        key: "contract_id",
+        type: "number",
+        required: false,
+        labelKey: "doc.contract",
+        fallbackLabel: "Договор",
+      },
+      {
+        key: "description",
+        type: "textarea",
+        required: false,
+        labelKey: "doc.description",
+        fallbackLabel: "Комментарий",
+      },
+    ],
+    buildPayload: (form, helpers) => {
+      const parseId = (value) => {
+        if (value == null || value === "") return null;
+        const numeric = Number(value);
+        return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
+      };
+
+      const dateUnix = helpers.toUnixTime(form.date);
+      if (!dateUnix) {
+        throw new Error("invalid_date");
+      }
+
+      const partnerId = parseId(form.partner_id);
+      const stockId = parseId(form.stock_id);
+      const currencyId = parseId(form.currency_id);
+
+      if (!partnerId || !stockId || !currencyId) {
+        throw new Error("missing_required");
+      }
+
+      const payload = {
+        date: dateUnix,
+        partner_id: partnerId,
+        stock_id: stockId,
+        currency_id: currencyId,
+      };
+
+      const priceTypeId = parseId(form.price_type_id);
+      if (priceTypeId) payload.price_type_id = priceTypeId;
+
+      const contractId = parseId(form.contract_id);
+      if (contractId) payload.contract_id = contractId;
+
+      const attachedUserId = parseId(form.attached_user_id);
+      if (attachedUserId) payload.attached_user_id = attachedUserId;
+
+      const sellerId = parseId(form.seller_id);
+      if (sellerId) payload.seller_id = sellerId;
+
+      if (form.vat_calculation_type) {
+        payload.vat_calculation_type = form.vat_calculation_type;
+      }
+
+      if (form.exchange_rate) {
+        const rate = Number(form.exchange_rate);
+        if (!Number.isNaN(rate) && rate > 0) {
+          payload.exchange_rate = rate;
+        }
+      }
+
+      if (form.description) {
+        const trimmed = form.description.trim();
+        if (trimmed) payload.description = trimmed;
+      }
+
+      return payload;
+    },
+    resolveCreatedId: (response) => {
+      if (!response) return null;
+      const { result } = response;
+      if (result?.new_id) return Number(result.new_id);
+      if (Array.isArray(result?.ids) && result.ids[0] != null) {
+        return Number(result.ids[0]);
+      }
+      if (result?.id) return Number(result.id);
+      if (response?.new_id) return Number(response.new_id);
+      return null;
+    },
   },
   operation: {
     titleKey: "op.wholesale.title",

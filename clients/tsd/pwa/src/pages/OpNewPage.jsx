@@ -25,7 +25,7 @@ import {
 import { cn } from "../lib/utils";
 import { getDocDefinition } from "../config/docDefinitions.js";
 
-const QUICK_QTY = [1, 5, 10, 12];
+const QUICK_QTY = [-1, 1, 2, 3, 5, 10, 14, 20];
 
 const BARCODE_INPUT_MODES = ["none", "search"];
 
@@ -113,6 +113,7 @@ export default function OpNewPage({ definition: definitionProp }) {
   const formOptions = docDefinition?.operation?.form || {};
   const showCostField = formOptions.showCost !== false;
   const showPriceField = formOptions.showPrice !== false;
+  const showDescriptionField = formOptions.showDescription !== false;
   const autoFill = docDefinition?.operation?.autoFill || {};
 
   const initialDocContext = useMemo(
@@ -428,6 +429,7 @@ export default function OpNewPage({ definition: definitionProp }) {
     if (showPriceField) setPrice("");
     setBarcodeValue("");
     setQueryValue("");
+    setDescription("");
     setPicked(null);
     setSearchStatus("idle");
     setResultModalOpen(false);
@@ -493,7 +495,9 @@ export default function OpNewPage({ definition: definitionProp }) {
           ? toNumber(priceValue)
           : undefined;
       const trimmedDescription =
-        typeof descriptionValue === "string" ? descriptionValue.trim() : "";
+        showDescriptionField && typeof descriptionValue === "string"
+          ? descriptionValue.trim()
+          : "";
 
       const buildPayload =
         docDefinition?.operation?.buildAddPayload || (() => null);
@@ -503,7 +507,10 @@ export default function OpNewPage({ definition: definitionProp }) {
         quantity: qtyNumber,
         cost: costNumber,
         price: priceNumber,
-        description: trimmedDescription,
+        description:
+          showDescriptionField && trimmedDescription
+            ? trimmedDescription
+            : undefined,
         docCtx,
       });
 
@@ -556,6 +563,7 @@ export default function OpNewPage({ definition: definitionProp }) {
       docCtx,
       docDefinition,
       resetFormState,
+      showDescriptionField,
       showCostField,
       showPriceField,
       showToast,
@@ -1031,15 +1039,15 @@ export default function OpNewPage({ definition: definitionProp }) {
       quantityValue: quantity,
       costValue: cost,
       priceValue: price,
-      descriptionValue: description,
+      descriptionValue: showDescriptionField ? description : "",
       resetForm: true,
     });
   };
 
   const descriptionPreview = useMemo(() => {
-    if (!description.trim() || !picked) return "";
+    if (!showDescriptionField || !description.trim() || !picked) return "";
     return `${t("op.description") || "Описание"}: ${description.trim()}`;
-  }, [description, picked, t]);
+  }, [description, picked, showDescriptionField, t]);
 
   const lpcLabel = useMemo(() => {
     if (!showCostField || picked?.last_purchase_cost == null) return null;
@@ -1331,7 +1339,7 @@ export default function OpNewPage({ definition: definitionProp }) {
                       })
                     }
                   >
-                    +{value}
+                    {value > 0 ? `+${value}` : String(value)}
                   </button>
                 ))}
               </div>
@@ -1409,22 +1417,24 @@ export default function OpNewPage({ definition: definitionProp }) {
               </div>
             )}
 
-            <div className="space-y-2">
-              <label className={labelClass()} htmlFor="description">
-                {t("op.description") || "Описание"}
-              </label>
-              <input
-                id="description"
-                type="text"
-                value={description}
-                placeholder={
-                  t("op.description.placeholder") ||
-                  "Комментарий к операции (необяз.)"
-                }
-                onChange={(event) => setDescription(event.target.value)}
-                className={inputClass()}
-              />
-            </div>
+            {showDescriptionField ? (
+              <div className="space-y-2">
+                <label className={labelClass()} htmlFor="description">
+                  {t("op.description") || "Описание"}
+                </label>
+                <input
+                  id="description"
+                  type="text"
+                  value={description}
+                  placeholder={
+                    t("op.description.placeholder") ||
+                    "Комментарий к операции (необяз.)"
+                  }
+                  onChange={(event) => setDescription(event.target.value)}
+                  className={inputClass()}
+                />
+              </div>
+            ) : null}
           </div>
           <div className="flex flex-wrap items-center justify-end gap-3">
             <button

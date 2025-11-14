@@ -1,8 +1,9 @@
 from typing import List, Optional
 
 from core.logger import setup_logger
-from schemas.api.base import APIBaseResponse, ArrayResult, IDRequest
+from schemas.api.base import APIBaseResponse, AddResult, ArrayResult, IDRequest
 from schemas.api.docs.wholesale import (
+    DocWholeSaleAddRequest,
     DocWholeSaleGetRequest,
     DocWholeSale,
 )
@@ -12,6 +13,7 @@ logger = setup_logger("docs.WholeSale")
 
 class DocWholeSaleService:
     PATH_GET = "DocWholeSale/Get"
+    PATH_ADD = "DocWholeSale/Add"
     PATH_PERFORM = "DocWholeSale/Perform"
     PATH_PERFORM_CANCEL = "DocWholeSale/PerformCancel"
     PATH_LOCK = "DocWholeSale/Lock"
@@ -28,6 +30,10 @@ class DocWholeSaleService:
         return await self.api.call(
             self.PATH_GET, req, APIBaseResponse[List[DocWholeSale]]
         )
+
+    async def add(self, req: DocWholeSaleAddRequest) -> APIBaseResponse[AddResult]:
+        """Добавить документ оптовой продажи."""
+        return await self.api.call(self.PATH_ADD, req, APIBaseResponse)
 
     async def perform(self, req: IDRequest) -> APIBaseResponse[ArrayResult]:
         """ """
