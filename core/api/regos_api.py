@@ -109,6 +109,7 @@ class RegosAPI:
             from core.api.references.item_price import ItemPriceService
             from core.api.references.item_operation import ItemOperationService
             from core.api.references.price_type import PriceTypeService
+            from core.api.references.operating_cash import OperatingCashService 
 
             self.brand = BrandService(api)
             self.currency = CurrencyService(api)
@@ -120,6 +121,7 @@ class RegosAPI:
             self.item_operation = ItemOperationService(api)
             self.price_type = PriceTypeService(api)
             self.partner = PartnerService(api)
+            self.operating_cash = OperatingCashService(api)
 
     class Rbac:
         def __init__(self, api: "RegosAPI"):

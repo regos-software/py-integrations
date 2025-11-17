@@ -1,7 +1,7 @@
 import httpx
 import json
 from enum import Enum
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Set
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
@@ -49,6 +49,7 @@ class TelegramSettings(Enum):
     BOT_TOKEN = "BOT_TOKEN"
     CHAT_IDS = "CHAT_IDS"
     CHEQUE_NOTIFICATION = "CHEQUE_NOTIFICATION"
+    STOCK_IDS = "STOCK_IDS"
 
 
 # Configuration for Telegram bot
@@ -102,7 +103,35 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
 
         s = str(raw).strip().lower()
         return s not in {"false", "0"}
+    def _parse_stock_ids(self, settings_map: Dict[str, str]) -> Optional[Set[int]]:
+        """
+        STOCK_IDS — строка с ID складов через запятую.
+        Пустая строка или отсутствие настройки = нет фильтрации (все склады).
+        """
+        raw = settings_map.get(TelegramSettings.STOCK_IDS.value.lower())
+        if raw is None:
+            return None
 
+        text = str(raw).strip()
+        if not text:
+            return None
+
+        result: Set[int] = set()
+        for part in text.replace(";", ",").split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                result.add(int(part))
+            except ValueError:
+                logger.warning(
+                    "Invalid STOCK_IDS value '%s' in settings (ID=%s)",
+                    part,
+                    self.connected_integration_id,
+                )
+
+        return result or None
+    
     async def _fetch_settings(self, cache_key: str) -> Optional[Dict[str, str]]:
         """Retrieve settings from Redis cache or API."""
         # Try to get settings from Redis cache
@@ -492,12 +521,13 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         await self.connect()
         return IntegrationSuccessResponse(result={"status": "settings updated"})
 
-
     async def handle_webhook(
         self, action: Optional[str] = None, data: Optional[Dict] = None, **kwargs
     ) -> Dict:
         """Process incoming webhook requests from the API."""
         logger.info(f"Processing webhook for ID {self.connected_integration_id}")
+
+        # Унификация входа: либо {action, data}, либо отдельные аргументы
         if isinstance(data, dict) and "action" in data:
             webhook_action = data.get("action")
             webhook_data = data.get("data", {})
@@ -515,24 +545,35 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             "DocChequeCanceled",
         }
         if webhook_action not in supported_actions:
-            return self._create_error_response(1006, f"Unsupported action: {webhook_action}")
+            return self._create_error_response(
+                1006, f"Unsupported action: {webhook_action}"
+            )
 
         uuid = webhook_data.get("uuid") or webhook_data.get("session_uuid")
         if not uuid:
-            return self._create_error_response(1007, "Webhook missing uuid/session_uuid")
+            return self._create_error_response(
+                1007, "Webhook missing uuid/session_uuid"
+            )
 
-        # Fetch settings
+        # Получаем настройки интеграции
         cache_key = f"clients:settings:telegram:{self.connected_integration_id}"
         try:
             settings_map = await self._fetch_settings(cache_key)
             bot_token = settings_map.get(TelegramSettings.BOT_TOKEN.value.lower())
             raw_chat_ids = settings_map.get(TelegramSettings.CHAT_IDS.value.lower())
             subscribers = parse_chat_ids(raw_chat_ids)
+
+            # --- Фильтр по складам (STOCK_IDS) ---
+            allowed_stock_ids = self._parse_stock_ids(settings_map)
+            # None -> фильтра нет, шлём по всем складам
+
             if not bot_token:
                 return self._create_error_response(1002, "No bot token in settings")
             if not subscribers:
                 logger.warning(f"No subscribers for {webhook_action} (uuid={uuid})")
                 return {"status": "ok", "message": "No subscribers"}
+
+            # Отключение чеков на уровне настройки CHEQUE_NOTIFICATION
             if webhook_action in {"DocChequeClosed", "DocChequeCanceled"}:
                 if not self._cheque_notifications_enabled(settings_map):
                     logger.info(
@@ -545,81 +586,207 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                         "action": webhook_action,
                         "uuid": uuid,
                     }
+
         except Exception as error:
             logger.error(f"Error fetching settings: {error}")
-            return self._create_error_response(1001, f"Settings retrieval error: {error}")
+            return self._create_error_response(
+                1001, f"Settings retrieval error: {error}"
+            )
 
         await self._initialize_bot()
+
         message_text = ""
-        keyboard = None
+        keyboard: Optional[InlineKeyboardMarkup] = None
+
         try:
+            # ---------------- ЧЕК ----------------
             if webhook_action in {"DocChequeClosed", "DocChequeCanceled"}:
                 async with RegosAPI(self.connected_integration_id) as api:
+                    from schemas.api.references.operating_cash import (
+                        OperatingCashGetRequest,
+                    )
+
                     cheques_resp = await api.docs.cheque.get_by_uuids([uuid])
+                    raw_cheques = getattr(cheques_resp, "result", cheques_resp) or []
 
-                # Минимальный фикс: принудительно приводим к DocCheque
-                raw_cheques = getattr(cheques_resp, "result", cheques_resp) or []
-                if not raw_cheques:
-                    logger.warning(f"Cheque with UUID {uuid} not found")
-                    message_text = (
-                        f"*Event:* `{webhook_action}`\nUUID: `{uuid}`\nDetails: Cheque not found"
-                    )
-                else:
-                    cheque = (
-                        raw_cheques[0]
-                        if isinstance(raw_cheques[0], DocCheque)
-                        else DocCheque.model_validate(raw_cheques[0])
-                    )
-                    message_text = format_cheque_notification(
-                        cheque=cheque, action=webhook_action
-                    )
-                    # Кнопка деталей
-                    keyboard = InlineKeyboardMarkup(
-                        inline_keyboard=[
-                            [
-                                InlineKeyboardButton(
-                                    text="Детали чека",
-                                    callback_data=f"cdetails_{uuid}_{webhook_action}",
+                    if not raw_cheques:
+                        logger.warning(f"Cheque with UUID {uuid} not found")
+                        message_text = (
+                            f"*Event:* `{webhook_action}`\n"
+                            f"UUID: `{uuid}`\n"
+                            f"Details: Cheque not found"
+                        )
+                    else:
+                        # Приводим к DocCheque
+                        cheque = (
+                            raw_cheques[0]
+                            if isinstance(raw_cheques[0], DocCheque)
+                            else DocCheque.model_validate(raw_cheques[0])
+                        )
+
+                        # --- Фильтрация по STOCK_IDS через смену и кассу ---
+                        stock_id_for_filter: Optional[int] = None
+                        if allowed_stock_ids:
+                            session_uuid = cheque.session  # UUID кассовой сессии
+
+                            try:
+                                # 1. Получаем смену
+                                sessions_resp = await api.docs.cash_session.get_by_uuids(
+                                    [session_uuid]
                                 )
-                            ]
-                        ]
-                    )
+                                sessions = getattr(
+                                    sessions_resp, "result", sessions_resp
+                                ) or []
 
-            elif webhook_action in {"DocSessionOpened", "DocSessionClosed"}:
-                async with RegosAPI(self.connected_integration_id) as api:
-                    sessions_resp = await api.docs.cash_session.get_by_uuids([uuid])
-                sessions = getattr(sessions_resp, "result", sessions_resp)
-                if not sessions:
-                    logger.warning(f"Session with UUID {uuid} not found")
-                    message_text = (
-                        f"*Event:* `{webhook_action}`\nUUID: `{uuid}`\nDetails: Session not found"
-                    )
-                else:
-                    session = sessions[0]
-                    message_text = format_session_notification(
-                        session=session, action=webhook_action
-                    )
-                    if getattr(session, "closed", False):
+                                if sessions:
+                                    session = sessions[0]
+
+                                    # 2. Получаем кассу (OperatingCash)
+                                    oc_resp = await api.references.operating_cash.get(
+                                        OperatingCashGetRequest(
+                                            ids=[session.operating_cash_id]
+                                        )
+                                    )
+                                    oc_list = getattr(
+                                        oc_resp, "result", oc_resp
+                                    ) or []
+                                    if oc_list:
+                                        operating_cash = oc_list[0]
+                                        stock = getattr(operating_cash, "stock", None)
+                                        stock_id_for_filter = getattr(stock, "id", None)
+
+                            except Exception as error:
+                                logger.error(
+                                    "Error fetching session/operating cash for cheque %s: %s",
+                                    uuid,
+                                    error,
+                                )
+
+                            # Если склад определён и не входит в список разрешённых — пропускаем вебхук
+                            if (
+                                stock_id_for_filter is not None
+                                and stock_id_for_filter not in allowed_stock_ids
+                            ):
+                                logger.info(
+                                    "Skipping cheque webhook %s due to STOCK_IDS filter "
+                                    "(stock_id=%s, allowed=%s)",
+                                    uuid,
+                                    stock_id_for_filter,
+                                    allowed_stock_ids,
+                                )
+                                return {
+                                    "status": "ok",
+                                    "message": "Cheque filtered by STOCK_IDS",
+                                    "action": webhook_action,
+                                    "uuid": uuid,
+                                    "stock_id": stock_id_for_filter,
+                                }
+
+                        # Если фильтр не сработал / не задан — формируем уведомление как раньше
+                        message_text = format_cheque_notification(
+                            cheque=cheque, action=webhook_action
+                        )
                         keyboard = InlineKeyboardMarkup(
                             inline_keyboard=[
                                 [
                                     InlineKeyboardButton(
-                                        text="Детали смены",
-                                        callback_data=f"sdetails_{uuid}_{webhook_action}",
+                                        text="Детали чека",
+                                        callback_data=f"cdetails_{uuid}_{webhook_action}",
                                     )
                                 ]
                             ]
                         )
+
+            # ---------------- СМЕНА ----------------
+            elif webhook_action in {"DocSessionOpened", "DocSessionClosed"}:
+                async with RegosAPI(self.connected_integration_id) as api:
+                    from schemas.api.references.operating_cash import (
+                        OperatingCashGetRequest,
+                    )
+
+                    sessions_resp = await api.docs.cash_session.get_by_uuids([uuid])
+                    sessions = getattr(sessions_resp, "result", sessions_resp) or []
+
+                    if not sessions:
+                        logger.warning(f"Session with UUID {uuid} not found")
+                        message_text = (
+                            f"*Event:* `{webhook_action}`\n"
+                            f"UUID: `{uuid}`\n"
+                            f"Details: Session not found"
+                        )
+                    else:
+                        session = sessions[0]
+
+                        # --- Фильтр по STOCK_IDS через кассу ---
+                        stock_id_for_filter: Optional[int] = None
+                        if allowed_stock_ids:
+                            try:
+                                oc_resp = await api.references.operating_cash.get(
+                                    OperatingCashGetRequest(
+                                        ids=[session.operating_cash_id]
+                                    )
+                                )
+                                oc_list = getattr(oc_resp, "result", oc_resp) or []
+                                if oc_list:
+                                    operating_cash = oc_list[0]
+                                    stock = getattr(operating_cash, "stock", None)
+                                    stock_id_for_filter = getattr(stock, "id", None)
+                            except Exception as error:
+                                logger.error(
+                                    "Error fetching operating cash for session %s: %s",
+                                    uuid,
+                                    error,
+                                )
+
+                            if (
+                                stock_id_for_filter is not None
+                                and stock_id_for_filter not in allowed_stock_ids
+                            ):
+                                logger.info(
+                                    "Skipping session webhook %s due to STOCK_IDS filter "
+                                    "(stock_id=%s, allowed=%s)",
+                                    uuid,
+                                    stock_id_for_filter,
+                                    allowed_stock_ids,
+                                )
+                                return {
+                                    "status": "ok",
+                                    "message": "Session filtered by STOCK_IDS",
+                                    "action": webhook_action,
+                                    "uuid": uuid,
+                                    "stock_id": stock_id_for_filter,
+                                }
+
+                        # Формируем уведомление как раньше
+                        message_text = format_session_notification(
+                            session=session, action=webhook_action
+                        )
+                        if getattr(session, "closed", False):
+                            keyboard = InlineKeyboardMarkup(
+                                inline_keyboard=[
+                                    [
+                                        InlineKeyboardButton(
+                                            text="Детали смены",
+                                            callback_data=f"sdetails_{uuid}_{webhook_action}",
+                                        )
+                                    ]
+                                ]
+                            )
+
             else:
+                # На всякий случай fallback (хотя все поддерживаемые action уже перечислены)
                 message_text = "Webhook action not supported for notifications"
 
         except Exception as error:
             logger.error(f"Error formatting message: {error}")
             message_text = (
-                f"*Event:* `{webhook_action}`\nUUID: `{uuid}`\nDetails unavailable: `{str(error)}`"
+                f"*Event:* `{webhook_action}`\n"
+                f"UUID: `{uuid}`\n"
+                f"Details unavailable: `{str(error)}`"
             )
 
-        results = []
+        # Рассылка сообщений подписчикам
+        results: List[Dict] = []
         for chat_id in subscribers:
             try:
                 await self.bot.send_message(
@@ -630,13 +797,15 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                 results.append({"status": "sent", "chat_id": chat_id})
             except Exception as error:
                 logger.error(f"Error sending message to chat {chat_id}: {error}")
-                results.append({"status": "error", "chat_id": chat_id, "error": str(error)})
+                results.append(
+                    {"status": "error", "chat_id": chat_id, "error": str(error)}
+                )
 
         return {
             "status": "webhook processed",
             "action": webhook_action,
             "uuid": uuid,
-            "sent_to": len([result for result in results if result["status"] == "sent"]),
+            "sent_to": len([r for r in results if r["status"] == "sent"]),
             "details": results,
         }
 

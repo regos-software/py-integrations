@@ -28,8 +28,8 @@ class DocChequeOperation(BaseSchema):
     item: Optional[Item] = PydField(default=None, description="Позиция номенклатуры.")
     order: int = PydField(..., ge=0, description="Порядковый номер в документе.")
     quantity: Decimal = PydField(..., description="Количество товара.")
-    price: Decimal = PydField(..., description="Цена продажи.")
-    price2: Decimal = PydField(..., description="Дополнительная цена (если есть).")
+    price: Decimal = PydField(..., description="Цена продажи (с учётом скидок).")
+    price2: Decimal = PydField(..., description="Цена без скидки")
     promo_id: Optional[int] = PydField(
         default=None, description="ID применённой акции."
     )
