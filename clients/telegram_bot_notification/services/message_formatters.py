@@ -74,18 +74,13 @@ def format_session_notification(*, session: DocCashSession, action: str) -> str:
 
     return "\n".join(message)
 
-
 def format_cheque_details(
     *,
     cheque: DocCheque,
     operations: List[DocChequeOperation],
     payments: List[DocChequePayment],
 ) -> str:
-    """
-    Creates a formatted message for cheque details, including itemized operations.
-    """
 
-    # Build the header
     message_parts = [
         "*ДЕТАЛИ ЧЕКА*",
         "----------------------",
@@ -96,48 +91,58 @@ def format_cheque_details(
         "----------------------",
     ]
 
-    # Process operations (items)
+    total_discount = Decimal("0")
+    total_without_discount = Decimal("0")
+
+    # === ОПЕРАЦИИ ===
     if not operations:
         message_parts.append("_Нет товаров._")
     else:
-        max_items = 30  # Limit the number of items displayed
+        max_items = 30
         for index, operation in enumerate(operations, start=1):
             item = getattr(operation, "item", None)
-            name = (
-                getattr(item, "name", None)
-                or getattr(item, "fullname", None)
-                or "No name"
-            )
-            quantity = getattr(operation, "quantity", None)
-            price = getattr(operation, "price", None)
+            name = getattr(item, "name", None) or getattr(item, "fullname", None) or "No name"
 
-            # Calculate total for the item
-            try:
-                item_total = (
-                    quantity * price
-                    if quantity is not None and price is not None
-                    else None
-                )
-            except Exception:
-                item_total = None
+            quantity = operation.quantity
+            price = operation.price
+            price2 = operation.price2
 
-            # Format values
-            quantity_text = f"{quantity}" if quantity is not None else "0"
-            price_text = format_money(price) if price is not None else "0.00 "
-            total_text = format_money(item_total) if item_total is not None else "0.00 "
+            total = quantity * price               # со скидкой
+            total2 = quantity * price2             # без скидки
+            discount_item = total2 - total
 
-            # Add item line
+            total_discount += discount_item
+            total_without_discount += total2
+
             message_parts.append(
-                f"{index}. *{name}*\n `{quantity_text} × {price_text} = {total_text}`"
+                f"{index}. *{name}*\n"
+                f"`{quantity} × {format_money(price)} = {format_money(total)}`"
             )
 
-            # Truncate if exceeding max items
+            if discount_item > 0:
+                message_parts.append(
+                    f"  _Скидка:_ `{format_money(discount_item)}`"
+                )
+
             if index >= max_items:
                 message_parts.append("_…Список товаров ограничен 30 позициями_")
                 break
+
     message_parts.append("----------------------")
-    message_parts.append(f"*Итого:* `{format_money(cheque.amount)}`")
+
+    # === ИТОГО ПО ЧЕКУ ===
+    if total_without_discount > 0 and total_discount > 0:
+        discount_percent = (total_discount / total_without_discount) * 100
+        discount_percent = discount_percent.quantize(Decimal("0.1"))
+
+        message_parts.append(f"*Итого:* `{format_money(total_without_discount)}`")
+        message_parts.append(f"*Скидка:* `{format_money(total_discount)}`")
+        message_parts.append(f"*Скидка %:* `{discount_percent}%`")
+
+    message_parts.append(f"*К оплате:* `{format_money(cheque.amount)}`")
     message_parts.append("----------------------")
+
+    # === ОПЛАТЫ ===
     if not payments:
         message_parts.append("_Нет оплат._")
     else:
@@ -145,6 +150,7 @@ def format_cheque_details(
             payment_type = payment.type.name
             value = getattr(payment, "value", 0)
             message_parts.append(f"{payment_type}: `{format_money(value)}`")
+
     message_parts.append("━━━━━━━━━━━━━━")
     return "\n".join(message_parts)
 
