@@ -19,23 +19,15 @@ class OperatingCash(BaseSchema):
     model_config = ConfigDict(extra="ignore")
 
     id: int = PydField(..., description="ID розничной кассы.")
-    stock: Stock = PydField(..., description="Склад.")
-    key: str = PydField(..., description="Ключ безопасности кассы.")
-    price_type: PriceType = PydField(..., description="Вид цены.")
-    description: Optional[str] = PydField(
-        default=None, description="Дополнительное описание."
-    )
-    virtual: bool = PydField(..., description="Признак виртуальной кассы.")
-    auto_close: bool = PydField(..., description="Автоматическое закрытие смены.")
-    max_cheque_quantity_in_session: int = PydField(
-        ..., description="Макс. число чеков за смену."
-    )
-    last_update: int = PydField(
-        ..., ge=0, description="Дата последнего изменения (Unix, сек)."
-    )
-    user_accept: User = PydField(
-        ..., description="Пользователь, принявший кассу в работу."
-    )
+    stock: Optional[Stock] = PydField(default=None, description="Склад кассы.")
+    key: Optional[str] = PydField(default=None, description="Ключ безопасности кассы.")
+    price_type: Optional[PriceType] = PydField(default=None, description="Вид цены.")
+    description: Optional[str] = None
+    virtual: Optional[bool] = None
+    auto_close: Optional[bool] = None
+    max_cheque_quantity_in_session: Optional[int] = None
+    last_update: Optional[int] = None
+    user_accept: Optional[User] = None
 
 
 class OperatingCashSortColumn(str, Enum):

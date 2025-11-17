@@ -103,6 +103,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
 
         s = str(raw).strip().lower()
         return s not in {"false", "0"}
+   
     def _parse_stock_ids(self, settings_map: Dict[str, str]) -> Optional[Set[int]]:
         """
         STOCK_IDS — строка с ID складов через запятую.
