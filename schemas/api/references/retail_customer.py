@@ -187,9 +187,11 @@ class RetailCustomerAddRequest(BaseSchema):
             return v
         if isinstance(v, str):
             s = v.strip().lower()
-            if s in {"non", "male", "female"}:
+            if s == "none":
+                return Sex.non
+            if s in {"male", "female"}:
                 return Sex(s)
-        raise ValueError("sex должен быть одним из: non | male | female")
+        raise ValueError("sex должен быть одним из: none | male | female")
 
 
 # ---------- Edit ----------
@@ -251,9 +253,11 @@ class RetailCustomerEditRequest(BaseSchema):
             return v
         if isinstance(v, str):
             s = v.strip().lower()
-            if s in {"non", "male", "female"}:
+            if s == "none":
+                return Sex.non
+            if s in {"male", "female"}:
                 return Sex(s)
-        raise ValueError("sex должен быть одним из: non | male | female")
+        raise ValueError("sex должен быть одним из: none | male | female")
 
 
 # ---------- DeleteMark ----------
