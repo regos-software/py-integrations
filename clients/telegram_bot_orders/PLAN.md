@@ -33,7 +33,7 @@
 ## 4) Клиент telegram_bot_orders — сделано (каркас + логика)
 - Создан clients/telegram_bot_orders/main.py.
 - Реализован handle_external для webhook Telegram.
-- Добавлены команды: /catalog, /add, /cart, /remove, /clear, /order, /card.
+- Управление через inline-кнопки (каталог, корзина, оформление заказа, карты покупателя).
 - Подключен Redis для корзины и кеша настроек.
 - Поиск покупателя по телефону (после "Поделиться номером"), установка field_telegram_id.
 - Создание RetailCustomer/Add при отсутствии.

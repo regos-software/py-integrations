@@ -71,7 +71,10 @@ class FieldValue(BaseModel):
     key: str
     name: str
     data_type: FieldDataType
-    value: str = PydField(..., description="Строковое представление значения")
+    value: Optional[str] = PydField(
+        default=None,
+        description="Строковое представление значения",
+    )
 
     @field_validator("data_type", mode="before")
     @classmethod
