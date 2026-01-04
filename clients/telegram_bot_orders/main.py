@@ -251,7 +251,10 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                 Texts.CART_EMPTY, reply_markup=self._main_menu_keyboard()
             )
             return
-        labels = [f"{idx}. {row['name']}" for idx, row in enumerate(cart, start=1)]
+        labels = [
+            Texts.cart_button_label(idx, row["name"])
+            for idx, row in enumerate(cart, start=1)
+        ]
         item_buttons = [
             {"label": label, "item_id": row["item_id"]}
             for label, row in zip(labels, cart)
@@ -687,8 +690,8 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             if entry.quantity and entry.quantity.common is not None
             else None
         )
-        qty_text = Texts.item_qty_suffix(qty) if qty is not None else ""
-        return Texts.item_line(index, name, price, qty_text)
+        qty_line = Texts.item_qty_line(qty) if qty is not None else ""
+        return Texts.item_line(index, name, price, qty_line)
 
     def _format_catalog_list(
         self,
@@ -708,6 +711,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             return "\n".join(lines)
         for idx, entry in enumerate(items, start=1):
             lines.append(self._format_item_line(idx, entry))
+            lines.append("")
         return "\n".join(lines)
 
     def _format_item_detail(self, entry: ItemExt) -> str:
@@ -1153,8 +1157,13 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         for idx, row in enumerate(cart, start=1):
             price = Decimal(str(row["price"]))
             qty = Decimal(str(row["qty"]))
-            total += price * qty
-            lines.append(Texts.cart_line(idx, row["name"], qty, price))
+            line_total = price * qty
+            total += line_total
+            lines.append(Texts.cart_item_header(idx, row["name"]))
+            lines.append(Texts.cart_item_details(qty, price, line_total))
+            lines.append(Texts.CART_SEPARATOR)
+        if lines and lines[-1] == Texts.CART_SEPARATOR:
+            lines.pop()
         lines.append(Texts.cart_total(total))
         lines.append(Texts.CART_HINT)
         return "\n".join(lines)

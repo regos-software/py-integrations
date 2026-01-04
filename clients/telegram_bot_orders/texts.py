@@ -24,7 +24,7 @@ class TelegramBotOrdersTexts:
     BUTTON_MENU_MAIN = "Меню"
     BUTTON_CATEGORIES = "Категории"
     BUTTON_ALL_ITEMS = "Все товары"
-    BUTTON_CART_CLEAR = "Очистить корзину"
+    BUTTON_CART_CLEAR = "🗑 Очистить корзину"
     BUTTON_CART_REMOVE = "Удалить позицию"
     BUTTON_ADD = "➕ Добавить"
     BUTTON_DETAILS = "Подробнее"
@@ -51,8 +51,10 @@ class TelegramBotOrdersTexts:
     CART_SELECT_NUMBER_REMOVE = "Отправьте номер позиции для удаления."
     CART_NUMBER_INVALID = "Некорректный номер позиции."
     CART_ITEM_REMOVED = "Позиция удалена."
-    CART_TITLE = "Корзина:"
-    CART_LINE = "{index}. {name}: {qty} x {price}"
+    CART_TITLE = "*Корзина*"
+    CART_SEPARATOR = "----"
+    CART_ITEM_HEADER = "❌ {index}. {name}"
+    CART_ITEM_DETAILS = "Количество: {qty}\nЦена: {price}\nСумма: {total}"
     CART_TOTAL = "Итого: {total}"
     CART_HINT = "Используйте кнопки ниже, чтобы изменить корзину."
     CATALOG_TITLE = "*Каталог* (стр. {page})"
@@ -62,7 +64,8 @@ class TelegramBotOrdersTexts:
     CATALOG_SEARCH_PROMPT = (
         "*Поиск*\nВведите запрос (название, артикул, код или штрих-код)."
     )
-    ITEM_LINE = "{index}. *{name}* - {price}{qty_text}"
+    ITEM_LINE = "{index}. *{name}*\nЦена: {price}{qty_line}"
+    ITEM_QTY_LINE = "\nОстаток: {qty}"
     ITEM_QTY_SUFFIX = ", остаток {qty}"
     ITEM_DETAIL_PRICE = "*Цена:* {price}"
     ITEM_DETAIL_QTY = "*Остаток:* {qty}"
@@ -165,9 +168,13 @@ class TelegramBotOrdersTexts:
         return TelegramBotOrdersTexts.ITEM_QTY_SUFFIX.format(qty=qty)
 
     @staticmethod
-    def item_line(index: int, name: str, price, qty_text: str) -> str:
+    def item_qty_line(qty) -> str:
+        return TelegramBotOrdersTexts.ITEM_QTY_LINE.format(qty=qty)
+
+    @staticmethod
+    def item_line(index: int, name: str, price, qty_line: str) -> str:
         return TelegramBotOrdersTexts.ITEM_LINE.format(
-            index=index, name=name, price=price, qty_text=qty_text
+            index=index, name=name, price=price, qty_line=qty_line
         )
 
     @staticmethod
@@ -198,10 +205,18 @@ class TelegramBotOrdersTexts:
         return lines
 
     @staticmethod
-    def cart_line(index: int, name: str, qty, price) -> str:
-        return TelegramBotOrdersTexts.CART_LINE.format(
-            index=index, name=name, qty=qty, price=price
+    def cart_item_header(index: int, name: str) -> str:
+        return TelegramBotOrdersTexts.CART_ITEM_HEADER.format(index=index, name=name)
+
+    @staticmethod
+    def cart_item_details(qty, price, total) -> str:
+        return TelegramBotOrdersTexts.CART_ITEM_DETAILS.format(
+            qty=qty, price=price, total=total
         )
+
+    @staticmethod
+    def cart_button_label(index: int, name: str) -> str:
+        return TelegramBotOrdersTexts.CART_ITEM_HEADER.format(index=index, name=name)
 
     @staticmethod
     def cart_total(total) -> str:
