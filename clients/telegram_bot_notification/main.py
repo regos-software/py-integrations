@@ -16,6 +16,7 @@ from clients.telegram_bot_notification.services.message_formatters import (
     format_session_details,
     format_session_notification,
 )
+from clients.telegram_polling import telegram_polling_manager
 from schemas.api.docs.cash_amount_details import CashAmountDetails, CashAmountDetailsGetRequest
 from schemas.api.docs.cheque import DocCheque
 from schemas.api.docs.cheque_payment import DocChequePayment, DocChequePaymentGetRequest
@@ -137,6 +138,9 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
     def _is_longpolling_mode() -> bool:
         mode = str(settings.telegram_update_mode or "").strip().lower()
         return mode in {"longpolling", "long_polling", "long-polling", "polling"}
+
+    def _polling_key(self) -> str:
+        return f"{TelegramBotConfig.INTEGRATION_KEY}:{self.connected_integration_id or 'unknown'}"
     
     async def _fetch_settings(self, cache_key: str) -> Optional[Dict[str, str]]:
         """Retrieve settings from Redis cache or API."""
@@ -475,9 +479,13 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
 
             if self._is_longpolling_mode():
                 await self.bot.delete_webhook(drop_pending_updates=True)
+                await telegram_polling_manager.start(
+                    self._polling_key(), self.bot, self.dispatcher
+                )
                 logger.info("Webhook deleted (longpolling mode).")
                 return {"status": "connected", "mode": "longpolling"}
 
+            await telegram_polling_manager.stop(self._polling_key())
             webhook_url = (
                 f"{TelegramBotConfig.WEBHOOK_BASE_URL}/{self.connected_integration_id}/external/"
             )
@@ -496,6 +504,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         logger.info(
             f"Disconnecting from TelegramBotNotificationIntegration (ID: {self.connected_integration_id})"
         )
+        await telegram_polling_manager.stop(self._polling_key())
         if not self.bot:
             return {"status": "disconnected", "message": "Bot not initialized"}
         try:

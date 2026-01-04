@@ -15,6 +15,7 @@ from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboar
 from aiogram.types import Update as TelegramUpdate
 
 from clients.base import ClientBase
+from clients.telegram_polling import telegram_polling_manager
 from config.settings import settings as app_settings
 from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
@@ -179,6 +180,9 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         mode = str(app_settings.telegram_update_mode or "").strip().lower()
         return mode in {"longpolling", "long_polling", "long-polling", "polling"}
 
+    def _polling_key(self) -> str:
+        return f"{TelegramBotOrdersConfig.INTEGRATION_KEY}:{self.connected_integration_id or 'unknown'}"
+
     def _is_work_time(self, settings_map: Dict[str, str]) -> bool:
         enabled = self._parse_bool(
             settings_map.get(TelegramOrdersSettings.WORK_TIME_ENABLED.value.lower())
@@ -205,8 +209,12 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             return {"status": "connected"}
         if self._is_longpolling_mode():
             await self.bot.delete_webhook(drop_pending_updates=True)
+            await telegram_polling_manager.start(
+                self._polling_key(), self.bot, self.dispatcher
+            )
             logger.info("Webhook deleted (longpolling mode).")
             return {"status": "connected", "mode": "longpolling"}
+        await telegram_polling_manager.stop(self._polling_key())
         webhook_url = (
             f"{TelegramBotOrdersConfig.WEBHOOK_BASE_URL}/"
             f"{self.connected_integration_id}/external/"
@@ -214,6 +222,22 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         await self.bot.set_webhook(url=webhook_url)
         logger.info(f"Webhook set: {webhook_url}")
         return {"status": "connected", "mode": "webhook", "webhook_url": webhook_url}
+
+    async def disconnect(self, **kwargs) -> Dict[str, Any]:
+        await telegram_polling_manager.stop(self._polling_key())
+        if not self.bot:
+            return {"status": "disconnected", "message": "Bot not initialized"}
+        try:
+            await self.bot.delete_webhook(drop_pending_updates=True)
+            await self.bot.close()
+            self.bot = None
+            self.dispatcher = None
+            self.handlers_registered = False
+            logger.info("Webhook removed")
+            return {"status": "disconnected"}
+        except Exception as error:
+            logger.error(f"Disconnection error: {error}")
+            return self._error_response(1004, f"Webhook removal failed: {error}").dict()
 
     async def update_settings(
         self,
