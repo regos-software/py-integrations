@@ -15,7 +15,6 @@ class TelegramBotOrdersTexts:
     CALLBACK_INVALID_DATA = "Некорректные данные"
     CALLBACK_ADD_FAILED = "Не удалось добавить"
     CALLBACK_ADDED = "Добавлено"
-    CALLBACK_FILTERS_NOT_READY = "Фильтры пока не настроены"
     REQUEST_PHONE = "Пожалуйста, поделитесь номером телефона для оформления заказа."
     BUTTON_SHARE_PHONE = "Поделиться номером"
     BUTTON_MENU_CATALOG = "Каталог"
@@ -23,14 +22,15 @@ class TelegramBotOrdersTexts:
     BUTTON_MENU_ORDER = "Оформить заказ"
     BUTTON_MENU_CARDS = "Карты покупателя"
     BUTTON_MENU_MAIN = "Меню"
+    BUTTON_CATEGORIES = "Категории"
+    BUTTON_ALL_ITEMS = "Все товары"
     BUTTON_CART_CLEAR = "Очистить корзину"
-    BUTTON_REMOVE_ITEM = "Удалить {item_id}"
+    BUTTON_CART_REMOVE = "Удалить позицию"
     BUTTON_ADD = "➕ Добавить"
     BUTTON_DETAILS = "Подробнее"
     BUTTON_BACK = "⬅ Назад"
     BUTTON_NEXT = "Вперёд ➡"
     BUTTON_SEARCH = "Поиск"
-    BUTTON_FILTERS = "Фильтры"
     BUTTON_BACK_TO_LIST = "Назад к списку"
     BUTTON_BACK_TO_CATALOG = "Назад к каталогу"
     BUTTON_CART = "Корзина"
@@ -44,11 +44,21 @@ class TelegramBotOrdersTexts:
     ORDER_CREATE_ERROR = "Ошибка при создании заказа."
     ORDER_ACCEPTED = "Заказ принят. Спасибо!"
     NO_CARDS = "У покупателя нет карт."
+    CATEGORIES_TITLE = "Выберите категорию:"
+    CATEGORIES_EMPTY = "Категории не найдены."
+    CATEGORIES_UNKNOWN = "Категория не найдена. Выберите из списка."
+    CATALOG_SELECT_NUMBER_ADD = "Отправьте номер товара для добавления."
+    CATALOG_SELECT_NUMBER_DETAIL = "Отправьте номер товара для просмотра."
+    CATALOG_NUMBER_INVALID = "Некорректный номер. Выберите из списка."
+    CART_SELECT_NUMBER_REMOVE = "Отправьте номер позиции для удаления."
+    CART_NUMBER_INVALID = "Некорректный номер позиции."
+    CART_ITEM_REMOVED = "Позиция удалена."
     CART_TITLE = "Корзина:"
-    CART_LINE = "- {name} (id={item_id}): {qty} x {price}"
+    CART_LINE = "{index}. {name}: {qty} x {price}"
     CART_TOTAL = "Итого: {total}"
     CART_HINT = "Используйте кнопки ниже, чтобы изменить корзину."
     CATALOG_TITLE = "*Каталог* (стр. {page})"
+    CATALOG_CATEGORY_LINE = "_Категория:_ {name}"
     CATALOG_SEARCH_LINE = "_Поиск:_ {query}"
     CATALOG_EMPTY_LINE = "_Нет товаров_"
     CATALOG_SEARCH_PROMPT = (
@@ -56,7 +66,6 @@ class TelegramBotOrdersTexts:
     )
     ITEM_LINE = "{index}. *{name}* - {price}{qty_text}"
     ITEM_QTY_SUFFIX = ", остаток {qty}"
-    ITEM_DETAIL_ID = "*ID:* {item_id}"
     ITEM_DETAIL_PRICE = "*Цена:* {price}"
     ITEM_DETAIL_QTY = "*Остаток:* {qty}"
     ITEM_DETAIL_ARTICUL = "*Артикул:* {articul}"
@@ -83,6 +92,7 @@ class TelegramBotOrdersTexts:
     BUTTON_SEND_LOCATION = "Отправить локацию"
     REQUEST_DESCRIPTION = "Напишите примечание к заказу."
     ITEM_NOT_FOUND = "Номенклатура не найдена."
+    ITEM_UNNAMED = "Товар"
 
     @staticmethod
     def log_redis_error(error) -> str:
@@ -145,6 +155,10 @@ class TelegramBotOrdersTexts:
         return TelegramBotOrdersTexts.CATALOG_SEARCH_LINE.format(query=query)
 
     @staticmethod
+    def catalog_category_line(name: str) -> str:
+        return TelegramBotOrdersTexts.CATALOG_CATEGORY_LINE.format(name=name)
+
+    @staticmethod
     def catalog_empty_line() -> str:
         return TelegramBotOrdersTexts.CATALOG_EMPTY_LINE
 
@@ -161,7 +175,6 @@ class TelegramBotOrdersTexts:
     @staticmethod
     def item_detail_lines(
         name: str,
-        item_id: int,
         price,
         qty: Optional[float] = None,
         articul: Optional[str] = None,
@@ -170,7 +183,6 @@ class TelegramBotOrdersTexts:
     ) -> List[str]:
         lines = [
             f"*{name}*",
-            TelegramBotOrdersTexts.ITEM_DETAIL_ID.format(item_id=item_id),
             TelegramBotOrdersTexts.ITEM_DETAIL_PRICE.format(price=price),
         ]
         if qty is not None:
@@ -188,9 +200,9 @@ class TelegramBotOrdersTexts:
         return lines
 
     @staticmethod
-    def cart_line(name: str, item_id: int, qty, price) -> str:
+    def cart_line(index: int, name: str, qty, price) -> str:
         return TelegramBotOrdersTexts.CART_LINE.format(
-            name=name, item_id=item_id, qty=qty, price=price
+            index=index, name=name, qty=qty, price=price
         )
 
     @staticmethod

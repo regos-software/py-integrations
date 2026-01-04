@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 from aiogram import Bot, Dispatcher, types
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import BufferedInputFile
 from aiogram.types import Update as TelegramUpdate
 
 from clients.base import ClientBase
@@ -38,6 +38,7 @@ from schemas.api.docs.order_delivery import (
     Location,
 )
 from schemas.api.references.item import ItemExt, ItemGetExtImageSize, ItemGetExtRequest
+from schemas.api.references.item_group import ItemGroup, ItemGroupGetRequest
 from schemas.api.references.retail_card import RetailCardGetRequest
 from schemas.api.references.fields import FieldValueAdd, FieldValueEdit
 from schemas.api.references.retail_customer import (
@@ -72,6 +73,7 @@ class TelegramBotOrdersConfig:
     SETTINGS_TTL = app_settings.redis_cache_ttl
     CART_TTL = app_settings.redis_cache_ttl
     CATALOG_TTL = 60
+    GROUPS_TTL = 300
     CATALOG_PAGE_SIZE = 5
     ORDER_STATE_TTL = app_settings.redis_cache_ttl
     INTEGRATION_KEY = "telegram_bot_orders"
@@ -103,6 +105,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         self._memory_carts: Dict[str, List[dict]] = {}
         self._memory_catalog_state: Dict[str, Dict[str, Any]] = {}
         self._memory_order_state: Dict[str, Dict[str, Any]] = {}
+        self._memory_cart_state: Dict[str, Dict[str, Any]] = {}
 
     def _error_response(self, code: int, description: str) -> IntegrationErrorResponse:
         return IntegrationErrorResponse(
@@ -202,28 +205,17 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             return start <= now <= end
         return now >= start or now <= end
 
-    def _main_menu_keyboard(self) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup(
-            inline_keyboard=[
+    def _main_menu_keyboard(self) -> types.ReplyKeyboardMarkup:
+        return types.ReplyKeyboardMarkup(
+            keyboard=[
                 [
-                    InlineKeyboardButton(
-                        text=Texts.BUTTON_MENU_CATALOG, callback_data="menu:catalog"
-                    ),
-                    InlineKeyboardButton(
-                        text=Texts.BUTTON_MENU_CART, callback_data="menu:cart"
-                    ),
+                    types.KeyboardButton(text=Texts.BUTTON_MENU_CATALOG),
+                    types.KeyboardButton(text=Texts.BUTTON_MENU_CART),
                 ],
-                [
-                    InlineKeyboardButton(
-                        text=Texts.BUTTON_MENU_ORDER, callback_data="menu:order"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(
-                        text=Texts.BUTTON_MENU_CARDS, callback_data="menu:cards"
-                    )
-                ],
-            ]
+                [types.KeyboardButton(text=Texts.BUTTON_MENU_ORDER)],
+                [types.KeyboardButton(text=Texts.BUTTON_MENU_CARDS)],
+            ],
+            resize_keyboard=True,
         )
 
     async def _send_main_menu(
@@ -232,58 +224,133 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         message_text = text or Texts.MAIN_MENU
         await message.answer(message_text, reply_markup=self._main_menu_keyboard())
 
-    def _cart_keyboard(self, cart: List[dict]) -> InlineKeyboardMarkup:
-        rows = [
-            [
-                InlineKeyboardButton(
-                    text=Texts.BUTTON_REMOVE_ITEM.format(item_id=row["item_id"]),
-                    callback_data=f"cart:remove:{row['item_id']}",
-                )
-            ]
-            for row in cart
-        ]
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=Texts.BUTTON_CART_CLEAR, callback_data="cart:clear"
-                )
-            ]
+    def _cart_keyboard(self, cart: List[dict]) -> types.ReplyKeyboardMarkup:
+        return types.ReplyKeyboardMarkup(
+            keyboard=[
+                [types.KeyboardButton(text=Texts.BUTTON_CART_REMOVE)],
+                [
+                    types.KeyboardButton(text=Texts.BUTTON_CART_CLEAR),
+                    types.KeyboardButton(text=Texts.BUTTON_MENU_ORDER),
+                ],
+                [types.KeyboardButton(text=Texts.BUTTON_MENU_MAIN)],
+            ],
+            resize_keyboard=True,
         )
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=Texts.BUTTON_MENU_ORDER, callback_data="menu:order"
-                )
-            ]
-        )
-        rows.append(
-            [InlineKeyboardButton(text=Texts.BUTTON_MENU_MAIN, callback_data="menu:main")]
-        )
-        return InlineKeyboardMarkup(inline_keyboard=rows)
 
     async def _send_cart(self, message: types.Message) -> None:
         cart = await self._get_cart(str(message.chat.id))
         if not cart:
+            await self._clear_cart_state(str(message.chat.id))
             await message.answer(
                 Texts.CART_EMPTY, reply_markup=self._main_menu_keyboard()
             )
             return
+        await self._save_cart_state(
+            str(message.chat.id),
+            awaiting_remove=False,
+            item_ids=[row["item_id"] for row in cart],
+        )
         await message.answer(
             self._format_cart(cart), reply_markup=self._cart_keyboard(cart)
         )
 
     async def _handle_text(self, message: types.Message) -> None:
         text = message.text.strip() if message.text else ""
+        chat_id = str(message.chat.id)
         if text.startswith("/start"):
             await self._send_welcome(message)
             return
         if text.startswith("/"):
             await self._send_main_menu(message, Texts.MAIN_MENU_USE_BUTTONS)
             return
+        if text == Texts.BUTTON_MENU_MAIN:
+            await self._save_catalog_state(
+                chat_id,
+                None,
+                0,
+                view="categories",
+                group_id=None,
+                group_name=None,
+                awaiting_search=False,
+                awaiting_action=None,
+                page_item_ids=[],
+                selected_item_id=None,
+                category_map={},
+            )
+            await self._send_main_menu(message, Texts.MAIN_MENU)
+            return
+        if text in {Texts.BUTTON_MENU_CATALOG, Texts.BUTTON_CATEGORIES}:
+            await self._send_categories(message)
+            return
+        if text == Texts.BUTTON_MENU_CART:
+            await self._send_cart(message)
+            return
+        if text == Texts.BUTTON_MENU_ORDER:
+            await self._handle_order(message)
+            return
+        if text == Texts.BUTTON_MENU_CARDS:
+            await self._handle_cards(message)
+            return
+        if text == Texts.BUTTON_CART_CLEAR:
+            await self._clear_cart(chat_id)
+            await self._clear_cart_state(chat_id)
+            await self._send_cart(message)
+            return
+        if text == Texts.BUTTON_CART_REMOVE:
+            await self._prompt_cart_remove(message)
+            return
+        if text == Texts.BUTTON_BACK:
+            await self._send_catalog_page(chat_id, prev_page=True)
+            return
+        if text == Texts.BUTTON_NEXT:
+            await self._send_catalog_page(chat_id, next_page=True)
+            return
+        if text == Texts.BUTTON_BACK_TO_LIST:
+            await self._send_catalog_page(chat_id)
+            return
+        if text == Texts.BUTTON_BACK_TO_CATALOG:
+            await self._send_categories(message)
+            return
+        if text == Texts.BUTTON_ALL_ITEMS:
+            await self._select_category(chat_id, None, Texts.BUTTON_ALL_ITEMS, message)
+            return
+        if text == Texts.BUTTON_SEARCH:
+            await self._send_catalog_search_prompt(chat_id)
+            return
+        if text == Texts.BUTTON_ADD:
+            state = await self._get_catalog_state(chat_id)
+            if state.get("view") == "detail" and state.get("selected_item_id"):
+                result = await self._add_item_to_cart(
+                    chat_id, state["selected_item_id"], Decimal("1")
+                )
+                await message.answer(result or Texts.ITEM_NOT_FOUND)
+                return
+            await self._prompt_catalog_add(message)
+            return
+        if text == Texts.BUTTON_DETAILS:
+            await self._prompt_catalog_detail(message)
+            return
+
         if await self._handle_description(message):
             return
         if await self._handle_search_input(message):
             return
+        if await self._handle_catalog_number_action(message):
+            return
+        if await self._handle_cart_number_action(message):
+            return
+
+        state = await self._get_catalog_state(chat_id)
+        category_map = state.get("category_map") or {}
+        if text in category_map:
+            await self._select_category(chat_id, category_map[text], text, message)
+            return
+
+        if state.get("view") == "categories" and text:
+            await message.answer(Texts.CATEGORIES_UNKNOWN)
+            await self._send_categories(message)
+            return
+
         await self._send_main_menu(message, Texts.MAIN_MENU)
 
     async def _send_welcome(self, message: types.Message) -> None:
@@ -362,158 +429,6 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         @self.dispatcher.message(lambda message: message.text is not None)
         async def handle_text(message: types.Message):
             await self._handle_text(message)
-
-        @self.dispatcher.callback_query(lambda c: c.data == "menu:main")
-        async def handle_menu_main(callback_query: types.CallbackQuery):
-            await callback_query.answer()
-            if callback_query.message:
-                await self._send_main_menu(callback_query.message)
-
-        @self.dispatcher.callback_query(lambda c: c.data == "menu:catalog")
-        async def handle_menu_catalog(callback_query: types.CallbackQuery):
-            await callback_query.answer()
-            chat_id = str(callback_query.from_user.id)
-            message_id = (
-                callback_query.message.message_id if callback_query.message else None
-            )
-            await self._save_catalog_state(
-                chat_id,
-                None,
-                0,
-                message_id=message_id,
-                view="list",
-                awaiting_search=False,
-                detail_item_id=None,
-                detail_photo_message_id=None,
-            )
-            await self._send_catalog_page(chat_id, message_id=message_id)
-
-        @self.dispatcher.callback_query(lambda c: c.data == "menu:cart")
-        async def handle_menu_cart(callback_query: types.CallbackQuery):
-            await callback_query.answer()
-            if callback_query.message:
-                await self._send_cart(callback_query.message)
-
-        @self.dispatcher.callback_query(
-            lambda c: c.data in {"menu:order", "cart:order"}
-        )
-        async def handle_menu_order(callback_query: types.CallbackQuery):
-            await callback_query.answer()
-            if callback_query.message:
-                await self._handle_order(callback_query.message)
-
-        @self.dispatcher.callback_query(lambda c: c.data == "menu:cards")
-        async def handle_menu_cards(callback_query: types.CallbackQuery):
-            await callback_query.answer()
-            if callback_query.message:
-                await self._handle_cards(callback_query.message)
-
-        @self.dispatcher.callback_query(lambda c: c.data == "cart:clear")
-        async def handle_cart_clear(callback_query: types.CallbackQuery):
-            await callback_query.answer()
-            await self._clear_cart(str(callback_query.from_user.id))
-            if callback_query.message:
-                await self._send_cart(callback_query.message)
-
-        @self.dispatcher.callback_query(lambda c: c.data and c.data.startswith("cart:remove:"))
-        async def handle_cart_remove(callback_query: types.CallbackQuery):
-            await callback_query.answer()
-            try:
-                item_id = int(callback_query.data.split(":")[2])
-            except Exception:
-                return
-            await self._remove_item_from_cart(str(callback_query.from_user.id), item_id)
-            if callback_query.message:
-                await self._send_cart(callback_query.message)
-
-        @self.dispatcher.callback_query(lambda c: c.data and c.data.startswith("cat:add:"))
-        async def handle_catalog_add(callback_query: types.CallbackQuery):
-            try:
-                item_id = int(callback_query.data.split(":")[2])
-            except Exception:
-                await callback_query.answer(Texts.CALLBACK_INVALID_DATA, show_alert=True)
-                return
-            result = await self._add_item_to_cart(
-                str(callback_query.from_user.id),
-                item_id,
-                Decimal("1"),
-            )
-            if not result:
-                await callback_query.answer(Texts.CALLBACK_ADD_FAILED, show_alert=True)
-                return
-            if Texts.ITEM_NOT_FOUND.lower() in result.lower():
-                await callback_query.answer(result, show_alert=True)
-                return
-            await callback_query.answer(Texts.CALLBACK_ADDED)
-
-        @self.dispatcher.callback_query(lambda c: c.data and c.data.startswith("cat:info:"))
-        async def handle_catalog_info(callback_query: types.CallbackQuery):
-            await callback_query.answer()
-            try:
-                item_id = int(callback_query.data.split(":")[2])
-            except Exception:
-                await callback_query.answer(Texts.CALLBACK_INVALID_DATA, show_alert=True)
-                return
-            chat_id = str(callback_query.from_user.id)
-            message_id = (
-                callback_query.message.message_id if callback_query.message else None
-            )
-            await self._send_catalog_detail(chat_id, item_id, message_id=message_id)
-
-        @self.dispatcher.callback_query(lambda c: c.data == "cat:next")
-        async def handle_catalog_next(callback_query: types.CallbackQuery):
-            await callback_query.answer()
-            chat_id = str(callback_query.from_user.id)
-            message_id = (
-                callback_query.message.message_id if callback_query.message else None
-            )
-            await self._send_catalog_page(
-                chat_id, message_id=message_id, next_page=True
-            )
-
-        @self.dispatcher.callback_query(lambda c: c.data == "cat:prev")
-        async def handle_catalog_prev(callback_query: types.CallbackQuery):
-            await callback_query.answer()
-            chat_id = str(callback_query.from_user.id)
-            message_id = (
-                callback_query.message.message_id if callback_query.message else None
-            )
-            await self._send_catalog_page(
-                chat_id, message_id=message_id, prev_page=True
-            )
-
-        @self.dispatcher.callback_query(lambda c: c.data == "cat:back")
-        async def handle_catalog_back(callback_query: types.CallbackQuery):
-            await callback_query.answer()
-            chat_id = str(callback_query.from_user.id)
-            message_id = (
-                callback_query.message.message_id if callback_query.message else None
-            )
-            await self._send_catalog_page(chat_id, message_id=message_id)
-
-        @self.dispatcher.callback_query(lambda c: c.data == "cat:search")
-        async def handle_catalog_search(callback_query: types.CallbackQuery):
-            await callback_query.answer()
-            chat_id = str(callback_query.from_user.id)
-            message_id = (
-                callback_query.message.message_id if callback_query.message else None
-            )
-            await self._send_catalog_search_prompt(chat_id, message_id=message_id)
-
-        @self.dispatcher.callback_query(lambda c: c.data == "cat:search_cancel")
-        async def handle_catalog_search_cancel(callback_query: types.CallbackQuery):
-            await callback_query.answer()
-            chat_id = str(callback_query.from_user.id)
-            message_id = (
-                callback_query.message.message_id if callback_query.message else None
-            )
-            await self._send_catalog_page(chat_id, message_id=message_id)
-
-        @self.dispatcher.callback_query(lambda c: c.data == "cat:filters")
-        async def handle_catalog_filters(callback_query: types.CallbackQuery):
-            await callback_query.answer(
-                Texts.CALLBACK_FILTERS_NOT_READY, show_alert=True
-            )
 
         self.handlers_registered = True
 
@@ -597,6 +512,11 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
     def _cart_key(self, chat_id: str) -> str:
         return f"clients:cart:telegram_bot_orders:{self.connected_integration_id}:{chat_id}"
 
+    def _cart_state_key(self, chat_id: str) -> str:
+        return (
+            f"clients:cart_state:telegram_bot_orders:{self.connected_integration_id}:{chat_id}"
+        )
+
     def _catalog_state_key(self, chat_id: str) -> str:
         return f"clients:catalog_state:telegram_bot_orders:{self.connected_integration_id}:{chat_id}"
 
@@ -628,29 +548,73 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             return
         self._memory_carts.pop(key, None)
 
+    async def _get_cart_state(self, chat_id: str) -> Dict[str, Any]:
+        key = self._cart_state_key(chat_id)
+        defaults = {"awaiting_remove": False, "item_ids": []}
+        if app_settings.redis_enabled and redis_client:
+            cached = await redis_client.get(key)
+            if cached:
+                if isinstance(cached, (bytes, bytearray)):
+                    cached = cached.decode("utf-8")
+                payload = json.loads(cached)
+                defaults.update(payload)
+                return defaults
+            return defaults
+        payload = self._memory_cart_state.get(key)
+        if payload:
+            defaults.update(payload)
+        return defaults
+
+    async def _save_cart_state(self, chat_id: str, **extra: Any) -> None:
+        key = self._cart_state_key(chat_id)
+        state = await self._get_cart_state(chat_id)
+        state.update(extra)
+        if app_settings.redis_enabled and redis_client:
+            await redis_client.setex(
+                key, TelegramBotOrdersConfig.CART_TTL, json.dumps(state)
+            )
+            return
+        self._memory_cart_state[key] = state
+
+    async def _clear_cart_state(self, chat_id: str) -> None:
+        key = self._cart_state_key(chat_id)
+        if app_settings.redis_enabled and redis_client:
+            await redis_client.delete(key)
+            return
+        self._memory_cart_state.pop(key, None)
+
     async def _save_catalog_state(
         self, chat_id: str, search: Optional[str], offset: int, **extra: Any
     ) -> None:
         key = self._catalog_state_key(chat_id)
         state = await self._get_catalog_state(chat_id)
-        state.update({"search": search, "offset": offset})
+        state.update(
+            {
+                "search": search,
+                "offset": offset,
+            }
+        )
         state.update(extra)
-        payload = state
         if app_settings.redis_enabled and redis_client:
-            await redis_client.setex(key, TelegramBotOrdersConfig.CATALOG_TTL, json.dumps(payload))
+            await redis_client.setex(
+                key, TelegramBotOrdersConfig.CATALOG_TTL, json.dumps(state)
+            )
             return
-        self._memory_catalog_state[key] = payload
+        self._memory_catalog_state[key] = state
 
     async def _get_catalog_state(self, chat_id: str) -> Dict[str, Any]:
         key = self._catalog_state_key(chat_id)
         defaults = {
             "search": None,
             "offset": 0,
-            "message_id": None,
-            "view": "list",
-            "detail_item_id": None,
-            "detail_photo_message_id": None,
+            "group_id": None,
+            "group_name": None,
+            "view": "categories",
             "awaiting_search": False,
+            "awaiting_action": None,
+            "page_item_ids": [],
+            "selected_item_id": None,
+            "category_map": {},
         }
         if app_settings.redis_enabled and redis_client:
             cached = await redis_client.get(key)
@@ -704,7 +668,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
 
     def _format_item_line(self, index: int, entry: ItemExt) -> str:
         item = entry.item
-        name = self._md_escape(item.name or f"ID {item.id}")
+        name = self._md_escape(item.name or Texts.ITEM_UNNAMED)
         price = entry.price if entry.price is not None else Decimal(0)
         qty = (
             entry.quantity.common
@@ -715,10 +679,16 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         return Texts.item_line(index, name, price, qty_text)
 
     def _format_catalog_list(
-        self, items: List[ItemExt], search: Optional[str], offset: int
+        self,
+        items: List[ItemExt],
+        search: Optional[str],
+        offset: int,
+        group_name: Optional[str],
     ) -> str:
         page = offset // TelegramBotOrdersConfig.CATALOG_PAGE_SIZE + 1
         lines = [Texts.catalog_title(page)]
+        if group_name:
+            lines.append(Texts.catalog_category_line(self._md_escape(group_name)))
         if search:
             lines.append(Texts.catalog_search_line(self._md_escape(search)))
         if not items:
@@ -730,7 +700,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
 
     def _format_item_detail(self, entry: ItemExt) -> str:
         item = entry.item
-        name = self._md_escape(item.name or f"ID {item.id}")
+        name = self._md_escape(item.name or Texts.ITEM_UNNAMED)
         price = entry.price if entry.price is not None else Decimal(0)
         qty = (
             entry.quantity.common
@@ -739,7 +709,6 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         )
         lines = Texts.item_detail_lines(
             name,
-            item.id,
             price,
             qty=qty,
             articul=self._md_escape(item.articul) if item.articul else None,
@@ -748,142 +717,126 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         )
         return "\n".join(lines)
 
+    def _categories_keyboard(self, groups: List[ItemGroup]) -> types.ReplyKeyboardMarkup:
+        rows: List[List[types.KeyboardButton]] = []
+        buffer: List[types.KeyboardButton] = []
+        for group in groups:
+            if not group.name:
+                continue
+            buffer.append(types.KeyboardButton(text=group.name))
+            if len(buffer) == 2:
+                rows.append(buffer)
+                buffer = []
+        if buffer:
+            rows.append(buffer)
+        rows.append([types.KeyboardButton(text=Texts.BUTTON_ALL_ITEMS)])
+        rows.append([types.KeyboardButton(text=Texts.BUTTON_MENU_MAIN)])
+        return types.ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+    def _catalog_numbers_keyboard(self, count: int) -> types.ReplyKeyboardMarkup:
+        rows: List[List[types.KeyboardButton]] = []
+        row: List[types.KeyboardButton] = []
+        for i in range(1, count + 1):
+            row.append(types.KeyboardButton(text=str(i)))
+            if len(row) == 5:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        rows.append(
+            [
+                types.KeyboardButton(text=Texts.BUTTON_BACK_TO_LIST),
+                types.KeyboardButton(text=Texts.BUTTON_MENU_MAIN),
+            ]
+        )
+        return types.ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
     def _catalog_list_keyboard(
         self, items: List[ItemExt], offset: int, has_next: bool
-    ) -> InlineKeyboardMarkup:
-        rows: List[List[InlineKeyboardButton]] = []
-        for entry in items:
-            rows.append(
-                [
-                    InlineKeyboardButton(
-                        text=Texts.BUTTON_ADD,
-                        callback_data=f"cat:add:{entry.item.id}",
-                    ),
-                    InlineKeyboardButton(
-                        text=Texts.BUTTON_DETAILS,
-                        callback_data=f"cat:info:{entry.item.id}",
-                    ),
-                ]
-            )
-        nav_row: List[InlineKeyboardButton] = []
+    ) -> types.ReplyKeyboardMarkup:
+        rows: List[List[types.KeyboardButton]] = []
+        row: List[types.KeyboardButton] = []
+        for i in range(1, len(items) + 1):
+            row.append(types.KeyboardButton(text=str(i)))
+            if len(row) == 5:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        rows.append(
+            [
+                types.KeyboardButton(text=Texts.BUTTON_ADD),
+                types.KeyboardButton(text=Texts.BUTTON_DETAILS),
+                types.KeyboardButton(text=Texts.BUTTON_SEARCH),
+            ]
+        )
+        nav_row: List[types.KeyboardButton] = []
         if offset > 0:
-            nav_row.append(
-                InlineKeyboardButton(text=Texts.BUTTON_BACK, callback_data="cat:prev")
-            )
+            nav_row.append(types.KeyboardButton(text=Texts.BUTTON_BACK))
         if has_next:
-            nav_row.append(
-                InlineKeyboardButton(text=Texts.BUTTON_NEXT, callback_data="cat:next")
-            )
+            nav_row.append(types.KeyboardButton(text=Texts.BUTTON_NEXT))
         if nav_row:
             rows.append(nav_row)
         rows.append(
             [
-                InlineKeyboardButton(text=Texts.BUTTON_SEARCH, callback_data="cat:search"),
-                InlineKeyboardButton(text=Texts.BUTTON_FILTERS, callback_data="cat:filters"),
+                types.KeyboardButton(text=Texts.BUTTON_CATEGORIES),
+                types.KeyboardButton(text=Texts.BUTTON_CART),
             ]
         )
-        rows.append(
-            [
-                InlineKeyboardButton(text=Texts.BUTTON_CART, callback_data="menu:cart"),
-                InlineKeyboardButton(text=Texts.BUTTON_MENU_MAIN, callback_data="menu:main"),
-            ]
-        )
-        return InlineKeyboardMarkup(inline_keyboard=rows)
+        rows.append([types.KeyboardButton(text=Texts.BUTTON_MENU_MAIN)])
+        return types.ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
-    @staticmethod
-    def _catalog_detail_keyboard(item_id: int) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup(
-            inline_keyboard=[
+    def _catalog_detail_keyboard(self) -> types.ReplyKeyboardMarkup:
+        return types.ReplyKeyboardMarkup(
+            keyboard=[
+                [types.KeyboardButton(text=Texts.BUTTON_ADD)],
+                [types.KeyboardButton(text=Texts.BUTTON_BACK_TO_LIST)],
                 [
-                    InlineKeyboardButton(
-                        text=Texts.BUTTON_ADD, callback_data=f"cat:add:{item_id}"
-                    )
+                    types.KeyboardButton(text=Texts.BUTTON_CART),
+                    types.KeyboardButton(text=Texts.BUTTON_MENU_MAIN),
                 ],
-                [
-                    InlineKeyboardButton(
-                        text=Texts.BUTTON_BACK_TO_LIST, callback_data="cat:back"
-                    )
-                ],
-                [
-                    InlineKeyboardButton(text=Texts.BUTTON_CART, callback_data="menu:cart"),
-                    InlineKeyboardButton(text=Texts.BUTTON_MENU_MAIN, callback_data="menu:main"),
-                ],
-            ]
+            ],
+            resize_keyboard=True,
         )
 
-    @staticmethod
-    def _catalog_search_keyboard() -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text=Texts.BUTTON_BACK_TO_CATALOG,
-                        callback_data="cat:search_cancel",
-                    )
-                ],
-                [InlineKeyboardButton(text=Texts.BUTTON_MENU_MAIN, callback_data="menu:main")],
-            ]
+    def _catalog_search_keyboard(self) -> types.ReplyKeyboardMarkup:
+        return types.ReplyKeyboardMarkup(
+            keyboard=[
+                [types.KeyboardButton(text=Texts.BUTTON_BACK_TO_CATALOG)],
+                [types.KeyboardButton(text=Texts.BUTTON_MENU_MAIN)],
+            ],
+            resize_keyboard=True,
         )
 
-    async def _edit_or_send_catalog_message(
-        self,
-        chat_id: str,
-        message_id: Optional[int],
-        text: str,
-        keyboard: InlineKeyboardMarkup,
-    ) -> Optional[int]:
-        if not self.bot:
-            return None
-        if message_id:
-            try:
-                await self.bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    text=text,
-                    reply_markup=keyboard,
-                    parse_mode=ParseMode.MARKDOWN,
-                )
-                return message_id
-            except Exception as error:
-                if "message is not modified" in str(error).lower():
-                    return message_id
-                logger.warning(Texts.log_update_catalog_fail(error))
-        msg = await self.bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            reply_markup=keyboard,
-            parse_mode=ParseMode.MARKDOWN,
-        )
-        return msg.message_id
+    def _cart_numbers_keyboard(self, count: int) -> types.ReplyKeyboardMarkup:
+        rows: List[List[types.KeyboardButton]] = []
+        row: List[types.KeyboardButton] = []
+        for i in range(1, count + 1):
+            row.append(types.KeyboardButton(text=str(i)))
+            if len(row) == 5:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        rows.append([types.KeyboardButton(text=Texts.BUTTON_MENU_MAIN)])
+        return types.ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
-    async def _clear_detail_photo(self, chat_id: str, state: Dict[str, Any]) -> None:
-        message_id = state.get("detail_photo_message_id")
-        if message_id and self.bot:
-            try:
-                await self.bot.delete_message(chat_id=chat_id, message_id=message_id)
-            except Exception as error:
-                logger.debug(Texts.log_delete_photo_fail(error))
-
-    async def _send_catalog_search_prompt(
-        self, chat_id: str, message_id: Optional[int] = None
-    ) -> None:
-        state = await self._get_catalog_state(chat_id)
-        text = Texts.CATALOG_SEARCH_PROMPT
-        current_message_id = message_id or state.get("message_id")
-        message_id = await self._edit_or_send_catalog_message(
-            chat_id,
-            current_message_id,
-            text,
-            self._catalog_search_keyboard(),
-        )
+    async def _send_catalog_search_prompt(self, chat_id: str) -> None:
         await self._save_catalog_state(
             chat_id,
-            state.get("search"),
-            state.get("offset", 0),
-            message_id=message_id,
+            None,
+            0,
             awaiting_search=True,
+            awaiting_action=None,
             view="search",
         )
+        if self.bot:
+            await self.bot.send_message(
+                chat_id=chat_id,
+                text=Texts.CATALOG_SEARCH_PROMPT,
+                reply_markup=self._catalog_search_keyboard(),
+                parse_mode=ParseMode.MARKDOWN,
+            )
 
     async def _handle_search_input(self, message: types.Message) -> bool:
         chat_id = str(message.chat.id)
@@ -897,15 +850,121 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             0,
             awaiting_search=False,
             view="list",
+            awaiting_action=None,
         )
-        await self._send_catalog_page(
-            chat_id, message_id=state.get("message_id")
-        )
+        await self._send_catalog_page(chat_id)
         return True
 
-    async def _send_catalog_detail(
-        self, chat_id: str, item_id: int, message_id: Optional[int] = None
-    ) -> None:
+    async def _prompt_catalog_add(self, message: types.Message) -> None:
+        chat_id = str(message.chat.id)
+        state = await self._get_catalog_state(chat_id)
+        count = len(state.get("page_item_ids") or [])
+        if count == 0:
+            await self._send_catalog_page(chat_id)
+            return
+        await self._save_catalog_state(
+            chat_id,
+            state.get("search"),
+            state.get("offset", 0),
+            awaiting_action="add",
+        )
+        await message.answer(
+            Texts.CATALOG_SELECT_NUMBER_ADD,
+            reply_markup=self._catalog_numbers_keyboard(count),
+        )
+
+    async def _prompt_catalog_detail(self, message: types.Message) -> None:
+        chat_id = str(message.chat.id)
+        state = await self._get_catalog_state(chat_id)
+        count = len(state.get("page_item_ids") or [])
+        if count == 0:
+            await self._send_catalog_page(chat_id)
+            return
+        await self._save_catalog_state(
+            chat_id,
+            state.get("search"),
+            state.get("offset", 0),
+            awaiting_action="detail",
+        )
+        await message.answer(
+            Texts.CATALOG_SELECT_NUMBER_DETAIL,
+            reply_markup=self._catalog_numbers_keyboard(count),
+        )
+
+    async def _handle_catalog_number_action(self, message: types.Message) -> bool:
+        text = message.text.strip() if message.text else ""
+        if not text.isdigit():
+            return False
+        chat_id = str(message.chat.id)
+        state = await self._get_catalog_state(chat_id)
+        action = state.get("awaiting_action")
+        if action not in {"add", "detail"}:
+            return False
+        page_item_ids = state.get("page_item_ids") or []
+        index = int(text)
+        if index < 1 or index > len(page_item_ids):
+            await message.answer(
+                Texts.CATALOG_NUMBER_INVALID,
+                reply_markup=self._catalog_numbers_keyboard(len(page_item_ids)),
+            )
+            return True
+        item_id = page_item_ids[index - 1]
+        await self._save_catalog_state(
+            chat_id,
+            state.get("search"),
+            state.get("offset", 0),
+            awaiting_action=None,
+        )
+        if action == "add":
+            result = await self._add_item_to_cart(chat_id, item_id, Decimal("1"))
+            await message.answer(result or Texts.ITEM_NOT_FOUND)
+            await self._send_catalog_page(chat_id)
+            return True
+        await self._send_catalog_detail(chat_id, item_id)
+        return True
+
+    async def _prompt_cart_remove(self, message: types.Message) -> None:
+        chat_id = str(message.chat.id)
+        cart = await self._get_cart(chat_id)
+        if not cart:
+            await message.answer(
+                Texts.CART_EMPTY, reply_markup=self._main_menu_keyboard()
+            )
+            return
+        await self._save_cart_state(
+            chat_id,
+            awaiting_remove=True,
+            item_ids=[row["item_id"] for row in cart],
+        )
+        await message.answer(
+            Texts.CART_SELECT_NUMBER_REMOVE,
+            reply_markup=self._cart_numbers_keyboard(len(cart)),
+        )
+
+    async def _handle_cart_number_action(self, message: types.Message) -> bool:
+        text = message.text.strip() if message.text else ""
+        if not text.isdigit():
+            return False
+        chat_id = str(message.chat.id)
+        state = await self._get_cart_state(chat_id)
+        if not state.get("awaiting_remove"):
+            return False
+        index = int(text)
+        cart = await self._get_cart(chat_id)
+        if index < 1 or index > len(cart):
+            await message.answer(
+                Texts.CART_NUMBER_INVALID,
+                reply_markup=self._cart_numbers_keyboard(len(cart)),
+            )
+            return True
+        item_id = cart[index - 1]["item_id"]
+        await self._remove_item_from_cart(chat_id, item_id)
+        await self._save_cart_state(chat_id, awaiting_remove=False)
+        await message.answer(Texts.CART_ITEM_REMOVED)
+        await self._send_cart(message)
+        return True
+
+    async def _send_catalog_detail(self, chat_id: str, item_id: int) -> None:
         cache_key = f"clients:settings:telegram_bot_orders:{self.connected_integration_id}"
         settings_map = await self._fetch_settings(cache_key)
         item_ext = await self._fetch_item_ext(item_id, settings_map)
@@ -918,39 +977,39 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                 )
             return
         state = await self._get_catalog_state(chat_id)
-        current_message_id = message_id or state.get("message_id")
         text = self._format_item_detail(item_ext)
-        message_id = await self._edit_or_send_catalog_message(
-            chat_id,
-            current_message_id,
-            text,
-            self._catalog_detail_keyboard(item_id),
-        )
-        await self._clear_detail_photo(chat_id, state)
-        detail_photo_id = None
         if item_ext.image_url and self.bot:
             try:
-                photo_message = await self.bot.send_photo(
+                await self.bot.send_photo(
                     chat_id=chat_id,
                     photo=item_ext.image_url,
-                    caption=self._md_escape(item_ext.item.name or f"ID {item_id}"),
+                    caption=self._md_escape(
+                        item_ext.item.name or Texts.ITEM_UNNAMED
+                    ),
                     parse_mode=ParseMode.MARKDOWN,
                 )
-                detail_photo_id = photo_message.message_id
             except Exception as error:
                 logger.warning(Texts.log_send_photo_fail(error))
+        if self.bot:
+            await self.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=self._catalog_detail_keyboard(),
+                parse_mode=ParseMode.MARKDOWN,
+            )
         await self._save_catalog_state(
             chat_id,
             state.get("search"),
             state.get("offset", 0),
-            message_id=message_id,
             view="detail",
-            detail_item_id=item_id,
-            detail_photo_message_id=detail_photo_id,
+            selected_item_id=item_id,
             awaiting_search=False,
+            awaiting_action=None,
         )
 
-    async def _fetch_catalog(self, search: Optional[str], offset: int) -> List[ItemExt]:
+    async def _fetch_catalog(
+        self, search: Optional[str], offset: int, group_id: Optional[int]
+    ) -> List[ItemExt]:
         cache_key = f"clients:settings:telegram_bot_orders:{self.connected_integration_id}"
         settings_map = await self._fetch_settings(cache_key)
         stock_id = self._parse_int(settings_map.get(TelegramOrdersSettings.STOCK_ID.value.lower()))
@@ -974,6 +1033,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             {
                 "search": search,
                 "offset": offset,
+                "group_id": group_id,
                 "stock_id": stock_id,
                 "price_type_id": price_type_id,
                 "zero_qty": zero_qty,
@@ -1001,6 +1061,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             has_image=has_image,
             image_size=ItemGetExtImageSize.Small,
             search=search,
+            group_ids=[group_id] if group_id else None,
             limit=TelegramBotOrdersConfig.CATALOG_PAGE_SIZE,
             offset=offset,
         )
@@ -1019,48 +1080,126 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                     logger.warning(Texts.log_catalog_cache_error(error))
             return result
 
+    async def _fetch_categories(self) -> List[ItemGroup]:
+        cache_key = f"clients:cache:item_groups:{self.connected_integration_id}"
+        if app_settings.redis_enabled and redis_client:
+            cached = await redis_client.get(cache_key)
+            if cached:
+                if isinstance(cached, (bytes, bytearray)):
+                    cached = cached.decode("utf-8")
+                raw_groups = json.loads(cached)
+                return [ItemGroup.model_validate(group) for group in raw_groups]
+
+        async with RegosAPI(connected_integration_id=self.connected_integration_id) as api:
+            resp = await api.references.item_group.get(ItemGroupGetRequest())
+            result = resp.result or []
+            groups = [group for group in result if group.name]
+            groups.sort(key=lambda group: group.name.lower())
+            if app_settings.redis_enabled and redis_client:
+                try:
+                    payload = [group.model_dump(mode="json") for group in groups]
+                    await redis_client.setex(
+                        cache_key,
+                        TelegramBotOrdersConfig.GROUPS_TTL,
+                        json.dumps(payload, ensure_ascii=False),
+                    )
+                except Exception as error:
+                    logger.warning(Texts.log_catalog_cache_error(error))
+            return groups
+
+    async def _send_categories(self, message: types.Message) -> None:
+        chat_id = str(message.chat.id)
+        groups = await self._fetch_categories()
+        if not groups:
+            await message.answer(
+                Texts.CATEGORIES_EMPTY, reply_markup=self._main_menu_keyboard()
+            )
+            return
+        category_map = {group.name: group.id for group in groups if group.name}
+        await self._save_catalog_state(
+            chat_id,
+            None,
+            0,
+            view="categories",
+            group_id=None,
+            group_name=None,
+            awaiting_search=False,
+            awaiting_action=None,
+            page_item_ids=[],
+            selected_item_id=None,
+            category_map=category_map,
+        )
+        await message.answer(
+            Texts.CATEGORIES_TITLE, reply_markup=self._categories_keyboard(groups)
+        )
+
+    async def _select_category(
+        self,
+        chat_id: str,
+        group_id: Optional[int],
+        group_name: Optional[str],
+        message: types.Message,
+    ) -> None:
+        await self._save_catalog_state(
+            chat_id,
+            None,
+            0,
+            view="list",
+            group_id=group_id,
+            group_name=group_name,
+            awaiting_search=False,
+            awaiting_action=None,
+        )
+        await self._send_catalog_page(chat_id)
+
     async def _send_catalog_page(
         self,
         chat_id: str,
         *,
-        message_id: Optional[int] = None,
         next_page: bool = False,
         prev_page: bool = False,
     ) -> None:
         state = await self._get_catalog_state(chat_id)
         search = state.get("search")
         offset = int(state.get("offset", 0))
+        group_id = state.get("group_id")
         if next_page:
             offset += TelegramBotOrdersConfig.CATALOG_PAGE_SIZE
         if prev_page:
             offset = max(0, offset - TelegramBotOrdersConfig.CATALOG_PAGE_SIZE)
-        items = await self._fetch_catalog(search=search, offset=offset)
+        items = await self._fetch_catalog(search=search, offset=offset, group_id=group_id)
         if not items and offset > 0:
             offset = max(0, offset - TelegramBotOrdersConfig.CATALOG_PAGE_SIZE)
-            items = await self._fetch_catalog(search=search, offset=offset)
+            items = await self._fetch_catalog(
+                search=search, offset=offset, group_id=group_id
+            )
 
         has_next = len(items) >= TelegramBotOrdersConfig.CATALOG_PAGE_SIZE
-        text = self._format_catalog_list(items, search, offset)
-        keyboard = self._catalog_list_keyboard(items, offset, has_next)
-        current_message_id = message_id or state.get("message_id")
-        message_id = await self._edit_or_send_catalog_message(
-            chat_id, current_message_id, text, keyboard
+        text = self._format_catalog_list(
+            items, search, offset, state.get("group_name")
         )
-        await self._clear_detail_photo(chat_id, state)
+        keyboard = self._catalog_list_keyboard(items, offset, has_next)
+        if self.bot:
+            await self.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=keyboard,
+                parse_mode=ParseMode.MARKDOWN,
+            )
         await self._save_catalog_state(
             chat_id,
             search,
             offset,
-            message_id=message_id,
             view="list",
-            detail_item_id=None,
-            detail_photo_message_id=None,
             awaiting_search=False,
+            awaiting_action=None,
+            page_item_ids=[entry.item.id for entry in items],
+            selected_item_id=None,
         )
 
     def _format_item(self, entry: ItemExt) -> str:
         item = entry.item
-        name = item.name or f"ID {item.id}"
+        name = item.name or Texts.ITEM_UNNAMED
         price = entry.price if entry.price is not None else Decimal(0)
         qty = (
             entry.quantity.common
@@ -1068,16 +1207,16 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             else None
         )
         qty_text = Texts.item_qty_suffix(qty) if qty is not None else ""
-        return f"{name} (id={item.id})\n{Texts.ITEM_DETAIL_PRICE.format(price=price)}{qty_text}"
+        return f"{name}\n{Texts.ITEM_DETAIL_PRICE.format(price=price)}{qty_text}"
 
     def _format_cart(self, cart: List[dict]) -> str:
         total = Decimal("0")
         lines = [Texts.CART_TITLE]
-        for row in cart:
+        for idx, row in enumerate(cart, start=1):
             price = Decimal(str(row["price"]))
             qty = Decimal(str(row["qty"]))
             total += price * qty
-            lines.append(Texts.cart_line(row["name"], row["item_id"], qty, price))
+            lines.append(Texts.cart_line(idx, row["name"], qty, price))
         lines.append(Texts.cart_total(total))
         lines.append(Texts.CART_HINT)
         return "\n".join(lines)
@@ -1230,6 +1369,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             return
 
         await self._clear_cart(str(message.chat.id))
+        await self._clear_cart_state(str(message.chat.id))
         await self._clear_order_state(str(message.chat.id))
         await message.answer(Texts.ORDER_ACCEPTED)
         await self._send_main_menu(message)
@@ -1327,7 +1467,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         cart = await self._get_cart(chat_id)
         existing = next((x for x in cart if x["item_id"] == item_id), None)
         price = item_ext.price if item_ext.price is not None else Decimal(0)
-        name = item_ext.item.name or f"ID {item_id}"
+        name = item_ext.item.name or Texts.ITEM_UNNAMED
         if existing:
             existing["qty"] = str(Decimal(existing["qty"]) + qty)
         else:
