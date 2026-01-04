@@ -20,9 +20,14 @@ from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
 from core.redis import redis_client
 from schemas.api.integrations.connected_integration_setting import (
+    ConnectedIntegrationSettingEditRequest,
     ConnectedIntegrationSettingRequest,
 )
-from schemas.integration.base import IntegrationErrorModel, IntegrationErrorResponse
+from schemas.integration.base import (
+    IntegrationErrorModel,
+    IntegrationErrorResponse,
+    IntegrationSuccessResponse,
+)
 from schemas.integration.telegram_integration_base import IntegrationTelegramBase
 from schemas.api.common.filters import Filter, FilterOperator
 from schemas.api.docs.order_delivery import (
@@ -193,7 +198,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             return start <= now <= end
         return now >= start or now <= end
 
-    async def connect(self) -> Dict[str, Any]:
+    async def connect(self, data: Optional[Dict] = None, **kwargs) -> Dict[str, Any]:
         await self._initialize_bot()
         await self._setup_handlers()
         if not self.bot:
@@ -209,6 +214,22 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         await self.bot.set_webhook(url=webhook_url)
         logger.info(f"Webhook set: {webhook_url}")
         return {"status": "connected", "mode": "webhook", "webhook_url": webhook_url}
+
+    async def update_settings(
+        self,
+        request: Optional[ConnectedIntegrationSettingEditRequest] = None,
+        data: Optional[List[Dict]] = None,
+        incoming_settings: Optional[List[Dict]] = None,
+        **kwargs,
+    ) -> IntegrationSuccessResponse:
+        cache_key = f"clients:settings:telegram_bot_orders:{self.connected_integration_id}"
+        if app_settings.redis_enabled and redis_client:
+            try:
+                await redis_client.delete(cache_key)
+            except Exception as error:
+                logger.warning(f"Redis error while clearing settings cache: {error}")
+        await self.connect()
+        return IntegrationSuccessResponse(result={"status": "settings updated"})
 
     async def _setup_handlers(self) -> None:
         if not self.dispatcher:
