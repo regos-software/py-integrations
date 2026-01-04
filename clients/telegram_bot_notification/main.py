@@ -132,6 +132,11 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                 )
 
         return result or None
+
+    @staticmethod
+    def _is_longpolling_mode() -> bool:
+        mode = str(settings.telegram_update_mode or "").strip().lower()
+        return mode in {"longpolling", "long_polling", "long-polling", "polling"}
     
     async def _fetch_settings(self, cache_key: str) -> Optional[Dict[str, str]]:
         """Retrieve settings from Redis cache or API."""
@@ -465,14 +470,20 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             bot_token = settings_map.get(TelegramSettings.BOT_TOKEN.value.lower())
             if not bot_token:
                 return self._create_error_response(1002, "No bot token in settings")
+            await self._initialize_bot()
+            await self._setup_handlers()
+
+            if self._is_longpolling_mode():
+                await self.bot.delete_webhook(drop_pending_updates=True)
+                logger.info("Webhook deleted (longpolling mode).")
+                return {"status": "connected", "mode": "longpolling"}
+
             webhook_url = (
                 f"{TelegramBotConfig.WEBHOOK_BASE_URL}/{self.connected_integration_id}/external/"
             )
-            await self._initialize_bot()
             await self.bot.set_webhook(url=webhook_url)
-            await self._setup_handlers()
             logger.info(f"Webhook set: {webhook_url}")
-            return {"status": "connected", "webhook_url": webhook_url}
+            return {"status": "connected", "mode": "webhook", "webhook_url": webhook_url}
         except (httpx.RequestError, httpx.HTTPStatusError) as error:
             logger.error(f"Connection error: {error}")
             raise

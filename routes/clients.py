@@ -20,6 +20,7 @@ from clients.getsms.main import GetSmsIntegration
 from clients.eskiz_sms.main import EskizSmsIntegration
 from clients.telegram_bot_notification.main import TelegramBotNotificationIntegration
 from clients.email_sender.main import EmailSenderIntegration
+from clients.telegram_bot_orders.main import TelegramBotOrdersIntegration
 
 router = APIRouter()
 logger = setup_logger("clients_route")
@@ -29,6 +30,7 @@ INTEGRATION_CLASSES = {
     "getsms": GetSmsIntegration,
     "eskiz_sms": EskizSmsIntegration,
     "regos_telegram_notifier": TelegramBotNotificationIntegration,
+    "telegram_bot_orders": TelegramBotOrdersIntegration,
     "email_sender": EmailSenderIntegration,
     "tsd": TsdIntegration,
 }

@@ -65,6 +65,7 @@ class RegosAPI:
             from core.api.docs.inventory_operation import InventoryOperationService
             from core.api.docs.movement import DocMovementService
             from core.api.docs.movement_operation import MovementOperationService
+            from core.api.docs.order_delivery import DocOrderDeliveryService
 
             # Initialize services
 
@@ -81,6 +82,7 @@ class RegosAPI:
             self.inventory_operation = InventoryOperationService(api)
             self.movement = DocMovementService(api)
             self.movement_operation = MovementOperationService(api)
+            self.order_delivery = DocOrderDeliveryService(api)
 
     class Integrations:
         def __init__(self, api: "RegosAPI"):
@@ -110,6 +112,7 @@ class RegosAPI:
             from core.api.references.item_operation import ItemOperationService
             from core.api.references.price_type import PriceTypeService
             from core.api.references.operating_cash import OperatingCashService 
+            from core.api.references.retail_card import RetailCardService
 
             self.brand = BrandService(api)
             self.currency = CurrencyService(api)
@@ -122,6 +125,7 @@ class RegosAPI:
             self.price_type = PriceTypeService(api)
             self.partner = PartnerService(api)
             self.operating_cash = OperatingCashService(api)
+            self.retail_card = RetailCardService(api)
 
     class Rbac:
         def __init__(self, api: "RegosAPI"):
