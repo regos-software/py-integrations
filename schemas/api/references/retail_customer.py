@@ -103,6 +103,19 @@ class RetailCustomer(BaseSchema):
     def _strip_strings(cls, v):
         return v.strip() if isinstance(v, str) else v
 
+    @field_validator("sex", mode="before")
+    @classmethod
+    def _normalize_sex(cls, v):
+        if v is None or isinstance(v, Sex):
+            return v
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s == "none":
+                return Sex.non
+            if s in {"male", "female"}:
+                return Sex(s)
+        raise ValueError("sex должен быть одним из: none | male | female")
+
 
 # ---------- Get ----------
 
