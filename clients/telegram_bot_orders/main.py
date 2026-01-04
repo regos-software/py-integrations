@@ -388,12 +388,6 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             "chat_id": chat_id,
         }
 
-    async def update_settings(self, settings: dict) -> Any:
-        cache_key = f"clients:settings:telegram_bot_orders:{self.connected_integration_id}"
-        if app_settings.redis_enabled and redis_client:
-            await redis_client.delete(cache_key)
-        return {"status": "settings updated"}
-
     async def _request_phone(self, message: types.Message) -> None:
         keyboard = types.ReplyKeyboardMarkup(
             keyboard=[
