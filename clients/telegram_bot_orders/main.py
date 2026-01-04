@@ -14,6 +14,7 @@ from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboar
 from aiogram.types import Update as TelegramUpdate
 
 from clients.base import ClientBase
+from clients.telegram_bot_orders.texts import TelegramBotOrdersTexts as Texts
 from clients.telegram_polling import telegram_polling_manager
 from config.settings import settings as app_settings
 from core.api.regos_api import RegosAPI
@@ -117,7 +118,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                         cached = cached.decode("utf-8")
                     return json.loads(cached)
             except Exception as error:
-                logger.warning(f"Ошибка Redis: {error}, запрашиваю настройки из API")
+                logger.warning(Texts.log_redis_error(error))
 
         async with RegosAPI(connected_integration_id=self.connected_integration_id) as api:
             settings_response = (
@@ -137,7 +138,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                     json.dumps(settings_map),
                 )
             except Exception as error:
-                logger.warning(f"Не удалось закешировать настройки: {error}")
+                logger.warning(Texts.log_settings_cache_fail(error))
         return settings_map
 
     async def _initialize_bot(self) -> None:
@@ -147,7 +148,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         settings_map = await self._fetch_settings(cache_key)
         bot_token = settings_map.get(TelegramOrdersSettings.BOT_TOKEN.value.lower())
         if not bot_token:
-            raise ValueError("Не найден BOT_TOKEN в настройках интеграции")
+            raise ValueError(Texts.ERROR_BOT_TOKEN_MISSING)
         self.bot = Bot(
             token=bot_token,
             default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN),
@@ -205,17 +206,21 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         return InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="Каталог", callback_data="menu:catalog"),
-                    InlineKeyboardButton(text="Корзина", callback_data="menu:cart"),
+                    InlineKeyboardButton(
+                        text=Texts.BUTTON_MENU_CATALOG, callback_data="menu:catalog"
+                    ),
+                    InlineKeyboardButton(
+                        text=Texts.BUTTON_MENU_CART, callback_data="menu:cart"
+                    ),
                 ],
                 [
                     InlineKeyboardButton(
-                        text="Оформить заказ", callback_data="menu:order"
+                        text=Texts.BUTTON_MENU_ORDER, callback_data="menu:order"
                     )
                 ],
                 [
                     InlineKeyboardButton(
-                        text="Карты покупателя", callback_data="menu:cards"
+                        text=Texts.BUTTON_MENU_CARDS, callback_data="menu:cards"
                     )
                 ],
             ]
@@ -224,33 +229,43 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
     async def _send_main_menu(
         self, message: types.Message, text: Optional[str] = None
     ) -> None:
-        message_text = text or "Выберите действие:"
+        message_text = text or Texts.MAIN_MENU
         await message.answer(message_text, reply_markup=self._main_menu_keyboard())
 
     def _cart_keyboard(self, cart: List[dict]) -> InlineKeyboardMarkup:
         rows = [
             [
                 InlineKeyboardButton(
-                    text=f"Удалить {row['item_id']}",
+                    text=Texts.BUTTON_REMOVE_ITEM.format(item_id=row["item_id"]),
                     callback_data=f"cart:remove:{row['item_id']}",
                 )
             ]
             for row in cart
         ]
         rows.append(
-            [InlineKeyboardButton(text="Очистить корзину", callback_data="cart:clear")]
+            [
+                InlineKeyboardButton(
+                    text=Texts.BUTTON_CART_CLEAR, callback_data="cart:clear"
+                )
+            ]
         )
         rows.append(
-            [InlineKeyboardButton(text="Оформить заказ", callback_data="menu:order")]
+            [
+                InlineKeyboardButton(
+                    text=Texts.BUTTON_MENU_ORDER, callback_data="menu:order"
+                )
+            ]
         )
-        rows.append([InlineKeyboardButton(text="Меню", callback_data="menu:main")])
+        rows.append(
+            [InlineKeyboardButton(text=Texts.BUTTON_MENU_MAIN, callback_data="menu:main")]
+        )
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
     async def _send_cart(self, message: types.Message) -> None:
         cart = await self._get_cart(str(message.chat.id))
         if not cart:
             await message.answer(
-                "Корзина пуста.", reply_markup=self._main_menu_keyboard()
+                Texts.CART_EMPTY, reply_markup=self._main_menu_keyboard()
             )
             return
         await message.answer(
@@ -263,14 +278,16 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             await self._send_welcome(message)
             return
         if text.startswith("/"):
-            await self._send_main_menu(message, "Используйте кнопки ниже.")
+            await self._send_main_menu(message, Texts.MAIN_MENU_USE_BUTTONS)
             return
         if await self._handle_description(message):
             return
-        await self._send_main_menu(message, "Выберите действие:")
+        if await self._handle_search_input(message):
+            return
+        await self._send_main_menu(message, Texts.MAIN_MENU)
 
     async def _send_welcome(self, message: types.Message) -> None:
-        await self._send_main_menu(message, "Привет! Выберите действие ниже.")
+        await self._send_main_menu(message, Texts.WELCOME)
         customer = await self._find_customer_by_chat(str(message.chat.id))
         if not customer:
             await self._request_phone(message)
@@ -356,8 +373,20 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         async def handle_menu_catalog(callback_query: types.CallbackQuery):
             await callback_query.answer()
             chat_id = str(callback_query.from_user.id)
-            await self._save_catalog_state(chat_id, None, 0)
-            await self._send_catalog_page(chat_id)
+            message_id = (
+                callback_query.message.message_id if callback_query.message else None
+            )
+            await self._save_catalog_state(
+                chat_id,
+                None,
+                0,
+                message_id=message_id,
+                view="list",
+                awaiting_search=False,
+                detail_item_id=None,
+                detail_photo_message_id=None,
+            )
+            await self._send_catalog_page(chat_id, message_id=message_id)
 
         @self.dispatcher.callback_query(lambda c: c.data == "menu:cart")
         async def handle_menu_cart(callback_query: types.CallbackQuery):
@@ -402,27 +431,95 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             try:
                 item_id = int(callback_query.data.split(":")[2])
             except Exception:
-                await callback_query.answer("Некорректные данные")
+                await callback_query.answer(Texts.CALLBACK_INVALID_DATA, show_alert=True)
                 return
             result = await self._add_item_to_cart(
                 str(callback_query.from_user.id),
                 item_id,
                 Decimal("1"),
             )
-            await callback_query.answer("Добавлено")
-            if result and self.bot:
-                await self.bot.send_message(chat_id=callback_query.from_user.id, text=result)
+            if not result:
+                await callback_query.answer(Texts.CALLBACK_ADD_FAILED, show_alert=True)
+                return
+            if Texts.ITEM_NOT_FOUND.lower() in result.lower():
+                await callback_query.answer(result, show_alert=True)
+                return
+            await callback_query.answer(Texts.CALLBACK_ADDED)
+
+        @self.dispatcher.callback_query(lambda c: c.data and c.data.startswith("cat:info:"))
+        async def handle_catalog_info(callback_query: types.CallbackQuery):
+            await callback_query.answer()
+            try:
+                item_id = int(callback_query.data.split(":")[2])
+            except Exception:
+                await callback_query.answer(Texts.CALLBACK_INVALID_DATA, show_alert=True)
+                return
+            chat_id = str(callback_query.from_user.id)
+            message_id = (
+                callback_query.message.message_id if callback_query.message else None
+            )
+            await self._send_catalog_detail(chat_id, item_id, message_id=message_id)
 
         @self.dispatcher.callback_query(lambda c: c.data == "cat:next")
         async def handle_catalog_next(callback_query: types.CallbackQuery):
             await callback_query.answer()
-            await self._send_catalog_page(str(callback_query.from_user.id), next_page=True)
+            chat_id = str(callback_query.from_user.id)
+            message_id = (
+                callback_query.message.message_id if callback_query.message else None
+            )
+            await self._send_catalog_page(
+                chat_id, message_id=message_id, next_page=True
+            )
+
+        @self.dispatcher.callback_query(lambda c: c.data == "cat:prev")
+        async def handle_catalog_prev(callback_query: types.CallbackQuery):
+            await callback_query.answer()
+            chat_id = str(callback_query.from_user.id)
+            message_id = (
+                callback_query.message.message_id if callback_query.message else None
+            )
+            await self._send_catalog_page(
+                chat_id, message_id=message_id, prev_page=True
+            )
+
+        @self.dispatcher.callback_query(lambda c: c.data == "cat:back")
+        async def handle_catalog_back(callback_query: types.CallbackQuery):
+            await callback_query.answer()
+            chat_id = str(callback_query.from_user.id)
+            message_id = (
+                callback_query.message.message_id if callback_query.message else None
+            )
+            await self._send_catalog_page(chat_id, message_id=message_id)
+
+        @self.dispatcher.callback_query(lambda c: c.data == "cat:search")
+        async def handle_catalog_search(callback_query: types.CallbackQuery):
+            await callback_query.answer()
+            chat_id = str(callback_query.from_user.id)
+            message_id = (
+                callback_query.message.message_id if callback_query.message else None
+            )
+            await self._send_catalog_search_prompt(chat_id, message_id=message_id)
+
+        @self.dispatcher.callback_query(lambda c: c.data == "cat:search_cancel")
+        async def handle_catalog_search_cancel(callback_query: types.CallbackQuery):
+            await callback_query.answer()
+            chat_id = str(callback_query.from_user.id)
+            message_id = (
+                callback_query.message.message_id if callback_query.message else None
+            )
+            await self._send_catalog_page(chat_id, message_id=message_id)
+
+        @self.dispatcher.callback_query(lambda c: c.data == "cat:filters")
+        async def handle_catalog_filters(callback_query: types.CallbackQuery):
+            await callback_query.answer(
+                Texts.CALLBACK_FILTERS_NOT_READY, show_alert=True
+            )
 
         self.handlers_registered = True
 
     async def send_messages(self, messages: List[Dict]) -> Any:
         if not self.connected_integration_id:
-            return self._error_response(1000, "connected_integration_id не задан")
+            return self._error_response(1000, Texts.ERROR_CONNECTED_ID_MISSING)
 
         await self._initialize_bot()
 
@@ -431,12 +528,12 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             chat_id = msg.get("recipient")
             text = msg.get("message")
             if not chat_id or not text:
-                return self._error_response(1001, "Некорректный формат сообщения")
+                return self._error_response(1001, Texts.ERROR_INVALID_MESSAGE_FORMAT)
             try:
                 await self.bot.send_message(chat_id=chat_id, text=text)
                 results.append({"status": "sent", "chat_id": chat_id})
             except Exception as error:
-                logger.error(f"Ошибка отправки сообщения {chat_id}: {error}")
+                logger.error(Texts.log_send_message_error(chat_id, error))
                 results.append({"status": "error", "chat_id": chat_id, "error": str(error)})
 
         return {"sent": len([r for r in results if r["status"] == "sent"]), "details": results}
@@ -444,7 +541,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
     async def handle_external(self, envelope: Dict) -> Dict:
         payload = envelope.get("body")
         if not isinstance(payload, dict):
-            return self._error_response(400, "Ожидается JSON-объект").dict()
+            return self._error_response(400, Texts.ERROR_EXPECTED_JSON).dict()
 
         await self._initialize_bot()
         await self._setup_handlers()
@@ -456,14 +553,14 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         try:
             telegram_update = TelegramUpdate.model_validate(payload)
         except Exception as error:
-            logger.error(f"Некорректное обновление Telegram: {error}")
-            return self._error_response(400, "Некорректный формат обновления").dict()
+            logger.error(Texts.log_update_invalid(error))
+            return self._error_response(400, Texts.ERROR_INVALID_UPDATE).dict()
 
         try:
             await self.dispatcher.feed_update(self.bot, telegram_update)
         except Exception as error:
-            logger.exception("Ошибка обработки Telegram update")
-            return self._error_response(500, f"Ошибка обработки: {error}").dict()
+            logger.exception(Texts.log_update_processing_error(error))
+            return self._error_response(500, Texts.ERROR_PROCESSING.format(error=error)).dict()
 
         return {
             "status": "processed",
@@ -476,7 +573,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             keyboard=[
                 [
                     types.KeyboardButton(
-                        text="Поделиться номером", request_contact=True
+                        text=Texts.BUTTON_SHARE_PHONE, request_contact=True
                     )
                 ]
             ],
@@ -484,7 +581,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             one_time_keyboard=True,
         )
         await message.answer(
-            "Пожалуйста, поделитесь номером телефона для оформления заказа.",
+            Texts.REQUEST_PHONE,
             reply_markup=keyboard,
         )
 
@@ -531,9 +628,14 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             return
         self._memory_carts.pop(key, None)
 
-    async def _save_catalog_state(self, chat_id: str, search: Optional[str], offset: int) -> None:
+    async def _save_catalog_state(
+        self, chat_id: str, search: Optional[str], offset: int, **extra: Any
+    ) -> None:
         key = self._catalog_state_key(chat_id)
-        payload = {"search": search, "offset": offset}
+        state = await self._get_catalog_state(chat_id)
+        state.update({"search": search, "offset": offset})
+        state.update(extra)
+        payload = state
         if app_settings.redis_enabled and redis_client:
             await redis_client.setex(key, TelegramBotOrdersConfig.CATALOG_TTL, json.dumps(payload))
             return
@@ -541,14 +643,28 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
 
     async def _get_catalog_state(self, chat_id: str) -> Dict[str, Any]:
         key = self._catalog_state_key(chat_id)
+        defaults = {
+            "search": None,
+            "offset": 0,
+            "message_id": None,
+            "view": "list",
+            "detail_item_id": None,
+            "detail_photo_message_id": None,
+            "awaiting_search": False,
+        }
         if app_settings.redis_enabled and redis_client:
             cached = await redis_client.get(key)
             if cached:
                 if isinstance(cached, (bytes, bytearray)):
                     cached = cached.decode("utf-8")
-                return json.loads(cached)
-            return {"search": None, "offset": 0}
-        return self._memory_catalog_state.get(key, {"search": None, "offset": 0})
+                payload = json.loads(cached)
+                defaults.update(payload)
+                return defaults
+            return defaults
+        payload = self._memory_catalog_state.get(key)
+        if payload:
+            defaults.update(payload)
+        return defaults
 
     async def _get_order_state(self, chat_id: str) -> Dict[str, Any]:
         key = self._order_state_key(chat_id)
@@ -576,6 +692,263 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             await redis_client.delete(key)
             return
         self._memory_order_state.pop(key, None)
+
+    @staticmethod
+    def _md_escape(value: Optional[str]) -> str:
+        if not value:
+            return ""
+        text = str(value)
+        for ch in ("\\", "*", "_", "`", "[", "]"):
+            text = text.replace(ch, f"\\{ch}")
+        return text
+
+    def _format_item_line(self, index: int, entry: ItemExt) -> str:
+        item = entry.item
+        name = self._md_escape(item.name or f"ID {item.id}")
+        price = entry.price if entry.price is not None else Decimal(0)
+        qty = (
+            entry.quantity.common
+            if entry.quantity and entry.quantity.common is not None
+            else None
+        )
+        qty_text = Texts.item_qty_suffix(qty) if qty is not None else ""
+        return Texts.item_line(index, name, price, qty_text)
+
+    def _format_catalog_list(
+        self, items: List[ItemExt], search: Optional[str], offset: int
+    ) -> str:
+        page = offset // TelegramBotOrdersConfig.CATALOG_PAGE_SIZE + 1
+        lines = [Texts.catalog_title(page)]
+        if search:
+            lines.append(Texts.catalog_search_line(self._md_escape(search)))
+        if not items:
+            lines.append(Texts.catalog_empty_line())
+            return "\n".join(lines)
+        for idx, entry in enumerate(items, start=1):
+            lines.append(self._format_item_line(idx, entry))
+        return "\n".join(lines)
+
+    def _format_item_detail(self, entry: ItemExt) -> str:
+        item = entry.item
+        name = self._md_escape(item.name or f"ID {item.id}")
+        price = entry.price if entry.price is not None else Decimal(0)
+        qty = (
+            entry.quantity.common
+            if entry.quantity and entry.quantity.common is not None
+            else None
+        )
+        lines = Texts.item_detail_lines(
+            name,
+            item.id,
+            price,
+            qty=qty,
+            articul=self._md_escape(item.articul) if item.articul else None,
+            code=item.code,
+            description=self._md_escape(item.description) if item.description else None,
+        )
+        return "\n".join(lines)
+
+    def _catalog_list_keyboard(
+        self, items: List[ItemExt], offset: int, has_next: bool
+    ) -> InlineKeyboardMarkup:
+        rows: List[List[InlineKeyboardButton]] = []
+        for entry in items:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=Texts.BUTTON_ADD,
+                        callback_data=f"cat:add:{entry.item.id}",
+                    ),
+                    InlineKeyboardButton(
+                        text=Texts.BUTTON_DETAILS,
+                        callback_data=f"cat:info:{entry.item.id}",
+                    ),
+                ]
+            )
+        nav_row: List[InlineKeyboardButton] = []
+        if offset > 0:
+            nav_row.append(
+                InlineKeyboardButton(text=Texts.BUTTON_BACK, callback_data="cat:prev")
+            )
+        if has_next:
+            nav_row.append(
+                InlineKeyboardButton(text=Texts.BUTTON_NEXT, callback_data="cat:next")
+            )
+        if nav_row:
+            rows.append(nav_row)
+        rows.append(
+            [
+                InlineKeyboardButton(text=Texts.BUTTON_SEARCH, callback_data="cat:search"),
+                InlineKeyboardButton(text=Texts.BUTTON_FILTERS, callback_data="cat:filters"),
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(text=Texts.BUTTON_CART, callback_data="menu:cart"),
+                InlineKeyboardButton(text=Texts.BUTTON_MENU_MAIN, callback_data="menu:main"),
+            ]
+        )
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    @staticmethod
+    def _catalog_detail_keyboard(item_id: int) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text=Texts.BUTTON_ADD, callback_data=f"cat:add:{item_id}"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text=Texts.BUTTON_BACK_TO_LIST, callback_data="cat:back"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(text=Texts.BUTTON_CART, callback_data="menu:cart"),
+                    InlineKeyboardButton(text=Texts.BUTTON_MENU_MAIN, callback_data="menu:main"),
+                ],
+            ]
+        )
+
+    @staticmethod
+    def _catalog_search_keyboard() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text=Texts.BUTTON_BACK_TO_CATALOG,
+                        callback_data="cat:search_cancel",
+                    )
+                ],
+                [InlineKeyboardButton(text=Texts.BUTTON_MENU_MAIN, callback_data="menu:main")],
+            ]
+        )
+
+    async def _edit_or_send_catalog_message(
+        self,
+        chat_id: str,
+        message_id: Optional[int],
+        text: str,
+        keyboard: InlineKeyboardMarkup,
+    ) -> Optional[int]:
+        if not self.bot:
+            return None
+        if message_id:
+            try:
+                await self.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=text,
+                    reply_markup=keyboard,
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                return message_id
+            except Exception as error:
+                if "message is not modified" in str(error).lower():
+                    return message_id
+                logger.warning(Texts.log_update_catalog_fail(error))
+        msg = await self.bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            reply_markup=keyboard,
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return msg.message_id
+
+    async def _clear_detail_photo(self, chat_id: str, state: Dict[str, Any]) -> None:
+        message_id = state.get("detail_photo_message_id")
+        if message_id and self.bot:
+            try:
+                await self.bot.delete_message(chat_id=chat_id, message_id=message_id)
+            except Exception as error:
+                logger.debug(Texts.log_delete_photo_fail(error))
+
+    async def _send_catalog_search_prompt(
+        self, chat_id: str, message_id: Optional[int] = None
+    ) -> None:
+        state = await self._get_catalog_state(chat_id)
+        text = Texts.CATALOG_SEARCH_PROMPT
+        current_message_id = message_id or state.get("message_id")
+        message_id = await self._edit_or_send_catalog_message(
+            chat_id,
+            current_message_id,
+            text,
+            self._catalog_search_keyboard(),
+        )
+        await self._save_catalog_state(
+            chat_id,
+            state.get("search"),
+            state.get("offset", 0),
+            message_id=message_id,
+            awaiting_search=True,
+            view="search",
+        )
+
+    async def _handle_search_input(self, message: types.Message) -> bool:
+        chat_id = str(message.chat.id)
+        state = await self._get_catalog_state(chat_id)
+        if not state.get("awaiting_search"):
+            return False
+        query = message.text.strip() if message.text else ""
+        await self._save_catalog_state(
+            chat_id,
+            query or None,
+            0,
+            awaiting_search=False,
+            view="list",
+        )
+        await self._send_catalog_page(
+            chat_id, message_id=state.get("message_id")
+        )
+        return True
+
+    async def _send_catalog_detail(
+        self, chat_id: str, item_id: int, message_id: Optional[int] = None
+    ) -> None:
+        cache_key = f"clients:settings:telegram_bot_orders:{self.connected_integration_id}"
+        settings_map = await self._fetch_settings(cache_key)
+        item_ext = await self._fetch_item_ext(item_id, settings_map)
+        if not item_ext:
+            if self.bot:
+                await self.bot.send_message(
+                    chat_id=chat_id,
+                    text=Texts.ITEM_NOT_FOUND,
+                    reply_markup=self._main_menu_keyboard(),
+                )
+            return
+        state = await self._get_catalog_state(chat_id)
+        current_message_id = message_id or state.get("message_id")
+        text = self._format_item_detail(item_ext)
+        message_id = await self._edit_or_send_catalog_message(
+            chat_id,
+            current_message_id,
+            text,
+            self._catalog_detail_keyboard(item_id),
+        )
+        await self._clear_detail_photo(chat_id, state)
+        detail_photo_id = None
+        if item_ext.image_url and self.bot:
+            try:
+                photo_message = await self.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=item_ext.image_url,
+                    caption=self._md_escape(item_ext.item.name or f"ID {item_id}"),
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+                detail_photo_id = photo_message.message_id
+            except Exception as error:
+                logger.warning(Texts.log_send_photo_fail(error))
+        await self._save_catalog_state(
+            chat_id,
+            state.get("search"),
+            state.get("offset", 0),
+            message_id=message_id,
+            view="detail",
+            detail_item_id=item_id,
+            detail_photo_message_id=detail_photo_id,
+            awaiting_search=False,
+        )
 
     async def _fetch_catalog(self, search: Optional[str], offset: int) -> List[ItemExt]:
         cache_key = f"clients:settings:telegram_bot_orders:{self.connected_integration_id}"
@@ -643,69 +1016,47 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                         json.dumps(payload, ensure_ascii=False),
                     )
                 except Exception as error:
-                    logger.warning(f"Ошибка кеширования каталога: {error}")
+                    logger.warning(Texts.log_catalog_cache_error(error))
             return result
 
-    async def _send_catalog_page(self, chat_id: str, *, next_page: bool = False) -> None:
+    async def _send_catalog_page(
+        self,
+        chat_id: str,
+        *,
+        message_id: Optional[int] = None,
+        next_page: bool = False,
+        prev_page: bool = False,
+    ) -> None:
         state = await self._get_catalog_state(chat_id)
         search = state.get("search")
         offset = int(state.get("offset", 0))
         if next_page:
             offset += TelegramBotOrdersConfig.CATALOG_PAGE_SIZE
+        if prev_page:
+            offset = max(0, offset - TelegramBotOrdersConfig.CATALOG_PAGE_SIZE)
         items = await self._fetch_catalog(search=search, offset=offset)
-        if not items:
-            if self.bot:
-                await self.bot.send_message(
-                    chat_id=chat_id,
-                    text="Каталог пуст.",
-                    reply_markup=self._main_menu_keyboard(),
-                )
-            return
-        await self._save_catalog_state(chat_id, search, offset)
+        if not items and offset > 0:
+            offset = max(0, offset - TelegramBotOrdersConfig.CATALOG_PAGE_SIZE)
+            items = await self._fetch_catalog(search=search, offset=offset)
 
-        for entry in items:
-            text = self._format_item(entry)
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text="Добавить",
-                            callback_data=f"cat:add:{entry.item.id}",
-                        )
-                    ]
-                ]
-            )
-            if entry.image_url:
-                await self.bot.send_photo(
-                    chat_id=chat_id,
-                    photo=entry.image_url,
-                    caption=text,
-                    reply_markup=keyboard,
-                )
-            else:
-                await self.bot.send_message(
-                    chat_id=chat_id,
-                    text=text,
-                    reply_markup=keyboard,
-                )
-
-        nav_rows = []
-        if len(items) >= TelegramBotOrdersConfig.CATALOG_PAGE_SIZE:
-            nav_rows.append(
-                [
-                    InlineKeyboardButton(
-                        text="Следующая страница", callback_data="cat:next"
-                    )
-                ]
-            )
-        nav_rows.append([InlineKeyboardButton(text="Меню", callback_data="menu:main")])
-        nav_keyboard = InlineKeyboardMarkup(inline_keyboard=nav_rows)
-        if self.bot:
-            await self.bot.send_message(
-                chat_id=chat_id,
-                text="Навигация:",
-                reply_markup=nav_keyboard,
-            )
+        has_next = len(items) >= TelegramBotOrdersConfig.CATALOG_PAGE_SIZE
+        text = self._format_catalog_list(items, search, offset)
+        keyboard = self._catalog_list_keyboard(items, offset, has_next)
+        current_message_id = message_id or state.get("message_id")
+        message_id = await self._edit_or_send_catalog_message(
+            chat_id, current_message_id, text, keyboard
+        )
+        await self._clear_detail_photo(chat_id, state)
+        await self._save_catalog_state(
+            chat_id,
+            search,
+            offset,
+            message_id=message_id,
+            view="list",
+            detail_item_id=None,
+            detail_photo_message_id=None,
+            awaiting_search=False,
+        )
 
     def _format_item(self, entry: ItemExt) -> str:
         item = entry.item
@@ -716,19 +1067,19 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             if entry.quantity and entry.quantity.common is not None
             else None
         )
-        qty_text = f", остаток {qty}" if qty is not None else ""
-        return f"{name} (id={item.id})\nЦена: {price}{qty_text}"
+        qty_text = Texts.item_qty_suffix(qty) if qty is not None else ""
+        return f"{name} (id={item.id})\n{Texts.ITEM_DETAIL_PRICE.format(price=price)}{qty_text}"
 
     def _format_cart(self, cart: List[dict]) -> str:
         total = Decimal("0")
-        lines = ["Корзина:"]
+        lines = [Texts.CART_TITLE]
         for row in cart:
             price = Decimal(str(row["price"]))
             qty = Decimal(str(row["qty"]))
             total += price * qty
-            lines.append(f"- {row['name']} (id={row['item_id']}): {qty} x {price}")
-        lines.append(f"Итого: {total}")
-        lines.append("Используйте кнопки ниже, чтобы изменить корзину.")
+            lines.append(Texts.cart_line(row["name"], row["item_id"], qty, price))
+        lines.append(Texts.cart_total(total))
+        lines.append(Texts.CART_HINT)
         return "\n".join(lines)
 
     async def _handle_add_to_cart(self, message: types.Message) -> None:
@@ -736,22 +1087,22 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             return
         parts = message.text.split()
         if len(parts) < 2:
-            await message.answer("Использование: /add <id> [qty]")
+            await message.answer(Texts.ADD_USAGE)
             return
         try:
             item_id = int(parts[1])
         except ValueError:
-            await message.answer("Некорректный id")
+            await message.answer(Texts.INVALID_ID)
             return
         qty = Decimal("1")
         if len(parts) > 2:
             try:
                 qty = Decimal(parts[2])
             except Exception:
-                await message.answer("Некорректное количество")
+                await message.answer(Texts.INVALID_QTY)
                 return
         if qty <= 0:
-            await message.answer("Количество должно быть больше 0")
+            await message.answer(Texts.QTY_GT_ZERO)
             return
 
         result = await self._add_item_to_cart(str(message.chat.id), item_id, qty)
@@ -763,17 +1114,17 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             return
         parts = message.text.split()
         if len(parts) < 2:
-            await message.answer("Использование: /remove <id>")
+            await message.answer(Texts.REMOVE_USAGE)
             return
         try:
             item_id = int(parts[1])
         except ValueError:
-            await message.answer("Некорректный id")
+            await message.answer(Texts.INVALID_ID)
             return
         cart = await self._get_cart(str(message.chat.id))
         new_cart = [row for row in cart if row["item_id"] != item_id]
         await self._save_cart(str(message.chat.id), new_cart)
-        await message.answer("Удалено из корзины.")
+        await message.answer(Texts.REMOVED_FROM_CART)
 
     async def _remove_item_from_cart(self, chat_id: str, item_id: int) -> None:
         cart = await self._get_cart(chat_id)
@@ -784,13 +1135,13 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         cache_key = f"clients:settings:telegram_bot_orders:{self.connected_integration_id}"
         settings_map = await self._fetch_settings(cache_key)
         if not self._is_work_time(settings_map):
-            await message.answer("Сейчас вне рабочего времени.")
+            await message.answer(Texts.WORK_TIME_OFF)
             await self._send_main_menu(message)
             return
 
         cart = await self._get_cart(str(message.chat.id))
         if not cart:
-            await message.answer("Корзина пуста.")
+            await message.answer(Texts.CART_EMPTY)
             await self._send_main_menu(message)
             return
 
@@ -801,7 +1152,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             Decimal(str(row["price"])) * Decimal(str(row["qty"])) for row in cart
         )
         if min_amount and min_amount > 0 and total < min_amount:
-            await message.answer(f"Минимальная сумма заказа: {min_amount}")
+            await message.answer(Texts.min_order_amount(min_amount))
             await self._send_main_menu(message)
             return
 
@@ -874,13 +1225,13 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         async with RegosAPI(connected_integration_id=self.connected_integration_id) as api:
             resp = await api.docs.order_delivery.add_full(req)
         if not resp.ok:
-            await message.answer("Ошибка при создании заказа.")
+            await message.answer(Texts.ORDER_CREATE_ERROR)
             await self._send_main_menu(message)
             return
 
         await self._clear_cart(str(message.chat.id))
         await self._clear_order_state(str(message.chat.id))
-        await message.answer("Заказ принят. Спасибо!")
+        await message.answer(Texts.ORDER_ACCEPTED)
         await self._send_main_menu(message)
 
     async def _handle_cards(self, message: types.Message) -> None:
@@ -894,15 +1245,12 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             )
         cards = resp.result or []
         if not cards:
-            await message.answer("У покупателя нет карт.")
+            await message.answer(Texts.NO_CARDS)
             await self._send_main_menu(message)
             return
         for card in cards:
-            text = (
-                f"Карта #{card.id}\n"
-                f"Баланс: {card.bonus_amount}\n"
-                f"Статус: {'активна' if card.enabled else 'не активна'}\n"
-                f"Штрих-код: {card.barcode_value}"
+            text = Texts.card_text(
+                card.id, card.bonus_amount, bool(card.enabled), card.barcode_value
             )
             image = self._make_qr(card.barcode_value)
             if image and self.bot:
@@ -964,7 +1312,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                         json.dumps(item.model_dump(mode="json"), ensure_ascii=False),
                     )
                 except Exception as error:
-                    logger.warning(f"Ошибка кеширования позиции: {error}")
+                    logger.warning(Texts.log_item_cache_error(error))
             return item
 
     async def _add_item_to_cart(
@@ -974,7 +1322,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         settings_map = await self._fetch_settings(cache_key)
         item_ext = await self._fetch_item_ext(item_id, settings_map)
         if not item_ext:
-            return "Номенклатура не найдена."
+            return Texts.ITEM_NOT_FOUND
 
         cart = await self._get_cart(chat_id)
         existing = next((x for x in cart if x["item_id"] == item_id), None)
@@ -987,25 +1335,25 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                 {"item_id": item_id, "name": name, "price": str(price), "qty": str(qty)}
             )
         await self._save_cart(chat_id, cart)
-        return f"Добавлено в корзину: {name} x {qty}"
+        return Texts.cart_added(name, qty)
 
     async def _handle_contact(self, message: types.Message) -> None:
         contact = message.contact
         if not contact or not contact.phone_number:
             await message.answer(
-                "Не удалось получить номер телефона. Попробуйте еще раз."
+                Texts.PHONE_NOT_RECEIVED
             )
             return
         phone = self._normalize_phone(contact.phone_number)
         if not phone:
-            await message.answer("Номер телефона некорректен. Попробуйте еще раз.")
+            await message.answer(Texts.PHONE_INVALID)
             return
 
         customer = await self._find_customer_by_phone(phone)
         if customer:
             await self._update_customer_telegram_id(customer.id, str(message.chat.id))
             await message.answer(
-                "Покупатель найден. Можно продолжать оформление.",
+                Texts.CUSTOMER_FOUND,
                 reply_markup=types.ReplyKeyboardRemove(),
             )
             await self._send_main_menu(message)
@@ -1014,14 +1362,14 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         created = await self._create_customer_from_contact(message, phone)
         if created:
             await message.answer(
-                "Покупатель создан. Можно продолжать оформление.",
+                Texts.CUSTOMER_CREATED,
                 reply_markup=types.ReplyKeyboardRemove(),
             )
             await self._send_main_menu(message)
             return
 
         await message.answer(
-            "Не удалось создать покупателя. Попробуйте позже или обратитесь в поддержку."
+            Texts.CUSTOMER_CREATE_FAILED
         )
 
     async def _handle_location(self, message: types.Message) -> None:
@@ -1031,7 +1379,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         state = await self._get_order_state(str(message.chat.id))
         if not state:
             await message.answer(
-                "Локация получена, но заказ не начат. Выберите «Оформить заказ»."
+                Texts.LOCATION_RECEIVED_NOT_STARTED
             )
             await self._send_main_menu(message)
             return
@@ -1052,7 +1400,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         state["description"] = message.text.strip()
         state["step"] = "ready"
         await self._save_order_state(str(message.chat.id), state)
-        await message.answer("Принято. Оформляю заказ.")
+        await message.answer(Texts.DESCRIPTION_ACCEPTED)
         await self._handle_order(message)
         return True
 
@@ -1089,10 +1437,10 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             settings_map.get(TelegramOrdersSettings.CUSTOMER_GROUP_ID.value.lower())
         )
         if not group_id:
-            logger.warning("CUSTOMER_GROUP_ID не задан в настройках интеграции")
+            logger.warning(Texts.log_customer_group_missing())
             return False
 
-        first_name = message.contact.first_name or "Клиент"
+        first_name = message.contact.first_name or Texts.CUSTOMER_DEFAULT_FIRST_NAME
         last_name = message.contact.last_name
         full_name = " ".join(
             [x for x in [first_name, last_name] if x]
@@ -1115,7 +1463,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             keyboard=[
                 [
                     types.KeyboardButton(
-                        text="Отправить локацию", request_location=True
+                        text=Texts.BUTTON_SEND_LOCATION, request_location=True
                     )
                 ]
             ],
@@ -1123,12 +1471,12 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             one_time_keyboard=True,
         )
         await message.answer(
-            "Пожалуйста, отправьте локацию для доставки.",
+            Texts.REQUEST_LOCATION,
             reply_markup=keyboard,
         )
 
     async def _request_description(self, message: types.Message) -> None:
-        await message.answer("Напишите примечание к заказу.")
+        await message.answer(Texts.REQUEST_DESCRIPTION)
 
     @staticmethod
     def _make_qr(value: str) -> Optional[bytes]:
