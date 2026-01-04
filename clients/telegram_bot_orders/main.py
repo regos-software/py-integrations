@@ -205,17 +205,17 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         return InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="???????", callback_data="menu:catalog"),
-                    InlineKeyboardButton(text="???????", callback_data="menu:cart"),
+                    InlineKeyboardButton(text="Каталог", callback_data="menu:catalog"),
+                    InlineKeyboardButton(text="Корзина", callback_data="menu:cart"),
                 ],
                 [
                     InlineKeyboardButton(
-                        text="???????? ?????", callback_data="menu:order"
+                        text="Оформить заказ", callback_data="menu:order"
                     )
                 ],
                 [
                     InlineKeyboardButton(
-                        text="????? ??????????", callback_data="menu:cards"
+                        text="Карты покупателя", callback_data="menu:cards"
                     )
                 ],
             ]
@@ -224,36 +224,38 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
     async def _send_main_menu(
         self, message: types.Message, text: Optional[str] = None
     ) -> None:
-        message_text = text or "???????? ????????:"
+        message_text = text or "Выберите действие:"
         await message.answer(message_text, reply_markup=self._main_menu_keyboard())
 
     def _cart_keyboard(self, cart: List[dict]) -> InlineKeyboardMarkup:
         rows = [
             [
                 InlineKeyboardButton(
-                    text=f"??????? {row['item_id']}",
+                    text=f"Удалить {row['item_id']}",
                     callback_data=f"cart:remove:{row['item_id']}",
                 )
             ]
             for row in cart
         ]
         rows.append(
-            [InlineKeyboardButton(text="???????? ???????", callback_data="cart:clear")]
+            [InlineKeyboardButton(text="Очистить корзину", callback_data="cart:clear")]
         )
         rows.append(
-            [InlineKeyboardButton(text="???????? ?????", callback_data="menu:order")]
+            [InlineKeyboardButton(text="Оформить заказ", callback_data="menu:order")]
         )
-        rows.append([InlineKeyboardButton(text="????", callback_data="menu:main")])
+        rows.append([InlineKeyboardButton(text="Меню", callback_data="menu:main")])
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
     async def _send_cart(self, message: types.Message) -> None:
         cart = await self._get_cart(str(message.chat.id))
         if not cart:
             await message.answer(
-                "??????? ?????.", reply_markup=self._main_menu_keyboard()
+                "Корзина пуста.", reply_markup=self._main_menu_keyboard()
             )
             return
-        await message.answer(self._format_cart(cart), reply_markup=self._cart_keyboard(cart))
+        await message.answer(
+            self._format_cart(cart), reply_markup=self._cart_keyboard(cart)
+        )
 
     async def _handle_text(self, message: types.Message) -> None:
         text = message.text.strip() if message.text else ""
@@ -261,14 +263,14 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             await self._send_welcome(message)
             return
         if text.startswith("/"):
-            await self._send_main_menu(message, "??????????? ?????? ????.")
+            await self._send_main_menu(message, "Используйте кнопки ниже.")
             return
         if await self._handle_description(message):
             return
-        await self._send_main_menu(message, "???????? ????????:")
+        await self._send_main_menu(message, "Выберите действие:")
 
     async def _send_welcome(self, message: types.Message) -> None:
-        await self._send_main_menu(message, "??????! ???????? ???????? ????.")
+        await self._send_main_menu(message, "Привет! Выберите действие ниже.")
         customer = await self._find_customer_by_chat(str(message.chat.id))
         if not customer:
             await self._request_phone(message)
@@ -400,14 +402,14 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             try:
                 item_id = int(callback_query.data.split(":")[2])
             except Exception:
-                await callback_query.answer("???????????? ??????")
+                await callback_query.answer("Некорректные данные")
                 return
             result = await self._add_item_to_cart(
                 str(callback_query.from_user.id),
                 item_id,
                 Decimal("1"),
             )
-            await callback_query.answer("?????????")
+            await callback_query.answer("Добавлено")
             if result and self.bot:
                 await self.bot.send_message(chat_id=callback_query.from_user.id, text=result)
 
@@ -474,7 +476,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             keyboard=[
                 [
                     types.KeyboardButton(
-                        text="?????????? ???????", request_contact=True
+                        text="Поделиться номером", request_contact=True
                     )
                 ]
             ],
@@ -482,7 +484,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             one_time_keyboard=True,
         )
         await message.answer(
-            "??????????, ?????????? ??????? ???????? ??? ?????????? ??????.",
+            "Пожалуйста, поделитесь номером телефона для оформления заказа.",
             reply_markup=keyboard,
         )
 
@@ -655,7 +657,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             if self.bot:
                 await self.bot.send_message(
                     chat_id=chat_id,
-                    text="??????? ????.",
+                    text="Каталог пуст.",
                     reply_markup=self._main_menu_keyboard(),
                 )
             return
@@ -667,7 +669,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                 inline_keyboard=[
                     [
                         InlineKeyboardButton(
-                            text="????????",
+                            text="Добавить",
                             callback_data=f"cat:add:{entry.item.id}",
                         )
                     ]
@@ -692,16 +694,16 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             nav_rows.append(
                 [
                     InlineKeyboardButton(
-                        text="????????? ????????", callback_data="cat:next"
+                        text="Следующая страница", callback_data="cat:next"
                     )
                 ]
             )
-        nav_rows.append([InlineKeyboardButton(text="????", callback_data="menu:main")])
+        nav_rows.append([InlineKeyboardButton(text="Меню", callback_data="menu:main")])
         nav_keyboard = InlineKeyboardMarkup(inline_keyboard=nav_rows)
         if self.bot:
             await self.bot.send_message(
                 chat_id=chat_id,
-                text="?????????:",
+                text="Навигация:",
                 reply_markup=nav_keyboard,
             )
 
@@ -714,22 +716,20 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             if entry.quantity and entry.quantity.common is not None
             else None
         )
-        qty_text = f", ??????? {qty}" if qty is not None else ""
-        return f"{name} (id={item.id})
-????: {price}{qty_text}"
+        qty_text = f", остаток {qty}" if qty is not None else ""
+        return f"{name} (id={item.id})\nЦена: {price}{qty_text}"
 
     def _format_cart(self, cart: List[dict]) -> str:
         total = Decimal("0")
-        lines = ["???????:"]
+        lines = ["Корзина:"]
         for row in cart:
             price = Decimal(str(row["price"]))
             qty = Decimal(str(row["qty"]))
             total += price * qty
             lines.append(f"- {row['name']} (id={row['item_id']}): {qty} x {price}")
-        lines.append(f"?????: {total}")
-        lines.append("??????????? ?????? ????, ????? ???????? ???????.")
-        return "
-".join(lines)
+        lines.append(f"Итого: {total}")
+        lines.append("Используйте кнопки ниже, чтобы изменить корзину.")
+        return "\n".join(lines)
 
     async def _handle_add_to_cart(self, message: types.Message) -> None:
         if not message.text:
@@ -784,13 +784,13 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         cache_key = f"clients:settings:telegram_bot_orders:{self.connected_integration_id}"
         settings_map = await self._fetch_settings(cache_key)
         if not self._is_work_time(settings_map):
-            await message.answer("?????? ??? ???????? ???????.")
+            await message.answer("Сейчас вне рабочего времени.")
             await self._send_main_menu(message)
             return
 
         cart = await self._get_cart(str(message.chat.id))
         if not cart:
-            await message.answer("??????? ?????.")
+            await message.answer("Корзина пуста.")
             await self._send_main_menu(message)
             return
 
@@ -801,7 +801,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             Decimal(str(row["price"])) * Decimal(str(row["qty"])) for row in cart
         )
         if min_amount and min_amount > 0 and total < min_amount:
-            await message.answer(f"??????????? ????? ??????: {min_amount}")
+            await message.answer(f"Минимальная сумма заказа: {min_amount}")
             await self._send_main_menu(message)
             return
 
@@ -874,13 +874,13 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         async with RegosAPI(connected_integration_id=self.connected_integration_id) as api:
             resp = await api.docs.order_delivery.add_full(req)
         if not resp.ok:
-            await message.answer("?????? ??? ???????? ??????.")
+            await message.answer("Ошибка при создании заказа.")
             await self._send_main_menu(message)
             return
 
         await self._clear_cart(str(message.chat.id))
         await self._clear_order_state(str(message.chat.id))
-        await message.answer("????? ??????. ???????!")
+        await message.answer("Заказ принят. Спасибо!")
         await self._send_main_menu(message)
 
     async def _handle_cards(self, message: types.Message) -> None:
@@ -894,18 +894,15 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             )
         cards = resp.result or []
         if not cards:
-            await message.answer("? ?????????? ??? ????.")
+            await message.answer("У покупателя нет карт.")
             await self._send_main_menu(message)
             return
         for card in cards:
             text = (
-                f"????? #{card.id}
-"
-                f"??????: {card.bonus_amount}
-"
-                f"??????: {'???????' if card.enabled else '?? ???????'}
-"
-                f"?????-???: {card.barcode_value}"
+                f"Карта #{card.id}\n"
+                f"Баланс: {card.bonus_amount}\n"
+                f"Статус: {'активна' if card.enabled else 'не активна'}\n"
+                f"Штрих-код: {card.barcode_value}"
             )
             image = self._make_qr(card.barcode_value)
             if image and self.bot:
@@ -977,7 +974,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         settings_map = await self._fetch_settings(cache_key)
         item_ext = await self._fetch_item_ext(item_id, settings_map)
         if not item_ext:
-            return "???????????? ?? ???????."
+            return "Номенклатура не найдена."
 
         cart = await self._get_cart(chat_id)
         existing = next((x for x in cart if x["item_id"] == item_id), None)
@@ -990,25 +987,25 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                 {"item_id": item_id, "name": name, "price": str(price), "qty": str(qty)}
             )
         await self._save_cart(chat_id, cart)
-        return f"????????? ? ???????: {name} x {qty}"
+        return f"Добавлено в корзину: {name} x {qty}"
 
     async def _handle_contact(self, message: types.Message) -> None:
         contact = message.contact
         if not contact or not contact.phone_number:
             await message.answer(
-                "?? ??????? ???????? ????? ????????. ?????????? ??? ???."
+                "Не удалось получить номер телефона. Попробуйте еще раз."
             )
             return
         phone = self._normalize_phone(contact.phone_number)
         if not phone:
-            await message.answer("????? ???????? ???????????. ?????????? ??? ???.")
+            await message.answer("Номер телефона некорректен. Попробуйте еще раз.")
             return
 
         customer = await self._find_customer_by_phone(phone)
         if customer:
             await self._update_customer_telegram_id(customer.id, str(message.chat.id))
             await message.answer(
-                "?????????? ??????. ????? ?????????? ??????????.",
+                "Покупатель найден. Можно продолжать оформление.",
                 reply_markup=types.ReplyKeyboardRemove(),
             )
             await self._send_main_menu(message)
@@ -1017,14 +1014,14 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         created = await self._create_customer_from_contact(message, phone)
         if created:
             await message.answer(
-                "?????????? ??????. ????? ?????????? ??????????.",
+                "Покупатель создан. Можно продолжать оформление.",
                 reply_markup=types.ReplyKeyboardRemove(),
             )
             await self._send_main_menu(message)
             return
 
         await message.answer(
-            "?? ??????? ??????? ??????????. ?????????? ????? ??? ?????????? ? ?????????."
+            "Не удалось создать покупателя. Попробуйте позже или обратитесь в поддержку."
         )
 
     async def _handle_location(self, message: types.Message) -> None:
@@ -1034,7 +1031,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         state = await self._get_order_state(str(message.chat.id))
         if not state:
             await message.answer(
-                "??????? ????????, ?? ????? ?? ?????. ???????? ????????? ??????."
+                "Локация получена, но заказ не начат. Выберите «Оформить заказ»."
             )
             await self._send_main_menu(message)
             return
@@ -1055,7 +1052,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         state["description"] = message.text.strip()
         state["step"] = "ready"
         await self._save_order_state(str(message.chat.id), state)
-        await message.answer("???????. ???????? ?????.")
+        await message.answer("Принято. Оформляю заказ.")
         await self._handle_order(message)
         return True
 
@@ -1118,7 +1115,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             keyboard=[
                 [
                     types.KeyboardButton(
-                        text="????????? ???????", request_location=True
+                        text="Отправить локацию", request_location=True
                     )
                 ]
             ],
@@ -1126,12 +1123,12 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             one_time_keyboard=True,
         )
         await message.answer(
-            "??????????, ????????? ??????? ??? ????????.",
+            "Пожалуйста, отправьте локацию для доставки.",
             reply_markup=keyboard,
         )
 
     async def _request_description(self, message: types.Message) -> None:
-        await message.answer("???????? ?????????? ? ??????.")
+        await message.answer("Напишите примечание к заказу.")
 
     @staticmethod
     def _make_qr(value: str) -> Optional[bytes]:
