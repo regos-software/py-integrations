@@ -47,8 +47,6 @@ class TelegramBotOrdersTexts:
     CATEGORIES_TITLE = "Выберите категорию:"
     CATEGORIES_EMPTY = "Категории не найдены."
     CATEGORIES_UNKNOWN = "Категория не найдена. Выберите из списка."
-    CATALOG_SELECT_NUMBER_ADD = "Отправьте номер товара для добавления."
-    CATALOG_SELECT_NUMBER_DETAIL = "Отправьте номер товара для просмотра."
     CATALOG_NUMBER_INVALID = "Некорректный номер. Выберите из списка."
     CART_SELECT_NUMBER_REMOVE = "Отправьте номер позиции для удаления."
     CART_NUMBER_INVALID = "Некорректный номер позиции."
