@@ -20,6 +20,7 @@ from config.settings import settings as app_settings
 from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
 from core.redis import redis_client
+from schemas.api.base import APIBaseResponse
 from schemas.api.integrations.connected_integration_setting import (
     ConnectedIntegrationSettingEditRequest,
     ConnectedIntegrationSettingRequest,
@@ -38,6 +39,7 @@ from schemas.api.docs.order_delivery import (
     Location,
 )
 from schemas.api.references.item import ItemExt, ItemGetExtImageSize, ItemGetExtRequest
+from schemas.api.references.delivery_type import DeliveryType
 from schemas.api.references.item_group import ItemGroup, ItemGroupGetRequest
 from schemas.api.references.retail_card import RetailCardGetRequest
 from schemas.api.references.fields import FieldValueAdd, FieldValueEdit
@@ -80,6 +82,7 @@ class TelegramBotOrdersConfig:
     CART_TTL = app_settings.redis_cache_ttl
     CATALOG_TTL = 60
     GROUPS_TTL = 300
+    DELIVERY_TYPES_TTL = 300
     CATALOG_PAGE_SIZE = 5
     ORDER_STATE_TTL = app_settings.redis_cache_ttl
     INTEGRATION_KEY = "telegram_bot_orders"
@@ -319,6 +322,8 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                 group_id=None,
                 group_name=None,
                 awaiting_search=False,
+                awaiting_qty=False,
+                qty_item_id=None,
                 awaiting_action=None,
                 page_item_ids=[],
                 page_items=[],
@@ -362,7 +367,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         if text == Texts.BUTTON_SEARCH:
             await self._send_catalog_search_prompt(chat_id)
             return
-        if text == Texts.BUTTON_ADD:
+        if text == Texts.BUTTON_ADD_ONE:
             state = await self._get_catalog_state(chat_id)
             if state.get("view") == "detail" and state.get("selected_item_id"):
                 result = await self._add_item_to_cart(
@@ -370,8 +375,17 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                 )
                 await message.answer(result or Texts.ITEM_NOT_FOUND)
                 return
+        if text == Texts.BUTTON_ADD_OTHER:
+            state = await self._get_catalog_state(chat_id)
+            if state.get("view") == "detail" and state.get("selected_item_id"):
+                await self._prompt_item_quantity(
+                    message, state["selected_item_id"]
+                )
+                return
 
         if await self._handle_order_text_input(message):
+            return
+        if await self._handle_qty_input(message):
             return
         if await self._handle_search_input(message):
             return
@@ -661,6 +675,8 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             "group_name": None,
             "view": "categories",
             "awaiting_search": False,
+            "awaiting_qty": False,
+            "qty_item_id": None,
             "awaiting_action": None,
             "page_item_ids": [],
             "page_items": [],
@@ -813,7 +829,8 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
     def _catalog_detail_keyboard(self) -> types.ReplyKeyboardMarkup:
         return types.ReplyKeyboardMarkup(
             keyboard=[
-                [types.KeyboardButton(text=Texts.BUTTON_ADD)],
+                [types.KeyboardButton(text=Texts.BUTTON_ADD_ONE)],
+                [types.KeyboardButton(text=Texts.BUTTON_ADD_OTHER)],
                 [types.KeyboardButton(text=Texts.BUTTON_BACK_TO_LIST)],
                 [
                     types.KeyboardButton(text=Texts.BUTTON_CART),
@@ -845,12 +862,39 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         rows.append([types.KeyboardButton(text=Texts.BUTTON_MENU_MAIN)])
         return types.ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
+    def _quantity_keyboard(self) -> types.ReplyKeyboardMarkup:
+        rows: List[List[types.KeyboardButton]] = []
+        row: List[types.KeyboardButton] = []
+        for option in Texts.QTY_OPTIONS:
+            row.append(types.KeyboardButton(text=option))
+            if len(row) == 3:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        rows.append([types.KeyboardButton(text=Texts.BUTTON_BACK_TO_ITEM)])
+        rows.append([types.KeyboardButton(text=Texts.BUTTON_MENU_MAIN)])
+        return types.ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+    def _delivery_type_keyboard(
+        self, types_list: List[DeliveryType]
+    ) -> types.ReplyKeyboardMarkup:
+        rows: List[List[types.KeyboardButton]] = []
+        for entry in types_list:
+            if not entry.name:
+                continue
+            rows.append([types.KeyboardButton(text=entry.name)])
+        rows.append([types.KeyboardButton(text=Texts.BUTTON_MENU_MAIN)])
+        return types.ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
     async def _send_catalog_search_prompt(self, chat_id: str) -> None:
         await self._save_catalog_state(
             chat_id,
             None,
             0,
             awaiting_search=True,
+            awaiting_qty=False,
+            qty_item_id=None,
             awaiting_action=None,
             view="search",
         )
@@ -873,10 +917,33 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             query or None,
             0,
             awaiting_search=False,
+            awaiting_qty=False,
+            qty_item_id=None,
             view="list",
             awaiting_action=None,
         )
         await self._send_catalog_page(chat_id)
+        return True
+
+    async def _handle_qty_input(self, message: types.Message) -> bool:
+        chat_id = str(message.chat.id)
+        state = await self._get_catalog_state(chat_id)
+        if not state.get("awaiting_qty"):
+            return False
+        text = message.text.strip() if message.text else ""
+        item_id = state.get("qty_item_id")
+        if text == Texts.BUTTON_BACK_TO_ITEM and item_id:
+            await self._send_catalog_detail(chat_id, item_id)
+            return True
+        qty = self._parse_quantity(text)
+        if not qty or not item_id:
+            await message.answer(
+                Texts.QTY_INVALID, reply_markup=self._quantity_keyboard()
+            )
+            return True
+        result = await self._add_item_to_cart(chat_id, item_id, qty)
+        await message.answer(result or Texts.ITEM_NOT_FOUND)
+        await self._send_catalog_detail(chat_id, item_id)
         return True
 
     async def _prompt_cart_remove(self, message: types.Message) -> None:
@@ -976,8 +1043,29 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             state.get("offset", 0),
             view="detail",
             selected_item_id=item_id,
+            awaiting_qty=False,
+            qty_item_id=None,
             awaiting_search=False,
             awaiting_action=None,
+        )
+
+    async def _prompt_item_quantity(
+        self, message: types.Message, item_id: int
+    ) -> None:
+        state = await self._get_catalog_state(str(message.chat.id))
+        await self._save_catalog_state(
+            str(message.chat.id),
+            state.get("search"),
+            state.get("offset", 0),
+            view="qty",
+            awaiting_qty=True,
+            qty_item_id=item_id,
+            awaiting_search=False,
+            awaiting_action=None,
+        )
+        await message.answer(
+            Texts.REQUEST_QTY,
+            reply_markup=self._quantity_keyboard(),
         )
 
     async def _fetch_catalog(
@@ -1104,6 +1192,37 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                 groups = [group for group in groups if group.id in allowed_group_ids]
             return groups
 
+    async def _fetch_delivery_types(self) -> List[DeliveryType]:
+        cache_key = f"clients:cache:delivery_types:{self.connected_integration_id}"
+        if app_settings.redis_enabled and redis_client:
+            cached = await redis_client.get(cache_key)
+            if cached:
+                if isinstance(cached, (bytes, bytearray)):
+                    cached = cached.decode("utf-8")
+                raw_types = json.loads(cached)
+                return [DeliveryType.model_validate(entry) for entry in raw_types]
+
+        async with RegosAPI(connected_integration_id=self.connected_integration_id) as api:
+            resp = await api.call(
+                "DeliveryType/Get",
+                {"limit": 10000, "offset": 0},
+                APIBaseResponse[List[DeliveryType]],
+            )
+            result = resp.result or []
+            types_list = [entry for entry in result if entry.name]
+            types_list.sort(key=lambda entry: entry.name.lower())
+            if app_settings.redis_enabled and redis_client:
+                try:
+                    payload = [entry.model_dump(mode="json") for entry in types_list]
+                    await redis_client.setex(
+                        cache_key,
+                        TelegramBotOrdersConfig.DELIVERY_TYPES_TTL,
+                        json.dumps(payload, ensure_ascii=False),
+                    )
+                except Exception as error:
+                    logger.warning(Texts.log_catalog_cache_error(error))
+            return types_list
+
     async def _send_categories(self, message: types.Message) -> None:
         chat_id = str(message.chat.id)
         groups = await self._fetch_categories()
@@ -1119,6 +1238,8 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             group_id=None,
             group_name=None,
             awaiting_search=False,
+            awaiting_qty=False,
+            qty_item_id=None,
             awaiting_action=None,
             page_item_ids=[],
             page_items=[],
@@ -1188,6 +1309,8 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             offset,
             view="list",
             awaiting_search=False,
+            awaiting_qty=False,
+            qty_item_id=None,
             awaiting_action=None,
             page_item_ids=[entry.item.id for entry in items],
             page_items=[
@@ -1595,14 +1718,27 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         step = state.get("step")
         text = message.text.strip()
         if step == "await_delivery_type":
-            try:
-                delivery_type_id = int(text)
-                if delivery_type_id <= 0:
-                    raise ValueError("delivery_type_id")
-            except ValueError:
-                await message.answer(Texts.DELIVERY_TYPE_INVALID)
+            delivery_type_id = None
+            delivery_type_options = state.get("delivery_type_options") or {}
+            if text in delivery_type_options:
+                delivery_type_id = delivery_type_options[text]
+            else:
+                try:
+                    parsed = int(text)
+                    if parsed > 0:
+                        delivery_type_id = parsed
+                except ValueError:
+                    delivery_type_id = None
+            if not delivery_type_id:
+                await message.answer(
+                    Texts.DELIVERY_TYPE_INVALID,
+                    reply_markup=self._delivery_type_keyboard(
+                        await self._fetch_delivery_types()
+                    ),
+                )
                 return True
             state["delivery_type_id"] = delivery_type_id
+            state["delivery_type_options"] = {}
             state["step"] = None
             await self._save_order_state(str(message.chat.id), state)
             await self._handle_order(message)
@@ -1700,7 +1836,22 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         await message.answer(Texts.REQUEST_DESCRIPTION)
 
     async def _request_delivery_type(self, message: types.Message) -> None:
-        await message.answer(Texts.REQUEST_DELIVERY_TYPE)
+        types_list = await self._fetch_delivery_types()
+        chat_id = str(message.chat.id)
+        state = await self._get_order_state(chat_id)
+        if not types_list:
+            await message.answer(Texts.DELIVERY_TYPES_EMPTY)
+            return
+        state["delivery_type_options"] = {
+            entry.name: entry.id
+            for entry in types_list
+            if entry.name and entry.id
+        }
+        await self._save_order_state(chat_id, state)
+        await message.answer(
+            Texts.REQUEST_DELIVERY_TYPE,
+            reply_markup=self._delivery_type_keyboard(types_list),
+        )
 
     async def _request_address(self, message: types.Message) -> None:
         await message.answer(Texts.REQUEST_ADDRESS)
@@ -1731,6 +1882,17 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             return Decimal(str(value).strip())
         except Exception:
             return None
+
+    @staticmethod
+    def _parse_quantity(value: str) -> Optional[Decimal]:
+        if not value:
+            return None
+        text = value.strip().replace(",", ".")
+        try:
+            qty = Decimal(text)
+        except Exception:
+            return None
+        return qty if qty > 0 else None
 
     @staticmethod
     def _parse_int_list(value: Optional[str]) -> List[int]:
