@@ -20,6 +20,7 @@ class TelegramBotOrdersTexts:
     BUTTON_MENU_CATALOG = "Каталог"
     BUTTON_MENU_CART = "Корзина"
     BUTTON_MENU_ORDER = "Оформить заказ"
+    BUTTON_MENU_ORDERS = "Мои заказы"
     BUTTON_MENU_CARDS = "Карты покупателя"
     BUTTON_MENU_MAIN = "Меню"
     BUTTON_CATEGORIES = "Категории"
@@ -36,6 +37,7 @@ class TelegramBotOrdersTexts:
     BUTTON_BACK_TO_LIST = "Назад к списку"
     BUTTON_BACK_TO_ITEM = "Назад к товару"
     BUTTON_BACK_TO_CATALOG = "Назад к каталогу"
+    BUTTON_ORDER_BACK_TO_LIST = "Назад к списку заказов"
     BUTTON_CART = "Корзина"
     ADD_USAGE = "Использование: /add <id> [qty]"
     REMOVE_USAGE = "Использование: /remove <id>"
@@ -48,6 +50,19 @@ class TelegramBotOrdersTexts:
     ORDER_ACCEPTED = "Заказ принят. Спасибо!"
     ORDERS_DISABLED = "Прием заказов отключен. Доступны только карты покупателя."
     DELIVERY_TYPES_EMPTY = "Способы доставки не найдены. Укажите ID вручную."
+    ORDERS_EMPTY = "У вас пока нет заказов."
+    ORDERS_TITLE = "*Мои заказы* (стр. {page})"
+    ORDERS_HINT = "Нажмите на заказ, чтобы посмотреть детали."
+    ORDER_LINE = "{index}. №{code} от {date} — {amount}{status}"
+    ORDER_DETAIL_TITLE = "*Заказ №{code}*"
+    ORDER_DETAIL_DATE = "*Дата:* {date}"
+    ORDER_DETAIL_AMOUNT = "*Сумма:* {amount}"
+    ORDER_DETAIL_STATUS = "*Статус:* {status}"
+    ORDER_DETAIL_ADDRESS = "*Адрес:* {address}"
+    ORDER_DETAIL_DESCRIPTION = "*Комментарий:* {description}"
+    ORDER_DETAIL_DELIVERY_TYPE = "*Доставка:* {delivery_type}"
+    ORDER_DETAIL_FROM = "*Источник:* {source}"
+    ORDER_NOT_FOUND = "Заказ не найден."
     NO_CARDS = "У покупателя нет карт."
     CATEGORIES_TITLE = "Выберите категорию:"
     CATEGORIES_EMPTY = "Категории не найдены."
@@ -175,6 +190,57 @@ class TelegramBotOrdersTexts:
     @staticmethod
     def catalog_empty_line() -> str:
         return TelegramBotOrdersTexts.CATALOG_EMPTY_LINE
+
+    @staticmethod
+    def orders_title(page: int) -> str:
+        return TelegramBotOrdersTexts.ORDERS_TITLE.format(page=page)
+
+    @staticmethod
+    def order_line(index: int, code: str, date: str, amount, status: Optional[str]) -> str:
+        status_part = f" ({status})" if status else ""
+        return TelegramBotOrdersTexts.ORDER_LINE.format(
+            index=index, code=code, date=date, amount=amount, status=status_part
+        )
+
+    @staticmethod
+    def order_button_label(index: int, code: str) -> str:
+        return f"{index}. №{code}"
+
+    @staticmethod
+    def order_detail_title(code: str) -> str:
+        return TelegramBotOrdersTexts.ORDER_DETAIL_TITLE.format(code=code)
+
+    @staticmethod
+    def order_detail_date(date: str) -> str:
+        return TelegramBotOrdersTexts.ORDER_DETAIL_DATE.format(date=date)
+
+    @staticmethod
+    def order_detail_amount(amount) -> str:
+        return TelegramBotOrdersTexts.ORDER_DETAIL_AMOUNT.format(amount=amount)
+
+    @staticmethod
+    def order_detail_status(status: str) -> str:
+        return TelegramBotOrdersTexts.ORDER_DETAIL_STATUS.format(status=status)
+
+    @staticmethod
+    def order_detail_address(address: str) -> str:
+        return TelegramBotOrdersTexts.ORDER_DETAIL_ADDRESS.format(address=address)
+
+    @staticmethod
+    def order_detail_description(description: str) -> str:
+        return TelegramBotOrdersTexts.ORDER_DETAIL_DESCRIPTION.format(
+            description=description
+        )
+
+    @staticmethod
+    def order_detail_delivery_type(delivery_type: str) -> str:
+        return TelegramBotOrdersTexts.ORDER_DETAIL_DELIVERY_TYPE.format(
+            delivery_type=delivery_type
+        )
+
+    @staticmethod
+    def order_detail_from(source: str) -> str:
+        return TelegramBotOrdersTexts.ORDER_DETAIL_FROM.format(source=source)
 
     @staticmethod
     def item_qty_suffix(qty) -> str:
