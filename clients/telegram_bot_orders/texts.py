@@ -19,7 +19,7 @@ class TelegramBotOrdersTexts:
     BUTTON_SHARE_PHONE = "☎️ Поделиться номером"
     BUTTON_MENU_CATALOG = "Каталог"
     BUTTON_MENU_CART = "🛒 Корзина"
-    BUTTON_MENU_ORDER = "Оформить заказ"
+    BUTTON_MENU_ORDER = "✅ Оформить заказ"
     BUTTON_MENU_ORDERS = "Мои заказы"
     BUTTON_MENU_CARDS = "Карты покупателя"
     BUTTON_MENU_MAIN = "Меню"
@@ -73,10 +73,11 @@ class TelegramBotOrdersTexts:
     CART_ITEM_REMOVED = "Позиция удалена."
     CART_TITLE = "*Корзина*"
     CART_SEPARATOR = "----"
-    CART_ITEM_HEADER = "❌ {index}. {name}"
+    CART_ITEM_HEADER = "*{index}. {name}*"
     CART_ITEM_DETAILS = "Количество: {qty}\nЦена: {price}\nСумма: {total}"
-    CART_TOTAL = "Итого: {total}"
-    CART_HINT = "Используйте кнопки ниже, чтобы изменить корзину."
+    CART_TOTAL = "*Итого:* {total}"
+    CART_HINT = "_Используйте кнопки ниже, чтобы изменить корзину._"
+    CART_BUTTON_LABEL = "❌ {index}. {name}"
     CATALOG_TITLE = "*Каталог* (стр. {page})"
     CATALOG_CATEGORY_LINE = "_Категория:_ {name}"
     CATALOG_SEARCH_LINE = "_Поиск:_ {query}"
@@ -296,7 +297,7 @@ class TelegramBotOrdersTexts:
 
     @staticmethod
     def cart_button_label(index: int, name: str) -> str:
-        return TelegramBotOrdersTexts.CART_ITEM_HEADER.format(index=index, name=name)
+        return TelegramBotOrdersTexts.CART_BUTTON_LABEL.format(index=index, name=name)
 
     @staticmethod
     def cart_total(total) -> str:

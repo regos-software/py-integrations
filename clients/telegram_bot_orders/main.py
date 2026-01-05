@@ -1652,7 +1652,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
 
     def _format_cart(self, cart: List[dict]) -> str:
         total = Decimal("0")
-        lines = [Texts.CART_TITLE]
+        lines = [Texts.CART_TITLE, ""]
         for idx, row in enumerate(cart, start=1):
             price = Decimal(str(row["price"]))
             qty = Decimal(str(row["qty"]))
@@ -1660,10 +1660,16 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             total += line_total
             lines.append(Texts.cart_item_header(idx, row["name"]))
             lines.append(Texts.cart_item_details(qty, price, line_total))
+            lines.append("")
             lines.append(Texts.CART_SEPARATOR)
+            lines.append("")
+        while lines and lines[-1] == "":
+            lines.pop()
         if lines and lines[-1] == Texts.CART_SEPARATOR:
             lines.pop()
+        lines.append("")
         lines.append(Texts.cart_total(total))
+        lines.append("")
         lines.append(Texts.CART_HINT)
         return "\n".join(lines)
 
