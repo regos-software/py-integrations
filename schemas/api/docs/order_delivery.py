@@ -5,7 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import List, Optional
 
-from pydantic import ConfigDict, Field as PydField, model_validator
+from pydantic import ConfigDict, Field as PydField, field_validator, model_validator
 
 from schemas.api.base import APIBaseResponse, BaseSchema
 from schemas.api.common.sort_orders import SortOrders
@@ -99,6 +99,13 @@ class DocOrderDelivery(BaseSchema):
     last_update: Optional[int] = PydField(
         default=None, ge=0, description="Last update (unix time)."
     )
+
+    @field_validator("operating_cash_id", mode="before")
+    @classmethod
+    def _normalize_operating_cash_id(cls, v):
+        if v in {0, "0"}:
+            return None
+        return v
 
 
 class DocOrderDeliveryOperation(BaseSchema):
