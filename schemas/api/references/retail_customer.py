@@ -8,7 +8,7 @@ from typing import Any, List, Optional
 from pydantic import Field as PydField, EmailStr, field_validator
 from pydantic.config import ConfigDict
 
-from schemas.api.base import APIBaseResponse, BaseSchema
+from schemas.api.base import APIBaseResponse, AddResult, BaseSchema
 from schemas.api.common.filters import Filters
 from schemas.api.common.sort_orders import SortOrders
 from schemas.api.references.fields import FieldValueAdds, FieldValueEdits, FieldValues
@@ -144,6 +144,13 @@ class RetailCustomerGetResponse(
     APIBaseResponse[List[RetailCustomer] | dict[str, Any]]
 ):
     """Response model for RetailCustomer/Get."""
+
+
+# ---------- Add Response ----------
+
+
+class RetailCustomerAddResponse(APIBaseResponse[AddResult | dict[str, Any]]):
+    """Response model for RetailCustomer/Add."""
 
 
 # ---------- Add ----------
@@ -308,6 +315,7 @@ __all__ = [
     "RetailCustomer",
     "RetailCustomerGetRequest",
     "RetailCustomerGetResponse",
+    "RetailCustomerAddResponse",
     "RetailCustomerAddRequest",
     "RetailCustomerEditRequest",
     "RetailCustomerDeleteMarkRequest",

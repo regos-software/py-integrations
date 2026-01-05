@@ -5,6 +5,7 @@ from schemas.api.base import APIBaseResponse, ArrayResult
 from schemas.api.references.retail_customer import (
     RetailCustomerGetResponse,
     RetailCustomerGetRequest,
+    RetailCustomerAddResponse,
     RetailCustomerAddRequest,
     RetailCustomerEditRequest,
     RetailCustomerDeleteMarkRequest,
@@ -31,11 +32,11 @@ class RetailCustomerService:
         """
         return await self.api.call(self.PATH_GET, req, RetailCustomerGetResponse)
 
-    async def add(self, req: RetailCustomerAddRequest) -> APIBaseResponse[ArrayResult]:
+    async def add(self, req: RetailCustomerAddRequest) -> RetailCustomerAddResponse:
         """
         Создаёт покупателя. Возвращает ID.
         """
-        return await self.api.call(self.PATH_ADD, req, APIBaseResponse[ArrayResult])
+        return await self.api.call(self.PATH_ADD, req, RetailCustomerAddResponse)
 
     async def edit(self, req: RetailCustomerEditRequest) -> None:
         """
