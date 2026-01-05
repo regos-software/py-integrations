@@ -1875,7 +1875,14 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                 offset=0,
             )
             resp = await api.references.retail_customer.get(req)
-            return resp.result[0] if resp.result else None
+            if not resp.result:
+                return None
+            customer = resp.result[0]
+            fields = customer.fields or []
+            for field in fields:
+                if field.key == "field_telegram_id" and str(field.value) == str(chat_id):
+                    return customer
+            return None
 
     async def _fetch_item_ext(self, item_id: int, settings_map: Dict[str, str]) -> Optional[ItemExt]:
         stock_id = self._parse_int(
