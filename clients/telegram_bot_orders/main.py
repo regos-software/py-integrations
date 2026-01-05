@@ -927,6 +927,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
 
     def _categories_keyboard(self, groups: List[ItemGroup]) -> types.ReplyKeyboardMarkup:
         rows: List[List[types.KeyboardButton]] = []
+        rows.append([types.KeyboardButton(text=Texts.BUTTON_SEARCH)])
         buffer: List[types.KeyboardButton] = []
         for group in groups:
             if not group.name:
@@ -1391,7 +1392,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             price_type_id=price_type_id,
             zero_quantity=zero_qty,
             has_image=has_image,
-            image_size=ItemGetExtImageSize.Small,
+            image_size=ItemGetExtImageSize.Large,
             search=search,
             group_ids=request_group_ids,
             limit=TelegramBotOrdersConfig.CATALOG_PAGE_SIZE,
@@ -1897,6 +1898,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             ids=[item_id],
             stock_id=stock_id,
             price_type_id=price_type_id,
+            image_size=ItemGetExtImageSize.Small,
             limit=1,
             offset=0,
         )

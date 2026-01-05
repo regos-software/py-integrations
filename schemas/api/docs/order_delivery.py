@@ -5,7 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import List, Optional
 
-from pydantic import ConfigDict, Field as PydField, field_validator, model_validator
+from pydantic import ConfigDict, Field as PydField, field_validator
 
 from schemas.api.base import APIBaseResponse, BaseSchema
 from schemas.api.common.sort_orders import SortOrders
@@ -24,7 +24,7 @@ class DocumentStatus(BaseSchema):
 
     model_config = ConfigDict(extra="ignore")
 
-    id: Optional[int] = PydField(default=None, ge=1, description="ID статуса.")
+    id: Optional[int] = PydField(default=None, description="ID статуса.")
     name: Optional[str] = PydField(default=None, description="Наименование статуса.")
 
 
@@ -35,14 +35,10 @@ class Location(BaseSchema):
 
     longitude: Optional[Decimal] = PydField(
         default=None,
-        ge=-180,
-        le=180,
         description="Longitude (from -180 to +180).",
     )
     latitude: Optional[Decimal] = PydField(
         default=None,
-        ge=-90,
-        le=90,
         description="Latitude (from -90 to +90).",
     )
 
@@ -52,19 +48,19 @@ class DocOrderDelivery(BaseSchema):
 
     model_config = ConfigDict(extra="ignore")
 
-    id: int = PydField(..., ge=1, description="Document id.")
-    date: int = PydField(..., ge=0, description="Document date (unix time).")
+    id: int = PydField(..., description="Document id.")
+    date: int = PydField(..., description="Document date (unix time).")
     code: str = PydField(..., description="Document code.")
     stock: Optional[Stock] = PydField(default=None, description="Stock.")
     customer: Optional[RetailCustomer] = PydField(default=None, description="Customer.")
     card: Optional[RetailCard] = PydField(default=None, description="Customer card.")
     operating_cash_id: Optional[int] = PydField(
-        default=None, ge=1, description="Operating cash id."
+        default=None, description="Operating cash id."
     )
     amount: Optional[Decimal] = PydField(default=None, description="Total amount.")
     status: Optional[DocumentStatus] = PydField(default=None, description="Status.")
     delivery_date: Optional[int] = PydField(
-        default=None, ge=0, description="Delivery date (unix time)."
+        default=None, description="Delivery date (unix time)."
     )
     description: Optional[str] = PydField(default=None, description="Description.")
     address: Optional[str] = PydField(default=None, description="Delivery address.")
@@ -97,7 +93,7 @@ class DocOrderDelivery(BaseSchema):
         default=None, description="Deleted mark."
     )
     last_update: Optional[int] = PydField(
-        default=None, ge=0, description="Last update (unix time)."
+        default=None, description="Last update (unix time)."
     )
 
     @field_validator("operating_cash_id", mode="before")
@@ -114,56 +110,49 @@ class DocOrderDeliveryOperation(BaseSchema):
     model_config = ConfigDict(extra="forbid")
 
     item_id: Optional[int] = PydField(
-        default=None, ge=1, description="Item id."
+        default=None, description="Item id."
     )
     item_code: Optional[int] = PydField(
-        default=None, ge=1, description="Item code."
+        default=None, description="Item code."
     )
     quantity: Decimal = PydField(..., description="Quantity.")
     price: Decimal = PydField(..., description="Price.")
-
-    @model_validator(mode="after")
-    def _validate_item_ref(self) -> "DocOrderDeliveryOperation":
-        if self.item_id is None and self.item_code is None:
-            raise ValueError("item_id or item_code is required")
-        return self
-
 
 class DocOrderDeliveryAddRequest(BaseSchema):
     """Payload for DocOrderDelivery/Add (embedded in AddFull)."""
 
     model_config = ConfigDict(extra="forbid")
 
-    date: Optional[int] = PydField(default=None, ge=0, description="Document date.")
-    stock_id: Optional[int] = PydField(default=None, ge=1, description="Stock id.")
+    date: Optional[int] = PydField(default=None, description="Document date.")
+    stock_id: Optional[int] = PydField(default=None, description="Stock id.")
     customer_id: Optional[int] = PydField(
-        default=None, ge=1, description="Customer id."
+        default=None, description="Customer id."
     )
-    card_id: Optional[int] = PydField(default=None, ge=1, description="Card id.")
+    card_id: Optional[int] = PydField(default=None, description="Card id.")
     operating_cash_id: Optional[int] = PydField(
-        default=None, ge=1, description="Operating cash id."
+        default=None, description="Operating cash id."
     )
     amount: Optional[Decimal] = PydField(default=None, description="Total amount.")
     delivery_date: Optional[int] = PydField(
-        default=None, ge=0, description="Delivery date (unix time)."
+        default=None, description="Delivery date (unix time)."
     )
     description: Optional[str] = PydField(default=None, description="Description.")
     address: Optional[str] = PydField(default=None, description="Delivery address.")
     phone: Optional[str] = PydField(default=None, description="Phone.")
     external_code: Optional[str] = PydField(default=None, description="External code.")
-    from_id: Optional[int] = PydField(default=None, ge=1, description="Source id.")
+    from_id: Optional[int] = PydField(default=None, description="Source id.")
     location: Optional[Location] = PydField(default=None, description="Location.")
     delivery_type_id: Optional[int] = PydField(
-        default=None, ge=1, description="Delivery type id."
+        default=None, description="Delivery type id."
     )
     courier_id: Optional[int] = PydField(
-        default=None, ge=1, description="Courier id."
+        default=None, description="Courier id."
     )
     price_type_id: Optional[int] = PydField(
-        default=None, ge=1, description="Price type id."
+        default=None, description="Price type id."
     )
     payment_type_id: Optional[int] = PydField(
-        default=None, ge=1, description="Payment type id."
+        default=None, description="Payment type id."
     )
 
 
@@ -184,10 +173,10 @@ class DocOrderDeliveryGetRequest(BaseSchema):
     model_config = ConfigDict(extra="forbid")
 
     start_date: Optional[int] = PydField(
-        default=None, ge=0, description="Start date (unix time)."
+        default=None, description="Start date (unix time)."
     )
     end_date: Optional[int] = PydField(
-        default=None, ge=0, description="End date (unix time)."
+        default=None, description="End date (unix time)."
     )
     code: Optional[str] = PydField(default=None, description="Document code.")
     ids: Optional[List[int]] = PydField(default=None, description="Document ids.")
@@ -216,17 +205,11 @@ class DocOrderDeliveryGetRequest(BaseSchema):
         default=None, description="Deleted mark."
     )
     limit: Optional[int] = PydField(
-        default=None, ge=1, description="Limit."
+        default=None, description="Limit."
     )
     offset: Optional[int] = PydField(
-        default=None, ge=0, description="Offset."
+        default=None, description="Offset."
     )
-
-    @model_validator(mode="after")
-    def _validate_dates(self) -> "DocOrderDeliveryGetRequest":
-        if self.start_date and self.end_date and self.end_date < self.start_date:
-            raise ValueError("end_date must be >= start_date")
-        return self
 
 
 class DocOrderDeliveryGetResponse(APIBaseResponse[List[DocOrderDelivery]]):
