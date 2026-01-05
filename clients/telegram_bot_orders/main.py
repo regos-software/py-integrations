@@ -942,6 +942,13 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             )
             return True
         result = await self._add_item_to_cart(chat_id, item_id, qty)
+        if result == Texts.QTY_INTEGER_ONLY:
+            await message.answer(result, reply_markup=self._quantity_keyboard())
+            return True
+        if result == Texts.ITEM_NOT_FOUND:
+            await message.answer(Texts.ITEM_NOT_FOUND)
+            await self._send_main_menu(message, Texts.MAIN_MENU)
+            return True
         await message.answer(result or Texts.ITEM_NOT_FOUND)
         await self._send_catalog_detail(chat_id, item_id)
         return True
@@ -1643,6 +1650,8 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         item_ext = await self._fetch_item_ext(item_id, settings_map)
         if not item_ext:
             return Texts.ITEM_NOT_FOUND
+        if self._unit_requires_integer(item_ext.item.unit) and self._is_fractional(qty):
+            return Texts.QTY_INTEGER_ONLY
 
         cart = await self._get_cart(chat_id)
         existing = next((x for x in cart if x["item_id"] == item_id), None)
@@ -1893,6 +1902,21 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         except Exception:
             return None
         return qty if qty > 0 else None
+
+    @staticmethod
+    def _is_fractional(qty: Decimal) -> bool:
+        return qty != qty.to_integral_value()
+
+    @staticmethod
+    def _unit_requires_integer(unit: Optional[Any]) -> bool:
+        if not unit or unit.type is None:
+            return False
+        value = str(unit.type).strip().lower()
+        if value in {"pcs", "2"}:
+            return True
+        if value in {"non_pcs", "1"}:
+            return False
+        return False
 
     @staticmethod
     def _parse_int_list(value: Optional[str]) -> List[int]:

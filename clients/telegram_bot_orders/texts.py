@@ -99,6 +99,7 @@ class TelegramBotOrdersTexts:
     REQUEST_DESCRIPTION = "Напишите примечание к заказу."
     REQUEST_QTY = "Выберите количество (можно дробное) или введите вручную."
     QTY_INVALID = "Некорректное количество. Введите число больше 0."
+    QTY_INTEGER_ONLY = "Для штучных товаров доступно только целое количество."
     REQUEST_DELIVERY_TYPE = "Выберите способ доставки."
     DELIVERY_TYPE_INVALID = "Выберите способ доставки из списка."
     REQUEST_ADDRESS = "Укажите адрес доставки текстом."
