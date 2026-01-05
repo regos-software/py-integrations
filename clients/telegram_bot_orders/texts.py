@@ -43,6 +43,7 @@ class TelegramBotOrdersTexts:
     WORK_TIME_OFF = "Сейчас вне рабочего времени."
     ORDER_CREATE_ERROR = "Ошибка при создании заказа."
     ORDER_ACCEPTED = "Заказ принят. Спасибо!"
+    ORDERS_DISABLED = "Прием заказов отключен. Доступны только карты покупателя."
     NO_CARDS = "У покупателя нет карт."
     CATEGORIES_TITLE = "Выберите категорию:"
     CATEGORIES_EMPTY = "Категории не найдены."
@@ -92,6 +93,10 @@ class TelegramBotOrdersTexts:
     REQUEST_LOCATION = "Пожалуйста, отправьте локацию для доставки."
     BUTTON_SEND_LOCATION = "Отправить локацию"
     REQUEST_DESCRIPTION = "Напишите примечание к заказу."
+    REQUEST_DELIVERY_TYPE = "Укажите ID способа доставки (число)."
+    DELIVERY_TYPE_INVALID = "Некорректный ID способа доставки. Отправьте число."
+    REQUEST_ADDRESS = "Укажите адрес доставки текстом."
+    ADDRESS_INVALID = "Адрес не должен быть пустым."
     ITEM_NOT_FOUND = "Номенклатура не найдена."
     ITEM_UNNAMED = "Товар"
 
