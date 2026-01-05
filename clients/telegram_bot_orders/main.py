@@ -2075,10 +2075,16 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             await self._handle_order(message)
             return True
         if step == "await_description":
-            state["description"] = text
+            if text == Texts.BUTTON_SKIP:
+                state["description"] = None
+            else:
+                state["description"] = text
             state["step"] = "ready"
             await self._save_order_state(str(message.chat.id), state)
-            await message.answer(Texts.DESCRIPTION_ACCEPTED)
+            await message.answer(
+                Texts.DESCRIPTION_ACCEPTED,
+                reply_markup=types.ReplyKeyboardRemove(),
+            )
             await self._handle_order(message)
             return True
         return False
@@ -2184,7 +2190,12 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         )
 
     async def _request_description(self, message: types.Message) -> None:
-        await message.answer(Texts.REQUEST_DESCRIPTION)
+        keyboard = types.ReplyKeyboardMarkup(
+            keyboard=[[types.KeyboardButton(text=Texts.BUTTON_SKIP)]],
+            resize_keyboard=True,
+            one_time_keyboard=True,
+        )
+        await message.answer(Texts.REQUEST_DESCRIPTION, reply_markup=keyboard)
 
     async def _request_delivery_type(self, message: types.Message) -> None:
         types_list = await self._fetch_delivery_types()

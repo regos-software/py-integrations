@@ -111,6 +111,7 @@ class TelegramBotOrdersTexts:
     DESCRIPTION_ACCEPTED = "Принято. Оформляю заказ."
     REQUEST_LOCATION = "Пожалуйста, отправьте локацию для доставки."
     BUTTON_SEND_LOCATION = "Отправить локацию"
+    BUTTON_SKIP = "Пропустить"
     REQUEST_DESCRIPTION = "Напишите примечание к заказу."
     REQUEST_QTY = "Выберите количество (можно дробное) или введите вручную."
     QTY_INVALID = "Некорректное количество. Введите число больше 0."
