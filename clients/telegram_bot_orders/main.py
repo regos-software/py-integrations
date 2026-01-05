@@ -31,7 +31,6 @@ from schemas.integration.base import (
     IntegrationSuccessResponse,
 )
 from schemas.integration.telegram_integration_base import IntegrationTelegramBase
-from schemas.api.common.filters import Filter, FilterOperator
 from schemas.api.common.sort_orders import SortDirection, SortOrder
 from schemas.api.docs.order_delivery import (
     DocOrderDelivery,
@@ -119,6 +118,8 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         self._memory_carts: Dict[str, List[dict]] = {}
         self._memory_catalog_state: Dict[str, Dict[str, Any]] = {}
         self._memory_order_state: Dict[str, Dict[str, Any]] = {}
+        self._memory_customer_phone: Dict[str, str] = {}
+        self._telegram_field_supported = False
         self._memory_cart_state: Dict[str, Dict[str, Any]] = {}
         self._memory_orders_state: Dict[str, Dict[str, Any]] = {}
 
@@ -617,6 +618,12 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
     def _order_state_key(self, chat_id: str) -> str:
         return f"clients:order_state:telegram_bot_orders:{self.connected_integration_id}:{chat_id}"
 
+    def _customer_phone_key(self, chat_id: str) -> str:
+        return (
+            "clients:customer_phone:telegram_bot_orders:"
+            f"{self.connected_integration_id}:{chat_id}"
+        )
+
     def _orders_state_key(self, chat_id: str) -> str:
         return (
             f"clients:orders_state:telegram_bot_orders:{self.connected_integration_id}:{chat_id}"
@@ -743,6 +750,17 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             return {}
         return self._memory_order_state.get(key, {})
 
+    async def _get_customer_phone(self, chat_id: str) -> Optional[str]:
+        key = self._customer_phone_key(chat_id)
+        if app_settings.redis_enabled and redis_client:
+            cached = await redis_client.get(key)
+            if cached:
+                if isinstance(cached, (bytes, bytearray)):
+                    cached = cached.decode("utf-8")
+                return str(cached)
+            return None
+        return self._memory_customer_phone.get(key)
+
     async def _get_orders_state(self, chat_id: str) -> Dict[str, Any]:
         key = self._orders_state_key(chat_id)
         defaults = {
@@ -784,6 +802,14 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             return
         self._memory_order_state[key] = state
 
+    async def _save_customer_phone(self, chat_id: str, phone: str) -> None:
+        key = self._customer_phone_key(chat_id)
+        if app_settings.redis_enabled and redis_client:
+            ttl = await self._get_order_state_ttl()
+            await redis_client.setex(key, ttl, phone)
+            return
+        self._memory_customer_phone[key] = phone
+
     async def _save_orders_state(self, chat_id: str, **extra: Any) -> None:
         key = self._orders_state_key(chat_id)
         state = await self._get_orders_state(chat_id)
@@ -800,6 +826,13 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             await redis_client.delete(key)
             return
         self._memory_order_state.pop(key, None)
+
+    async def _clear_customer_phone(self, chat_id: str) -> None:
+        key = self._customer_phone_key(chat_id)
+        if app_settings.redis_enabled and redis_client:
+            await redis_client.delete(key)
+            return
+        self._memory_customer_phone.pop(key, None)
 
     async def _clear_orders_state(self, chat_id: str) -> None:
         key = self._orders_state_key(chat_id)
@@ -1861,28 +1894,19 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                 await message.answer(text)
         await self._send_main_menu(message)
 
+    @staticmethod
+    def _customer_has_telegram_field(customer) -> bool:
+        fields = customer.fields or []
+        return any(field.key == "field_telegram_id" for field in fields)
+
     async def _find_customer_by_chat(self, chat_id: str):
-        async with RegosAPI(connected_integration_id=self.connected_integration_id) as api:
-            req = RetailCustomerGetRequest(
-                filters=[
-                    Filter(
-                        field="field_telegram_id",
-                        operator=FilterOperator.Equal,
-                        value=str(chat_id),
-                    )
-                ],
-                limit=1,
-                offset=0,
-            )
-            resp = await api.references.retail_customer.get(req)
-            if not resp.result:
-                return None
-            customer = resp.result[0]
-            fields = customer.fields or []
-            for field in fields:
-                if field.key == "field_telegram_id" and str(field.value) == str(chat_id):
-                    return customer
+        phone = await self._get_customer_phone(chat_id)
+        if not phone:
             return None
+        customer = await self._find_customer_by_phone(phone)
+        if not customer:
+            await self._clear_customer_phone(chat_id)
+        return customer
 
     async def _fetch_item_ext(self, item_id: int, settings_map: Dict[str, str]) -> Optional[ItemExt]:
         stock_id = self._parse_int(
@@ -1960,9 +1984,12 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             await message.answer(Texts.PHONE_INVALID)
             return
 
+        await self._save_customer_phone(str(message.chat.id), phone)
+
         customer = await self._find_customer_by_phone(phone)
         if customer:
-            await self._update_customer_telegram_id(customer.id, str(message.chat.id))
+            if self._customer_has_telegram_field(customer):
+                await self._update_customer_telegram_id(customer.id, str(message.chat.id))
             await message.answer(
                 Texts.CUSTOMER_FOUND,
                 reply_markup=types.ReplyKeyboardRemove(),
@@ -1970,7 +1997,11 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             await self._send_main_menu(message)
             return
 
-        created = await self._create_customer_from_contact(message, phone)
+        created = await self._create_customer_from_contact(
+            message,
+            phone,
+            include_telegram_field=self._telegram_field_supported,
+        )
         if created:
             await message.answer(
                 Texts.CUSTOMER_CREATED,
@@ -2060,15 +2091,29 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                 offset=0,
             )
             resp = await api.references.retail_customer.get(req)
-            if resp.result:
-                return resp.result[0]
+            customers = resp.result if isinstance(resp.result, list) else []
+            if customers:
+                customer = customers[0]
+                if self._customer_has_telegram_field(customer):
+                    self._telegram_field_supported = True
+                return customer
+            if resp.result is not None and not isinstance(resp.result, list):
+                logger.warning("RetailCustomer.Get returned non-list result")
             req = RetailCustomerGetRequest(
                 search=phone,
                 limit=1,
                 offset=0,
             )
             resp = await api.references.retail_customer.get(req)
-            return resp.result[0] if resp.result else None
+            customers = resp.result if isinstance(resp.result, list) else []
+            if customers:
+                customer = customers[0]
+                if self._customer_has_telegram_field(customer):
+                    self._telegram_field_supported = True
+                return customer
+            if resp.result is not None and not isinstance(resp.result, list):
+                logger.warning("RetailCustomer.Get returned non-list result")
+            return None
 
     async def _update_customer_telegram_id(self, customer_id: int, chat_id: str) -> None:
         async with RegosAPI(connected_integration_id=self.connected_integration_id) as api:
@@ -2076,9 +2121,20 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                 id=customer_id,
                 fields=[FieldValueEdit(key="field_telegram_id", value=chat_id)],
             )
-            await api.references.retail_customer.edit(req)
+            try:
+                await api.references.retail_customer.edit(req)
+            except Exception as error:
+                logger.warning(
+                    "Не удалось обновить field_telegram_id: %s", error
+                )
 
-    async def _create_customer_from_contact(self, message: types.Message, phone: str) -> bool:
+    async def _create_customer_from_contact(
+        self,
+        message: types.Message,
+        phone: str,
+        *,
+        include_telegram_field: bool = False,
+    ) -> bool:
         cache_key = f"clients:settings:telegram_bot_orders:{self.connected_integration_id}"
         settings_map = await self._fetch_settings(cache_key)
         group_id = self._parse_int(
@@ -2094,13 +2150,17 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             [x for x in [first_name, last_name] if x]
         ).strip()
 
+        fields = None
+        if include_telegram_field:
+            fields = [FieldValueAdd(key="field_telegram_id", value=str(message.chat.id))]
+
         req = RetailCustomerAddRequest(
             group_id=group_id,
             first_name=first_name,
             last_name=last_name,
             full_name=full_name or None,
             main_phone=phone,
-            fields=[FieldValueAdd(key="field_telegram_id", value=str(message.chat.id))],
+            fields=fields,
         )
         async with RegosAPI(connected_integration_id=self.connected_integration_id) as api:
             resp = await api.references.retail_customer.add(req)

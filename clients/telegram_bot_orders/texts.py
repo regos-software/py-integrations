@@ -38,7 +38,7 @@ class TelegramBotOrdersTexts:
     BUTTON_BACK_TO_ITEM = "Назад к товару"
     BUTTON_BACK_TO_CATALOG = "Назад к каталогу"
     BUTTON_ORDER_BACK_TO_LIST = "Назад к списку заказов"
-    BUTTON_CART = "Корзина"
+    BUTTON_CART = "🛒 Корзина"
     ADD_USAGE = "Использование: /add <id> [qty]"
     REMOVE_USAGE = "Использование: /remove <id>"
     INVALID_ID = "Некорректный id"

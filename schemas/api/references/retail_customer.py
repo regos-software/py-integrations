@@ -3,12 +3,12 @@ from __future__ import annotations
 
 from decimal import Decimal
 from enum import Enum
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from pydantic import Field as PydField, EmailStr, field_validator
 from pydantic.config import ConfigDict
 
-from schemas.api.base import BaseSchema
+from schemas.api.base import APIBaseResponse, BaseSchema
 from schemas.api.common.filters import Filters
 from schemas.api.common.sort_orders import SortOrders
 from schemas.api.references.fields import FieldValueAdds, FieldValueEdits, FieldValues
@@ -138,6 +138,12 @@ class RetailCustomerGetRequest(BaseSchema):
     main_phone: Optional[str] = None
     limit: Optional[int] = None
     offset: Optional[int] = None
+
+
+class RetailCustomerGetResponse(
+    APIBaseResponse[List[RetailCustomer] | dict[str, Any]]
+):
+    """Response model for RetailCustomer/Get."""
 
 
 # ---------- Add ----------
@@ -301,6 +307,7 @@ __all__ = [
     "Sex",
     "RetailCustomer",
     "RetailCustomerGetRequest",
+    "RetailCustomerGetResponse",
     "RetailCustomerAddRequest",
     "RetailCustomerEditRequest",
     "RetailCustomerDeleteMarkRequest",

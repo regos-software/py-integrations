@@ -1,11 +1,9 @@
 # services/retail_customer.py
 from __future__ import annotations
-from typing import List
-
 from core.logger import setup_logger
 from schemas.api.base import APIBaseResponse, ArrayResult
 from schemas.api.references.retail_customer import (
-    RetailCustomer,
+    RetailCustomerGetResponse,
     RetailCustomerGetRequest,
     RetailCustomerAddRequest,
     RetailCustomerEditRequest,
@@ -26,16 +24,12 @@ class RetailCustomerService:
     def __init__(self, api):
         self.api = api
 
-    async def get(
-        self, req: RetailCustomerGetRequest
-    ) -> APIBaseResponse[List[RetailCustomer]]:
+    async def get(self, req: RetailCustomerGetRequest) -> RetailCustomerGetResponse:
         """
         Возвращает список покупателей. Бросает RuntimeError при ok=False
         и TypeError при неверном формате result.
         """
-        return await self.api.call(
-            self.PATH_GET, req, APIBaseResponse[List[RetailCustomer]]
-        )
+        return await self.api.call(self.PATH_GET, req, RetailCustomerGetResponse)
 
     async def add(self, req: RetailCustomerAddRequest) -> APIBaseResponse[ArrayResult]:
         """
