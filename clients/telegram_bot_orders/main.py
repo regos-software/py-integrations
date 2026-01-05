@@ -45,6 +45,7 @@ from schemas.api.references.delivery_type import DeliveryType
 from schemas.api.references.item_group import ItemGroup, ItemGroupGetRequest
 from schemas.api.references.retail_card import RetailCardGetRequest
 from schemas.api.references.fields import FieldValueAdd, FieldValueEdit
+from schemas.api.common.filters import Filter, FilterOperator
 from schemas.api.references.retail_customer import (
     RetailCustomerAddRequest,
     RetailCustomerEditRequest,
@@ -119,7 +120,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         self._memory_catalog_state: Dict[str, Dict[str, Any]] = {}
         self._memory_order_state: Dict[str, Dict[str, Any]] = {}
         self._memory_customer_phone: Dict[str, str] = {}
-        self._telegram_field_supported = False
+        self._telegram_field_supported: Optional[bool] = None
         self._memory_cart_state: Dict[str, Dict[str, Any]] = {}
         self._memory_orders_state: Dict[str, Dict[str, Any]] = {}
 
@@ -1760,6 +1761,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         address_required = self._parse_bool(
             settings_map.get(TelegramOrdersSettings.ADDRESS_REQUIRED.value.lower())
         )
+        description_skipped = bool(state.get("description_skipped"))
         if delivery_required and not state.get("delivery_type_id"):
             await self._save_order_state(
                 str(message.chat.id),
@@ -1769,6 +1771,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                     "address": state.get("address"),
                     "location": state.get("location"),
                     "description": state.get("description"),
+                    "description_skipped": description_skipped,
                 },
             )
             await self._request_delivery_type(message)
@@ -1782,6 +1785,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                     "address": None,
                     "location": state.get("location"),
                     "description": state.get("description"),
+                    "description_skipped": description_skipped,
                 },
             )
             await self._request_address(message)
@@ -1795,11 +1799,12 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                     "description": state.get("description"),
                     "delivery_type_id": state.get("delivery_type_id"),
                     "address": state.get("address"),
+                    "description_skipped": description_skipped,
                 },
             )
             await self._request_location(message)
             return
-        if not state.get("description"):
+        if not state.get("description") and not description_skipped:
             await self._save_order_state(
                 str(message.chat.id),
                 {
@@ -1808,6 +1813,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                     "description": None,
                     "delivery_type_id": state.get("delivery_type_id"),
                     "address": state.get("address"),
+                    "description_skipped": description_skipped,
                 },
             )
             await self._request_description(message)
@@ -1901,12 +1907,65 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
 
     async def _find_customer_by_chat(self, chat_id: str):
         phone = await self._get_customer_phone(chat_id)
-        if not phone:
+        if phone:
+            customer = await self._find_customer_by_phone(phone)
+            if not customer:
+                await self._clear_customer_phone(chat_id)
+            return customer
+        if self._telegram_field_supported is False:
             return None
-        customer = await self._find_customer_by_phone(phone)
+        customer = await self._find_customer_by_telegram_id(chat_id)
         if not customer:
-            await self._clear_customer_phone(chat_id)
+            return None
         return customer
+
+    async def _find_customer_by_telegram_id(self, chat_id: str):
+        async with RegosAPI(connected_integration_id=self.connected_integration_id) as api:
+            req = RetailCustomerGetRequest(
+                filters=[
+                    Filter(
+                        field="field_telegram_id",
+                        operator=FilterOperator.Equal,
+                        value=str(chat_id),
+                    )
+                ],
+                limit=1,
+                offset=0,
+            )
+            resp = await api.references.retail_customer.get(req)
+            if isinstance(resp.result, list):
+                self._telegram_field_supported = True
+                if not resp.result:
+                    return None
+                customer = resp.result[0]
+                if self._customer_has_telegram_field(customer):
+                    matched = False
+                    for field in customer.fields or []:
+                        if (
+                            field.key == "field_telegram_id"
+                            and str(field.value) == str(chat_id)
+                        ):
+                            matched = True
+                            break
+                    if not matched:
+                        return None
+                if customer.main_phone:
+                    normalized = self._normalize_phone(customer.main_phone)
+                    if normalized:
+                        await self._save_customer_phone(chat_id, normalized)
+                return customer
+            if isinstance(resp.result, dict):
+                error_code = resp.result.get("error")
+                description = str(resp.result.get("description", "")).lower()
+                if error_code == 7501 or "field_telegram_id" in description:
+                    self._telegram_field_supported = False
+                logger.warning(
+                    "RetailCustomer.Get by field_telegram_id failed: %s", resp.result
+                )
+                return None
+            if resp.ok is False:
+                self._telegram_field_supported = False
+            return None
 
     async def _fetch_item_ext(self, item_id: int, settings_map: Dict[str, str]) -> Optional[ItemExt]:
         stock_id = self._parse_int(
@@ -2077,8 +2136,10 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         if step == "await_description":
             if text == Texts.BUTTON_SKIP:
                 state["description"] = None
+                state["description_skipped"] = True
             else:
                 state["description"] = text
+                state["description_skipped"] = False
             state["step"] = "ready"
             await self._save_order_state(str(message.chat.id), state)
             await message.answer(
