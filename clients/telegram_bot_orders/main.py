@@ -75,16 +75,17 @@ class TelegramOrdersSettings(Enum):
     ADDRESS_REQUIRED = "ADDRESS_REQUIRED"
     ITEM_GROUP_IDS = "ITEM_GROUP_IDS"
     ORDERS_DISABLED = "ORDERS_DISABLED"
+    ORDER_STATE_TTL = "ORDER_STATE_TTL"
 
 
 class TelegramBotOrdersConfig:
     SETTINGS_TTL = app_settings.redis_cache_ttl
-    CART_TTL = app_settings.redis_cache_ttl
+    CART_TTL = 86400
     CATALOG_TTL = 60
     GROUPS_TTL = 300
     DELIVERY_TYPES_TTL = 300
     CATALOG_PAGE_SIZE = 5
-    ORDER_STATE_TTL = app_settings.redis_cache_ttl
+    ORDER_STATE_TTL = 86400
     INTEGRATION_KEY = "telegram_bot_orders"
     WEBHOOK_BASE_URL = f"{app_settings.integration_url.rstrip('/')}/external"
 
@@ -708,11 +709,22 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             return {}
         return self._memory_order_state.get(key, {})
 
+    async def _get_order_state_ttl(self) -> int:
+        settings_map = await self._get_settings_map()
+        ttl_value = settings_map.get(
+            TelegramOrdersSettings.ORDER_STATE_TTL.value.lower()
+        )
+        ttl = self._parse_int(ttl_value)
+        if ttl and ttl > 0:
+            return ttl
+        return TelegramBotOrdersConfig.ORDER_STATE_TTL
+
     async def _save_order_state(self, chat_id: str, state: Dict[str, Any]) -> None:
         key = self._order_state_key(chat_id)
         if app_settings.redis_enabled and redis_client:
+            ttl = await self._get_order_state_ttl()
             await redis_client.setex(
-                key, TelegramBotOrdersConfig.ORDER_STATE_TTL, json.dumps(state)
+                key, ttl, json.dumps(state)
             )
             return
         self._memory_order_state[key] = state
