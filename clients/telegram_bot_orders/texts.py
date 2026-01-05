@@ -90,9 +90,11 @@ class TelegramBotOrdersTexts:
     ITEM_QTY_SUFFIX = ", остаток {qty}"
     ITEM_DETAIL_PRICE = "*Цена:* {price}"
     ITEM_DETAIL_QTY = "*Остаток:* {qty}"
+    ITEM_DETAIL_COLOR = "*Цвет:* {color}"
+    ITEM_DETAIL_SIZE = "*Размер:* {size}"
     ITEM_DETAIL_ARTICUL = "*Артикул:* {articul}"
     ITEM_DETAIL_CODE = "*Код:* {code}"
-    ITEM_DETAIL_DESCRIPTION = "*Описание:* {description}"
+    ITEM_DETAIL_DESCRIPTION = "*Описание:* _{description}_"
     CARD_STATUS_ACTIVE = "активна"
     CARD_STATUS_INACTIVE = "не активна"
     CARD_TEMPLATE = (
@@ -263,6 +265,8 @@ class TelegramBotOrdersTexts:
         name: str,
         price,
         qty: Optional[float] = None,
+        color: Optional[str] = None,
+        size: Optional[str] = None,
         articul: Optional[str] = None,
         code: Optional[int] = None,
         description: Optional[str] = None,
@@ -273,6 +277,10 @@ class TelegramBotOrdersTexts:
         ]
         if qty is not None:
             lines.append(TelegramBotOrdersTexts.ITEM_DETAIL_QTY.format(qty=qty))
+        if color:
+            lines.append(TelegramBotOrdersTexts.ITEM_DETAIL_COLOR.format(color=color))
+        if size:
+            lines.append(TelegramBotOrdersTexts.ITEM_DETAIL_SIZE.format(size=size))
         if articul:
             lines.append(TelegramBotOrdersTexts.ITEM_DETAIL_ARTICUL.format(articul=articul))
         if code:

@@ -851,6 +851,19 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             text = text.replace(ch, f"\\{ch}")
         return text
 
+    @staticmethod
+    def _format_decimal(value: Optional[Decimal]) -> str:
+        if value is None:
+            return "0"
+        try:
+            dec = Decimal(str(value))
+        except Exception:
+            return str(value)
+        text = format(dec, "f")
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        return text or "0"
+
     def _format_item_line(self, index: int, entry: ItemExt) -> str:
         item = entry.item
         name = self._md_escape(item.name or Texts.ITEM_UNNAMED)
@@ -905,7 +918,9 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             status = order.status.name if order.status else None
             status_text = self._md_escape(status) if status else None
             lines.append(
-                Texts.order_line(idx, code, date_text, amount, status_text)
+                Texts.order_line(
+                    idx, code, date_text, self._format_decimal(amount), status_text
+                )
             )
         lines.append(Texts.ORDERS_HINT)
         return "\n".join(lines)
@@ -915,7 +930,9 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         lines = [Texts.order_detail_title(code)]
         lines.append(Texts.order_detail_date(self._format_order_date(order.date)))
         if order.amount is not None:
-            lines.append(Texts.order_detail_amount(order.amount))
+            lines.append(
+                Texts.order_detail_amount(self._format_decimal(order.amount))
+            )
         if order.status and order.status.name:
             lines.append(
                 Texts.order_detail_status(self._md_escape(order.status.name))
@@ -949,15 +966,27 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             if entry.quantity and entry.quantity.common is not None
             else None
         )
+        color = (
+            self._md_escape(item.color.name)
+            if item.color and item.color.name
+            else None
+        )
+        size = (
+            self._md_escape(item.size.name)
+            if item.size and item.size.name
+            else None
+        )
         lines = Texts.item_detail_lines(
             name,
-            price,
-            qty=qty,
+            self._format_decimal(price),
+            qty=self._format_decimal(qty) if qty is not None else None,
+            color=color,
+            size=size,
             articul=self._md_escape(item.articul) if item.articul else None,
             code=item.code,
             description=self._md_escape(item.description) if item.description else None,
         )
-        return "\n".join(lines)
+        return "\n\n".join(lines)
 
     def _categories_keyboard(self, groups: List[ItemGroup]) -> types.ReplyKeyboardMarkup:
         rows: List[List[types.KeyboardButton]] = []
@@ -1647,8 +1676,14 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             if entry.quantity and entry.quantity.common is not None
             else None
         )
-        qty_text = Texts.item_qty_suffix(qty) if qty is not None else ""
-        return f"{name}\n{Texts.ITEM_DETAIL_PRICE.format(price=price)}{qty_text}"
+        qty_text = (
+            Texts.item_qty_suffix(self._format_decimal(qty)) if qty is not None else ""
+        )
+        return (
+            f"{name}\n"
+            f"{Texts.ITEM_DETAIL_PRICE.format(price=self._format_decimal(price))}"
+            f"{qty_text}"
+        )
 
     def _format_cart(self, cart: List[dict]) -> str:
         total = Decimal("0")
@@ -1659,7 +1694,13 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             line_total = price * qty
             total += line_total
             lines.append(Texts.cart_item_header(idx, row["name"]))
-            lines.append(Texts.cart_item_details(qty, price, line_total))
+            lines.append(
+                Texts.cart_item_details(
+                    self._format_decimal(qty),
+                    self._format_decimal(price),
+                    self._format_decimal(line_total),
+                )
+            )
             lines.append("")
             lines.append(Texts.CART_SEPARATOR)
             lines.append("")
@@ -1668,7 +1709,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         if lines and lines[-1] == Texts.CART_SEPARATOR:
             lines.pop()
         lines.append("")
-        lines.append(Texts.cart_total(total))
+        lines.append(Texts.cart_total(self._format_decimal(total)))
         lines.append("")
         lines.append(Texts.CART_HINT)
         return "\n".join(lines)
@@ -1749,7 +1790,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             Decimal(str(row["price"])) * Decimal(str(row["qty"])) for row in cart
         )
         if min_amount and min_amount > 0 and total < min_amount:
-            await message.answer(Texts.min_order_amount(min_amount))
+            await message.answer(Texts.min_order_amount(self._format_decimal(min_amount)))
             await self._send_main_menu(message)
             return
 
