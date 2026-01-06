@@ -135,6 +135,11 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         return result or None
 
     @staticmethod
+    def _is_bot_blocked_error(error: object) -> bool:
+        text = str(error).lower()
+        return "bot was blocked by the user" in text
+
+    @staticmethod
     def _is_longpolling_mode() -> bool:
         mode = str(settings.telegram_update_mode or "").strip().lower()
         return mode in {"longpolling", "long_polling", "long-polling", "polling"}
@@ -818,6 +823,16 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                 results.append({"status": "sent", "chat_id": chat_id})
             except Exception as error:
                 logger.error(f"Error sending message to chat {chat_id}: {error}")
+                if self._is_bot_blocked_error(error):
+                    try:
+                        await self._remove_subscriber(str(chat_id))
+                        logger.info(
+                            "Removed subscriber %s because bot was blocked", chat_id
+                        )
+                    except Exception as remove_error:
+                        logger.warning(
+                            "Failed to remove subscriber %s: %s", chat_id, remove_error
+                        )
                 results.append(
                     {"status": "error", "chat_id": chat_id, "error": str(error)}
                 )
@@ -881,6 +896,29 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             except Exception as error:
                 logger.error(f"Error sending batch {i}: {error}")
                 results.append({"error": str(error), "batch_index": i})
+
+        for batch_result in results:
+            details = batch_result.get("details") if isinstance(batch_result, dict) else None
+            if not details:
+                continue
+            for detail in details:
+                if not isinstance(detail, dict) or detail.get("status") != "error":
+                    continue
+                error_text = detail.get("error", "")
+                if not self._is_bot_blocked_error(error_text):
+                    continue
+                chat_id = detail.get("chat_id")
+                if not chat_id:
+                    continue
+                try:
+                    await self._remove_subscriber(str(chat_id))
+                    logger.info(
+                        "Removed subscriber %s because bot was blocked", chat_id
+                    )
+                except Exception as remove_error:
+                    logger.warning(
+                        "Failed to remove subscriber %s: %s", chat_id, remove_error
+                    )
 
         logger.info(f"Message sending completed. Processed {len(results)} batches")
         return {"sent_batches": len(results), "details": results}

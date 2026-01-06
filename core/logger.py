@@ -22,6 +22,7 @@ def _ensure_root_handler(level: int):
     # уровень и включение
     root.setLevel(level)
     root.disabled = False
+    logging.getLogger("uvicorn.access").setLevel(level)
 
 def setup_logger(name: str = "app") -> logging.Logger:
     """
