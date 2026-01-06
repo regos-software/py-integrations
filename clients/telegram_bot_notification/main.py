@@ -558,7 +558,21 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         cache_key = f"clients:settings:telegram:{self.connected_integration_id}"
         if settings.redis_enabled and redis_client:
             await redis_client.delete(cache_key)
-        await self.connect()
+        settings_items = incoming_settings or data
+        if not settings_items and request is not None:
+            settings_items = getattr(request, "root", None) or request
+        if not settings_items:
+            settings_items = kwargs.get("messages")
+        if settings_items and not isinstance(settings_items, list):
+            settings_items = [settings_items]
+        changed_keys = set()
+        for item in settings_items or []:
+            key = item.get("key") if isinstance(item, dict) else getattr(item, "key", None)
+            if key:
+                changed_keys.add(str(key).strip().lower())
+        reconnect_keys = {TelegramSettings.BOT_TOKEN.value.lower()}
+        if changed_keys & reconnect_keys:
+            await self.connect()
         return IntegrationSuccessResponse(result={"status": "settings updated"})
 
     async def handle_webhook(

@@ -506,7 +506,21 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                 await redis_client.delete(cache_key)
             except Exception as error:
                 logger.warning(f"Redis error while clearing settings cache: {error}")
-        await self.connect()
+        settings_items = incoming_settings or data
+        if not settings_items and request is not None:
+            settings_items = getattr(request, "root", None) or request
+        if not settings_items:
+            settings_items = kwargs.get("messages")
+        if settings_items and not isinstance(settings_items, list):
+            settings_items = [settings_items]
+        changed_keys = set()
+        for item in settings_items or []:
+            key = item.get("key") if isinstance(item, dict) else getattr(item, "key", None)
+            if key:
+                changed_keys.add(str(key).strip().lower())
+        reconnect_keys = {TelegramOrdersSettings.BOT_TOKEN.value.lower()}
+        if changed_keys & reconnect_keys:
+            await self.connect()
         return IntegrationSuccessResponse(result={"status": "settings updated"})
 
     async def _setup_handlers(self) -> None:
