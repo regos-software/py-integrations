@@ -77,6 +77,7 @@ class TelegramOrdersSettings(Enum):
     DELIVERY_TYPE_REQUIRED = "DELIVERY_TYPE_REQUIRED"
     ADDRESS_REQUIRED = "ADDRESS_REQUIRED"
     ITEM_GROUP_IDS = "ITEM_GROUP_IDS"
+    CATALOG_PAGE_SIZE = "CATALOG_PAGE_SIZE"
     ORDERS_DISABLED = "ORDERS_DISABLED"
     ORDER_STATE_TTL = "ORDER_STATE_TTL"
 
@@ -783,6 +784,16 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             defaults.update(payload)
         return defaults
 
+    async def _get_catalog_page_size(self) -> int:
+        settings_map = await self._get_settings_map()
+        page_size_value = settings_map.get(
+            TelegramOrdersSettings.CATALOG_PAGE_SIZE.value.lower()
+        )
+        page_size = self._parse_int(page_size_value)
+        if page_size and page_size > 0:
+            return page_size
+        return TelegramBotOrdersConfig.CATALOG_PAGE_SIZE
+
     async def _get_order_state_ttl(self) -> int:
         settings_map = await self._get_settings_map()
         ttl_value = settings_map.get(
@@ -882,8 +893,9 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         search: Optional[str],
         offset: int,
         group_name: Optional[str],
+        page_size: int,
     ) -> str:
-        page = offset // TelegramBotOrdersConfig.CATALOG_PAGE_SIZE + 1
+        page = offset // page_size + 1
         lines = [Texts.catalog_title(page)]
         if group_name:
             lines.append(Texts.catalog_category_line(self._md_escape(group_name)))
@@ -1392,9 +1404,15 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         return False
 
     async def _fetch_catalog(
-        self, search: Optional[str], offset: int, group_id: Optional[int]
+        self,
+        search: Optional[str],
+        offset: int,
+        group_id: Optional[int],
+        page_size: int,
     ) -> List[ItemExt]:
         settings_map = await self._get_settings_map()
+        if page_size <= 0:
+            page_size = TelegramBotOrdersConfig.CATALOG_PAGE_SIZE
         stock_id = self._parse_int(
             settings_map.get(TelegramOrdersSettings.STOCK_ID_QUANTITY.value.lower())
         )
@@ -1427,6 +1445,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                 "price_type_id": price_type_id,
                 "zero_qty": zero_qty,
                 "has_image": has_image,
+                "limit": page_size,
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -1458,7 +1477,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             image_size=ItemGetExtImageSize.Large,
             search=search,
             group_ids=request_group_ids,
-            limit=TelegramBotOrdersConfig.CATALOG_PAGE_SIZE,
+            limit=page_size,
             offset=offset,
         )
         request_payload = req.model_dump(mode="json", exclude_none=True)
@@ -1624,20 +1643,29 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         search = state.get("search")
         offset = int(state.get("offset", 0))
         group_id = state.get("group_id")
+        page_size = await self._get_catalog_page_size()
         if next_page:
-            offset += TelegramBotOrdersConfig.CATALOG_PAGE_SIZE
+            offset += page_size
         if prev_page:
-            offset = max(0, offset - TelegramBotOrdersConfig.CATALOG_PAGE_SIZE)
-        items = await self._fetch_catalog(search=search, offset=offset, group_id=group_id)
+            offset = max(0, offset - page_size)
+        items = await self._fetch_catalog(
+            search=search,
+            offset=offset,
+            group_id=group_id,
+            page_size=page_size,
+        )
         if not items and offset > 0:
-            offset = max(0, offset - TelegramBotOrdersConfig.CATALOG_PAGE_SIZE)
+            offset = max(0, offset - page_size)
             items = await self._fetch_catalog(
-                search=search, offset=offset, group_id=group_id
+                search=search,
+                offset=offset,
+                group_id=group_id,
+                page_size=page_size,
             )
 
-        has_next = len(items) >= TelegramBotOrdersConfig.CATALOG_PAGE_SIZE
+        has_next = len(items) >= page_size
         text = self._format_catalog_list(
-            items, search, offset, state.get("group_name")
+            items, search, offset, state.get("group_name"), page_size
         )
         keyboard = self._catalog_list_keyboard(items, offset, has_next)
         if self.bot:
