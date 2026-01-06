@@ -53,7 +53,15 @@ async def _cleanup_integration(
         return
 
     if action_name in {"reconnect", "update_settings"}:
-        return
+        is_longpolling = False
+        is_longpolling_mode = getattr(integration_instance, "_is_longpolling_mode", None)
+        if callable(is_longpolling_mode):
+            try:
+                is_longpolling = bool(is_longpolling_mode())
+            except Exception as error:
+                logger.warning("Failed to detect longpolling mode: %s", error)
+        if is_longpolling:
+            return
 
     if action_name == "connect":
         payload = getattr(result, "result", result)
