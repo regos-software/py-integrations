@@ -62,6 +62,10 @@
 
 ---
 
+## Standards and conventions
+- Schemas: `schemas/api/readme.md`
+- Services: `core/api/readme.md`
+
 ## Как добавить и зарегистрировать нового клиента (integration)
 
 **Цель:** реализовать нового провайдера/канал интеграции (например, WhatsApp, e‑mail, иной SMS‑провайдер).

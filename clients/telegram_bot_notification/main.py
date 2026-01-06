@@ -216,8 +216,15 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                             )
                         ]
                     )
-                success = getattr(edit_resp, "result", edit_resp)
+                success = getattr(edit_resp, "ok", None)
+                if success is None:
+                    success = bool(getattr(edit_resp, "result", edit_resp))
                 if not success:
+                    logger.error(
+                        "Settings update failed (add): ok=%s result=%s",
+                        getattr(edit_resp, "ok", None),
+                        getattr(edit_resp, "result", None),
+                    )
                     raise RuntimeError("Failed to update settings")
                 if settings.redis_enabled and redis_client:
                     await redis_client.delete(cache_key)
@@ -250,8 +257,15 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                             )
                         ]
                     )
-                success = getattr(edit_resp, "result", edit_resp)
+                success = getattr(edit_resp, "ok", None)
+                if success is None:
+                    success = bool(getattr(edit_resp, "result", edit_resp))
                 if not success:
+                    logger.error(
+                        "Settings update failed (remove): ok=%s result=%s",
+                        getattr(edit_resp, "ok", None),
+                        getattr(edit_resp, "result", None),
+                    )
                     raise RuntimeError("Failed to update settings")
                 if settings.redis_enabled and redis_client:
                     await redis_client.delete(cache_key)
