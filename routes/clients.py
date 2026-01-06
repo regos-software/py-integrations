@@ -78,10 +78,17 @@ async def _cleanup_integration(
 
     bot = getattr(integration_instance, "bot", None)
     if bot:
-        try:
-            await bot.close()
-        except Exception as error:
-            logger.warning("Failed to close bot: %s", error)
+        session = getattr(bot, "session", None)
+        if session:
+            try:
+                await session.close()
+            except Exception as error:
+                logger.warning("Failed to close bot session: %s", error)
+        else:
+            try:
+                await bot.close()
+            except Exception as error:
+                logger.warning("Failed to close bot: %s", error)
 
     http_client = getattr(integration_instance, "http_client", None)
     if http_client:

@@ -80,9 +80,15 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         # Clean up resources
-        await self.http_client.aclose()
-        if self.bot:
-            await self.bot.close()
+        try:
+            await self.http_client.aclose()
+        except Exception as error:
+            logger.warning("Failed to close http client: %s", error)
+        if self.bot and getattr(self.bot, "session", None):
+            try:
+                await self.bot.session.close()
+            except Exception as error:
+                logger.warning("Failed to close bot session: %s", error)
 
     def _create_error_response(
         self, error_code: int, description: str
