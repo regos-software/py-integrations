@@ -20,6 +20,7 @@ from clients.getsms.main import GetSmsIntegration
 from clients.eskiz_sms.main import EskizSmsIntegration
 from clients.telegram_bot_notification.main import TelegramBotNotificationIntegration
 from clients.email_sender.main import EmailSenderIntegration
+from clients.telegram_bot_orders.main import TelegramBotOrdersIntegration
 
 router = APIRouter()
 logger = setup_logger("clients_route")
@@ -29,6 +30,7 @@ INTEGRATION_CLASSES = {
     "getsms": GetSmsIntegration,
     "eskiz_sms": EskizSmsIntegration,
     "regos_telegram_notifier": TelegramBotNotificationIntegration,
+    "telegram_bot_orders": TelegramBotOrdersIntegration,
     "email_sender": EmailSenderIntegration,
     "tsd": TsdIntegration,
 }
@@ -40,6 +42,45 @@ EXCLUDED_SERVICE_HEADERS = {
     "content-length",
     "accept-encoding",
 }
+
+
+async def _cleanup_integration(
+    integration_instance: Any,
+    action_name: Optional[str] = None,
+    result: Optional[Any] = None,
+) -> None:
+    if not integration_instance:
+        return
+
+    if action_name in {"reconnect", "update_settings"}:
+        return
+
+    if action_name == "connect":
+        payload = getattr(result, "result", result)
+        if isinstance(payload, dict) and payload.get("mode") == "longpolling":
+            return
+
+    aexit = getattr(integration_instance, "__aexit__", None)
+    if callable(aexit):
+        try:
+            await aexit(None, None, None)
+            return
+        except Exception as error:
+            logger.warning("Cleanup via __aexit__ failed: %s", error)
+
+    bot = getattr(integration_instance, "bot", None)
+    if bot:
+        try:
+            await bot.close()
+        except Exception as error:
+            logger.warning("Failed to close bot: %s", error)
+
+    http_client = getattr(integration_instance, "http_client", None)
+    if http_client:
+        try:
+            await http_client.aclose()
+        except Exception as error:
+            logger.warning("Failed to close http client: %s", error)
 
 
 def camel_to_snake(name: str) -> str:
@@ -97,6 +138,8 @@ async def handle_integration(
     logger.info(f"Заголовок 'connected-integration-id': {connected_integration_id}")
     logger.debug(f"Содержимое запроса: {request_body.dict()}")
 
+    integration_instance = None
+    result = None
     integration_class = INTEGRATION_CLASSES.get(client)
     if not integration_class:
         logger.warning(f"Интеграция '{client}' не зарегистрирована.")
@@ -124,6 +167,7 @@ async def handle_integration(
 
     action_method = getattr(integration_instance, action_name, None)
     if not callable(action_method):
+        await _cleanup_integration(integration_instance)
         logger.warning(f"Метод '{action_name}' не найден в интеграции '{client}'")
         return IntegrationErrorResponse(
             result=IntegrationErrorModel(
@@ -162,6 +206,10 @@ async def handle_integration(
                 error=500, description=f"Ошибка во время вызова метода '{action_name}'"
             )
         )
+
+
+    finally:
+        await _cleanup_integration(integration_instance, action_name, result)
 
 
 @router.get("/clients/{client}/", include_in_schema=False)
@@ -307,6 +355,9 @@ async def handle_external(
     )
     logger.info(f"[external] Connected-Integration-Id: {connected_integration_id}")
 
+    integration_instance = None
+    result = None
+
     # 1) Класс интеграции
     integration_class = INTEGRATION_CLASSES.get(client)
     if not integration_class:
@@ -347,6 +398,7 @@ async def handle_external(
     # 4) Вызов handle_external (обязательный для внешних вызовов)
     handler = getattr(integration_instance, "handle_external", None)
     if not callable(handler):
+        await _cleanup_integration(integration_instance)
         return JSONResponse(
             status_code=400,
             content={
@@ -392,3 +444,5 @@ async def handle_external(
                 "description": "Ошибка во время вызова handle_external",
             },
         )
+    finally:
+        await _cleanup_integration(integration_instance, "handle_external", result)

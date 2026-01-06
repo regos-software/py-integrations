@@ -16,6 +16,7 @@ class Settings(BaseSettings):
     redis_db: int = 0
     redis_password: str = "psw"
     redis_cache_ttl: int = 60
+    telegram_update_mode: str = "webhook"
 
     oauth_endpoint: str = "https://auth.regos.uz/" # oath/token
     oauth_client_id: str = ""

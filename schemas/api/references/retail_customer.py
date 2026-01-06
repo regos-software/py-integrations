@@ -3,12 +3,12 @@ from __future__ import annotations
 
 from decimal import Decimal
 from enum import Enum
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from pydantic import Field as PydField, EmailStr, field_validator
 from pydantic.config import ConfigDict
 
-from schemas.api.base import BaseSchema
+from schemas.api.base import APIBaseResponse, AddResult, BaseSchema
 from schemas.api.common.filters import Filters
 from schemas.api.common.sort_orders import SortOrders
 from schemas.api.references.fields import FieldValueAdds, FieldValueEdits, FieldValues
@@ -103,6 +103,19 @@ class RetailCustomer(BaseSchema):
     def _strip_strings(cls, v):
         return v.strip() if isinstance(v, str) else v
 
+    @field_validator("sex", mode="before")
+    @classmethod
+    def _normalize_sex(cls, v):
+        if v is None or isinstance(v, Sex):
+            return v
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s == "none":
+                return Sex.non
+            if s in {"male", "female"}:
+                return Sex(s)
+        raise ValueError("sex должен быть одним из: none | male | female")
+
 
 # ---------- Get ----------
 
@@ -125,6 +138,19 @@ class RetailCustomerGetRequest(BaseSchema):
     main_phone: Optional[str] = None
     limit: Optional[int] = None
     offset: Optional[int] = None
+
+
+class RetailCustomerGetResponse(
+    APIBaseResponse[List[RetailCustomer] | dict[str, Any]]
+):
+    """Response model for RetailCustomer/Get."""
+
+
+# ---------- Add Response ----------
+
+
+class RetailCustomerAddResponse(APIBaseResponse[AddResult | dict[str, Any]]):
+    """Response model for RetailCustomer/Add."""
 
 
 # ---------- Add ----------
@@ -187,9 +213,11 @@ class RetailCustomerAddRequest(BaseSchema):
             return v
         if isinstance(v, str):
             s = v.strip().lower()
-            if s in {"non", "male", "female"}:
+            if s == "none":
+                return Sex.non
+            if s in {"male", "female"}:
                 return Sex(s)
-        raise ValueError("sex должен быть одним из: non | male | female")
+        raise ValueError("sex должен быть одним из: none | male | female")
 
 
 # ---------- Edit ----------
@@ -251,9 +279,11 @@ class RetailCustomerEditRequest(BaseSchema):
             return v
         if isinstance(v, str):
             s = v.strip().lower()
-            if s in {"non", "male", "female"}:
+            if s == "none":
+                return Sex.non
+            if s in {"male", "female"}:
                 return Sex(s)
-        raise ValueError("sex должен быть одним из: non | male | female")
+        raise ValueError("sex должен быть одним из: none | male | female")
 
 
 # ---------- DeleteMark ----------
@@ -284,6 +314,8 @@ __all__ = [
     "Sex",
     "RetailCustomer",
     "RetailCustomerGetRequest",
+    "RetailCustomerGetResponse",
+    "RetailCustomerAddResponse",
     "RetailCustomerAddRequest",
     "RetailCustomerEditRequest",
     "RetailCustomerDeleteMarkRequest",

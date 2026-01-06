@@ -9,3 +9,5 @@ aiogram
 tenacity
 aiosmtplib
 pydantic[email]
+qrcode
+pillow

@@ -16,6 +16,7 @@ from clients.telegram_bot_notification.services.message_formatters import (
     format_session_details,
     format_session_notification,
 )
+from clients.telegram_polling import telegram_polling_manager
 from schemas.api.docs.cash_amount_details import CashAmountDetails, CashAmountDetailsGetRequest
 from schemas.api.docs.cheque import DocCheque
 from schemas.api.docs.cheque_payment import DocChequePayment, DocChequePaymentGetRequest
@@ -132,6 +133,19 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                 )
 
         return result or None
+
+    @staticmethod
+    def _is_bot_blocked_error(error: object) -> bool:
+        text = str(error).lower()
+        return "bot was blocked by the user" in text
+
+    @staticmethod
+    def _is_longpolling_mode() -> bool:
+        mode = str(settings.telegram_update_mode or "").strip().lower()
+        return mode in {"longpolling", "long_polling", "long-polling", "polling"}
+
+    def _polling_key(self) -> str:
+        return f"{TelegramBotConfig.INTEGRATION_KEY}:{self.connected_integration_id or 'unknown'}"
     
     async def _fetch_settings(self, cache_key: str) -> Optional[Dict[str, str]]:
         """Retrieve settings from Redis cache or API."""
@@ -465,14 +479,24 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             bot_token = settings_map.get(TelegramSettings.BOT_TOKEN.value.lower())
             if not bot_token:
                 return self._create_error_response(1002, "No bot token in settings")
+            await self._initialize_bot()
+            await self._setup_handlers()
+
+            if self._is_longpolling_mode():
+                await self.bot.delete_webhook(drop_pending_updates=True)
+                await telegram_polling_manager.start(
+                    self._polling_key(), self.bot, self.dispatcher
+                )
+                logger.info("Webhook deleted (longpolling mode).")
+                return {"status": "connected", "mode": "longpolling"}
+
+            await telegram_polling_manager.stop(self._polling_key())
             webhook_url = (
                 f"{TelegramBotConfig.WEBHOOK_BASE_URL}/{self.connected_integration_id}/external/"
             )
-            await self._initialize_bot()
             await self.bot.set_webhook(url=webhook_url)
-            await self._setup_handlers()
             logger.info(f"Webhook set: {webhook_url}")
-            return {"status": "connected", "webhook_url": webhook_url}
+            return {"status": "connected", "mode": "webhook", "webhook_url": webhook_url}
         except (httpx.RequestError, httpx.HTTPStatusError) as error:
             logger.error(f"Connection error: {error}")
             raise
@@ -485,6 +509,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         logger.info(
             f"Disconnecting from TelegramBotNotificationIntegration (ID: {self.connected_integration_id})"
         )
+        await telegram_polling_manager.stop(self._polling_key())
         if not self.bot:
             return {"status": "disconnected", "message": "Bot not initialized"}
         try:
@@ -798,6 +823,16 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                 results.append({"status": "sent", "chat_id": chat_id})
             except Exception as error:
                 logger.error(f"Error sending message to chat {chat_id}: {error}")
+                if self._is_bot_blocked_error(error):
+                    try:
+                        await self._remove_subscriber(str(chat_id))
+                        logger.info(
+                            "Removed subscriber %s because bot was blocked", chat_id
+                        )
+                    except Exception as remove_error:
+                        logger.warning(
+                            "Failed to remove subscriber %s: %s", chat_id, remove_error
+                        )
                 results.append(
                     {"status": "error", "chat_id": chat_id, "error": str(error)}
                 )
@@ -861,6 +896,29 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             except Exception as error:
                 logger.error(f"Error sending batch {i}: {error}")
                 results.append({"error": str(error), "batch_index": i})
+
+        for batch_result in results:
+            details = batch_result.get("details") if isinstance(batch_result, dict) else None
+            if not details:
+                continue
+            for detail in details:
+                if not isinstance(detail, dict) or detail.get("status") != "error":
+                    continue
+                error_text = detail.get("error", "")
+                if not self._is_bot_blocked_error(error_text):
+                    continue
+                chat_id = detail.get("chat_id")
+                if not chat_id:
+                    continue
+                try:
+                    await self._remove_subscriber(str(chat_id))
+                    logger.info(
+                        "Removed subscriber %s because bot was blocked", chat_id
+                    )
+                except Exception as remove_error:
+                    logger.warning(
+                        "Failed to remove subscriber %s: %s", chat_id, remove_error
+                    )
 
         logger.info(f"Message sending completed. Processed {len(results)} batches")
         return {"sent_batches": len(results), "details": results}
