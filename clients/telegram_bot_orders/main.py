@@ -461,21 +461,29 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         await self._setup_handlers()
         if not self.bot:
             return {"status": "connected"}
+
+        logger.info("telegram_update_mode=%r is_longpolling=%s",
+                    app_settings.telegram_update_mode, self._is_longpolling_mode())
+
         if self._is_longpolling_mode():
             await self.bot.delete_webhook(drop_pending_updates=True)
-            await telegram_polling_manager.start(
-                self._polling_key(), self.bot, self.dispatcher
-            )
+            await telegram_polling_manager.start(self._polling_key(), self.bot, self.dispatcher)
             logger.info("Webhook deleted (longpolling mode).")
             return {"status": "connected", "mode": "longpolling"}
+
         await telegram_polling_manager.stop(self._polling_key())
-        webhook_url = (
-            f"{TelegramBotOrdersConfig.WEBHOOK_BASE_URL}/"
-            f"{self.connected_integration_id}/external/"
-        )
-        await self.bot.set_webhook(url=webhook_url)
-        logger.info(f"Webhook set: {webhook_url}")
-        return {"status": "connected", "mode": "webhook", "webhook_url": webhook_url}
+
+        webhook_url = f"{app_settings.integration_url.rstrip('/')}/external/{self.connected_integration_id}/"
+        # Важно: сначала удалить старое состояние, потом поставить
+        try:
+            await self.bot.delete_webhook(drop_pending_updates=True)
+            await self.bot.set_webhook(url=webhook_url)
+            info = await self.bot.get_webhook_info()
+            logger.info("Webhook set result url=%r", info.url)
+            return {"status": "connected", "mode": "webhook", "webhook_url": info.url}
+        except Exception as e:
+            logger.exception("Failed to set webhook url=%r error=%s", webhook_url, e)
+            raise
 
     async def disconnect(self, **kwargs) -> Dict[str, Any]:
         await telegram_polling_manager.stop(self._polling_key())
