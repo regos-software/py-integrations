@@ -473,7 +473,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
 
         await telegram_polling_manager.stop(self._polling_key())
 
-        webhook_url = f"{app_settings.integration_url.rstrip('/')}/external/{self.connected_integration_id}/"
+        webhook_url = f"{app_settings.integration_url.rstrip('/')}/external/{self.connected_integration_id}/external/"
         # Важно: сначала удалить старое состояние, потом поставить
         try:
             await self.bot.delete_webhook(drop_pending_updates=True)
