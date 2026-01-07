@@ -203,8 +203,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
     @staticmethod
     def _is_longpolling_mode() -> bool:
         mode = str(app_settings.telegram_update_mode or "").strip().lower()
-       # return mode in {"longpolling", "long_polling", "long-polling", "polling"}
-        return False
+        return mode in {"longpolling", "long_polling", "long-polling", "polling"}
 
     def _polling_key(self) -> str:
         return f"{TelegramBotOrdersConfig.INTEGRATION_KEY}:{self.connected_integration_id or 'unknown'}"
