@@ -1261,12 +1261,11 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         cache_key = f"clients:settings:telegram_bot_orders:{self.connected_integration_id}"
         settings_map = await self._fetch_settings(cache_key)
         item_ext = await self._fetch_item_ext(item_id, settings_map)
+
         if not item_ext:
             if self.bot:
                 orders_disabled = self._parse_bool(
-                    settings_map.get(
-                        TelegramOrdersSettings.ORDERS_DISABLED.value.lower()
-                    )
+                    settings_map.get(TelegramOrdersSettings.ORDERS_DISABLED.value.lower())
                 )
                 await self.bot.send_message(
                     chat_id=chat_id,
@@ -1274,27 +1273,52 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                     reply_markup=self._main_menu_keyboard(bool(orders_disabled)),
                 )
             return
+
         state = await self._get_catalog_state(chat_id)
         text = self._format_item_detail(item_ext)
-        if item_ext.image_url and self.bot:
-            try:
-                await self.bot.send_photo(
+
+        if self.bot:
+            if item_ext.image_url:
+                try:
+                    # Пытаемся отправить описание в caption (под картинкой)
+                    await self.bot.send_photo(
+                        chat_id=chat_id,
+                        photo=item_ext.image_url,
+                        caption=text,
+                        reply_markup=self._catalog_detail_keyboard(),
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+                except Exception as error:
+                    # Частая причина: слишком длинный caption или проблемы с Markdown
+                    logger.warning(Texts.log_send_photo_fail(error))
+
+                    # Фолбэк: фото (короткий caption) + отдельным сообщением полный текст
+                    try:
+                        title = self._md_escape(item_ext.item.name or Texts.ITEM_UNNAMED)
+                        await self.bot.send_photo(
+                            chat_id=chat_id,
+                            photo=item_ext.image_url,
+                            caption=title,
+                            parse_mode=ParseMode.MARKDOWN,
+                        )
+                    except Exception as error2:
+                        logger.warning(Texts.log_send_photo_fail(error2))
+
+                    await self.bot.send_message(
+                        chat_id=chat_id,
+                        text=text,
+                        reply_markup=self._catalog_detail_keyboard(),
+                        parse_mode=ParseMode.MARKDOWN,
+                    )
+            else:
+                # Картинки нет — отдельным сообщением
+                await self.bot.send_message(
                     chat_id=chat_id,
-                    photo=item_ext.image_url,
-                    caption=self._md_escape(
-                        item_ext.item.name or Texts.ITEM_UNNAMED
-                    ),
+                    text=text,
+                    reply_markup=self._catalog_detail_keyboard(),
                     parse_mode=ParseMode.MARKDOWN,
                 )
-            except Exception as error:
-                logger.warning(Texts.log_send_photo_fail(error))
-        if self.bot:
-            await self.bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                reply_markup=self._catalog_detail_keyboard(),
-                parse_mode=ParseMode.MARKDOWN,
-            )
+
         await self._save_catalog_state(
             chat_id,
             state.get("search"),
@@ -1306,6 +1330,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             awaiting_search=False,
             awaiting_action=None,
         )
+
 
     async def _prompt_item_quantity(
         self, message: types.Message, item_id: int
@@ -2071,7 +2096,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             ids=[item_id],
             stock_id=stock_id,
             price_type_id=price_type_id,
-            image_size=ItemGetExtImageSize.Small,
+            image_size=ItemGetExtImageSize.Large,
             limit=1,
             offset=0,
         )
