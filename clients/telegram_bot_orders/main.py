@@ -67,6 +67,7 @@ class TelegramOrdersSettings(Enum):
     STOCK_ID_QUANTITY = "STOCK_ID_QUANTITY"
     SHOW_ZERO_QUANTITY = "SHOW_ZERO_QUANTITY"
     SHOW_WITHOUT_IMAGES = "SHOW_WITHOUT_IMAGES"
+    SHOW_ITEMS_WITHOUT_PRICE = "SHOW_ITEMS_WITHOUT_PRICE"
     ORDER_SOURCE_ID = "ORDER_SOURCE_ID"
     MIN_ORDER_AMOUNT = "MIN_ORDER_AMOUNT"
     WORK_TIME_ENABLED = "WORK_TIME_ENABLED"
@@ -871,6 +872,17 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         return text
 
     @staticmethod
+    def _group_digits(value: str) -> str:
+        if not value:
+            return "0"
+        groups: List[str] = []
+        while value:
+            groups.append(value[-3:])
+            value = value[:-3]
+        groups.reverse()
+        return " ".join(groups) if groups else "0"
+
+    @staticmethod
     def _format_decimal(value: Optional[Decimal]) -> str:
         if value is None:
             return "0"
@@ -879,21 +891,37 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         except Exception:
             return str(value)
         text = format(dec, "f")
-        if "." in text:
-            text = text.rstrip("0").rstrip(".")
-        return text or "0"
+        sign = ""
+        if text.startswith("-"):
+            sign = "-"
+            text = text[1:]
+        integer, dot, fraction = text.partition(".")
+        if not integer:
+            integer = "0"
+        if fraction:
+            fraction = fraction.rstrip("0")
+        grouped = TelegramBotOrdersIntegration._group_digits(integer)
+        formatted = f"{sign}{grouped}"
+        if fraction:
+            formatted = f"{formatted}.{fraction}"
+        return formatted or "0"
 
     def _format_item_line(self, index: int, entry: ItemExt) -> str:
         item = entry.item
         name = self._md_escape(item.name or Texts.ITEM_UNNAMED)
-        price = entry.price if entry.price is not None else Decimal(0)
+        price_value = entry.price
+        price_text = (
+            self._format_decimal(price_value)
+            if price_value is not None
+            else Texts.item_price_missing()
+        )
         qty = (
             entry.quantity.common
             if entry.quantity and entry.quantity.common is not None
             else None
         )
         qty_line = Texts.item_qty_line(qty) if qty is not None else ""
-        return Texts.item_line(index, name, price, qty_line)
+        return Texts.item_line(index, name, price_text, qty_line)
 
     def _format_catalog_list(
         self,
@@ -980,7 +1008,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
     def _format_item_detail(self, entry: ItemExt) -> str:
         item = entry.item
         name = self._md_escape(item.name or Texts.ITEM_UNNAMED)
-        price = entry.price if entry.price is not None else Decimal(0)
+        price_value = entry.price
         qty = (
             entry.quantity.common
             if entry.quantity and entry.quantity.common is not None
@@ -998,7 +1026,9 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         )
         lines = Texts.item_detail_lines(
             name,
-            self._format_decimal(price),
+            self._format_decimal(price_value)
+            if price_value is not None
+            else Texts.item_price_missing(),
             qty=self._format_decimal(qty) if qty is not None else None,
             color=color,
             size=size,
@@ -1461,6 +1491,11 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         show_without_images = self._parse_bool(
             settings_map.get(TelegramOrdersSettings.SHOW_WITHOUT_IMAGES.value.lower())
         )
+        show_without_price = self._parse_bool(
+            settings_map.get(
+                TelegramOrdersSettings.SHOW_ITEMS_WITHOUT_PRICE.value.lower()
+            )
+        )
         if show_without_images is True:
             has_image = None
         elif show_without_images is False:
@@ -1478,6 +1513,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                 "price_type_id": price_type_id,
                 "zero_qty": zero_qty,
                 "has_image": has_image,
+                "show_without_price": bool(show_without_price),
                 "limit": page_size,
             },
             ensure_ascii=False,
@@ -1506,6 +1542,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             stock_id=stock_id,
             price_type_id=price_type_id,
             zero_quantity=zero_qty,
+            zero_price=show_without_price,
             has_image=has_image,
             image_size=ItemGetExtImageSize.Large,
             search=search,
@@ -1525,16 +1562,17 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                     and entry.item.group
                     and entry.item.group.id == group_id
                 ]
-            if app_settings.redis_enabled and redis_client:
-                try:
-                    cache_payload = [item.model_dump(mode="json") for item in result]
-                    await redis_client.setex(
-                        cache_key,
-                        TelegramBotOrdersConfig.CATALOG_TTL,
-                        json.dumps(cache_payload, ensure_ascii=False),
-                    )
-                except Exception as error:
-                    logger.warning(Texts.log_catalog_cache_error(error))
+
+        if app_settings.redis_enabled and redis_client:
+            try:
+                cache_payload = [item.model_dump(mode="json") for item in result]
+                await redis_client.setex(
+                    cache_key,
+                    TelegramBotOrdersConfig.CATALOG_TTL,
+                    json.dumps(cache_payload, ensure_ascii=False),
+                )
+            except Exception as error:
+                logger.warning(Texts.log_catalog_cache_error(error))
             return result
 
     async def _fetch_categories(self) -> List[ItemGroup]:

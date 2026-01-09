@@ -89,6 +89,7 @@ class TelegramBotOrdersTexts:
     ITEM_QTY_LINE = "\nОстаток: {qty}"
     ITEM_QTY_SUFFIX = ", остаток {qty}"
     ITEM_DETAIL_PRICE = "*Цена:* {price}"
+    ITEM_PRICE_MISSING = "Price not set"
     ITEM_DETAIL_QTY = "*Остаток:* {qty}"
     ITEM_DETAIL_COLOR = "*Цвет:* {color}"
     ITEM_DETAIL_SIZE = "*Размер:* {size}"
@@ -253,6 +254,10 @@ class TelegramBotOrdersTexts:
     @staticmethod
     def item_qty_line(qty) -> str:
         return TelegramBotOrdersTexts.ITEM_QTY_LINE.format(qty=qty)
+
+    @staticmethod
+    def item_price_missing() -> str:
+        return TelegramBotOrdersTexts.ITEM_PRICE_MISSING
 
     @staticmethod
     def item_line(index: int, name: str, price, qty_line: str) -> str:
