@@ -151,6 +151,11 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         return "not enough rights to send text messages to the chat" in text
 
     @staticmethod
+    def _is_user_deactivated_error(error: object) -> bool:
+        text = str(error).lower()
+        return "forbidden: user is deactivated" in text
+
+    @staticmethod
     def _is_longpolling_mode() -> bool:
         mode = str(settings.telegram_update_mode or "").strip().lower()
         return mode in {"longpolling", "long_polling", "long-polling", "polling"}
@@ -849,20 +854,18 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             except Exception as error:
                 logger.error(f"Error sending message to chat {chat_id}: {error}")
                 if self._is_bot_blocked_error(error):
-                    try:
-                        await self._remove_subscriber(str(chat_id))
-                        logger.info(
-                            "Removed subscriber %s because bot was blocked", chat_id
-                        )
-                    except Exception as remove_error:
-                        logger.warning(
-                            "Failed to remove subscriber %s: %s", chat_id, remove_error
-                        )
+                    reason = "bot was blocked"
                 elif self._is_not_enough_rights_error(error):
+                    reason = "bot lacks rights"
+                elif self._is_user_deactivated_error(error):
+                    reason = "user is deactivated"
+                else:
+                    reason = None
+                if reason:
                     try:
                         await self._remove_subscriber(str(chat_id))
                         logger.info(
-                            "Removed subscriber %s because bot lacks rights", chat_id
+                            "Removed subscriber %s because %s", chat_id, reason
                         )
                     except Exception as remove_error:
                         logger.warning(
@@ -948,6 +951,8 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                     removed_reason = "bot was blocked"
                 elif self._is_not_enough_rights_error(error_text):
                     removed_reason = "not enough rights"
+                elif self._is_user_deactivated_error(error_text):
+                    removed_reason = "user deactivated"
                 if not removed_reason:
                     continue
                 try:
