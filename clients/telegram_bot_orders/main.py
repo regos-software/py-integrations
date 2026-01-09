@@ -68,6 +68,7 @@ class TelegramOrdersSettings(Enum):
     SHOW_ZERO_QUANTITY = "SHOW_ZERO_QUANTITY"
     SHOW_WITHOUT_IMAGES = "SHOW_WITHOUT_IMAGES"
     SHOW_ITEMS_WITHOUT_PRICE = "SHOW_ITEMS_WITHOUT_PRICE"
+    SHOW_ITEM_STOCK = "SHOW_ITEM_STOCK"
     ORDER_SOURCE_ID = "ORDER_SOURCE_ID"
     MIN_ORDER_AMOUNT = "MIN_ORDER_AMOUNT"
     WORK_TIME_ENABLED = "WORK_TIME_ENABLED"
@@ -190,6 +191,12 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         if text in {"0", "false", "no", "n"}:
             return False
         return None
+
+    def _should_show_item_stock(self, settings_map: Dict[str, str]) -> bool:
+        value = self._parse_bool(
+            settings_map.get(TelegramOrdersSettings.SHOW_ITEM_STOCK.value.lower())
+        )
+        return True if value is None else bool(value)
 
     @staticmethod
     def _parse_time(value: Optional[str]) -> Optional[dt_time]:
@@ -906,7 +913,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             formatted = f"{formatted}.{fraction}"
         return formatted or "0"
 
-    def _format_item_line(self, index: int, entry: ItemExt) -> str:
+    def _format_item_line(self, index: int, entry: ItemExt, show_stock: bool) -> str:
         item = entry.item
         name = self._md_escape(item.name or Texts.ITEM_UNNAMED)
         price_value = entry.price
@@ -920,7 +927,11 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             if entry.quantity and entry.quantity.common is not None
             else None
         )
-        qty_line = Texts.item_qty_line(qty) if qty is not None else ""
+        qty_line = (
+            Texts.item_qty_line(qty)
+            if qty is not None and show_stock
+            else ""
+        )
         return Texts.item_line(index, name, price_text, qty_line)
 
     def _format_catalog_list(
@@ -930,6 +941,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         offset: int,
         group_name: Optional[str],
         page_size: int,
+        show_stock: bool,
     ) -> str:
         page = offset // page_size + 1
         lines = [Texts.catalog_title(page)]
@@ -941,7 +953,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             lines.append(Texts.catalog_empty_line())
             return "\n".join(lines)
         for idx, entry in enumerate(items, start=1):
-            lines.append(self._format_item_line(idx, entry))
+            lines.append(self._format_item_line(idx, entry, show_stock))
             lines.append("")
         return "\n".join(lines)
 
@@ -1005,7 +1017,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             )
         return "\n".join(lines)
 
-    def _format_item_detail(self, entry: ItemExt) -> str:
+    def _format_item_detail(self, entry: ItemExt, show_stock: bool) -> str:
         item = entry.item
         name = self._md_escape(item.name or Texts.ITEM_UNNAMED)
         price_value = entry.price
@@ -1024,12 +1036,17 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             if item.size and item.size.name
             else None
         )
+        qty_line = (
+            self._format_decimal(qty)
+            if qty is not None and show_stock
+            else None
+        )
         lines = Texts.item_detail_lines(
             name,
             self._format_decimal(price_value)
             if price_value is not None
             else Texts.item_price_missing(),
-            qty=self._format_decimal(qty) if qty is not None else None,
+            qty=qty_line,
             color=color,
             size=size,
             articul=self._md_escape(item.articul) if item.articul else None,
@@ -1305,7 +1322,8 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             return
 
         state = await self._get_catalog_state(chat_id)
-        text = self._format_item_detail(item_ext)
+        show_stock = self._should_show_item_stock(settings_map)
+        text = self._format_item_detail(item_ext, show_stock)
 
         if self.bot:
             if item_ext.image_url:
@@ -1472,27 +1490,28 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         offset: int,
         group_id: Optional[int],
         page_size: int,
+        settings_map: Optional[Dict[str, str]] = None,
     ) -> List[ItemExt]:
-        settings_map = await self._get_settings_map()
+        settings = settings_map or await self._get_settings_map()
         if page_size <= 0:
             page_size = TelegramBotOrdersConfig.CATALOG_PAGE_SIZE
         stock_id = self._parse_int(
-            settings_map.get(TelegramOrdersSettings.STOCK_ID_QUANTITY.value.lower())
+            settings.get(TelegramOrdersSettings.STOCK_ID_QUANTITY.value.lower())
         )
         price_type_id = self._parse_int(
-            settings_map.get(TelegramOrdersSettings.PRICE_TYPE_ID.value.lower())
+            settings.get(TelegramOrdersSettings.PRICE_TYPE_ID.value.lower())
         )
         allowed_group_ids = self._parse_int_list(
-            settings_map.get(TelegramOrdersSettings.ITEM_GROUP_IDS.value.lower())
+            settings.get(TelegramOrdersSettings.ITEM_GROUP_IDS.value.lower())
         )
         zero_qty = self._parse_bool(
-            settings_map.get(TelegramOrdersSettings.SHOW_ZERO_QUANTITY.value.lower())
+            settings.get(TelegramOrdersSettings.SHOW_ZERO_QUANTITY.value.lower())
         )
         show_without_images = self._parse_bool(
-            settings_map.get(TelegramOrdersSettings.SHOW_WITHOUT_IMAGES.value.lower())
+            settings.get(TelegramOrdersSettings.SHOW_WITHOUT_IMAGES.value.lower())
         )
         show_without_price = self._parse_bool(
-            settings_map.get(
+            settings.get(
                 TelegramOrdersSettings.SHOW_ITEMS_WITHOUT_PRICE.value.lower()
             )
         )
@@ -1719,11 +1738,14 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             offset += page_size
         if prev_page:
             offset = max(0, offset - page_size)
+        settings_map = await self._get_settings_map()
+        show_stock = self._should_show_item_stock(settings_map)
         items = await self._fetch_catalog(
             search=search,
             offset=offset,
             group_id=group_id,
             page_size=page_size,
+            settings_map=settings_map,
         )
         if not items and offset > 0:
             offset = max(0, offset - page_size)
@@ -1732,11 +1754,17 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                 offset=offset,
                 group_id=group_id,
                 page_size=page_size,
+                settings_map=settings_map,
             )
 
         has_next = len(items) >= page_size
         text = self._format_catalog_list(
-            items, search, offset, state.get("group_name"), page_size
+            items,
+            search,
+            offset,
+            state.get("group_name"),
+            page_size,
+            show_stock,
         )
         keyboard = self._catalog_list_keyboard(items, offset, has_next)
         if self.bot:
