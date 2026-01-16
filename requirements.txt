@@ -11,3 +11,4 @@ aiosmtplib
 pydantic[email]
 qrcode
 pillow
+openpyxl

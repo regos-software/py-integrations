@@ -6,7 +6,6 @@ from fastapi import APIRouter, Header, Request, Path, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.responses import JSONResponse
 
-from clients.tsd.main import TsdIntegration
 from schemas.integration.base import (
     IntegrationRequest,
     IntegrationSuccessResponse,
@@ -18,9 +17,11 @@ from core.logger import setup_logger
 # Импорт доступных интеграций (класс, не модуль)
 from clients.getsms.main import GetSmsIntegration
 from clients.eskiz_sms.main import EskizSmsIntegration
-from clients.telegram_bot_notification.main import TelegramBotNotificationIntegration
 from clients.email_sender.main import EmailSenderIntegration
+from clients.telegram_bot_notification.main import TelegramBotNotificationIntegration
+from clients.telegram_bot_quantity.main import TelegramBotMinQuantityIntegration
 from clients.telegram_bot_orders.main import TelegramBotOrdersIntegration
+from clients.tsd.main import TsdIntegration
 
 router = APIRouter()
 logger = setup_logger("clients_route")
@@ -29,9 +30,10 @@ logger = setup_logger("clients_route")
 INTEGRATION_CLASSES = {
     "getsms": GetSmsIntegration,
     "eskiz_sms": EskizSmsIntegration,
-    "regos_telegram_notifier": TelegramBotNotificationIntegration,
-    "telegram_bot_orders": TelegramBotOrdersIntegration,
     "email_sender": EmailSenderIntegration,
+    "regos_telegram_notifier": TelegramBotNotificationIntegration,
+    "regos_telegram_minquantity": TelegramBotMinQuantityIntegration,
+    "telegram_bot_orders": TelegramBotOrdersIntegration,
     "tsd": TsdIntegration,
 }
 
