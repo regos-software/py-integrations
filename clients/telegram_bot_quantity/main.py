@@ -1,5 +1,6 @@
 import httpx
 import json
+import hashlib
 from enum import Enum
 from typing import Optional, Dict, List, Set
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
@@ -86,6 +87,22 @@ class TelegramBotMinQuantityIntegration(IntegrationTelegramBase, ClientBase):
         self.bot: Optional[Bot] = None
         self.dispatcher: Optional[Dispatcher] = None
         self.handlers_registered = False  # Track if handlers are registered
+
+    @staticmethod
+    def _is_longpolling_mode() -> bool:
+        mode = str(settings.telegram_update_mode or "").strip().lower()
+        return mode in {"longpolling", "long_polling", "long-polling", "polling"}
+
+    def _polling_key(self) -> str:
+        return f"{TelegramBotMinQuantityConfig.INTEGRATION_KEY}:{self.connected_integration_id or 'unknown'}"
+
+    def _polling_key_unknown(self) -> str:
+        return f"{TelegramBotMinQuantityConfig.INTEGRATION_KEY}:unknown"
+
+    @staticmethod
+    def _polling_key_for_token(bot_token: str) -> str:
+        token_hash = hashlib.sha256(str(bot_token).encode("utf-8")).hexdigest()[:16]
+        return f"{TelegramBotMinQuantityConfig.INTEGRATION_KEY}:token:{token_hash}"
 
     def _pending_get_quantity_search_key(self, chat_id: str) -> str:
         return (
@@ -486,7 +503,7 @@ class TelegramBotMinQuantityIntegration(IntegrationTelegramBase, ClientBase):
         ),
     )
     async def connect(self, data: Optional[Dict] = None, **kwargs) -> Dict:
-        """Connect to Telegram and set up the webhook."""
+        """Connect to Telegram and set up the webhook or long-polling."""
         logger.info(
             f"Connecting to TelegramBotMinQuantityIntegration (ID: {self.connected_integration_id})"
         )
@@ -496,9 +513,27 @@ class TelegramBotMinQuantityIntegration(IntegrationTelegramBase, ClientBase):
             bot_token = settings_map.get(TelegramSettings.BOT_TOKEN.value.lower())
             if not bot_token:
                 return self._create_error_response(1002, "No bot token in settings")
+
+            polling_key_token = self._polling_key_for_token(bot_token)
             await self._initialize_bot()
             await self._set_bot_commands()
             await self._setup_handlers()
+
+            if self._is_longpolling_mode():
+                # Ensure we never run multiple getUpdates streams for the same bot token.
+                # Also stop any legacy sessions started under connected_integration_id/unknown keys.
+                await telegram_polling_manager.stop(self._polling_key_unknown())
+                await telegram_polling_manager.stop(self._polling_key())
+                await self.bot.delete_webhook(drop_pending_updates=True)
+                await telegram_polling_manager.start(
+                    polling_key_token, self.bot, self.dispatcher
+                )
+                logger.info("Webhook deleted (longpolling mode).")
+                return {"status": "connected", "mode": "longpolling"}
+
+            await telegram_polling_manager.stop(self._polling_key_unknown())
+            await telegram_polling_manager.stop(self._polling_key())
+            await telegram_polling_manager.stop(polling_key_token)
 
             webhook_url = f"{TelegramBotMinQuantityConfig.WEBHOOK_BASE_URL}/{self.connected_integration_id}/external/"
             await self.bot.set_webhook(url=webhook_url)
@@ -520,6 +555,22 @@ class TelegramBotMinQuantityIntegration(IntegrationTelegramBase, ClientBase):
         logger.info(
             f"Disconnecting from TelegramBotMinQuantityIntegration (ID: {self.connected_integration_id})"
         )
+        # Best-effort stop for all possible polling keys.
+        await telegram_polling_manager.stop(self._polling_key_unknown())
+        await telegram_polling_manager.stop(self._polling_key())
+        try:
+            settings_map = await self._fetch_settings(
+                f"clients:settings:telegram-min-qty:{self.connected_integration_id}"
+            )
+            bot_token = (settings_map or {}).get(
+                TelegramSettings.BOT_TOKEN.value.lower()
+            )
+            if bot_token:
+                await telegram_polling_manager.stop(
+                    self._polling_key_for_token(bot_token)
+                )
+        except Exception as error:
+            logger.debug("Failed to resolve bot token for polling stop: %s", error)
         if not self.bot:
             return {"status": "disconnected", "message": "Bot not initialized"}
         try:
