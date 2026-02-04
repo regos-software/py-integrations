@@ -94,9 +94,12 @@ class APIClient:
     @staticmethod
     def _serialize_payload(data: Any) -> Any:
         if isinstance(data, BaseModel):
-            return data.model_dump(mode="json")
+            return data.model_dump(mode="json", exclude_none=True)
         if isinstance(data, list):
-            return [x.model_dump(mode="json") if isinstance(x, BaseModel) else x for x in data]
+            return [
+                x.model_dump(mode="json", exclude_none=True) if isinstance(x, BaseModel) else x
+                for x in data
+            ]
         if isinstance(data, dict):
             return data
         raise TypeError(f"Unsupported data type for POST: {type(data)}")
