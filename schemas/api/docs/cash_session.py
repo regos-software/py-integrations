@@ -8,7 +8,7 @@ from typing import List, Optional
 
 from pydantic import ConfigDict, Field as PydField, model_validator
 
-from schemas.api.base import BaseSchema
+from schemas.api.base import APIBaseResponse, APIErrorResult, BaseSchema
 from schemas.api.rbac.user import User
 
 
@@ -124,9 +124,16 @@ class DocCashSessionGetRequest(BaseSchema):
         return values
 
 
+class DocCashSessionGetResponse(
+    APIBaseResponse[List[DocCashSession] | APIErrorResult]
+):
+    """Response model for DocCashSession/Get."""
+
+
 __all__ = [
     "DocCashSession",
     "DocCashSessionGetRequest",
+    "DocCashSessionGetResponse",
     "DocCashSessionSortColumn",
     "SortDirection",
     "SortOrder",
