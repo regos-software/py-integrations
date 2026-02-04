@@ -34,7 +34,7 @@ class ConnectedIntegrationSettingRequest(BaseSchema):
         ..., min_length=1, description="Системный ключ интеграции."
     )
     firm_id: Optional[int] = PydField(
-        default=None,
+        default=0,
         ge=1,
         description="Фильтр по ID фирмы (если требуется уточнение).",
     )
