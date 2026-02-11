@@ -174,14 +174,14 @@ export default function ItemInfoPage() {
       none: formatFallback(t, "input_mode.none", "Без клавиатуры"),
       search: formatFallback(t, "input_mode.search", "Поиск"),
     }),
-    [t]
+    [t],
   );
 
   const toggleBarcodeInputMode = useCallback(() => {
     setBarcodeInputMode((prev) =>
       prev === BARCODE_INPUT_MODES[0]
         ? BARCODE_INPUT_MODES[1]
-        : BARCODE_INPUT_MODES[0]
+        : BARCODE_INPUT_MODES[0],
     );
   }, []);
 
@@ -191,7 +191,7 @@ export default function ItemInfoPage() {
     const prefix = formatFallback(
       t,
       "input_mode.toggle",
-      "Изменить режим ввода"
+      "Изменить режим ввода",
     );
     return `${prefix}: ${currentLabel}`;
   }, [barcodeInputMode, barcodeInputModeLabels, t]);
@@ -203,7 +203,7 @@ export default function ItemInfoPage() {
       hint: formatFallback(t, "scanner.hint", "Наведи камеру на штрих-код"),
       cancel: formatFallback(t, "common.cancel", "Отмена"),
     }),
-    [t]
+    [t],
   );
 
   const scannerErrors = useMemo(
@@ -211,30 +211,30 @@ export default function ItemInfoPage() {
       camera_not_supported: formatFallback(
         t,
         "camera_not_supported",
-        "Камера на этом устройстве не поддерживается"
+        "Камера на этом устройстве не поддерживается",
       ),
       camera_permission_denied: formatFallback(
         t,
         "camera_permission_denied",
-        "Доступ к камере запрещен"
+        "Доступ к камере запрещен",
       ),
       camera_not_found: formatFallback(
         t,
         "camera_not_found",
-        "Камера не найдена"
+        "Камера не найдена",
       ),
       camera_in_use: formatFallback(
         t,
         "camera_in_use",
-        "Камера уже используется"
+        "Камера уже используется",
       ),
       camera_open_failed: formatFallback(
         t,
         "camera_open_failed",
-        "Не удалось открыть камеру"
+        "Не удалось открыть камеру",
       ),
     }),
-    [t]
+    [t],
   );
 
   const handleScannerError = useCallback(
@@ -242,7 +242,7 @@ export default function ItemInfoPage() {
       if (!message) return;
       showToast(message, { type: "error" });
     },
-    [showToast]
+    [showToast],
   );
 
   const stopScan = useCallback(() => {
@@ -253,7 +253,7 @@ export default function ItemInfoPage() {
     () => () => {
       stopScan();
     },
-    [stopScan]
+    [stopScan],
   );
 
   const startScan = useCallback(() => {
@@ -306,7 +306,7 @@ export default function ItemInfoPage() {
       const defaultMessage = formatFallback(
         t,
         "common.error",
-        "Ошибка выполнения запроса"
+        "Ошибка выполнения запроса",
       );
 
       if (!response.ok) {
@@ -326,7 +326,7 @@ export default function ItemInfoPage() {
       }
       return body;
     },
-    [api, t]
+    [api, t],
   );
 
   const loadOptions = useCallback(async () => {
@@ -343,8 +343,8 @@ export default function ItemInfoPage() {
           formatFallback(
             t,
             "item_info.stocks_error",
-            "Не удалось загрузить склады"
-          )
+            "Не удалось загрузить склады",
+          ),
         ),
         callApi(
           "references.price_type.get",
@@ -352,8 +352,8 @@ export default function ItemInfoPage() {
           formatFallback(
             t,
             "item_info.price_type_error",
-            "Не удалось загрузить виды цен"
-          )
+            "Не удалось загрузить виды цен",
+          ),
         ),
       ]);
 
@@ -421,7 +421,7 @@ export default function ItemInfoPage() {
       if (stock?.id != null) return `ID ${stock.id}`;
       return formatFallback(t, "item_info.stock_unknown", "Склад не указан");
     },
-    [t]
+    [t],
   );
 
   const getDocTypeFilterValue = useCallback((operation) => {
@@ -445,10 +445,10 @@ export default function ItemInfoPage() {
       return formatFallback(
         t,
         "item_info.doc_type_unknown",
-        "Тип документа не указан"
+        "Тип документа не указан",
       );
     },
-    [t]
+    [t],
   );
 
   const operationStockOptions = useMemo(() => {
@@ -580,42 +580,42 @@ export default function ItemInfoPage() {
         activeSettings.stockId != null
           ? Number(activeSettings.stockId)
           : fallbackStockId != null
-          ? Number(fallbackStockId)
-          : null;
+            ? Number(fallbackStockId)
+            : null;
       const priceTypeId =
         activeSettings.priceTypeId != null
           ? Number(activeSettings.priceTypeId)
           : fallbackPriceTypeId != null
-          ? Number(fallbackPriceTypeId)
-          : null;
+            ? Number(fallbackPriceTypeId)
+            : null;
       const operationLimit = normalizeOperationLimit(
-        activeSettings.limit ?? DEFAULT_LIMIT
+        activeSettings.limit ?? DEFAULT_LIMIT,
       );
 
       const loadErrorMessage = formatFallback(
         t,
         "item_info.load_error",
-        "Не удалось загрузить номенклатуру"
+        "Не удалось загрузить номенклатуру",
       );
       const quantityErrorMessage = formatFallback(
         t,
         "item_info.quantity_error",
-        "Не удалось получить остатки"
+        "Не удалось получить остатки",
       );
       const priceErrorMessage = formatFallback(
         t,
         "item_info.price_error",
-        "Не удалось получить цены"
+        "Не удалось получить цены",
       );
       const operationsErrorMessage = formatFallback(
         t,
         "item_info.operations_error",
-        "Не удалось получить операции"
+        "Не удалось получить операции",
       );
       const similarErrorMessage = formatFallback(
         t,
         "item_info.similar_error",
-        "Не удалось получить похожие позиции"
+        "Не удалось получить похожие позиции",
       );
 
       const similarSearchName =
@@ -721,13 +721,13 @@ export default function ItemInfoPage() {
         ensureStep(SIMILAR_SEARCH_STEP_KEY, similarErrorMessage);
         const similarExtResponse = ensureStep(
           SIMILAR_EXT_STEP_KEY,
-          similarErrorMessage
+          similarErrorMessage,
         );
         const quantityResponse = ensureStep("quantity", quantityErrorMessage);
         const priceResponse = ensureStep("prices", priceErrorMessage);
         const operationsResponse = ensureStep(
           "operations",
-          operationsErrorMessage
+          operationsErrorMessage,
         );
 
         const ext = Array.isArray(extResponse?.result)
@@ -735,15 +735,17 @@ export default function ItemInfoPage() {
           : null;
         setSelectedExt(ext ?? null);
         setQuantityInfo(
-          Array.isArray(quantityResponse?.result) ? quantityResponse.result : []
+          Array.isArray(quantityResponse?.result)
+            ? quantityResponse.result
+            : [],
         );
         setPricesInfo(
-          Array.isArray(priceResponse?.result) ? priceResponse.result : []
+          Array.isArray(priceResponse?.result) ? priceResponse.result : [],
         );
         setOperations(
           Array.isArray(operationsResponse?.result)
             ? operationsResponse.result
-            : []
+            : [],
         );
 
         const targetArticul =
@@ -791,7 +793,7 @@ export default function ItemInfoPage() {
         setDetailsLoading(false);
       }
     },
-    [api, priceTypes, settings, showToast, stocks, t]
+    [api, priceTypes, settings, showToast, stocks, t],
   );
 
   const handlePickItem = useCallback(
@@ -804,7 +806,7 @@ export default function ItemInfoPage() {
       setQueryValue("");
       await loadItemDetails(item, settings);
     },
-    [loadItemDetails, settings]
+    [loadItemDetails, settings],
   );
 
   const resetUI = useCallback(() => {
@@ -826,7 +828,7 @@ export default function ItemInfoPage() {
       resetUI();
       await handlePickItem(item);
     },
-    [handlePickItem, resetUI]
+    [handlePickItem, resetUI],
   );
 
   const handleOperationFiltersOpen = useCallback(() => {
@@ -849,7 +851,7 @@ export default function ItemInfoPage() {
 
         const availableWidth = Math.max(
           240,
-          viewportWidth - FILTER_POPOVER_MARGIN * 2
+          viewportWidth - FILTER_POPOVER_MARGIN * 2,
         );
         const popoverWidth = Math.min(FILTER_POPOVER_WIDTH, availableWidth);
 
@@ -873,7 +875,7 @@ export default function ItemInfoPage() {
             scrollY + rect.top - FILTER_POPOVER_OFFSET - FILTER_POPOVER_HEIGHT;
           const clampedTop = Math.max(
             scrollY + FILTER_POPOVER_MARGIN,
-            Math.min(topAbove, maxTop)
+            Math.min(topAbove, maxTop),
           );
           anchor = { top: clampedTop, left, width: popoverWidth };
         }
@@ -889,7 +891,7 @@ export default function ItemInfoPage() {
       const value = event?.target?.value ?? "all";
       setOperationFiltersDraft((prev) => ({ ...prev, [field]: value }));
     },
-    []
+    [],
   );
 
   const handleOperationFiltersApply = useCallback(() => {
@@ -928,6 +930,7 @@ export default function ItemInfoPage() {
 
         const payload = {
           search: normalized,
+          deleted_mark: false,
           limit: 100,
         };
         const stockId =
@@ -948,8 +951,8 @@ export default function ItemInfoPage() {
           formatFallback(
             t,
             "item_info.search_error",
-            "Не удалось выполнить поиск"
-          )
+            "Не удалось выполнить поиск",
+          ),
         );
 
         const items = Array.isArray(data?.result) ? data.result : [];
@@ -1001,7 +1004,7 @@ export default function ItemInfoPage() {
       showToast,
       stocks,
       t,
-    ]
+    ],
   );
 
   const runSearch = useCallback(
@@ -1013,7 +1016,7 @@ export default function ItemInfoPage() {
       }
       await handleSearch(value, SEARCH_MODES.NAME);
     },
-    [handleSearch, searchMode]
+    [handleSearch, searchMode],
   );
 
   const handleScannerResult = useCallback(
@@ -1021,7 +1024,7 @@ export default function ItemInfoPage() {
       if (!value) return;
       runSearch(value, SEARCH_MODES.SCAN);
     },
-    [runSearch]
+    [runSearch],
   );
 
   const closeResultModal = useCallback(() => {
@@ -1082,7 +1085,7 @@ export default function ItemInfoPage() {
               {formatFallback(
                 t,
                 "item_info.selected_hint",
-                "Выбрана позиция, данные обновлены"
+                "Выбрана позиция, данные обновлены",
               )}
             </p>
           ) : null}
@@ -1172,7 +1175,7 @@ export default function ItemInfoPage() {
               placeholder={formatFallback(
                 t,
                 "item_info.barcode_placeholder",
-                "Введите штрих-код и нажмите Enter"
+                "Введите штрих-код и нажмите Enter",
               )}
               onChange={(event) => setBarcodeValue(event.target.value)}
               onKeyDown={(event) => {
@@ -1218,7 +1221,7 @@ export default function ItemInfoPage() {
               placeholder={formatFallback(
                 t,
                 "item_info.search_placeholder",
-                "Наименование / артикул / код"
+                "Наименование / артикул / код",
               )}
               onChange={(event) => setQueryValue(event.target.value)}
               onKeyDown={(event) => {
@@ -1243,10 +1246,10 @@ export default function ItemInfoPage() {
             {searchStatus === "loading"
               ? formatFallback(t, "searching", "Поиск...")
               : searchStatus === "empty"
-              ? formatFallback(t, "common.nothing", "Ничего не найдено")
-              : searchStatus === "error"
-              ? formatFallback(t, "search_error", "Ошибка поиска")
-              : null}
+                ? formatFallback(t, "common.nothing", "Ничего не найдено")
+                : searchStatus === "error"
+                  ? formatFallback(t, "search_error", "Ошибка поиска")
+                  : null}
           </div>
         </div>
       ) : null}
@@ -1368,7 +1371,7 @@ export default function ItemInfoPage() {
             <div className="grid gap-3 md:grid-cols-3">
               <div
                 className={cardClass(
-                  "space-y-1 bg-slate-50/80 dark:bg-slate-900/40"
+                  "space-y-1 bg-slate-50/80 dark:bg-slate-900/40",
                 )}
                 aria-label="quantity-common"
               >
@@ -1376,21 +1379,21 @@ export default function ItemInfoPage() {
                   {formatFallback(
                     t,
                     "item_info.quantity_common",
-                    "Доступно всего"
+                    "Доступно всего",
                   )}
                 </p>
                 <p className="text-lg font-semibold text-slate-900 dark:text-slate-100">
                   {fmt.number(
                     quantityInfo?.reduce(
                       (acc, item) => acc + (item.common ?? 0),
-                      0
-                    )
+                      0,
+                    ),
                   )}
                 </p>
               </div>
               <div
                 className={cardClass(
-                  "space-y-1 bg-slate-50/80 dark:bg-slate-900/40"
+                  "space-y-1 bg-slate-50/80 dark:bg-slate-900/40",
                 )}
                 aria-label="quantity-allowed"
               >
@@ -1398,21 +1401,21 @@ export default function ItemInfoPage() {
                   {formatFallback(
                     t,
                     "item_info.quantity_allowed",
-                    "Разрешено к продаже"
+                    "Разрешено к продаже",
                   )}
                 </p>
                 <p className="text-lg font-semibold text-slate-900 dark:text-slate-100">
                   {fmt.number(
                     quantityInfo?.reduce(
                       (acc, item) => acc + (item.allowed ?? 0),
-                      0
-                    ) ?? 0
+                      0,
+                    ) ?? 0,
                   )}
                 </p>
               </div>
               <div
                 className={cardClass(
-                  "space-y-1 bg-slate-50/80 dark:bg-slate-900/40"
+                  "space-y-1 bg-slate-50/80 dark:bg-slate-900/40",
                 )}
                 aria-label="quantity-booked"
               >
@@ -1420,15 +1423,15 @@ export default function ItemInfoPage() {
                   {formatFallback(
                     t,
                     "item_info.quantity_booked",
-                    "Зарезервировано"
+                    "Зарезервировано",
                   )}
                 </p>
                 <p className="text-lg font-semibold text-slate-900 dark:text-slate-100">
                   {fmt.number(
                     quantityInfo?.reduce(
                       (acc, item) => acc + (item.booked ?? 0),
-                      0
-                    ) ?? 0
+                      0,
+                    ) ?? 0,
                   )}
                 </p>
               </div>
@@ -1444,7 +1447,7 @@ export default function ItemInfoPage() {
                 {fmt.money(
                   selectedPrice,
                   docCurrency,
-                  selectedPriceType?.round_to
+                  selectedPriceType?.round_to,
                 )}
               </p>
             </div>
@@ -1490,7 +1493,7 @@ export default function ItemInfoPage() {
               {formatFallback(
                 t,
                 "item_info.quantity_empty",
-                "Нет данных об остатках"
+                "Нет данных об остатках",
               )}
             </p>
           ) : (
@@ -1507,7 +1510,7 @@ export default function ItemInfoPage() {
                       formatFallback(
                         t,
                         "item_info.stock_unknown",
-                        "Склад не указан"
+                        "Склад не указан",
                       )}
                   </p>
                   <div className="flex flex-wrap gap-3 text-sm text-slate-600 dark:text-slate-300">
@@ -1539,7 +1542,7 @@ export default function ItemInfoPage() {
               {formatFallback(
                 t,
                 "item_info.prices_empty",
-                "Нет данных о ценах"
+                "Нет данных о ценах",
               )}
             </p>
           ) : (
@@ -1561,7 +1564,7 @@ export default function ItemInfoPage() {
                             formatFallback(
                               t,
                               "item_info.price_type_unknown",
-                              "Тип цены неизвестен"
+                              "Тип цены неизвестен",
                             )}
                         </p>
                         {/* <p className={mutedTextClass()}>
@@ -1581,7 +1584,7 @@ export default function ItemInfoPage() {
                         {fmt.money(
                           price.value ?? 0,
                           currencyCode,
-                          price.price_type?.round_to
+                          price.price_type?.round_to,
                         )}
                       </p>
                     </div>
@@ -1604,7 +1607,7 @@ export default function ItemInfoPage() {
               {formatFallback(
                 t,
                 "item_info.operations_visible",
-                "Показано операций"
+                "Показано операций",
               )}
               : {filteredOperations.length} / {operations.length}
             </p>
@@ -1614,7 +1617,7 @@ export default function ItemInfoPage() {
                   {formatFallback(
                     t,
                     "item_info.filters_active",
-                    "Фильтры включены"
+                    "Фильтры включены",
                   )}
                 </span>
               ) : null}
@@ -1628,14 +1631,14 @@ export default function ItemInfoPage() {
                 title={formatFallback(
                   t,
                   "item_info.open_filters",
-                  "Настроить фильтры операций"
+                  "Настроить фильтры операций",
                 )}
               >
                 <span className="sr-only">
                   {formatFallback(
                     t,
                     "item_info.open_filters",
-                    "Настроить фильтры операций"
+                    "Настроить фильтры операций",
                   )}
                 </span>
                 <svg
@@ -1659,7 +1662,7 @@ export default function ItemInfoPage() {
                 {formatFallback(
                   t,
                   "item_info.similar_items",
-                  "Похожие номенклатуры"
+                  "Похожие номенклатуры",
                 )}
               </h2>
               <div className="grid gap-3 xl:grid-cols-4">
@@ -1668,7 +1671,7 @@ export default function ItemInfoPage() {
                     key={`${item.id}-${item.barcode || "similar"}`}
                     type="button"
                     className={cardClass(
-                      "w-full text-left transition hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-500 focus-visible:ring-offset-2"
+                      "w-full text-left transition hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-500 focus-visible:ring-offset-2",
                     )}
                     onClick={() => handlePickSimilarItem(item)}
                   >
@@ -1706,7 +1709,7 @@ export default function ItemInfoPage() {
                             {formatFallback(
                               t,
                               "item_info.size_chart",
-                              "Размерная сетка"
+                              "Размерная сетка",
                             )}
                             : {item.sizeChart}
                           </span>
@@ -1724,12 +1727,12 @@ export default function ItemInfoPage() {
                 ? formatFallback(
                     t,
                     "item_info.operations_filtered_empty",
-                    "Нет операций по выбранным фильтрам"
+                    "Нет операций по выбранным фильтрам",
                   )
                 : formatFallback(
                     t,
                     "item_info.operations_empty",
-                    "Нет операций"
+                    "Нет операций",
                   )}
             </p>
           ) : (
@@ -1770,12 +1773,12 @@ export default function ItemInfoPage() {
                           ? formatFallback(
                               t,
                               "item_info.operation_income",
-                              "Приход"
+                              "Приход",
                             )
                           : formatFallback(
                               t,
                               "item_info.operation_outcome",
-                              "Расход"
+                              "Расход",
                             )}
                       </span>
                     ) : null}
@@ -1797,7 +1800,7 @@ export default function ItemInfoPage() {
         >
           <div
             className={cardClass(
-              "relative mt-6 w-full max-w-lg space-y-4 shadow-xl"
+              "relative mt-6 w-full max-w-lg space-y-4 shadow-xl",
             )}
             onClick={(event) => event.stopPropagation()}
           >
@@ -1808,7 +1811,7 @@ export default function ItemInfoPage() {
               {formatFallback(
                 t,
                 "item_info.choose_item",
-                "Выберите номенклатуру"
+                "Выберите номенклатуру",
               )}
             </h2>
             <div className="max-h-96 space-y-3 overflow-y-auto pr-1">
@@ -1817,7 +1820,7 @@ export default function ItemInfoPage() {
                   key={`${item.id}-${item.barcode}`}
                   type="button"
                   className={cardClass(
-                    "w-full text-left transition hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-500 focus-visible:ring-offset-2"
+                    "w-full text-left transition hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-500 focus-visible:ring-offset-2",
                   )}
                   onClick={() => handlePickItem(item)}
                 >
@@ -1885,7 +1888,7 @@ export default function ItemInfoPage() {
               {formatFallback(
                 t,
                 "item_info.operations_filter_title",
-                "Фильтры операций"
+                "Фильтры операций",
               )}
             </h2>
 
@@ -1907,7 +1910,7 @@ export default function ItemInfoPage() {
                     {formatFallback(
                       t,
                       "item_info.filter_all_stocks",
-                      "Все склады"
+                      "Все склады",
                     )}
                   </option>
                   {operationStockOptions.map((option) => (
@@ -1926,7 +1929,7 @@ export default function ItemInfoPage() {
                   {formatFallback(
                     t,
                     "item_info.filter_operation_type",
-                    "Тип движения"
+                    "Тип движения",
                   )}
                 </label>
                 <select
@@ -1939,7 +1942,7 @@ export default function ItemInfoPage() {
                     {formatFallback(
                       t,
                       "item_info.filter_all_movements",
-                      "Все операции"
+                      "Все операции",
                     )}
                   </option>
                   <option value="true">
@@ -1959,7 +1962,7 @@ export default function ItemInfoPage() {
                   {formatFallback(
                     t,
                     "item_info.filter_doc_type",
-                    "Тип документа"
+                    "Тип документа",
                   )}
                 </label>
                 <select
@@ -1972,7 +1975,7 @@ export default function ItemInfoPage() {
                     {formatFallback(
                       t,
                       "item_info.filter_all_doc_types",
-                      "Все типы"
+                      "Все типы",
                     )}
                   </option>
                   {operationDocTypeOptions.map((option) => (
@@ -2021,7 +2024,7 @@ export default function ItemInfoPage() {
         >
           <div
             className={cardClass(
-              "relative mt-12 w-full max-w-md space-y-4 shadow-xl"
+              "relative mt-12 w-full max-w-md space-y-4 shadow-xl",
             )}
             onClick={(event) => event.stopPropagation()}
           >
@@ -2032,7 +2035,7 @@ export default function ItemInfoPage() {
               {formatFallback(
                 t,
                 "item_info.settings_title",
-                "Настройки поиска"
+                "Настройки поиска",
               )}
             </h2>
             {optionsLoading ? (
@@ -2040,7 +2043,7 @@ export default function ItemInfoPage() {
                 {formatFallback(
                   t,
                   "item_info.settings_loading",
-                  "Загрузка параметров..."
+                  "Загрузка параметров...",
                 )}
               </p>
             ) : null}
@@ -2105,7 +2108,7 @@ export default function ItemInfoPage() {
                   {formatFallback(
                     t,
                     "item_info.limit",
-                    "Лимит последних операций"
+                    "Лимит последних операций",
                   )}
                 </label>
                 <input
@@ -2130,7 +2133,7 @@ export default function ItemInfoPage() {
                   {formatFallback(
                     t,
                     "item_info.limit_help",
-                    "От 1 до 1000 записей"
+                    "От 1 до 1000 записей",
                   )}
                 </p>
               </div>
