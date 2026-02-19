@@ -356,15 +356,15 @@ class TelegramBotMinQuantityIntegration(IntegrationTelegramBase, ClientBase):
             commands=[
                 BotCommand(
                     command="start",
-                    description="Активировать бота минимальных остатков",
+                    description="Запуск бота",
                 ),
                 BotCommand(
                     command="get_quantity",
-                    description="Получить минимальные остатки",
+                    description="Минимальные остатки",
                 ),
                 BotCommand(
                     command="get_quantity_search",
-                    description="Получить минимальные остатки по поиску",
+                    description="Остатки по поиску",
                 ),
                 # BotCommand(
                 #     command="stop",
