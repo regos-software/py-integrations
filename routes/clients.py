@@ -21,6 +21,7 @@ from clients.email_sender.main import EmailSenderIntegration
 from clients.telegram_bot_notification.main import TelegramBotNotificationIntegration
 from clients.telegram_bot_quantity.main import TelegramBotMinQuantityIntegration
 from clients.telegram_bot_orders.main import TelegramBotOrdersIntegration
+from clients.telegram_bot_crm_channel.main import TelegramBotCrmChannelIntegration
 from clients.tsd.main import TsdIntegration
 
 router = APIRouter()
@@ -34,6 +35,7 @@ INTEGRATION_CLASSES = {
     "regos_telegram_notifier": TelegramBotNotificationIntegration,
     "regos_telegram_minquantity": TelegramBotMinQuantityIntegration,
     "telegram_bot_orders": TelegramBotOrdersIntegration,
+    "telegram_bot_crm_channel": TelegramBotCrmChannelIntegration,
     "tsd": TsdIntegration,
 }
 

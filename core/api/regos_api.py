@@ -24,6 +24,9 @@ class RegosAPI:
         self.batch = BatchService(self)
 
         self.docs: "RegosAPI.Docs" = self.Docs(self)
+        self.crm: "RegosAPI.Crm" = self.Crm(self)
+        self.chat: "RegosAPI.Chat" = self.Chat(self)
+        self.files: "RegosAPI.Files" = self.Files(self)
         self.integrations: "RegosAPI.Integrations" = self.Integrations(self)
         self.reports: "RegosAPI.Reports" = self.Reports(self)
         self.references: "RegosAPI.References" = self.References(self)
@@ -91,6 +94,26 @@ class RegosAPI:
             )
 
             self.connected_integration_setting = ConnectedIntegrationSettingService(api)
+
+    class Crm:
+        def __init__(self, api: "RegosAPI"):
+            from core.api.crm.lead import LeadService
+            from core.api.crm.pipeline import PipelineService
+
+            self.lead = LeadService(api)
+            self.pipeline = PipelineService(api)
+
+    class Chat:
+        def __init__(self, api: "RegosAPI"):
+            from core.api.chat.chat_message import ChatMessageService
+
+            self.chat_message = ChatMessageService(api)
+
+    class Files:
+        def __init__(self, api: "RegosAPI"):
+            from core.api.files.file import FileService
+
+            self.file = FileService(api)
 
     class Reports:
         def __init__(self, api: "RegosAPI"):
