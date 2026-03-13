@@ -368,6 +368,15 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         await redis_client.set(key, value, ex=max(ttl_sec, 1))
 
     @staticmethod
+    async def _redis_delete(*keys: str) -> None:
+        if not _redis_enabled():
+            return
+        valid_keys = [str(k).strip() for k in keys if str(k).strip()]
+        if not valid_keys:
+            return
+        await redis_client.delete(*valid_keys)
+
+    @staticmethod
     async def _acquire_lock(key: str, ttl_sec: int) -> Optional[str]:
         if not _redis_enabled():
             return None
@@ -984,14 +993,44 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         )
 
     @staticmethod
-    def _build_subject(template: Optional[str], message: Dict[str, Any], tg_chat_id: str) -> str:
+    def _extract_contact_payload(message: Dict[str, Any], tg_chat_id: str) -> Dict[str, str]:
         author = message.get("from") or {}
-        payload = {
+        contact = message.get("contact")
+        contact = contact if isinstance(contact, dict) else {}
+        chat = message.get("chat") or {}
+
+        first_name = (
+            str(contact.get("first_name") or "").strip()
+            or str(author.get("first_name") or "").strip()
+            or str(chat.get("first_name") or "").strip()
+        )
+        last_name = (
+            str(contact.get("last_name") or "").strip()
+            or str(author.get("last_name") or "").strip()
+            or str(chat.get("last_name") or "").strip()
+        )
+        username = (
+            str(author.get("username") or "").strip()
+            or str(chat.get("username") or "").strip()
+        )
+
+        full_name = " ".join([first_name, last_name]).strip()
+        display_name = full_name or username or tg_chat_id
+
+        return {
             "chat_id": tg_chat_id,
-            "first_name": str(author.get("first_name") or "").strip(),
-            "last_name": str(author.get("last_name") or "").strip(),
-            "username": str(author.get("username") or "").strip(),
+            "first_name": first_name,
+            "last_name": last_name,
+            "username": username,
+            "full_name": full_name,
+            "display_name": display_name,
         }
+
+    @staticmethod
+    def _build_subject(template: Optional[str], message: Dict[str, Any], tg_chat_id: str) -> str:
+        payload = TelegramBotCrmChannelIntegration._extract_contact_payload(
+            message, tg_chat_id
+        )
         if template:
             try:
                 result = template.format_map(payload).strip()
@@ -999,8 +1038,44 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     return result[:250]
             except Exception:
                 pass
-        default_name = payload["first_name"] or payload["username"] or tg_chat_id
-        return f"Telegram: {default_name}"[:250]
+        return f"Telegram: {payload['display_name']}"[:250]
+
+    @classmethod
+    async def _resolve_client_avatar_url(
+        cls, bot_cfg: BotSlotConfig, message: Dict[str, Any]
+    ) -> Optional[str]:
+        author = message.get("from") or {}
+        contact = message.get("contact")
+        contact = contact if isinstance(contact, dict) else {}
+
+        user_id = contact.get("user_id") or author.get("id")
+        if not user_id:
+            return None
+        try:
+            user_id_int = int(user_id)
+        except (TypeError, ValueError):
+            return None
+
+        try:
+            bot = await cls._get_bot(bot_cfg.token)
+            photos = await bot.get_user_profile_photos(user_id=user_id_int, limit=1)
+            rows = photos.photos[0] if photos and photos.photos else []
+            if not rows:
+                return None
+            best = max(
+                [row for row in rows if getattr(row, "file_id", None)],
+                key=lambda row: int(getattr(row, "file_size", 0) or 0),
+                default=None,
+            )
+            if not best:
+                return None
+            file_info = await bot.get_file(best.file_id)
+            file_path = str(file_info.file_path or "").strip()
+            if not file_path:
+                return None
+            return f"https://api.telegram.org/file/bot{bot_cfg.token}/{file_path}"
+        except Exception:
+            return None
 
     @classmethod
     async def _set_worker_heartbeat(cls, connected_integration_id: str) -> None:
@@ -1295,7 +1370,8 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             ext_message_id = f"tgmsg:{bot_hash}:{tg_chat_id}:{tg_message_id}"
 
             async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-                await api.chat.chat_message.add(
+                add_response = await api.call(
+                    "ChatMessage/Add",
                     ChatMessageAddRequest(
                         chat_id=chat_id,
                         message_type=ChatMessageTypeEnum.Regular,
@@ -1303,11 +1379,78 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                         file_ids=file_ids or None,
                         event_id=event_id,
                         external_message_id=ext_message_id,
-                    )
+                    ),
+                    APIBaseResponse[Dict[str, Any]],
                 )
+            if not add_response.ok:
+                result_payload = (
+                    add_response.result if isinstance(add_response.result, dict) else {}
+                )
+                error_code = result_payload.get("error")
+                error_description = result_payload.get("description")
+                await cls._clear_cached_target_mapping(
+                    connected_integration_id=connected_integration_id,
+                    bot_hash=bot_hash,
+                    tg_chat_id=tg_chat_id,
+                    lead_id=lead_id,
+                    chat_id=chat_id,
+                )
+                logger.warning(
+                    "Cleared cached mapping after ChatMessage/Add reject: ci=%s lead_id=%s chat_id=%s bot_hash=%s tg_chat_id=%s",
+                    connected_integration_id,
+                    lead_id,
+                    chat_id,
+                    bot_hash,
+                    tg_chat_id,
+                )
+                raise RuntimeError(
+                    "ChatMessage/Add rejected: "
+                    f"error={error_code} description={error_description}"
+                )
+
+            msg_uuid = ""
+            if isinstance(add_response.result, dict):
+                msg_uuid = str(add_response.result.get("new_uuid") or "").strip()
+            logger.debug(
+                "ChatMessage/Add accepted: ci=%s lead_id=%s chat_id=%s msg_uuid=%s ext_id=%s",
+                connected_integration_id,
+                lead_id,
+                chat_id,
+                msg_uuid or "<empty>",
+                ext_message_id,
+            )
             await cls._redis_set_with_ttl(dedupe_key, "1", runtime.lead_dedupe_ttl_sec)
         finally:
             await cls._release_lock(dedupe_lock_key, dedupe_lock_token)
+
+    @classmethod
+    async def _clear_cached_target_mapping(
+        cls,
+        connected_integration_id: str,
+        bot_hash: str,
+        tg_chat_id: str,
+        lead_id: Optional[int] = None,
+        chat_id: Optional[str] = None,
+    ) -> None:
+        if lead_id is None:
+            lead_id_raw = await cls._redis_get(
+                cls._lead_by_tg_key(connected_integration_id, bot_hash, tg_chat_id)
+            )
+            lead_id = _parse_int(lead_id_raw)
+        if chat_id is None and lead_id:
+            chat_id = await cls._redis_get(
+                cls._chat_by_lead_key(connected_integration_id, lead_id)
+            )
+
+        await cls._redis_delete(
+            cls._lead_by_tg_key(connected_integration_id, bot_hash, tg_chat_id),
+            cls._chat_by_lead_key(connected_integration_id, lead_id)
+            if lead_id
+            else "",
+            cls._tg_by_chat_key(connected_integration_id, str(chat_id))
+            if chat_id
+            else "",
+        )
 
     @classmethod
     async def _resolve_or_create_lead(
@@ -1367,19 +1510,17 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     if chat_id:
                         return lead_id, chat_id
 
-            author = message.get("from") or {}
             lead_subject = cls._build_subject(
                 bot_cfg.lead_subject_template, message, tg_chat_id
             )
-
-            client_name = " ".join(
-                [str(author.get("first_name") or "").strip(), str(author.get("last_name") or "").strip()]
-            ).strip() or str(author.get("username") or "").strip() or None
+            contact_payload = cls._extract_contact_payload(message, tg_chat_id)
+            client_name = contact_payload["display_name"] or None
 
             client_phone = None
             contact = message.get("contact")
             if isinstance(contact, dict):
                 client_phone = str(contact.get("phone_number") or "").strip() or None
+            client_avatar_url = await cls._resolve_client_avatar_url(bot_cfg, message)
 
             async with RegosAPI(connected_integration_id=connected_integration_id) as api:
                 add_resp = await api.crm.lead.add(
@@ -1393,6 +1534,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                         ),
                         client_name=client_name,
                         client_phone=client_phone,
+                        client_avatar_url=client_avatar_url,
                         external_chat_id=tg_chat_id,
                         bot_id=bot_cfg.bot_hash,
                     )
