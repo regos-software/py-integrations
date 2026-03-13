@@ -652,6 +652,12 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 runtime.update_mode,
                 self.connected_integration_id,
             )
+            logger.debug(
+                "connect runtime: ci=%s bots=%s bot_hashes=%s",
+                self.connected_integration_id,
+                len(runtime.bots),
+                [b.bot_hash for b in runtime.bots],
+            )
             await self._validate_pipelines(runtime)
             webhook_subscribe = await self._subscribe_required_webhooks(
                 self.connected_integration_id
@@ -809,6 +815,12 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 return self._error_response(403, "Invalid Telegram secret token").dict()
 
         try:
+            logger.debug(
+                "enqueue telegram webhook: ci=%s bot_hash=%s update_id=%s",
+                self.connected_integration_id,
+                bot_hash,
+                payload.get("update_id"),
+            )
             await self._enqueue(
                 self._stream_key("telegram_in", self.connected_integration_id),
                 {
@@ -848,6 +860,12 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             return {"status": "ignored", "action": event_action}
 
         try:
+            logger.debug(
+                "enqueue regos webhook: ci=%s action=%s event_id=%s",
+                self.connected_integration_id,
+                event_action,
+                event_id,
+            )
             await self._enqueue(
                 self._stream_key("regos_in", self.connected_integration_id),
                 {
@@ -1031,6 +1049,12 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 await cls._process_regos_event(connected_integration_id, fields)
             await redis_client.xack(
                 stream_key, TelegramBotCrmChannelConfig.STREAM_GROUP, message_id
+            )
+            logger.debug(
+                "stream ack: ci=%s kind=%s message_id=%s",
+                connected_integration_id,
+                kind,
+                message_id,
             )
         except Exception as error:
             attempts += 1
