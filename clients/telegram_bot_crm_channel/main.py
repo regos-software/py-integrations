@@ -143,6 +143,10 @@ def _bot_hash(token: str) -> str:
     return hashlib.md5(token.encode("utf-8")).hexdigest()
 
 
+def _external_contact_id(bot_hash: str, tg_chat_id: str) -> str:
+    return f"tg:{bot_hash}:{tg_chat_id}"
+
+
 def _update_mode_from_value(raw: Optional[str]) -> str:
     mode = str(raw or "").strip().lower()
     if mode in {"longpolling", "long_polling", "long-polling", "polling"}:
@@ -176,8 +180,52 @@ def _file_ext_from_name(name: str, fallback: str = "bin") -> str:
     return ext[:10]
 
 
+def _file_ext_from_mime(mime_type: Optional[str], fallback: str = "bin") -> str:
+    mime = str(mime_type or "").strip().lower()
+    if not mime:
+        return fallback
+    mapping = {
+        "audio/mpeg": "mp3",
+        "audio/mp3": "mp3",
+        "audio/mp4": "m4a",
+        "audio/x-m4a": "m4a",
+        "audio/aac": "aac",
+        "audio/ogg": "ogg",
+        "audio/opus": "opus",
+        "audio/webm": "webm",
+        "audio/wav": "wav",
+        "audio/x-wav": "wav",
+        "audio/flac": "flac",
+    }
+    if mime in mapping:
+        return mapping[mime]
+    if "/" in mime:
+        tail = mime.rsplit("/", 1)[-1].strip()
+        if tail:
+            return tail[:10]
+    return fallback
+
+
 def _is_photo_extension(extension: Optional[str]) -> bool:
     return str(extension or "").lower() in {"jpg", "jpeg", "png", "webp"}
+
+
+def _is_voice_extension(extension: Optional[str]) -> bool:
+    return str(extension or "").lower() in {"ogg", "oga", "opus"}
+
+
+def _is_audio_extension(extension: Optional[str]) -> bool:
+    return str(extension or "").lower() in {
+        "mp3",
+        "m4a",
+        "aac",
+        "ogg",
+        "oga",
+        "opus",
+        "wav",
+        "flac",
+        "webm",
+    }
 
 
 def _headers_ci(headers: Dict[str, Any], key: str) -> Optional[str]:
@@ -392,53 +440,43 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
 
     @staticmethod
     def _parse_bots(settings_map: Dict[str, str]) -> List[BotSlotConfig]:
-        bots: List[BotSlotConfig] = []
-        bot_hashes: set[str] = set()
-
-        for slot in range(1, 6):
-            enabled = _parse_bool(settings_map.get(f"bot_{slot}_enabled"), False)
-            if not enabled:
-                continue
-
-            token = str(settings_map.get(f"bot_{slot}_token") or "").strip()
-            pipeline_id = _parse_int(settings_map.get(f"bot_{slot}_pipeline_id"))
-            channel_id = _parse_int(settings_map.get(f"bot_{slot}_channel_id"))
-            if not token:
-                raise ValueError(f"BOT_{slot}_TOKEN is required when BOT_{slot}_ENABLED=true")
-            if not pipeline_id or pipeline_id <= 0:
+        for slot in range(2, 6):
+            if _parse_bool(settings_map.get(f"bot_{slot}_enabled"), False):
                 raise ValueError(
-                    f"BOT_{slot}_PIPELINE_ID must be a positive integer for enabled bot"
-                )
-            if not channel_id or channel_id <= 0:
-                raise ValueError(
-                    f"BOT_{slot}_CHANNEL_ID must be a positive integer for enabled bot"
+                    "Single-bot mode: only BOT_1_* settings are supported; "
+                    f"disable BOT_{slot}_ENABLED"
                 )
 
-            token_hash = _bot_hash(token)
-            if token_hash in bot_hashes:
-                raise ValueError("Bot tokens must be unique per connected integration")
-            bot_hashes.add(token_hash)
+        enabled = _parse_bool(settings_map.get("bot_1_enabled"), False)
+        if not enabled:
+            raise ValueError("BOT_1_ENABLED=true is required")
 
-            bots.append(
-                BotSlotConfig(
-                    slot=slot,
-                    token=token,
-                    pipeline_id=pipeline_id,
-                    channel_id=channel_id,
-                    lead_subject_template=str(
-                        settings_map.get(f"bot_{slot}_lead_subject_template") or ""
-                    ).strip()
-                    or None,
-                    default_responsible_user_id=_parse_int(
-                        settings_map.get(f"bot_{slot}_default_responsible_user_id")
-                    ),
-                    bot_hash=token_hash,
-                )
+        token = str(settings_map.get("bot_1_token") or "").strip()
+        pipeline_id = _parse_int(settings_map.get("bot_1_pipeline_id"))
+        channel_id = _parse_int(settings_map.get("bot_1_channel_id"))
+        if not token:
+            raise ValueError("BOT_1_TOKEN is required when BOT_1_ENABLED=true")
+        if not pipeline_id or pipeline_id <= 0:
+            raise ValueError("BOT_1_PIPELINE_ID must be a positive integer")
+        if not channel_id or channel_id <= 0:
+            raise ValueError("BOT_1_CHANNEL_ID must be a positive integer")
+
+        return [
+            BotSlotConfig(
+                slot=1,
+                token=token,
+                pipeline_id=pipeline_id,
+                channel_id=channel_id,
+                lead_subject_template=str(
+                    settings_map.get("bot_1_lead_subject_template") or ""
+                ).strip()
+                or None,
+                default_responsible_user_id=_parse_int(
+                    settings_map.get("bot_1_default_responsible_user_id")
+                ),
+                bot_hash=_bot_hash(token),
             )
-
-        if not bots:
-            raise ValueError("At least one BOT_{N}_ENABLED=true is required")
-        return bots
+        ]
 
     @staticmethod
     async def _load_runtime(connected_integration_id: str) -> RuntimeConfig:
@@ -688,25 +726,24 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 }
 
             await self._stop_pollers_for_ci(self.connected_integration_id)
-            webhook_urls: Dict[str, str] = {}
-            for bot_cfg in runtime.bots:
-                bot = await self._get_bot(bot_cfg.token)
-                url = (
-                    f"{app_settings.integration_url.rstrip('/')}/external/"
-                    f"{self.connected_integration_id}/external/?bot_hash={bot_cfg.bot_hash}"
-                )
-                await bot.delete_webhook(drop_pending_updates=True)
-                kwargs_set_webhook: Dict[str, Any] = {"url": url}
-                if runtime.telegram_secret_token:
-                    kwargs_set_webhook["secret_token"] = runtime.telegram_secret_token
-                await bot.set_webhook(**kwargs_set_webhook)
-                webhook_urls[bot_cfg.bot_hash] = url
+            bot_cfg = runtime.bots[0]
+            bot = await self._get_bot(bot_cfg.token)
+            url = (
+                f"{app_settings.integration_url.rstrip('/')}/external/"
+                f"{self.connected_integration_id}/external/"
+            )
+            await bot.delete_webhook(drop_pending_updates=True)
+            kwargs_set_webhook: Dict[str, Any] = {"url": url}
+            if runtime.telegram_secret_token:
+                kwargs_set_webhook["secret_token"] = runtime.telegram_secret_token
+            await bot.set_webhook(**kwargs_set_webhook)
 
             return {
                 "status": "connected",
                 "mode": "webhook",
                 "bots": len(runtime.bots),
-                "webhook_urls": webhook_urls,
+                "webhook_url": url,
+                "bot_hash": bot_cfg.bot_hash,
                 "webhooks_subscription": webhook_subscribe,
             }
         except Exception as error:
@@ -764,6 +801,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             return self._error_response(1000, "connected_integration_id is required").dict()
         try:
             runtime = await self._load_runtime(self.connected_integration_id)
+            bot_cfg = runtime.bots[0]
             details: List[Dict[str, Any]] = []
             for item in messages:
                 text = str(item.get("message") or "").strip()
@@ -772,18 +810,20 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 if not text or not recipient:
                     details.append({"status": "error", "error": "recipient/message required"})
                     continue
-                if not bot_hash:
-                    bot_hash = runtime.bots[0].bot_hash
-                bot_cfg = runtime.bots_by_hash.get(bot_hash)
-                if not bot_cfg:
-                    details.append({"status": "error", "error": f"unknown bot_hash={bot_hash}"})
+                if bot_hash and bot_hash != bot_cfg.bot_hash:
+                    details.append(
+                        {
+                            "status": "error",
+                            "error": "single-bot mode: unknown bot_hash",
+                        }
+                    )
                     continue
                 bot = await self._get_bot(bot_cfg.token)
                 sent = await bot.send_message(chat_id=_tg_chat_id_cast(recipient), text=text)
                 details.append(
                     {
                         "status": "sent",
-                        "bot_hash": bot_hash,
+                        "bot_hash": bot_cfg.bot_hash,
                         "recipient": recipient,
                         "telegram_message_id": sent.message_id,
                     }
@@ -807,12 +847,15 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             return self._error_response(400, "Invalid Telegram payload").dict()
 
         runtime = await self._load_runtime(self.connected_integration_id)
+        single_bot = runtime.bots[0]
         query = envelope.get("query") or {}
         bot_hash = str(query.get("bot_hash") or "").strip()
-        if not bot_hash and len(runtime.bots) == 1:
-            bot_hash = runtime.bots[0].bot_hash
-        if bot_hash not in runtime.bots_by_hash:
-            return self._error_response(400, "Unknown bot_hash for Telegram webhook").dict()
+        if not bot_hash:
+            bot_hash = single_bot.bot_hash
+        if bot_hash != single_bot.bot_hash:
+            return self._error_response(
+                400, "single-bot mode: invalid bot_hash for Telegram webhook"
+            ).dict()
 
         if runtime.telegram_secret_token:
             headers = envelope.get("headers") or {}
@@ -1345,6 +1388,9 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                         pipeline_id=bot_cfg.pipeline_id,
                         responsible_user_id=bot_cfg.default_responsible_user_id,
                         subject=lead_subject,
+                        external_contact_id=_external_contact_id(
+                            bot_cfg.bot_hash, tg_chat_id
+                        ),
                         client_name=client_name,
                         client_phone=client_phone,
                         external_chat_id=tg_chat_id,
@@ -1393,7 +1439,12 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         ]
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
             response = await api.crm.lead.get(
-                LeadGetRequest(filters=filters, statuses=statuses, limit=1, offset=0)
+                LeadGetRequest(
+                    filters=filters,
+                    statuses=statuses,
+                    limit=1,
+                    offset=0,
+                )
             )
         if not response.result:
             return None
@@ -1473,7 +1524,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     "name": file_name,
                     "extension": _file_ext_from_name(file_name, "bin"),
                 }
-            )
+                )
 
         photos = message.get("photo")
         if isinstance(photos, list) and photos:
@@ -1490,6 +1541,35 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                         "extension": "jpg",
                     }
                 )
+
+        audio = message.get("audio")
+        if isinstance(audio, dict) and audio.get("file_id"):
+            audio_name_raw = str(audio.get("file_name") or "").strip()
+            if audio_name_raw:
+                audio_name = _sanitize_file_name(audio_name_raw)
+                audio_ext = _file_ext_from_name(audio_name, "mp3")
+            else:
+                audio_ext = _file_ext_from_mime(audio.get("mime_type"), "mp3")
+                audio_name = f"audio_{message_id}.{audio_ext}"
+            result.append(
+                {
+                    "file_id": str(audio["file_id"]),
+                    "name": audio_name,
+                    "extension": audio_ext,
+                }
+            )
+
+        voice = message.get("voice")
+        if isinstance(voice, dict) and voice.get("file_id"):
+            voice_ext = _file_ext_from_mime(voice.get("mime_type"), "ogg")
+            voice_name = f"voice_{message_id}.{voice_ext}"
+            result.append(
+                {
+                    "file_id": str(voice["file_id"]),
+                    "name": voice_name,
+                    "extension": voice_ext,
+                }
+            )
         return result
 
     @classmethod
@@ -1684,6 +1764,18 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 sent = await bot.send_photo(
                     chat_id=target_chat,
                     photo=str(file_model.url),
+                    caption=caption,
+                )
+            elif _is_voice_extension(file_model.extension):
+                sent = await bot.send_voice(
+                    chat_id=target_chat,
+                    voice=str(file_model.url),
+                    caption=caption,
+                )
+            elif _is_audio_extension(file_model.extension):
+                sent = await bot.send_audio(
+                    chat_id=target_chat,
+                    audio=str(file_model.url),
                     caption=caption,
                 )
             else:

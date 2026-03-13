@@ -4,19 +4,17 @@ Telegram <-> REGOS CRM chat bridge with Redis-backed queue workers.
 
 ## Required settings
 
-Enable at least one bot (up to 5):
+Single-bot mode only:
 
 - `BOT_1_ENABLED=true`
 - `BOT_1_TOKEN=<telegram_bot_token>`
 - `BOT_1_PIPELINE_ID=<lead_pipeline_id>`
 - `BOT_1_CHANNEL_ID=<crm_channel_id>`
 
-Repeat for `BOT_2_* ... BOT_5_*` if needed.
-
 ## Optional settings
 
-- `BOT_{N}_LEAD_SUBJECT_TEMPLATE`
-- `BOT_{N}_DEFAULT_RESPONSIBLE_USER_ID`
+- `BOT_1_LEAD_SUBJECT_TEMPLATE`
+- `BOT_1_DEFAULT_RESPONSIBLE_USER_ID`
 - `LEAD_DEDUPE_TTL_SEC` (default `86400`)
 - `STATE_TTL_SEC` (default `86400`)
 - `TELEGRAM_SECRET_TOKEN`
@@ -24,6 +22,18 @@ Repeat for `BOT_2_* ... BOT_5_*` if needed.
 - `FORWARD_SYSTEM_MESSAGES` (`false` by default)
 - `LEAD_CLOSED_MESSAGE_TEMPLATE`
 - `telegram_update_mode` (`webhook` or `longpolling`)
+
+## Bot flow (business)
+
+1. A user sends a message to the Telegram bot.
+2. The system checks whether this user already has an active CRM lead.
+3. If there is no active lead, the system creates a new Lead in the configured pipeline for this bot.
+4. During lead creation, the system fills available customer context from Telegram (for example, name and phone if provided), so operators see who started the dialog.
+5. The new lead is linked to this Telegram dialog, so all next messages from this user continue in the same lead until it is closed.
+6. The first user message is added to the CRM chat linked to that lead.
+7. An operator replies in the CRM chat, and the reply is delivered to Telegram.
+8. The dialog continues in both directions: Telegram <-> CRM chat.
+9. When the lead is closed in CRM, the user can receive a final message.
 
 ## Webhooks
 
@@ -37,12 +47,17 @@ REGOS webhooks subscribed by integration:
 
 Telegram webhook endpoint format (when `telegram_update_mode=webhook`):
 
-- `/external/{connected_integration_id}/external/?bot_hash=<md5(BOT_{N}_TOKEN)>`
+- `/external/{connected_integration_id}/external/`
+- optional backward-compatible query: `?bot_hash=<md5(BOT_1_TOKEN)>`
 - if `TELEGRAM_SECRET_TOKEN` is configured, header `x-telegram-bot-api-secret-token` is validated.
 
 ## Notes
 
 - `bot_id` is always `md5(token)`.
+- Integration supports exactly one bot (`BOT_1_*`).
 - Redis is mandatory (`redis_enabled=true`).
 - In longpolling mode only one poller per bot token is active in cluster (`lock:polling_owner:{bot_hash}`).
-- In webhook mode pass `bot_hash` in Telegram webhook query string.
+- In webhook mode `bot_hash` query is optional and used only for backward compatibility.
+- Media transfer:
+  - Telegram -> CRM: `photo`, `document`, `audio`, `voice`.
+  - CRM -> Telegram: images are sent as photo, audio as audio/voice, other files as document.

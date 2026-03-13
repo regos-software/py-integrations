@@ -40,7 +40,6 @@ class Lead(BaseSchema):
     external_contact_id: Optional[str] = PydField(
         default=None, description="External contact id."
     )
-    dedupe_key: Optional[str] = PydField(default=None, description="Dedupe key.")
     client_name: Optional[str] = PydField(default=None, description="Client name.")
     client_phone: Optional[str] = PydField(default=None, description="Client phone.")
     client_avatar_url: Optional[str] = PydField(
@@ -133,7 +132,6 @@ class LeadAddRequest(BaseSchema):
     external_contact_id: Optional[str] = PydField(
         default=None, description="External contact id."
     )
-    dedupe_key: Optional[str] = PydField(default=None, description="Dedupe key.")
     client_name: Optional[str] = PydField(default=None, description="Client name.")
     client_phone: Optional[str] = PydField(default=None, description="Client phone.")
     client_avatar_url: Optional[str] = PydField(
