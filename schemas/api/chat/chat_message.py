@@ -77,6 +77,12 @@ class ChatMessageAddRequest(BaseSchema):
     model_config = ConfigDict(extra="forbid")
 
     chat_id: str = PydField(..., description="Chat UUID.")
+    author_entity_type: Optional[str] = PydField(
+        default=None, description="Optional explicit author entity type."
+    )
+    author_entity_id: Optional[int] = PydField(
+        default=None, description="Optional explicit author entity id."
+    )
     message_type: Optional[ChatMessageTypeEnum] = PydField(
         default=None, description="Regular or Private."
     )

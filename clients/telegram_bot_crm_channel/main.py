@@ -1374,6 +1374,8 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     "ChatMessage/Add",
                     ChatMessageAddRequest(
                         chat_id=chat_id,
+                        author_entity_type="Lead",
+                        author_entity_id=lead_id,
                         message_type=ChatMessageTypeEnum.Regular,
                         text=text,
                         file_ids=file_ids or None,
@@ -1790,14 +1792,48 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             except Exception:
                 pass
 
-        filters = [Filter(field="chat_id", operator=FilterOperator.Equal, value=chat_id)]
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-            response = await api.crm.lead.get(
-                LeadGetRequest(filters=filters, limit=1, offset=0)
+            chat_response = await api.call(
+                "Chat/Get",
+                {"ids": [chat_id], "limit": 1, "offset": 0},
+                APIBaseResponse[List[Dict[str, Any]]],
             )
-        if not response.result:
+            if not chat_response.ok:
+                logger.warning(
+                    "Chat/Get rejected while resolving target: ci=%s chat_id=%s payload=%s",
+                    connected_integration_id,
+                    chat_id,
+                    chat_response.result,
+                )
+                return None
+
+            chat_rows = chat_response.result or []
+            if not chat_rows:
+                return None
+
+            lead_id = cls._extract_lead_id_from_chat_payload(chat_rows[0])
+            if not lead_id:
+                return None
+
+            lead_response = await api.call(
+                "Lead/Get",
+                LeadGetRequest(ids=[lead_id], limit=1, offset=0),
+                APIBaseResponse[List[Dict[str, Any]]],
+            )
+            if not lead_response.ok:
+                logger.warning(
+                    "Lead/Get rejected while resolving target: ci=%s chat_id=%s lead_id=%s payload=%s",
+                    connected_integration_id,
+                    chat_id,
+                    lead_id,
+                    lead_response.result,
+                )
+                return None
+
+        lead_rows = lead_response.result or []
+        if not lead_rows:
             return None
-        lead = response.result[0]
+        lead = Lead.model_validate(lead_rows[0])
         if not (lead and lead.bot_id and lead.external_chat_id and lead.id):
             return None
         await cls._redis_set_mapping(
@@ -1810,6 +1846,24 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             ),
         )
         return str(lead.bot_id), str(lead.external_chat_id)
+
+    @staticmethod
+    def _extract_lead_id_from_chat_payload(chat_payload: Any) -> Optional[int]:
+        if not isinstance(chat_payload, dict):
+            return None
+        participants = chat_payload.get("participants")
+        if not isinstance(participants, list):
+            return None
+        for participant in participants:
+            if not isinstance(participant, dict):
+                continue
+            entity_type_raw = str(participant.get("entity_type") or "").strip().lower()
+            if entity_type_raw not in {"lead", "2"}:
+                continue
+            entity_id = _parse_int(str(participant.get("entity_id") or ""))
+            if entity_id and entity_id > 0:
+                return entity_id
+        return None
 
     @classmethod
     async def _handle_chat_message_added(
