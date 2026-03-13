@@ -4,6 +4,12 @@ import sys
 from config.settings import settings
 
 
+_APP_LOG_FORMATTER = logging.Formatter(
+    fmt="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+
 def _ensure_root_handler(level: int):
     """
     Гарантируем, что root-логгер пишет в консоль и не отключён.
@@ -12,13 +18,9 @@ def _ensure_root_handler(level: int):
     root = logging.getLogger()
     # если на root нет ни одного хендлера — добавим консоль
     if not root.handlers:
-        fmt = logging.Formatter(
-            fmt="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        )
         ch = logging.StreamHandler(sys.stdout)
         ch.setLevel(logging.NOTSET)  # пропускать всё, фильтрует уровень логгеров
-        ch.setFormatter(fmt)
+        ch.setFormatter(_APP_LOG_FORMATTER)
         root.addHandler(ch)
     else:
         # Если root уже сконфигурирован (например uvicorn), не даём handler-level
@@ -55,9 +57,16 @@ def setup_logger(name: str = "app") -> logging.Logger:
         if isinstance(h, logging.NullHandler):
             logger.removeHandler(h)
 
-    # 4) уровень/пропагация/включение
+    # 4) fail-safe handler на самом логгере (чтобы писать даже при сломанном root)
+    if not logger.handlers:
+        own = logging.StreamHandler(sys.stdout)
+        own.setLevel(logging.NOTSET)
+        own.setFormatter(_APP_LOG_FORMATTER)
+        logger.addHandler(own)
+
+    # 5) уровень/пропагация/включение
     logger.setLevel(level)
-    logger.propagate = True      # отдаём в root
+    logger.propagate = False     # avoid зависимость от root и дубли
     logger.disabled = False      # на случай disable_existing_loggers=True
 
     return logger
