@@ -491,6 +491,7 @@ const purchaseDefinition = {
       action: "references.item.get_ext",
       buildParams: ({ queryText, docCtx }) => ({
         search: queryText,
+        deleted_mark: false,
         price_type_id: docCtx?.price_type_id ?? undefined,
         stock_id: docCtx?.stock_id ?? undefined,
       }),
@@ -733,7 +734,7 @@ const inventoryDefinition = {
         ...doc,
         performed,
         date: doc.close_date || doc.open_date || doc.date || null,
-        partner: partnerName ? { name: partnerName } : doc.partner ?? null,
+        partner: partnerName ? { name: partnerName } : (doc.partner ?? null),
         amount:
           doc.amount ??
           doc.total_actual_quantity ??
@@ -746,8 +747,8 @@ const inventoryDefinition = {
       const list = Array.isArray(response)
         ? response
         : Array.isArray(response?.result)
-        ? response.result
-        : [];
+          ? response.result
+          : [];
 
       return list.map((operation) => {
         const actual =
@@ -808,6 +809,7 @@ const inventoryDefinition = {
       action: "references.item.get_ext",
       buildParams: ({ queryText, docCtx }) => ({
         search: queryText,
+        deleted_mark: false,
         price_type_id: docCtx?.price_type_id ?? undefined,
         stock_id: docCtx?.stock_id ?? undefined,
       }),
@@ -1368,6 +1370,7 @@ const wholesaleDefinition = {
       action: "references.item.get_ext",
       buildParams: ({ queryText, docCtx }) => ({
         search: queryText,
+        deleted_mark: false,
         price_type_id: docCtx?.price_type_id ?? undefined,
         stock_id: docCtx?.stock_id ?? undefined,
       }),
@@ -1389,8 +1392,8 @@ const wholesaleDefinition = {
             ext?.price2 != null
               ? Number(ext.price2)
               : price != null
-              ? price
-              : null;
+                ? price
+                : null;
 
           return {
             id: Number(core.id ?? core.code),
@@ -1610,7 +1613,7 @@ const movementDefinition = {
         segments.push(
           senderName && receiverName
             ? `${senderName} → ${receiverName}`
-            : senderName || receiverName
+            : senderName || receiverName,
         );
       }
       const partnerName =
@@ -1848,6 +1851,7 @@ const movementDefinition = {
       action: "references.item.get_ext",
       buildParams: ({ queryText, docCtx }) => ({
         search: queryText,
+        deleted_mark: false,
         stock_id: docCtx?.stock_sender_id ?? docCtx?.stock_id ?? undefined,
       }),
       normalize: (data = {}) => {

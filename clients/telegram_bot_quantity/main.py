@@ -356,20 +356,20 @@ class TelegramBotMinQuantityIntegration(IntegrationTelegramBase, ClientBase):
             commands=[
                 BotCommand(
                     command="start",
-                    description="Активировать бота минимальных остатков",
+                    description="Запуск бота",
                 ),
                 BotCommand(
                     command="get_quantity",
-                    description="Получить минимальные остатки",
+                    description="Минимальные остатки",
                 ),
                 BotCommand(
                     command="get_quantity_search",
-                    description="Получить минимальные остатки по поиску",
+                    description="Остатки по поиску",
                 ),
-                BotCommand(
-                    command="stop",
-                    description="Отписаться от уведомлений",
-                ),
+                # BotCommand(
+                #     command="stop",
+                #     description="Отписаться от уведомлений",
+                # ),
             ]
         )
 
@@ -479,18 +479,18 @@ class TelegramBotMinQuantityIntegration(IntegrationTelegramBase, ClientBase):
                     "Ошибка при формировании отчета. Попробуйте позже."
                 )
 
-        @self.dispatcher.message(Command("stop"))
-        async def handle_stop_command(message: types.Message):
-            """Handle /stop command to unsubscribe from notifications."""
-            chat_id = str(message.chat.id)
-            try:
-                await self._remove_subscriber(chat_id)
-                await message.answer("Вы отписались от уведомлений.")
-                logger.info(
-                    f"Client {chat_id} unsubscribed for ID {self.connected_integration_id}"
-                )
-            except Exception:
-                await message.answer("Error unsubscribing. Please try again later.")
+        # @self.dispatcher.message(Command("stop"))
+        # async def handle_stop_command(message: types.Message):
+        #     """Handle /stop command to unsubscribe from notifications."""
+        #     chat_id = str(message.chat.id)
+        #     try:
+        #         await self._remove_subscriber(chat_id)
+        #         await message.answer("Вы отписались от уведомлений.")
+        #         logger.info(
+        #             f"Client {chat_id} unsubscribed for ID {self.connected_integration_id}"
+        #         )
+        #     except Exception:
+        #         await message.answer("Error unsubscribing. Please try again later.")
 
         self.handlers_registered = True
 
