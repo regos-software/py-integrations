@@ -43,6 +43,26 @@ class RegosAPI:
             method_path=path, data=body, response_model=response_model
         )
 
+    @retry(
+        wait=wait_exponential(min=0.2, max=5),
+        stop=stop_after_attempt(3),
+        retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)),
+        reraise=True,
+    )
+    async def call_multipart(
+        self,
+        path: str,
+        data: dict[str, Any],
+        files: dict[str, tuple[str, bytes] | tuple[str, bytes, str]],
+        response_model: Type[T],
+    ) -> T:
+        return await self._client.post_multipart(
+            method_path=path,
+            data=data,
+            files=files,
+            response_model=response_model,
+        )
+
     async def close(self) -> None:
         await self._client.close()
 

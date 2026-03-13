@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import json
 import os
@@ -22,7 +21,6 @@ from core.logger import setup_logger
 from core.redis import redis_client
 from schemas.api.base import APIBaseResponse
 from schemas.api.chat.chat_message import (
-    ChatMessageAddFileRequest,
     ChatMessageAddRequest,
     ChatMessageGetRequest,
     ChatMessageMarkSentRequest,
@@ -1636,20 +1634,33 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 file_bytes = await cls._download_telegram_file(
                     token=bot_cfg.token, file_id=file_meta["file_id"]
                 )
-                payload_b64 = base64.b64encode(file_bytes).decode("ascii")
-                response = await api.chat.chat_message.add_file(
-                    ChatMessageAddFileRequest(
-                        chat_id=chat_id,
-                        name=file_meta["name"],
-                        extension=file_meta["extension"],
-                        data=payload_b64,
-                    )
+                response = await api.call_multipart(
+                    "ChatMessage/AddFile",
+                    data={
+                        "chat_id": chat_id,
+                        "name": file_meta["name"],
+                        "extension": file_meta["extension"],
+                    },
+                    files={
+                        "file": (
+                            file_meta["name"],
+                            file_bytes,
+                        )
+                    },
+                    response_model=APIBaseResponse[Dict[str, Any]],
                 )
-                file_id = None
-                if response.result:
-                    file_id = _parse_int(str(response.result.file_id))
-                if file_id:
-                    uploaded_ids.append(file_id)
+                result_payload = response.result if isinstance(response.result, dict) else {}
+                if not response.ok:
+                    error_code = result_payload.get("error")
+                    error_description = result_payload.get("description")
+                    raise RuntimeError(
+                        "ChatMessage/AddFile rejected: "
+                        f"error={error_code} description={error_description}"
+                    )
+                file_id = _parse_int(str(result_payload.get("file_id") or ""))
+                if not file_id:
+                    raise RuntimeError("ChatMessage/AddFile did not return file_id")
+                uploaded_ids.append(file_id)
         return uploaded_ids
 
     @staticmethod
