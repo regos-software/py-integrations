@@ -107,6 +107,28 @@ def camel_to_snake(name: str) -> str:
     return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
 
 
+def _resolve_action_method(integration_instance: Any, action: str):
+    """
+    Resolve action method tolerant to variants:
+    Reconnect / ReConnect / re_connect / reconnect.
+    """
+    primary_name = camel_to_snake(action)
+    method = getattr(integration_instance, primary_name, None)
+    if callable(method):
+        return primary_name, method
+
+    compact_action = re.sub(r"[^a-z0-9]", "", str(action).lower())
+    for attr_name in dir(integration_instance):
+        candidate = getattr(integration_instance, attr_name, None)
+        if not callable(candidate):
+            continue
+        compact_attr = re.sub(r"[^a-z0-9]", "", str(attr_name).lower())
+        if compact_attr == compact_action:
+            return attr_name, candidate
+
+    return primary_name, None
+
+
 def _sanitize_headers(headers) -> Dict[str, str]:
     """Удаляем служебные заголовки, остальные оставляем как есть."""
     return {
@@ -181,10 +203,10 @@ async def handle_integration(
             )
         )
 
-    action_name = camel_to_snake(request_body.action)
+    action_name, action_method = _resolve_action_method(
+        integration_instance, request_body.action
+    )
     logger.debug(f"Action '{request_body.action}' → метод '{action_name}'")
-
-    action_method = getattr(integration_instance, action_name, None)
     if not callable(action_method):
         await _cleanup_integration(integration_instance)
         logger.warning(f"Метод '{action_name}' не найден в интеграции '{client}'")
