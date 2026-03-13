@@ -314,6 +314,12 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         return bool(result)
 
     @staticmethod
+    async def _redis_set_with_ttl(key: str, value: str, ttl_sec: int) -> None:
+        if not _redis_enabled():
+            return
+        await redis_client.set(key, value, ex=max(ttl_sec, 1))
+
+    @staticmethod
     async def _acquire_lock(key: str, ttl_sec: int) -> Optional[str]:
         if not _redis_enabled():
             return None
@@ -1085,11 +1091,12 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 stream_key, TelegramBotCrmChannelConfig.STREAM_GROUP, message_id
             )
             logger.warning(
-                "Requeued stream event: ci=%s kind=%s attempt=%s message_id=%s",
+                "Requeued stream event: ci=%s kind=%s attempt=%s message_id=%s error=%s",
                 connected_integration_id,
                 kind,
                 attempts,
                 message_id,
+                error,
             )
 
     @classmethod
@@ -1190,60 +1197,74 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         dedupe_key = cls._dedupe_tg_update_key(
             connected_integration_id, bot_hash, update_id_int
         )
-        inserted = await cls._redis_set_nx_with_ttl(
-            dedupe_key, "1", runtime.lead_dedupe_ttl_sec
-        )
-        if not inserted:
+        if await cls._redis_get(dedupe_key):
             return
-
-        message = payload.get("message") or payload.get("edited_message")
-        if not isinstance(message, dict):
-            return
-
-        author = message.get("from") or {}
-        if bool(author.get("is_bot")):
-            return
-
-        chat = message.get("chat") or {}
-        tg_chat_id = str(chat.get("id") or "").strip()
-        if not tg_chat_id:
-            return
-
-        lead_id, chat_id = await cls._resolve_or_create_lead(
-            connected_integration_id=connected_integration_id,
-            runtime=runtime,
-            bot_cfg=bot_cfg,
-            tg_chat_id=tg_chat_id,
-            message=message,
-        )
-        if not lead_id or not chat_id:
-            return
-
-        text = str(message.get("text") or message.get("caption") or "").strip() or None
-        file_ids = await cls._upload_telegram_files(
-            connected_integration_id=connected_integration_id,
-            bot_cfg=bot_cfg,
-            chat_id=chat_id,
-            message=message,
-        )
-        if not text and not file_ids:
-            return
-
-        tg_message_id = message.get("message_id")
-        event_id = f"tgupd:{bot_hash}:{update_id_int}"
-        ext_message_id = f"tgmsg:{bot_hash}:{tg_chat_id}:{tg_message_id}"
-
-        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-            await api.chat.chat_message.add(
-                ChatMessageAddRequest(
-                    chat_id=chat_id,
-                    message_type=ChatMessageTypeEnum.Regular,
-                    text=text,
-                    file_ids=file_ids or None,
-                    event_id=event_id,
-                    external_message_id=ext_message_id,
-                )
+        dedupe_lock_key = f"{dedupe_key}:lock"
+        dedupe_lock_token = await cls._acquire_lock(dedupe_lock_key, 120)
+        if not dedupe_lock_token:
+            logger.debug(
+                "Skip duplicate Telegram update (in-flight): ci=%s bot_hash=%s update_id=%s",
+                connected_integration_id,
+                bot_hash,
+                update_id_int,
             )
+            return
+
+        try:
+            if await cls._redis_get(dedupe_key):
+                return
+
+            message = payload.get("message") or payload.get("edited_message")
+            if not isinstance(message, dict):
+                return
+
+            author = message.get("from") or {}
+            if bool(author.get("is_bot")):
+                return
+
+            chat = message.get("chat") or {}
+            tg_chat_id = str(chat.get("id") or "").strip()
+            if not tg_chat_id:
+                return
+
+            lead_id, chat_id = await cls._resolve_or_create_lead(
+                connected_integration_id=connected_integration_id,
+                runtime=runtime,
+                bot_cfg=bot_cfg,
+                tg_chat_id=tg_chat_id,
+                message=message,
+            )
+            if not lead_id or not chat_id:
+                return
+
+            text = str(message.get("text") or message.get("caption") or "").strip() or None
+            file_ids = await cls._upload_telegram_files(
+                connected_integration_id=connected_integration_id,
+                bot_cfg=bot_cfg,
+                chat_id=chat_id,
+                message=message,
+            )
+            if not text and not file_ids:
+                return
+
+            tg_message_id = message.get("message_id")
+            event_id = f"tgupd:{bot_hash}:{update_id_int}"
+            ext_message_id = f"tgmsg:{bot_hash}:{tg_chat_id}:{tg_message_id}"
+
+            async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+                await api.chat.chat_message.add(
+                    ChatMessageAddRequest(
+                        chat_id=chat_id,
+                        message_type=ChatMessageTypeEnum.Regular,
+                        text=text,
+                        file_ids=file_ids or None,
+                        event_id=event_id,
+                        external_message_id=ext_message_id,
+                    )
+                )
+            await cls._redis_set_with_ttl(dedupe_key, "1", runtime.lead_dedupe_ttl_sec)
+        finally:
+            await cls._release_lock(dedupe_lock_key, dedupe_lock_token)
 
     @classmethod
     async def _resolve_or_create_lead(
@@ -1500,27 +1521,37 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             stable = f"{action}:{_json_dumps(payload)}"
             event_id_raw = hashlib.md5(stable.encode("utf-8")).hexdigest()
         dedupe_key = cls._dedupe_webhook_key(connected_integration_id, event_id_raw)
-        inserted = await cls._redis_set_nx_with_ttl(
-            dedupe_key, "1", runtime.lead_dedupe_ttl_sec
-        )
-        if not inserted:
+        if await cls._redis_get(dedupe_key):
+            return
+        dedupe_lock_key = f"{dedupe_key}:lock"
+        dedupe_lock_token = await cls._acquire_lock(dedupe_lock_key, 120)
+        if not dedupe_lock_token:
+            logger.debug(
+                "Skip duplicate REGOS event (in-flight): ci=%s action=%s event_id=%s",
+                connected_integration_id,
+                action,
+                event_id_raw,
+            )
             return
 
-        if action == "ChatMessageAdded":
-            await cls._handle_chat_message_added(connected_integration_id, runtime, payload)
-            return
-        if action == "ChatMessageEdited":
-            await cls._handle_chat_message_edited(connected_integration_id, runtime, payload)
-            return
-        if action == "ChatMessageDeleted":
-            await cls._handle_chat_message_deleted(connected_integration_id, runtime, payload)
-            return
-        if action == "ChatWriting":
-            await cls._handle_chat_writing(connected_integration_id, runtime, payload)
-            return
-        if action == "LeadClosed":
-            await cls._handle_lead_closed(connected_integration_id, runtime, payload)
-            return
+        try:
+            if await cls._redis_get(dedupe_key):
+                return
+
+            if action == "ChatMessageAdded":
+                await cls._handle_chat_message_added(connected_integration_id, runtime, payload)
+            elif action == "ChatMessageEdited":
+                await cls._handle_chat_message_edited(connected_integration_id, runtime, payload)
+            elif action == "ChatMessageDeleted":
+                await cls._handle_chat_message_deleted(connected_integration_id, runtime, payload)
+            elif action == "ChatWriting":
+                await cls._handle_chat_writing(connected_integration_id, runtime, payload)
+            elif action == "LeadClosed":
+                await cls._handle_lead_closed(connected_integration_id, runtime, payload)
+
+            await cls._redis_set_with_ttl(dedupe_key, "1", runtime.lead_dedupe_ttl_sec)
+        finally:
+            await cls._release_lock(dedupe_lock_key, dedupe_lock_token)
 
     @classmethod
     async def _resolve_target_by_chat(
