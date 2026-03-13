@@ -3,6 +3,7 @@ import logging
 import sys
 from config.settings import settings
 
+
 def _ensure_root_handler(level: int):
     """
     Гарантируем, что root-логгер пишет в консоль и не отключён.
@@ -19,10 +20,18 @@ def _ensure_root_handler(level: int):
         ch.setLevel(logging.NOTSET)  # пропускать всё, фильтрует уровень логгеров
         ch.setFormatter(fmt)
         root.addHandler(ch)
+    else:
+        # Если root уже сконфигурирован (например uvicorn), не даём handler-level
+        # зажимать DEBUG-сообщения.
+        for handler in root.handlers:
+            handler.setLevel(logging.NOTSET)
     # уровень и включение
     root.setLevel(level)
     root.disabled = False
-    logging.getLogger("uvicorn.access").setLevel(level)
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "uvicorn.asgi"):
+        uv_logger = logging.getLogger(name)
+        uv_logger.setLevel(level)
+        uv_logger.disabled = False
 
 def setup_logger(name: str = "app") -> logging.Logger:
     """
