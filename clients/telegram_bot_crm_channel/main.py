@@ -1366,7 +1366,6 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 return
 
             tg_message_id = message.get("message_id")
-            event_id = f"tgupd:{bot_hash}:{update_id_int}"
             ext_message_id = f"tgmsg:{bot_hash}:{tg_chat_id}:{tg_message_id}"
 
             async with RegosAPI(connected_integration_id=connected_integration_id) as api:
@@ -1379,7 +1378,6 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                         message_type=ChatMessageTypeEnum.Regular,
                         text=text,
                         file_ids=file_ids or None,
-                        event_id=event_id,
                         external_message_id=ext_message_id,
                     ),
                     APIBaseResponse[Dict[str, Any]],
