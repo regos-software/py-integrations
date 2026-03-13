@@ -25,6 +25,21 @@ Repeat for `BOT_2_* ... BOT_5_*` if needed.
 - `LEAD_CLOSED_MESSAGE_TEMPLATE`
 - `telegram_update_mode` (`webhook` or `longpolling`)
 
+## Webhooks
+
+REGOS webhooks subscribed by integration:
+
+- `ChatMessageAdded`
+- `ChatMessageEdited`
+- `ChatMessageDeleted`
+- `ChatWriting`
+- `LeadClosed`
+
+Telegram webhook endpoint format (when `telegram_update_mode=webhook`):
+
+- `/external/{connected_integration_id}/external/?bot_hash=<md5(BOT_{N}_TOKEN)>`
+- if `TELEGRAM_SECRET_TOKEN` is configured, header `x-telegram-bot-api-secret-token` is validated.
+
 ## Notes
 
 - `bot_id` is always `md5(token)`.

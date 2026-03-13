@@ -440,8 +440,10 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             connected_integration_id
         )
         bots = TelegramBotCrmChannelIntegration._parse_bots(settings_map)
+        # Keep behavior aligned with telegram_bot_orders:
+        # global ENV mode is primary, setting is only fallback.
         mode = _update_mode_from_value(
-            settings_map.get("telegram_update_mode") or app_settings.telegram_update_mode
+            app_settings.telegram_update_mode or settings_map.get("telegram_update_mode")
         )
 
         runtime = RuntimeConfig(
@@ -644,6 +646,12 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
 
         try:
             runtime = await self._load_runtime(self.connected_integration_id)
+            logger.info(
+                "telegram_update_mode=%r resolved_mode=%s ci=%s",
+                app_settings.telegram_update_mode,
+                runtime.update_mode,
+                self.connected_integration_id,
+            )
             await self._validate_pipelines(runtime)
             webhook_subscribe = await self._subscribe_required_webhooks(
                 self.connected_integration_id
