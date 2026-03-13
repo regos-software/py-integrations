@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import os
@@ -21,6 +22,7 @@ from core.logger import setup_logger
 from core.redis import redis_client
 from schemas.api.base import APIBaseResponse
 from schemas.api.chat.chat_message import (
+    ChatMessageAddFileRequest,
     ChatMessageAddRequest,
     ChatMessageGetRequest,
     ChatMessageMarkSentRequest,
@@ -54,6 +56,13 @@ class TelegramBotCrmChannelConfig:
     STREAM_MAX_RETRIES = 5
 
     POLLING_LOCK_TTL_SEC = 30
+    MAX_TELEGRAM_FILE_SIZE_BYTES = 50 * 1024 * 1024
+    LARGE_FILE_NOTICE_TEXT = (
+        "The file is too large to be sent. Maximum allowed size is 50 MB."
+    )
+    LARGE_FILES_NOTICE_TEXT = (
+        "Some files are too large to be sent. Maximum allowed size is 50 MB."
+    )
 
     SUPPORTED_INBOUND_WEBHOOKS = {
         "ChatMessageAdded",
@@ -96,6 +105,13 @@ _BOT_CLIENTS: Dict[str, Bot] = {}
 _BOT_CLIENTS_LOCK = asyncio.Lock()
 _HTTP_CLIENT: Optional[httpx.AsyncClient] = None
 _INSTANCE_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+
+
+class TelegramFileTooLargeError(RuntimeError):
+    def __init__(self, size_bytes: Optional[int], limit_bytes: int) -> None:
+        self.size_bytes = size_bytes
+        self.limit_bytes = limit_bytes
+        super().__init__("Telegram file exceeds size limit")
 
 
 def _now_ts() -> int:
@@ -1354,12 +1370,19 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 return
 
             text = str(message.get("text") or message.get("caption") or "").strip() or None
-            file_ids = await cls._upload_telegram_files(
+            file_ids, oversized_files_count = await cls._upload_telegram_files(
                 connected_integration_id=connected_integration_id,
                 bot_cfg=bot_cfg,
                 chat_id=chat_id,
                 message=message,
             )
+            if oversized_files_count > 0:
+                too_large_notice = (
+                    TelegramBotCrmChannelConfig.LARGE_FILE_NOTICE_TEXT
+                    if oversized_files_count == 1
+                    else TelegramBotCrmChannelConfig.LARGE_FILES_NOTICE_TEXT
+                )
+                text = f"{text}\n\n{too_large_notice}" if text else too_large_notice
             if not text and not file_ids:
                 return
 
@@ -1623,31 +1646,60 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         bot_cfg: BotSlotConfig,
         chat_id: str,
         message: Dict[str, Any],
-    ) -> List[int]:
+    ) -> Tuple[List[int], int]:
         files = cls._extract_files_from_message(message)
         if not files:
-            return []
+            return [], 0
 
         uploaded_ids: List[int] = []
+        oversized_files_count = 0
+        max_size_bytes = TelegramBotCrmChannelConfig.MAX_TELEGRAM_FILE_SIZE_BYTES
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
             for file_meta in files:
-                file_bytes = await cls._download_telegram_file(
-                    token=bot_cfg.token, file_id=file_meta["file_id"]
+                file_id_raw = str(file_meta.get("file_id") or "").strip()
+                file_name = str(file_meta.get("name") or "file.bin")
+                reported_size = _parse_int(
+                    str(file_meta.get("size_bytes") or ""),
+                    default=None,
                 )
-                response = await api.call_multipart(
+                if reported_size and reported_size > max_size_bytes:
+                    oversized_files_count += 1
+                    logger.info(
+                        "Skip telegram file above size limit: ci=%s chat_id=%s file=%s size=%sB limit=%sB",
+                        connected_integration_id,
+                        chat_id,
+                        file_name,
+                        reported_size,
+                        max_size_bytes,
+                    )
+                    continue
+                try:
+                    file_bytes = await cls._download_telegram_file(
+                        token=bot_cfg.token,
+                        file_id=file_id_raw,
+                        max_size_bytes=max_size_bytes,
+                    )
+                except TelegramFileTooLargeError as exc:
+                    oversized_files_count += 1
+                    logger.info(
+                        "Skip telegram file above size limit (from get_file): ci=%s chat_id=%s file=%s size=%sB limit=%sB",
+                        connected_integration_id,
+                        chat_id,
+                        file_name,
+                        exc.size_bytes,
+                        exc.limit_bytes,
+                    )
+                    continue
+                payload_b64 = base64.b64encode(file_bytes).decode("ascii")
+                response = await api.call(
                     "ChatMessage/AddFile",
-                    data={
-                        "chat_id": chat_id,
-                        "name": file_meta["name"],
-                        "extension": file_meta["extension"],
-                    },
-                    files={
-                        "file": (
-                            file_meta["name"],
-                            file_bytes,
-                        )
-                    },
-                    response_model=APIBaseResponse[Dict[str, Any]],
+                    ChatMessageAddFileRequest(
+                        chat_id=chat_id,
+                        name=file_meta["name"],
+                        extension=file_meta["extension"],
+                        data=payload_b64,
+                    ),
+                    APIBaseResponse[Dict[str, Any]],
                 )
                 result_payload = response.result if isinstance(response.result, dict) else {}
                 if not response.ok:
@@ -1661,11 +1713,11 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 if not file_id:
                     raise RuntimeError("ChatMessage/AddFile did not return file_id")
                 uploaded_ids.append(file_id)
-        return uploaded_ids
+        return uploaded_ids, oversized_files_count
 
     @staticmethod
-    def _extract_files_from_message(message: Dict[str, Any]) -> List[Dict[str, str]]:
-        result: List[Dict[str, str]] = []
+    def _extract_files_from_message(message: Dict[str, Any]) -> List[Dict[str, Any]]:
+        result: List[Dict[str, Any]] = []
         message_id = str(message.get("message_id") or _now_ts())
 
         document = message.get("document")
@@ -1676,6 +1728,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     "file_id": str(document["file_id"]),
                     "name": file_name,
                     "extension": _file_ext_from_name(file_name, "bin"),
+                    "size_bytes": _parse_int(str(document.get("file_size") or ""), None),
                 }
                 )
 
@@ -1692,6 +1745,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                         "file_id": str(best_photo["file_id"]),
                         "name": f"photo_{message_id}.jpg",
                         "extension": "jpg",
+                        "size_bytes": _parse_int(str(best_photo.get("file_size") or ""), None),
                     }
                 )
 
@@ -1709,6 +1763,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     "file_id": str(audio["file_id"]),
                     "name": audio_name,
                     "extension": audio_ext,
+                    "size_bytes": _parse_int(str(audio.get("file_size") or ""), None),
                 }
             )
 
@@ -1721,14 +1776,26 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     "file_id": str(voice["file_id"]),
                     "name": voice_name,
                     "extension": voice_ext,
+                    "size_bytes": _parse_int(str(voice.get("file_size") or ""), None),
                 }
             )
         return result
 
     @classmethod
-    async def _download_telegram_file(cls, token: str, file_id: str) -> bytes:
+    async def _download_telegram_file(
+        cls,
+        token: str,
+        file_id: str,
+        max_size_bytes: Optional[int] = None,
+    ) -> bytes:
         bot = await cls._get_bot(token)
         file_info = await bot.get_file(file_id)
+        if max_size_bytes and max_size_bytes > 0:
+            resolved_size = _parse_int(str(getattr(file_info, "file_size", "") or ""), None)
+            if resolved_size and resolved_size > max_size_bytes:
+                raise TelegramFileTooLargeError(
+                    size_bytes=resolved_size, limit_bytes=max_size_bytes
+                )
         file_path = str(file_info.file_path or "").strip()
         if not file_path:
             raise RuntimeError("Telegram file_path is empty")
