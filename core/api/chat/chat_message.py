@@ -7,6 +7,8 @@ from schemas.api.chat.chat_message import (
     ChatMessageAddResponse,
     ChatMessageGetRequest,
     ChatMessageGetResponse,
+    ChatMessageMarkReadRequest,
+    ChatMessageMarkReadResponse,
     ChatMessageMarkSentRequest,
     ChatMessageMarkSentResponse,
 )
@@ -16,6 +18,7 @@ class ChatMessageService:
     PATH_GET = "ChatMessage/Get"
     PATH_ADD = "ChatMessage/Add"
     PATH_ADD_FILE = "ChatMessage/AddFile"
+    PATH_MARK_READ = "ChatMessage/MarkRead"
     PATH_MARK_SENT = "ChatMessage/MarkSent"
 
     def __init__(self, api):
@@ -31,6 +34,11 @@ class ChatMessageService:
         self, req: ChatMessageAddFileRequest
     ) -> ChatMessageAddFileResponse:
         return await self.api.call(self.PATH_ADD_FILE, req, ChatMessageAddFileResponse)
+
+    async def mark_read(
+        self, req: ChatMessageMarkReadRequest
+    ) -> ChatMessageMarkReadResponse:
+        return await self.api.call(self.PATH_MARK_READ, req, ChatMessageMarkReadResponse)
 
     async def mark_sent(
         self, req: ChatMessageMarkSentRequest

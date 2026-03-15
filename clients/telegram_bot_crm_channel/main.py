@@ -25,6 +25,7 @@ from schemas.api.chat.chat_message import (
     ChatMessageAddFileRequest,
     ChatMessageAddRequest,
     ChatMessageGetRequest,
+    ChatMessageMarkReadRequest,
     ChatMessageMarkSentRequest,
     ChatMessageTypeEnum,
 )
@@ -1369,6 +1370,11 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             if not lead_id or not chat_id:
                 return
 
+            await cls._mark_chat_read_best_effort(
+                connected_integration_id=connected_integration_id,
+                chat_id=chat_id,
+            )
+
             text = str(message.get("text") or message.get("caption") or "").strip() or None
             file_ids, oversized_files_count = await cls._upload_telegram_files(
                 connected_integration_id=connected_integration_id,
@@ -1443,6 +1449,34 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             await cls._redis_set_with_ttl(dedupe_key, "1", runtime.lead_dedupe_ttl_sec)
         finally:
             await cls._release_lock(dedupe_lock_key, dedupe_lock_token)
+
+    @classmethod
+    async def _mark_chat_read_best_effort(
+        cls,
+        connected_integration_id: str,
+        chat_id: str,
+    ) -> None:
+        try:
+            async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+                response = await api.chat.chat_message.mark_read(
+                    ChatMessageMarkReadRequest(chat_id=chat_id)
+                )
+            if not response.ok:
+                payload = response.result if isinstance(response.result, dict) else {}
+                logger.warning(
+                    "ChatMessage/MarkRead rejected: ci=%s chat_id=%s error=%s description=%s",
+                    connected_integration_id,
+                    chat_id,
+                    payload.get("error"),
+                    payload.get("description"),
+                )
+        except Exception as error:
+            logger.warning(
+                "ChatMessage/MarkRead failed: ci=%s chat_id=%s error=%s",
+                connected_integration_id,
+                chat_id,
+                error,
+            )
 
     @classmethod
     async def _clear_cached_target_mapping(

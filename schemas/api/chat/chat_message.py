@@ -148,6 +148,20 @@ class ChatMessageMarkSentResponse(APIBaseResponse[ArrayResult]):
     model_config = ConfigDict(extra="ignore")
 
 
+class ChatMessageMarkReadRequest(BaseSchema):
+    """Request for ChatMessage/MarkRead."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    chat_id: str = PydField(..., description="Chat UUID.")
+
+
+class ChatMessageMarkReadResponse(APIBaseResponse[ArrayResult]):
+    """Response for ChatMessage/MarkRead."""
+
+    model_config = ConfigDict(extra="ignore")
+
+
 class ChatMessageGetResponse(APIBaseResponse[List[ChatMessage]]):
     """Response for ChatMessage/Get."""
 
@@ -162,6 +176,8 @@ __all__ = [
     "ChatMessageAddResponse",
     "ChatMessageGetRequest",
     "ChatMessageGetResponse",
+    "ChatMessageMarkReadRequest",
+    "ChatMessageMarkReadResponse",
     "ChatMessageMarkSentRequest",
     "ChatMessageMarkSentResponse",
     "ChatMessageTypeEnum",
