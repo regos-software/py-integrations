@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from aiogram import Bot
+from aiogram.types import BufferedInputFile
 from starlette.responses import JSONResponse
 
 from clients.base import ClientBase
@@ -2061,6 +2062,15 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             file_model = files_map.get(int(file_id))
             if not file_model or not file_model.url:
                 continue
+            file_bytes = await cls._download_regos_file_bytes(str(file_model.url))
+            file_name_raw = str(file_model.name or "").strip()
+            file_ext = str(file_model.extension or "").strip().lower()
+            if not file_name_raw:
+                file_name_raw = f"file_{file_id}.{file_ext or 'bin'}"
+            elif "." not in file_name_raw and file_ext:
+                file_name_raw = f"{file_name_raw}.{file_ext}"
+            file_name = _sanitize_file_name(file_name_raw)
+            input_file = BufferedInputFile(file_bytes, filename=file_name)
             caption = None
             if text and not caption_used:
                 caption = text
@@ -2069,25 +2079,25 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             if _is_photo_extension(file_model.extension):
                 sent = await bot.send_photo(
                     chat_id=target_chat,
-                    photo=str(file_model.url),
+                    photo=input_file,
                     caption=caption,
                 )
             elif _is_voice_extension(file_model.extension):
                 sent = await bot.send_voice(
                     chat_id=target_chat,
-                    voice=str(file_model.url),
+                    voice=input_file,
                     caption=caption,
                 )
             elif _is_audio_extension(file_model.extension):
                 sent = await bot.send_audio(
                     chat_id=target_chat,
-                    audio=str(file_model.url),
+                    audio=input_file,
                     caption=caption,
                 )
             else:
                 sent = await bot.send_document(
                     chat_id=target_chat,
-                    document=str(file_model.url),
+                    document=input_file,
                     caption=caption,
                 )
             if not first_sent_id:
@@ -2099,6 +2109,16 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 first_sent_id = int(sent.message_id)
 
         return first_sent_id
+
+    @classmethod
+    async def _download_regos_file_bytes(cls, url: str) -> bytes:
+        source_url = str(url or "").strip()
+        if not source_url:
+            raise RuntimeError("REGOS file url is empty")
+        client = await cls._get_http_client()
+        response = await client.get(source_url)
+        response.raise_for_status()
+        return response.content
 
     @classmethod
     async def _handle_chat_message_edited(
