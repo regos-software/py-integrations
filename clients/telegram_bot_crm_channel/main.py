@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 from aiogram import Bot
 from aiogram.types import BufferedInputFile
+from redis.exceptions import ResponseError
 from starlette.responses import JSONResponse
 
 from clients.base import ClientBase
@@ -138,6 +139,12 @@ def _json_loads(raw: str) -> Any:
 
 def _redis_enabled() -> bool:
     return bool(app_settings.redis_enabled and redis_client is not None)
+
+
+def _is_redis_nogroup_error(error: Exception) -> bool:
+    if isinstance(error, ResponseError):
+        return "NOGROUP" in str(error).upper()
+    return "NOGROUP" in str(error or "").upper()
 
 
 def _parse_bool(value: Optional[str], default: bool = False) -> bool:
@@ -1667,13 +1674,26 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 await cls._process_claimed_entries(
                     stream_key, consumer, connected_integration_id, kind
                 )
-                records = await redis_client.xreadgroup(
-                    groupname=TelegramBotCrmChannelConfig.STREAM_GROUP,
-                    consumername=consumer,
-                    streams={stream_key: ">"},
-                    count=TelegramBotCrmChannelConfig.STREAM_BATCH_SIZE,
-                    block=TelegramBotCrmChannelConfig.STREAM_READ_BLOCK_MS,
-                )
+                try:
+                    records = await redis_client.xreadgroup(
+                        groupname=TelegramBotCrmChannelConfig.STREAM_GROUP,
+                        consumername=consumer,
+                        streams={stream_key: ">"},
+                        count=TelegramBotCrmChannelConfig.STREAM_BATCH_SIZE,
+                        block=TelegramBotCrmChannelConfig.STREAM_READ_BLOCK_MS,
+                    )
+                except Exception as error:
+                    if _is_redis_nogroup_error(error):
+                        await cls._ensure_consumer_group(stream_key)
+                        logger.warning(
+                            "Recovered missing Redis stream/group after NOGROUP: ci=%s kind=%s stream=%s op=xreadgroup",
+                            connected_integration_id,
+                            kind,
+                            stream_key,
+                        )
+                        await asyncio.sleep(0.1)
+                        continue
+                    raise
                 if not records:
                     continue
 
@@ -1705,14 +1725,26 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         connected_integration_id: str,
         kind: str,
     ) -> None:
-        claimed_raw = await redis_client.xautoclaim(
-            stream_key,
-            TelegramBotCrmChannelConfig.STREAM_GROUP,
-            consumer,
-            min_idle_time=TelegramBotCrmChannelConfig.STREAM_MIN_IDLE_MS,
-            start_id="0-0",
-            count=TelegramBotCrmChannelConfig.STREAM_BATCH_SIZE,
-        )
+        try:
+            claimed_raw = await redis_client.xautoclaim(
+                stream_key,
+                TelegramBotCrmChannelConfig.STREAM_GROUP,
+                consumer,
+                min_idle_time=TelegramBotCrmChannelConfig.STREAM_MIN_IDLE_MS,
+                start_id="0-0",
+                count=TelegramBotCrmChannelConfig.STREAM_BATCH_SIZE,
+            )
+        except Exception as error:
+            if _is_redis_nogroup_error(error):
+                await cls._ensure_consumer_group(stream_key)
+                logger.warning(
+                    "Recovered missing Redis stream/group after NOGROUP: ci=%s kind=%s stream=%s op=xautoclaim",
+                    connected_integration_id,
+                    kind,
+                    stream_key,
+                )
+                return
+            raise
         entries = []
         if isinstance(claimed_raw, (list, tuple)) and len(claimed_raw) >= 2:
             entries = claimed_raw[1] or []
