@@ -1545,7 +1545,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     return result[:250]
             except Exception:
                 pass
-        return f"Telegram: {payload['display_name']}"[:250]
+        return str(payload["display_name"] or tg_chat_id)[:250]
 
     @classmethod
     async def _resolve_client_avatar_url(
@@ -3833,6 +3833,18 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         chat_id = str(payload.get("chat_id") or "").strip()
         if not chat_id:
             return
+
+        author_entity_type = str(payload.get("author_entity_type") or "").strip().lower()
+        author_entity_id = _parse_int(str(payload.get("author_entity_id") or ""))
+        if author_entity_type in {"lead", "2"}:
+            logger.debug(
+                "Skip ChatWriting relay for lead author: ci=%s chat_id=%s author_entity_id=%s",
+                connected_integration_id,
+                chat_id,
+                author_entity_id,
+            )
+            return
+
         target = await cls._resolve_target_by_chat(connected_integration_id, chat_id)
         if not target:
             return
@@ -3842,6 +3854,10 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             return
 
         throttle_key = cls._typing_key(connected_integration_id, bot_hash, tg_chat_id)
+        if author_entity_type or author_entity_id:
+            throttle_key = (
+                f"{throttle_key}:{author_entity_type or 'unknown'}:{author_entity_id or 0}"
+            )
         can_send = await cls._redis_set_nx_with_ttl(throttle_key, "1", 3)
         if not can_send:
             return
