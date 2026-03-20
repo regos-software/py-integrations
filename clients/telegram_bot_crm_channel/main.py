@@ -2,18 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import html
 import hashlib
 import json
 import os
+import re
 import socket
 import time
 import uuid
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from aiogram import Bot
-from aiogram.types import BufferedInputFile
+from aiogram.types import BufferedInputFile, Message
 from redis.exceptions import ResponseError
 from starlette.responses import JSONResponse
 
@@ -322,6 +325,342 @@ def _extract_deleted_telegram_messages(payload: Dict[str, Any]) -> List[Tuple[st
         seen.add(key)
         deduped.append((tg_chat_id, tg_message_id))
     return deduped
+
+
+_CRM_MD_TAG_MARKERS: Tuple[Tuple[str, str], ...] = (
+    ("**", "b"),
+    ("__", "b"),
+    ("++", "u"),
+    ("~~", "s"),
+    ("*", "i"),
+    ("_", "i"),
+)
+_CRM_MD_ESCAPED_CHARS = set("\\`*_+~[]()")
+_LANGUAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_+\-]{0,31}$")
+
+
+def _find_unescaped_token(text: str, token: str, start: int) -> int:
+    if not token:
+        return -1
+    idx = text.find(token, max(start, 0))
+    step = max(len(token), 1)
+    while idx != -1:
+        slash_count = 0
+        probe = idx - 1
+        while probe >= 0 and text[probe] == "\\":
+            slash_count += 1
+            probe -= 1
+        if slash_count % 2 == 0:
+            return idx
+        idx = text.find(token, idx + step)
+    return -1
+
+
+def _find_markdown_link_url_end(text: str, start: int) -> int:
+    depth = 1
+    idx = max(start, 0)
+    while idx < len(text):
+        char = text[idx]
+        if char == "\\" and idx + 1 < len(text):
+            idx += 2
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return idx
+        idx += 1
+    return -1
+
+
+def _is_ascii_word_char(ch: str) -> bool:
+    return bool(ch) and ch.isalnum()
+
+
+def _is_valid_single_marker_bounds(text: str, open_idx: int, close_idx: int) -> bool:
+    if close_idx <= open_idx + 1:
+        return False
+    if text[open_idx + 1].isspace() or text[close_idx - 1].isspace():
+        return False
+    prev_char = text[open_idx - 1] if open_idx > 0 else ""
+    next_idx = close_idx + 1
+    next_char = text[next_idx] if next_idx < len(text) else ""
+    if prev_char and _is_ascii_word_char(prev_char):
+        return False
+    if next_char and _is_ascii_word_char(next_char):
+        return False
+    return True
+
+
+def _escape_markdown_text(text: str) -> str:
+    chunks: List[str] = []
+    for char in text:
+        if char in _CRM_MD_ESCAPED_CHARS:
+            chunks.append("\\")
+        chunks.append(char)
+    return "".join(chunks)
+
+
+def _escape_markdown_link_url(url: str) -> str:
+    chunks: List[str] = []
+    for char in url:
+        if char in {"\\", "(", ")"}:
+            chunks.append("\\")
+        chunks.append(char)
+    return "".join(chunks)
+
+
+def _unescape_markdown_text(text: str) -> str:
+    if "\\" not in text:
+        return text
+    chunks: List[str] = []
+    idx = 0
+    while idx < len(text):
+        char = text[idx]
+        if char == "\\" and idx + 1 < len(text):
+            chunks.append(text[idx + 1])
+            idx += 2
+            continue
+        chunks.append(char)
+        idx += 1
+    return "".join(chunks)
+
+
+def _sanitize_code_language(raw: str) -> str:
+    token = str(raw or "").strip()
+    if not token:
+        return ""
+    if _LANGUAGE_RE.match(token):
+        return token
+    return ""
+
+
+def _crm_markdown_to_telegram_html(markdown_text: str) -> str:
+    source = str(markdown_text or "")
+    if not source:
+        return ""
+    return _parse_crm_markdown_segment(source)
+
+
+def _parse_crm_markdown_segment(text: str) -> str:
+    result: List[str] = []
+    idx = 0
+    size = len(text)
+    while idx < size:
+        if text.startswith("\\", idx):
+            if idx + 1 < size:
+                result.append(html.escape(text[idx + 1]))
+                idx += 2
+                continue
+            result.append("\\")
+            idx += 1
+            continue
+
+        if text.startswith("```", idx):
+            close_idx = _find_unescaped_token(text, "```", idx + 3)
+            if close_idx != -1:
+                code_block_raw = text[idx + 3 : close_idx]
+                result.append(_render_markdown_code_block_to_html(code_block_raw))
+                idx = close_idx + 3
+                continue
+
+        if text.startswith("`", idx):
+            close_idx = _find_unescaped_token(text, "`", idx + 1)
+            if close_idx != -1:
+                code_inline = text[idx + 1 : close_idx]
+                result.append(f"<code>{html.escape(_unescape_markdown_text(code_inline))}</code>")
+                idx = close_idx + 1
+                continue
+
+        if text.startswith("[", idx):
+            close_label = _find_unescaped_token(text, "]", idx + 1)
+            if close_label != -1 and close_label + 1 < size and text[close_label + 1] == "(":
+                close_url = _find_markdown_link_url_end(text, close_label + 2)
+                if close_url != -1:
+                    label_raw = text[idx + 1 : close_label]
+                    url_raw = text[close_label + 2 : close_url]
+                    href = _unescape_markdown_text(url_raw).strip()
+                    if href:
+                        label_html = _parse_crm_markdown_segment(label_raw)
+                        result.append(
+                            f'<a href="{html.escape(href, quote=True)}">{label_html}</a>'
+                        )
+                        idx = close_url + 1
+                        continue
+
+        marker_handled = False
+        for marker, tag in _CRM_MD_TAG_MARKERS:
+            if not text.startswith(marker, idx):
+                continue
+            close_idx = _find_unescaped_token(text, marker, idx + len(marker))
+            if close_idx == -1:
+                continue
+            if len(marker) == 1 and not _is_valid_single_marker_bounds(text, idx, close_idx):
+                continue
+            inner_raw = text[idx + len(marker) : close_idx]
+            if not inner_raw:
+                continue
+            inner_html = _parse_crm_markdown_segment(inner_raw)
+            result.append(f"<{tag}>{inner_html}</{tag}>")
+            idx = close_idx + len(marker)
+            marker_handled = True
+            break
+        if marker_handled:
+            continue
+
+        result.append(html.escape(text[idx]))
+        idx += 1
+
+    return "".join(result)
+
+
+def _render_markdown_code_block_to_html(raw_block: str) -> str:
+    block = raw_block.replace("\r\n", "\n")
+    language = ""
+    code_text = block
+    newline_idx = block.find("\n")
+    if newline_idx != -1:
+        candidate = block[:newline_idx].strip()
+        language = _sanitize_code_language(candidate)
+        if language:
+            code_text = block[newline_idx + 1 :]
+    code_html = html.escape(code_text)
+    if language:
+        return (
+            '<pre><code class="language-'
+            f'{html.escape(language, quote=True)}">{code_html}</code></pre>'
+        )
+    return f"<pre>{code_html}</pre>"
+
+
+def _extract_language_from_code_tag(attrs: Dict[str, str]) -> str:
+    classes = str(attrs.get("class") or "").strip().split()
+    for class_name in classes:
+        if class_name.startswith("language-"):
+            return _sanitize_code_language(class_name[len("language-") :])
+    return ""
+
+
+class _TelegramHtmlToCrmMarkdownParser(HTMLParser):
+    _SUPPORTED_TAGS = {
+        "a",
+        "b",
+        "blockquote",
+        "code",
+        "del",
+        "em",
+        "i",
+        "ins",
+        "pre",
+        "s",
+        "strike",
+        "strong",
+        "tg-spoiler",
+        "u",
+    }
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._stack: List[Dict[str, Any]] = [{"tag": None, "attrs": {}, "chunks": []}]
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
+        tag_lower = str(tag or "").lower()
+        if tag_lower == "br":
+            self._append_chunk("\n")
+            return
+        if tag_lower not in self._SUPPORTED_TAGS:
+            return
+        attrs_map = {str(key): str(value or "") for key, value in attrs}
+        self._stack.append({"tag": tag_lower, "attrs": attrs_map, "chunks": []})
+
+    def handle_endtag(self, tag: str) -> None:
+        tag_lower = str(tag or "").lower()
+        if len(self._stack) <= 1:
+            return
+        for idx in range(len(self._stack) - 1, 0, -1):
+            frame = self._stack[idx]
+            if frame.get("tag") != tag_lower:
+                continue
+            while len(self._stack) - 1 >= idx:
+                popped = self._stack.pop()
+                parent = self._stack[-1]
+                rendered = self._render_frame(popped, parent)
+                parent["chunks"].append(rendered)
+            return
+
+    def handle_data(self, data: str) -> None:
+        if not data:
+            return
+        if self._inside_verbatim_context():
+            self._append_chunk(data)
+        else:
+            self._append_chunk(_escape_markdown_text(data))
+
+    def markdown(self) -> str:
+        while len(self._stack) > 1:
+            popped = self._stack.pop()
+            parent = self._stack[-1]
+            rendered = self._render_frame(popped, parent)
+            parent["chunks"].append(rendered)
+        return "".join(self._stack[0]["chunks"])
+
+    def _append_chunk(self, text: str) -> None:
+        self._stack[-1]["chunks"].append(text)
+
+    def _inside_verbatim_context(self) -> bool:
+        for frame in self._stack[1:]:
+            if frame.get("tag") in {"code", "pre"}:
+                return True
+        return False
+
+    def _render_frame(self, frame: Dict[str, Any], parent: Dict[str, Any]) -> str:
+        tag = str(frame.get("tag") or "")
+        attrs = frame.get("attrs") or {}
+        content = "".join(frame.get("chunks") or [])
+
+        if tag in {"b", "strong"}:
+            return f"**{content}**"
+        if tag in {"i", "em"}:
+            return f"*{content}*"
+        if tag in {"u", "ins"}:
+            return f"++{content}++"
+        if tag in {"s", "strike", "del"}:
+            return f"~~{content}~~"
+        if tag == "a":
+            href = str(attrs.get("href") or "").strip()
+            if not href:
+                return content
+            return f"[{content}]({_escape_markdown_link_url(href)})"
+        if tag == "code":
+            if str(parent.get("tag") or "") == "pre":
+                language = _extract_language_from_code_tag(attrs)
+                if language:
+                    parent.setdefault("attrs", {})
+                    parent["attrs"]["_language"] = language
+                return content
+            inline = content.replace("`", "\\`")
+            return f"`{inline}`"
+        if tag == "pre":
+            language = _sanitize_code_language(str(attrs.get("_language") or ""))
+            block = content.replace("```", "\\`\\`\\`")
+            if block.endswith("\n"):
+                if language:
+                    return f"```{language}\n{block}```"
+                return f"```\n{block}```"
+            if language:
+                return f"```{language}\n{block}\n```"
+            return f"```\n{block}\n```"
+        if tag in {"blockquote", "tg-spoiler"}:
+            return content
+        return content
+
+
+def _telegram_html_to_crm_markdown(html_text: str) -> str:
+    parser = _TelegramHtmlToCrmMarkdownParser()
+    parser.feed(str(html_text or ""))
+    parser.close()
+    return parser.markdown()
 
 
 class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
@@ -1108,6 +1447,57 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if isinstance(author, dict):
             return author
         return {}
+
+    @classmethod
+    def _telegram_message_to_crm_markdown(
+        cls, connected_integration_id: str, message: Dict[str, Any]
+    ) -> Optional[str]:
+        has_text = message.get("text") is not None
+        raw_text = (
+            str(message.get("text") or "").strip()
+            if has_text
+            else str(message.get("caption") or "").strip()
+        )
+        if not raw_text:
+            return None
+
+        entities_key = "entities" if has_text else "caption_entities"
+        entities = message.get(entities_key)
+        if not isinstance(entities, list) or not entities:
+            return raw_text
+
+        try:
+            tg_message = Message.model_validate(message)
+            html_text = str(tg_message.html_text or "").strip()
+            if not html_text:
+                return raw_text
+            markdown_text = _telegram_html_to_crm_markdown(html_text).strip()
+            if markdown_text:
+                logger.debug(
+                    "Telegram formatting converted to CRM markdown: ci=%s entities=%s source=%s",
+                    connected_integration_id,
+                    len(entities),
+                    entities_key,
+                )
+                return markdown_text
+        except Exception as error:
+            logger.debug(
+                "Telegram formatting conversion failed (fallback to plain text): ci=%s source=%s error=%s",
+                connected_integration_id,
+                entities_key,
+                error,
+            )
+        return raw_text
+
+    @staticmethod
+    def _crm_markdown_to_telegram_payload(text: str) -> Tuple[str, Optional[str]]:
+        source = str(text or "")
+        if not source:
+            return "", None
+        try:
+            return _crm_markdown_to_telegram_html(source), "HTML"
+        except Exception:
+            return source, None
 
     @staticmethod
     def _extract_contact_payload(message: Dict[str, Any], tg_chat_id: str) -> Dict[str, str]:
@@ -2261,7 +2651,10 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         chat_id: str,
         message: Dict[str, Any],
     ) -> Tuple[Optional[str], List[int]]:
-        text = str(message.get("text") or message.get("caption") or "").strip() or None
+        text = cls._telegram_message_to_crm_markdown(
+            connected_integration_id=connected_integration_id,
+            message=message,
+        )
         file_ids, oversized_files_count = await cls._upload_telegram_files(
             connected_integration_id=connected_integration_id,
             bot_cfg=bot_cfg,
@@ -3253,6 +3646,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         target_chat = _tg_chat_id_cast(tg_chat_id)
         first_sent_id: Optional[int] = None
         caption_used = False
+        rendered_text, parse_mode = cls._crm_markdown_to_telegram_payload(text)
 
         files_map: Dict[int, Any] = {}
         if file_ids:
@@ -3276,8 +3670,8 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             file_name = _sanitize_file_name(file_name_raw)
             input_file = BufferedInputFile(file_bytes, filename=file_name)
             caption = None
-            if text and not caption_used:
-                caption = text
+            if rendered_text and not caption_used:
+                caption = rendered_text
                 caption_used = True
 
             if _is_photo_extension(file_model.extension):
@@ -3285,30 +3679,38 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     chat_id=target_chat,
                     photo=input_file,
                     caption=caption,
+                    parse_mode=parse_mode if caption and parse_mode else None,
                 )
             elif _is_voice_extension(file_model.extension):
                 sent = await bot.send_voice(
                     chat_id=target_chat,
                     voice=input_file,
                     caption=caption,
+                    parse_mode=parse_mode if caption and parse_mode else None,
                 )
             elif _is_audio_extension(file_model.extension):
                 sent = await bot.send_audio(
                     chat_id=target_chat,
                     audio=input_file,
                     caption=caption,
+                    parse_mode=parse_mode if caption and parse_mode else None,
                 )
             else:
                 sent = await bot.send_document(
                     chat_id=target_chat,
                     document=input_file,
                     caption=caption,
+                    parse_mode=parse_mode if caption and parse_mode else None,
                 )
             if not first_sent_id:
                 first_sent_id = int(sent.message_id)
 
-        if text and not caption_used:
-            sent = await bot.send_message(chat_id=target_chat, text=text)
+        if rendered_text and not caption_used:
+            sent = await bot.send_message(
+                chat_id=target_chat,
+                text=rendered_text,
+                parse_mode=parse_mode,
+            )
             if not first_sent_id:
                 first_sent_id = int(sent.message_id)
 
@@ -3367,13 +3769,15 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         bot = await cls._get_bot(bot_cfg.token)
         target_chat = _tg_chat_id_cast(tg_chat_id)
         text = (msg.text or "").strip()
+        rendered_text, parse_mode = cls._crm_markdown_to_telegram_payload(text)
 
         if mapped_id and text:
             try:
                 await bot.edit_message_text(
                     chat_id=target_chat,
                     message_id=int(mapped_id),
-                    text=text,
+                    text=rendered_text,
+                    parse_mode=parse_mode,
                 )
                 return
             except Exception:
