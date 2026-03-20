@@ -65,6 +65,7 @@ class TelegramBotCrmChannelConfig:
     STREAM_MAX_RETRIES = 5
 
     POLLING_LOCK_TTL_SEC = 30
+    LEAD_SYNC_AVATAR_RECHECK_SEC = 6 * 60 * 60
     MAX_TELEGRAM_FILE_SIZE_BYTES = 50 * 1024 * 1024
     LARGE_FILE_NOTICE_TEXT = (
         "The file is too large to be sent. Maximum allowed size is 50 MB."
@@ -425,6 +426,13 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         return (
             f"{TelegramBotCrmChannelConfig.REDIS_PREFIX}typing:"
             f"{connected_integration_id}:{bot_hash}:{tg_chat_id}"
+        )
+
+    @staticmethod
+    def _lead_sync_cache_key(connected_integration_id: str, lead_id: int) -> str:
+        return (
+            f"{TelegramBotCrmChannelConfig.REDIS_PREFIX}lead_sync:"
+            f"{connected_integration_id}:{lead_id}"
         )
 
     @staticmethod
@@ -1221,15 +1229,180 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         return patch
 
     @classmethod
+    def _build_lead_sync_patch_from_cached(
+        cls,
+        desired_payload: Dict[str, Optional[str]],
+        cached_payload: Dict[str, Any],
+    ) -> Dict[str, str]:
+        patch: Dict[str, str] = {}
+        field_names = [
+            "external_contact_id",
+            "client_name",
+            "client_phone",
+            "external_chat_id",
+            "bot_id",
+        ]
+        for field_name in field_names:
+            desired_value = cls._normalize_text_value(desired_payload.get(field_name))
+            if not desired_value:
+                continue
+            cached_value = cls._normalize_text_value(cached_payload.get(field_name))
+            if cached_value != desired_value:
+                patch[field_name] = desired_value
+        return patch
+
+    @staticmethod
+    def _parse_lead_sync_cache(raw: Optional[str]) -> Optional[Dict[str, Any]]:
+        if not raw:
+            return None
+        try:
+            payload = _json_loads(raw)
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return payload
+
+    @classmethod
+    def _build_lead_sync_cache_payload(
+        cls,
+        desired_payload: Dict[str, Optional[str]],
+        *,
+        avatar_state: str,
+        avatar_url: Optional[str],
+        avatar_check_after_ts: int,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        field_names = [
+            "external_contact_id",
+            "client_name",
+            "client_phone",
+            "external_chat_id",
+            "bot_id",
+        ]
+        for field_name in field_names:
+            payload[field_name] = cls._normalize_text_value(desired_payload.get(field_name)) or ""
+
+        normalized_avatar_state = str(avatar_state or "").strip().lower()
+        payload["avatar_state"] = "present" if normalized_avatar_state == "present" else "missing"
+        payload["client_avatar_url"] = cls._normalize_text_value(avatar_url) or ""
+        payload["avatar_check_after_ts"] = max(avatar_check_after_ts, 0)
+        return payload
+
+    @classmethod
     async def _sync_lead_from_telegram_best_effort(
         cls,
         connected_integration_id: str,
+        state_ttl_sec: int,
         bot_cfg: BotSlotConfig,
         lead_id: int,
         tg_chat_id: str,
         message: Dict[str, Any],
     ) -> None:
         desired_payload = cls._build_lead_contact_payload(bot_cfg, message, tg_chat_id)
+        cache_key = cls._lead_sync_cache_key(connected_integration_id, lead_id)
+        now_ts = _now_ts()
+        avatar_recheck_sec = max(
+            min(state_ttl_sec, TelegramBotCrmChannelConfig.LEAD_SYNC_AVATAR_RECHECK_SEC),
+            300,
+        )
+
+        cached_payload_raw = await cls._redis_get(cache_key)
+        cached_payload = cls._parse_lead_sync_cache(cached_payload_raw)
+
+        if cached_payload:
+            patch = cls._build_lead_sync_patch_from_cached(desired_payload, cached_payload)
+
+            cached_avatar_state = str(cached_payload.get("avatar_state") or "").strip().lower()
+            cached_avatar_url = cls._normalize_text_value(cached_payload.get("client_avatar_url"))
+            cached_avatar_check_after_ts = (
+                _parse_int(str(cached_payload.get("avatar_check_after_ts") or ""), 0) or 0
+            )
+            avatar_check_due = (
+                cached_avatar_state != "present" and now_ts >= cached_avatar_check_after_ts
+            )
+
+            avatar_state = "present" if cached_avatar_state == "present" else "missing"
+            avatar_url = cached_avatar_url
+            avatar_check_after_ts = (
+                now_ts + avatar_recheck_sec
+                if avatar_state != "present"
+                else now_ts + state_ttl_sec
+            )
+
+            if avatar_check_due:
+                resolved_avatar_url = await cls._resolve_client_avatar_url(bot_cfg, message)
+                if resolved_avatar_url:
+                    normalized_resolved = cls._normalize_text_value(resolved_avatar_url)
+                    if normalized_resolved and normalized_resolved != cached_avatar_url:
+                        patch["client_avatar_url"] = normalized_resolved
+                    avatar_state = "present"
+                    avatar_url = normalized_resolved
+                    avatar_check_after_ts = now_ts + state_ttl_sec
+                else:
+                    avatar_state = "missing"
+                    avatar_check_after_ts = now_ts + avatar_recheck_sec
+
+            if not patch:
+                if avatar_check_due:
+                    await cls._redis_set_with_ttl(
+                        cache_key,
+                        _json_dumps(
+                            cls._build_lead_sync_cache_payload(
+                                desired_payload,
+                                avatar_state=avatar_state,
+                                avatar_url=avatar_url,
+                                avatar_check_after_ts=avatar_check_after_ts,
+                            )
+                        ),
+                        state_ttl_sec,
+                    )
+                return
+
+            try:
+                async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+                    response = await api.crm.lead.edit(LeadEditRequest(id=lead_id, **patch))
+                if response.ok:
+                    if "client_avatar_url" in patch:
+                        avatar_state = "present"
+                        avatar_url = cls._normalize_text_value(patch.get("client_avatar_url"))
+                        avatar_check_after_ts = now_ts + state_ttl_sec
+                    await cls._redis_set_with_ttl(
+                        cache_key,
+                        _json_dumps(
+                            cls._build_lead_sync_cache_payload(
+                                desired_payload,
+                                avatar_state=avatar_state,
+                                avatar_url=avatar_url,
+                                avatar_check_after_ts=avatar_check_after_ts,
+                            )
+                        ),
+                        state_ttl_sec,
+                    )
+                    return
+
+                payload = response.result if isinstance(response.result, dict) else {}
+                logger.warning(
+                    "Lead/Edit rejected while syncing Telegram profile: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s error=%s description=%s",
+                    connected_integration_id,
+                    lead_id,
+                    bot_cfg.bot_hash,
+                    tg_chat_id,
+                    payload.get("error"),
+                    payload.get("description"),
+                )
+                return
+            except Exception as error:
+                logger.warning(
+                    "Lead sync from Telegram failed: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s error=%s",
+                    connected_integration_id,
+                    lead_id,
+                    bot_cfg.bot_hash,
+                    tg_chat_id,
+                    error,
+                )
+                return
+
         try:
             async with RegosAPI(connected_integration_id=connected_integration_id) as api:
                 lead = await api.crm.lead.get_by_id(lead_id)
@@ -1237,16 +1410,54 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     return
 
                 patch = cls._build_lead_sync_patch(lead, desired_payload)
-                if not cls._normalize_text_value(lead.client_avatar_url):
+                avatar_url = cls._normalize_text_value(lead.client_avatar_url)
+                avatar_state = "present" if avatar_url else "missing"
+                avatar_check_after_ts = (
+                    now_ts + state_ttl_sec
+                    if avatar_state == "present"
+                    else now_ts + avatar_recheck_sec
+                )
+
+                if avatar_state != "present":
                     avatar_url = await cls._resolve_client_avatar_url(bot_cfg, message)
                     if avatar_url:
                         patch["client_avatar_url"] = avatar_url
+                        avatar_state = "present"
+                        avatar_check_after_ts = now_ts + state_ttl_sec
 
                 if not patch:
+                    await cls._redis_set_with_ttl(
+                        cache_key,
+                        _json_dumps(
+                            cls._build_lead_sync_cache_payload(
+                                desired_payload,
+                                avatar_state=avatar_state,
+                                avatar_url=avatar_url,
+                                avatar_check_after_ts=avatar_check_after_ts,
+                            )
+                        ),
+                        state_ttl_sec,
+                    )
                     return
 
                 response = await api.crm.lead.edit(LeadEditRequest(id=lead_id, **patch))
                 if response.ok:
+                    if "client_avatar_url" in patch:
+                        avatar_state = "present"
+                        avatar_url = cls._normalize_text_value(patch.get("client_avatar_url"))
+                        avatar_check_after_ts = now_ts + state_ttl_sec
+                    await cls._redis_set_with_ttl(
+                        cache_key,
+                        _json_dumps(
+                            cls._build_lead_sync_cache_payload(
+                                desired_payload,
+                                avatar_state=avatar_state,
+                                avatar_url=avatar_url,
+                                avatar_check_after_ts=avatar_check_after_ts,
+                            )
+                        ),
+                        state_ttl_sec,
+                    )
                     return
 
                 payload = response.result if isinstance(response.result, dict) else {}
@@ -1606,6 +1817,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
 
         await cls._sync_lead_from_telegram_best_effort(
             connected_integration_id=connected_integration_id,
+            state_ttl_sec=runtime.state_ttl_sec,
             bot_cfg=bot_cfg,
             lead_id=lead_id,
             tg_chat_id=tg_chat_id,
@@ -1673,6 +1885,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
 
         await cls._sync_lead_from_telegram_best_effort(
             connected_integration_id=connected_integration_id,
+            state_ttl_sec=runtime.state_ttl_sec,
             bot_cfg=bot_cfg,
             lead_id=lead_id,
             tg_chat_id=tg_chat_id,
@@ -2060,6 +2273,9 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         await cls._redis_delete(
             cls._lead_by_tg_key(connected_integration_id, bot_hash, tg_chat_id),
             cls._chat_by_lead_key(connected_integration_id, lead_id)
+            if lead_id
+            else "",
+            cls._lead_sync_cache_key(connected_integration_id, lead_id)
             if lead_id
             else "",
             cls._tg_by_chat_key(connected_integration_id, str(chat_id))

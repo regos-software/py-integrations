@@ -41,6 +41,7 @@ Telegram inbound event handling:
 - `edited_message` and `edited_business_message` -> `ChatMessage/Edit` in CRM.
 - `deleted_business_messages` (and compatible `deleted_*` payloads) -> `ChatMessage/Delete` in CRM when message mapping is available.
 - For existing leads, inbound Telegram messages trigger best-effort `Lead/Edit` to refresh contact fields (`client_name`, `client_phone`, `external_*`, `bot_id`) and fill `client_avatar_url` when it is empty.
+- Lead profile sync is cached in Redis by `lead_id`, so repeated messages from the same user do not trigger `Lead/Get` on every message.
 
 Delivery issue alerts:
 
