@@ -1150,17 +1150,36 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
 
         user_id = contact.get("user_id") or author.get("id")
         if not user_id:
+            logger.debug(
+                "Avatar resolve skipped: bot_hash=%s reason=no_user_id",
+                bot_cfg.bot_hash,
+            )
             return None
         try:
             user_id_int = int(user_id)
         except (TypeError, ValueError):
+            logger.debug(
+                "Avatar resolve skipped: bot_hash=%s reason=invalid_user_id user_id=%r",
+                bot_cfg.bot_hash,
+                user_id,
+            )
             return None
 
         try:
+            logger.debug(
+                "Avatar resolve started: bot_hash=%s tg_user_id=%s",
+                bot_cfg.bot_hash,
+                user_id_int,
+            )
             bot = await cls._get_bot(bot_cfg.token)
             photos = await bot.get_user_profile_photos(user_id=user_id_int, limit=1)
             rows = photos.photos[0] if photos and photos.photos else []
             if not rows:
+                logger.debug(
+                    "Avatar resolve result: bot_hash=%s tg_user_id=%s status=no_photos",
+                    bot_cfg.bot_hash,
+                    user_id_int,
+                )
                 return None
             best = max(
                 [row for row in rows if getattr(row, "file_id", None)],
@@ -1168,13 +1187,37 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 default=None,
             )
             if not best:
+                logger.debug(
+                    "Avatar resolve result: bot_hash=%s tg_user_id=%s status=no_file_id",
+                    bot_cfg.bot_hash,
+                    user_id_int,
+                )
                 return None
             file_info = await bot.get_file(best.file_id)
             file_path = str(file_info.file_path or "").strip()
             if not file_path:
+                logger.debug(
+                    "Avatar resolve result: bot_hash=%s tg_user_id=%s status=no_file_path file_id=%s",
+                    bot_cfg.bot_hash,
+                    user_id_int,
+                    getattr(best, "file_id", None),
+                )
                 return None
+            logger.debug(
+                "Avatar resolve success: bot_hash=%s tg_user_id=%s file_id=%s file_path=%s",
+                bot_cfg.bot_hash,
+                user_id_int,
+                getattr(best, "file_id", None),
+                file_path,
+            )
             return f"https://api.telegram.org/file/bot{bot_cfg.token}/{file_path}"
-        except Exception:
+        except Exception as error:
+            logger.debug(
+                "Avatar resolve failed: bot_hash=%s tg_user_id=%s error=%s",
+                bot_cfg.bot_hash,
+                user_id_int,
+                error,
+            )
             return None
 
     @staticmethod
@@ -1309,6 +1352,14 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
 
         cached_payload_raw = await cls._redis_get(cache_key)
         cached_payload = cls._parse_lead_sync_cache(cached_payload_raw)
+        logger.debug(
+            "Lead sync started: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s cache_hit=%s",
+            connected_integration_id,
+            lead_id,
+            bot_cfg.bot_hash,
+            tg_chat_id,
+            bool(cached_payload),
+        )
 
         if cached_payload:
             patch = cls._build_lead_sync_patch_from_cached(desired_payload, cached_payload)
@@ -1320,6 +1371,16 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             )
             avatar_check_due = (
                 cached_avatar_state != "present" and now_ts >= cached_avatar_check_after_ts
+            )
+            logger.debug(
+                "Lead sync cache state: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s avatar_state=%s avatar_check_due=%s patch_keys=%s",
+                connected_integration_id,
+                lead_id,
+                bot_cfg.bot_hash,
+                tg_chat_id,
+                cached_avatar_state or "missing",
+                avatar_check_due,
+                sorted(patch.keys()),
             )
 
             avatar_state = "present" if cached_avatar_state == "present" else "missing"
@@ -1336,14 +1397,42 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     normalized_resolved = cls._normalize_text_value(resolved_avatar_url)
                     if normalized_resolved and normalized_resolved != cached_avatar_url:
                         patch["client_avatar_url"] = normalized_resolved
+                        logger.debug(
+                            "Lead sync avatar patch prepared: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s",
+                            connected_integration_id,
+                            lead_id,
+                            bot_cfg.bot_hash,
+                            tg_chat_id,
+                        )
                     avatar_state = "present"
                     avatar_url = normalized_resolved
                     avatar_check_after_ts = now_ts + state_ttl_sec
+                    logger.debug(
+                        "Lead sync avatar recheck result: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s status=resolved",
+                        connected_integration_id,
+                        lead_id,
+                        bot_cfg.bot_hash,
+                        tg_chat_id,
+                    )
                 else:
                     avatar_state = "missing"
                     avatar_check_after_ts = now_ts + avatar_recheck_sec
+                    logger.debug(
+                        "Lead sync avatar recheck result: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s status=not_found",
+                        connected_integration_id,
+                        lead_id,
+                        bot_cfg.bot_hash,
+                        tg_chat_id,
+                    )
 
             if not patch:
+                logger.debug(
+                    "Lead sync skipped (no changes): ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s",
+                    connected_integration_id,
+                    lead_id,
+                    bot_cfg.bot_hash,
+                    tg_chat_id,
+                )
                 if avatar_check_due:
                     await cls._redis_set_with_ttl(
                         cache_key,
@@ -1360,6 +1449,15 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 return
 
             try:
+                logger.debug(
+                    "Lead sync editing from cache: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s patch_keys=%s has_avatar_patch=%s",
+                    connected_integration_id,
+                    lead_id,
+                    bot_cfg.bot_hash,
+                    tg_chat_id,
+                    sorted(patch.keys()),
+                    "client_avatar_url" in patch,
+                )
                 async with RegosAPI(connected_integration_id=connected_integration_id) as api:
                     response = await api.crm.lead.edit(LeadEditRequest(id=lead_id, **patch))
                 if response.ok:
@@ -1378,6 +1476,14 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                             )
                         ),
                         state_ttl_sec,
+                    )
+                    logger.debug(
+                        "Lead sync edit accepted: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s patch_keys=%s",
+                        connected_integration_id,
+                        lead_id,
+                        bot_cfg.bot_hash,
+                        tg_chat_id,
+                        sorted(patch.keys()),
                     )
                     return
 
@@ -1404,9 +1510,23 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 return
 
         try:
+            logger.debug(
+                "Lead sync cache miss -> loading lead: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s",
+                connected_integration_id,
+                lead_id,
+                bot_cfg.bot_hash,
+                tg_chat_id,
+            )
             async with RegosAPI(connected_integration_id=connected_integration_id) as api:
                 lead = await api.crm.lead.get_by_id(lead_id)
                 if not lead:
+                    logger.debug(
+                        "Lead sync stopped: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s reason=lead_not_found",
+                        connected_integration_id,
+                        lead_id,
+                        bot_cfg.bot_hash,
+                        tg_chat_id,
+                    )
                     return
 
                 patch = cls._build_lead_sync_patch(lead, desired_payload)
@@ -1419,13 +1539,42 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 )
 
                 if avatar_state != "present":
+                    logger.debug(
+                        "Lead sync avatar missing in lead: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s",
+                        connected_integration_id,
+                        lead_id,
+                        bot_cfg.bot_hash,
+                        tg_chat_id,
+                    )
                     avatar_url = await cls._resolve_client_avatar_url(bot_cfg, message)
                     if avatar_url:
                         patch["client_avatar_url"] = avatar_url
                         avatar_state = "present"
                         avatar_check_after_ts = now_ts + state_ttl_sec
+                        logger.debug(
+                            "Lead sync avatar patch prepared from fresh lead: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s",
+                            connected_integration_id,
+                            lead_id,
+                            bot_cfg.bot_hash,
+                            tg_chat_id,
+                        )
+                    else:
+                        logger.debug(
+                            "Lead sync avatar still missing after Telegram lookup: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s",
+                            connected_integration_id,
+                            lead_id,
+                            bot_cfg.bot_hash,
+                            tg_chat_id,
+                        )
 
                 if not patch:
+                    logger.debug(
+                        "Lead sync skipped after fresh lead load (no changes): ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s",
+                        connected_integration_id,
+                        lead_id,
+                        bot_cfg.bot_hash,
+                        tg_chat_id,
+                    )
                     await cls._redis_set_with_ttl(
                         cache_key,
                         _json_dumps(
@@ -1440,6 +1589,15 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     )
                     return
 
+                logger.debug(
+                    "Lead sync editing after fresh lead load: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s patch_keys=%s has_avatar_patch=%s",
+                    connected_integration_id,
+                    lead_id,
+                    bot_cfg.bot_hash,
+                    tg_chat_id,
+                    sorted(patch.keys()),
+                    "client_avatar_url" in patch,
+                )
                 response = await api.crm.lead.edit(LeadEditRequest(id=lead_id, **patch))
                 if response.ok:
                     if "client_avatar_url" in patch:
@@ -1457,6 +1615,14 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                             )
                         ),
                         state_ttl_sec,
+                    )
+                    logger.debug(
+                        "Lead sync edit accepted: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s patch_keys=%s",
+                        connected_integration_id,
+                        lead_id,
+                        bot_cfg.bot_hash,
+                        tg_chat_id,
+                        sorted(patch.keys()),
                     )
                     return
 
@@ -2352,6 +2518,14 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             if isinstance(contact, dict):
                 client_phone = str(contact.get("phone_number") or "").strip() or None
             client_avatar_url = await cls._resolve_client_avatar_url(bot_cfg, message)
+            logger.debug(
+                "Lead create payload prepared: ci=%s bot_hash=%s tg_chat_id=%s has_avatar=%s has_phone=%s",
+                connected_integration_id,
+                bot_cfg.bot_hash,
+                tg_chat_id,
+                bool(client_avatar_url),
+                bool(client_phone),
+            )
 
             async with RegosAPI(connected_integration_id=connected_integration_id) as api:
                 add_resp = await api.crm.lead.add(
@@ -2379,6 +2553,14 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 lead = await api.crm.lead.get_by_id(new_id)
                 if not lead or not lead.chat_id:
                     raise RuntimeError("Lead/Get did not return chat_id")
+                logger.debug(
+                    "Lead created/reused by Lead/Add: ci=%s bot_hash=%s tg_chat_id=%s lead_id=%s lead_has_avatar=%s",
+                    connected_integration_id,
+                    bot_cfg.bot_hash,
+                    tg_chat_id,
+                    lead.id,
+                    bool(cls._normalize_text_value(getattr(lead, "client_avatar_url", None))),
+                )
 
             await cls._save_lead_mapping(
                 connected_integration_id=connected_integration_id,
