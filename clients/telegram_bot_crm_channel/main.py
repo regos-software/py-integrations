@@ -31,7 +31,13 @@ from schemas.api.chat.chat_message import (
     ChatMessageTypeEnum,
 )
 from schemas.api.common.filters import Filter, FilterOperator
-from schemas.api.crm.lead import Lead, LeadAddRequest, LeadGetRequest, LeadStatusEnum
+from schemas.api.crm.lead import (
+    Lead,
+    LeadAddRequest,
+    LeadEditRequest,
+    LeadGetRequest,
+    LeadStatusEnum,
+)
 from schemas.api.crm.pipeline import CrmEntityTypeEnum, PipelineGetRequest
 from schemas.api.files.file import FileGetRequest
 from schemas.api.integrations.connected_integration_setting import (
@@ -1163,6 +1169,106 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         except Exception:
             return None
 
+    @staticmethod
+    def _normalize_text_value(value: Any) -> Optional[str]:
+        text = str(value or "").strip()
+        return text or None
+
+    @classmethod
+    def _build_lead_contact_payload(
+        cls,
+        bot_cfg: BotSlotConfig,
+        message: Dict[str, Any],
+        tg_chat_id: str,
+    ) -> Dict[str, Optional[str]]:
+        contact_payload = cls._extract_contact_payload(message, tg_chat_id)
+        client_name = cls._normalize_text_value(contact_payload.get("display_name"))
+
+        client_phone = None
+        contact = message.get("contact")
+        if isinstance(contact, dict):
+            client_phone = cls._normalize_text_value(contact.get("phone_number"))
+
+        return {
+            "external_contact_id": _external_contact_id(bot_cfg.bot_hash, tg_chat_id),
+            "client_name": client_name,
+            "client_phone": client_phone,
+            "external_chat_id": tg_chat_id,
+            "bot_id": bot_cfg.bot_hash,
+        }
+
+    @classmethod
+    def _build_lead_sync_patch(
+        cls,
+        lead: Lead,
+        desired_payload: Dict[str, Optional[str]],
+    ) -> Dict[str, str]:
+        patch: Dict[str, str] = {}
+        field_names = [
+            "external_contact_id",
+            "client_name",
+            "client_phone",
+            "external_chat_id",
+            "bot_id",
+        ]
+        for field_name in field_names:
+            desired_value = cls._normalize_text_value(desired_payload.get(field_name))
+            if not desired_value:
+                continue
+            current_value = cls._normalize_text_value(getattr(lead, field_name, None))
+            if current_value != desired_value:
+                patch[field_name] = desired_value
+        return patch
+
+    @classmethod
+    async def _sync_lead_from_telegram_best_effort(
+        cls,
+        connected_integration_id: str,
+        bot_cfg: BotSlotConfig,
+        lead_id: int,
+        tg_chat_id: str,
+        message: Dict[str, Any],
+    ) -> None:
+        desired_payload = cls._build_lead_contact_payload(bot_cfg, message, tg_chat_id)
+        try:
+            async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+                lead = await api.crm.lead.get_by_id(lead_id)
+                if not lead:
+                    return
+
+                patch = cls._build_lead_sync_patch(lead, desired_payload)
+                if not cls._normalize_text_value(lead.client_avatar_url):
+                    avatar_url = await cls._resolve_client_avatar_url(bot_cfg, message)
+                    if avatar_url:
+                        patch["client_avatar_url"] = avatar_url
+
+                if not patch:
+                    return
+
+                response = await api.crm.lead.edit(LeadEditRequest(id=lead_id, **patch))
+                if response.ok:
+                    return
+
+                payload = response.result if isinstance(response.result, dict) else {}
+                logger.warning(
+                    "Lead/Edit rejected while syncing Telegram profile: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s error=%s description=%s",
+                    connected_integration_id,
+                    lead_id,
+                    bot_cfg.bot_hash,
+                    tg_chat_id,
+                    payload.get("error"),
+                    payload.get("description"),
+                )
+        except Exception as error:
+            logger.warning(
+                "Lead sync from Telegram failed: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s error=%s",
+                connected_integration_id,
+                lead_id,
+                bot_cfg.bot_hash,
+                tg_chat_id,
+                error,
+            )
+
     @classmethod
     async def _set_worker_heartbeat(cls, connected_integration_id: str) -> None:
         if not _redis_enabled():
@@ -1349,7 +1455,9 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                         timeout=20,
                         allowed_updates=[
                             "message",
+                            "business_message",
                             "edited_message",
+                            "edited_business_message",
                             "deleted_business_messages",
                         ],
                     )
@@ -1429,6 +1537,8 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 return
 
             message = payload.get("message")
+            if not isinstance(message, dict):
+                message = payload.get("business_message")
             if isinstance(message, dict):
                 await cls._process_added_telegram_message(
                     connected_integration_id=connected_integration_id,
@@ -1441,6 +1551,8 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 return
 
             edited_message = payload.get("edited_message")
+            if not isinstance(edited_message, dict):
+                edited_message = payload.get("edited_business_message")
             if isinstance(edited_message, dict):
                 await cls._process_edited_telegram_message(
                     connected_integration_id=connected_integration_id,
@@ -1491,6 +1603,14 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         )
         if not lead_id or not chat_id:
             return
+
+        await cls._sync_lead_from_telegram_best_effort(
+            connected_integration_id=connected_integration_id,
+            bot_cfg=bot_cfg,
+            lead_id=lead_id,
+            tg_chat_id=tg_chat_id,
+            message=message,
+        )
 
         await cls._mark_chat_read_best_effort(
             connected_integration_id=connected_integration_id,
@@ -1550,6 +1670,14 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         )
         if not lead_id or not chat_id:
             return
+
+        await cls._sync_lead_from_telegram_best_effort(
+            connected_integration_id=connected_integration_id,
+            bot_cfg=bot_cfg,
+            lead_id=lead_id,
+            tg_chat_id=tg_chat_id,
+            message=message,
+        )
 
         await cls._mark_chat_read_best_effort(
             connected_integration_id=connected_integration_id,

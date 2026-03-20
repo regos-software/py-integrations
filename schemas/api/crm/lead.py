@@ -7,9 +7,9 @@ from typing import List, Optional
 
 from pydantic import ConfigDict, Field as PydField
 
-from schemas.api.base import APIBaseResponse, AddResult, BaseSchema
+from schemas.api.base import APIBaseResponse, AddResult, ArrayResult, BaseSchema
 from schemas.api.common.filters import Filter
-from schemas.api.references.fields import FieldValue, FieldValueAdd
+from schemas.api.references.fields import FieldValue, FieldValueAdd, FieldValueEdit
 
 
 class LeadStatusEnum(str, Enum):
@@ -146,6 +146,34 @@ class LeadAddRequest(BaseSchema):
     )
 
 
+class LeadEditRequest(BaseSchema):
+    """Request for Lead/Edit."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: int = PydField(..., ge=1, description="Lead id.")
+    channel_id: Optional[int] = PydField(default=None, ge=1, description="Channel id.")
+    pipeline_id: Optional[int] = PydField(default=None, ge=1, description="Pipeline id.")
+    stage_id: Optional[int] = PydField(default=None, ge=1, description="Stage id.")
+    status: Optional[LeadStatusEnum] = PydField(default=None, description="Status.")
+    subject: Optional[str] = PydField(default=None, description="Lead subject.")
+    external_contact_id: Optional[str] = PydField(
+        default=None, description="External contact id."
+    )
+    client_name: Optional[str] = PydField(default=None, description="Client name.")
+    client_phone: Optional[str] = PydField(default=None, description="Client phone.")
+    client_avatar_url: Optional[str] = PydField(
+        default=None, description="Client avatar URL."
+    )
+    external_chat_id: Optional[str] = PydField(
+        default=None, description="External chat id."
+    )
+    bot_id: Optional[str] = PydField(default=None, description="External bot id.")
+    fields: Optional[List[FieldValueEdit]] = PydField(
+        default=None, description="Custom field changes."
+    )
+
+
 class LeadGetResponse(APIBaseResponse[List[Lead]]):
     """Response for Lead/Get."""
 
@@ -158,10 +186,18 @@ class LeadAddResponse(APIBaseResponse[AddResult]):
     model_config = ConfigDict(extra="ignore")
 
 
+class LeadEditResponse(APIBaseResponse[ArrayResult]):
+    """Response for Lead/Edit."""
+
+    model_config = ConfigDict(extra="ignore")
+
+
 __all__ = [
     "Lead",
     "LeadAddRequest",
     "LeadAddResponse",
+    "LeadEditRequest",
+    "LeadEditResponse",
     "LeadGetRequest",
     "LeadGetResponse",
     "LeadStatusEnum",
