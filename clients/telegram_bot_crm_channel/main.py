@@ -1100,8 +1100,18 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         )
 
     @staticmethod
+    def _extract_message_author(message: Dict[str, Any]) -> Dict[str, Any]:
+        author = message.get("from")
+        if isinstance(author, dict):
+            return author
+        author = message.get("from_user")
+        if isinstance(author, dict):
+            return author
+        return {}
+
+    @staticmethod
     def _extract_contact_payload(message: Dict[str, Any], tg_chat_id: str) -> Dict[str, str]:
-        author = message.get("from") or {}
+        author = TelegramBotCrmChannelIntegration._extract_message_author(message)
         contact = message.get("contact")
         contact = contact if isinstance(contact, dict) else {}
         chat = message.get("chat") or {}
@@ -1151,7 +1161,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
     async def _resolve_client_avatar_url(
         cls, bot_cfg: BotSlotConfig, message: Dict[str, Any]
     ) -> Optional[str]:
-        author = message.get("from") or {}
+        author = cls._extract_message_author(message)
         contact = message.get("contact")
         contact = contact if isinstance(contact, dict) else {}
         chat = message.get("chat")
@@ -1916,7 +1926,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                             {
                                 "connected_integration_id": connected_integration_id,
                                 "bot_hash": bot_config.bot_hash,
-                                "payload": update.model_dump(mode="json"),
+                                "payload": update.model_dump(mode="json", by_alias=True),
                                 "attempt": "0",
                                 "enqueued_at": str(_now_ts()),
                             },
@@ -2037,7 +2047,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             )
             return
 
-        author = message.get("from") or {}
+        author = cls._extract_message_author(message)
         if bool(author.get("is_bot")):
             return
 
@@ -2111,7 +2121,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             )
             return
 
-        author = message.get("from") or {}
+        author = cls._extract_message_author(message)
         if bool(author.get("is_bot")):
             return
 
