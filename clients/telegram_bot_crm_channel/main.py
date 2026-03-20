@@ -1154,8 +1154,21 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         author = message.get("from") or {}
         contact = message.get("contact")
         contact = contact if isinstance(contact, dict) else {}
+        chat = message.get("chat")
+        chat = chat if isinstance(chat, dict) else {}
 
         user_id = contact.get("user_id") or author.get("id")
+        if not user_id:
+            # In private chats chat.id usually equals user id; use it as fallback.
+            chat_type = str(chat.get("type") or "").strip().lower()
+            chat_id = chat.get("id")
+            if chat_type == "private" and chat_id is not None:
+                user_id = chat_id
+                logger.debug(
+                    "Avatar resolve user_id fallback: bot_hash=%s source=chat.id chat_id=%s",
+                    bot_cfg.bot_hash,
+                    chat_id,
+                )
         if not user_id:
             logger.debug(
                 "Avatar resolve skipped: bot_hash=%s reason=no_user_id",
