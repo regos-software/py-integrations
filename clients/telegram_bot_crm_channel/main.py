@@ -1156,6 +1156,16 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         contact = contact if isinstance(contact, dict) else {}
         chat = message.get("chat")
         chat = chat if isinstance(chat, dict) else {}
+        sender_business_bot = message.get("sender_business_bot")
+        sender_chat = message.get("sender_chat")
+        is_from_offline = bool(message.get("is_from_offline"))
+
+        if isinstance(sender_business_bot, dict):
+            logger.debug(
+                "Avatar resolve skipped: bot_hash=%s reason=outgoing_business_message",
+                bot_cfg.bot_hash,
+            )
+            return None
 
         user_id = contact.get("user_id") or author.get("id")
         if not user_id:
@@ -1170,6 +1180,18 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     chat_id,
                 )
         if not user_id:
+            if isinstance(sender_chat, dict):
+                logger.debug(
+                    "Avatar resolve skipped: bot_hash=%s reason=sender_chat_only",
+                    bot_cfg.bot_hash,
+                )
+                return None
+            if is_from_offline:
+                logger.debug(
+                    "Avatar resolve skipped: bot_hash=%s reason=offline_implicit_message",
+                    bot_cfg.bot_hash,
+                )
+                return None
             logger.debug(
                 "Avatar resolve skipped: bot_hash=%s reason=no_user_id",
                 bot_cfg.bot_hash,
@@ -2007,6 +2029,14 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         bot_hash: str,
         message: Dict[str, Any],
     ) -> None:
+        if isinstance(message.get("sender_business_bot"), dict):
+            logger.debug(
+                "Skip outbound business message in inbound add flow: ci=%s bot_hash=%s",
+                connected_integration_id,
+                bot_hash,
+            )
+            return
+
         author = message.get("from") or {}
         if bool(author.get("is_bot")):
             return
@@ -2073,6 +2103,14 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         bot_hash: str,
         message: Dict[str, Any],
     ) -> None:
+        if isinstance(message.get("sender_business_bot"), dict):
+            logger.debug(
+                "Skip outbound business message in inbound edit flow: ci=%s bot_hash=%s",
+                connected_integration_id,
+                bot_hash,
+            )
+            return
+
         author = message.get("from") or {}
         if bool(author.get("is_bot")):
             return
