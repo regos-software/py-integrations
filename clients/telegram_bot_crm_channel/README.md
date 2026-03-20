@@ -35,6 +35,16 @@ Single-bot mode only:
 8. The dialog continues in both directions: Telegram <-> CRM chat.
 9. When the lead is closed in CRM, the user can receive a final message.
 
+Telegram inbound event handling:
+
+- `message` -> `ChatMessage/Add` in CRM.
+- `edited_message` -> `ChatMessage/Edit` in CRM.
+- `deleted_business_messages` (and compatible `deleted_*` payloads) -> `ChatMessage/Delete` in CRM when message mapping is available.
+
+Delivery issue alerts:
+
+- If outbound Telegram delivery fails after all retries, integration posts an internal alert message to the related CRM chat.
+
 ## Webhooks
 
 REGOS webhooks subscribed by integration:
