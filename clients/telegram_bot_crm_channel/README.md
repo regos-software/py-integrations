@@ -43,8 +43,15 @@ When `bot_1_auto_create_contact=retail_customer`:
 1. Integration tries to find existing `RetailCustomer` by Telegram id field (`field_telegram_id`).
 2. If not found, creates `RetailCustomer` in `bot_1_retail_customer_group_id`.
 3. Stores mapping `(connected_integration_id, bot_hash, tg_chat_id) -> customer_id` in Redis.
+4. If contact is created, integration sends `System` message: `Создан розничный покупатель: {Имя}`.
+5. If existing contact is updated, integration sends `System` message: `Обновлен розничный покупатель: {Имя}`.
 
 If contact create fails, lead flow still continues (best effort).
+
+## Delivery failures
+
+- If outbound delivery to Telegram fails after retries, integration writes a CRM `System` message to the same chat.
+- The message contains a human-readable reason in Russian and a short technical reason for debugging.
 
 ## Global Config
 
