@@ -991,8 +991,8 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             connected_integration_id
         )
         bots = TelegramBotCrmChannelIntegration._parse_bots(settings_map)
-        # Transport mode is parsed strictly: only webhook/longpolling are accepted.
-        mode = _update_mode_from_value(settings_map.get("telegram_update_mode"))
+        # Transport mode is configured globally, not via integration settings.
+        mode = _update_mode_from_value(app_settings.telegram_update_mode)
 
         runtime = RuntimeConfig(
             connected_integration_id=connected_integration_id,
@@ -1192,6 +1192,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if not lock_token:
             return self._error_response(1002, "connect is already running").dict()
 
+        runtime: Optional[RuntimeConfig] = None
         try:
             runtime = await self._load_runtime(self.connected_integration_id)
             logger.info(
@@ -1209,8 +1210,6 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             webhook_subscribe = await self._subscribe_required_webhooks(
                 self.connected_integration_id
             )
-            await self._ensure_stream_workers(self.connected_integration_id)
-            await redis_client.sadd(self._active_ci_ids_key(), self.connected_integration_id)
 
             if runtime.update_mode == "longpolling":
                 keep_hashes = {bot.bot_hash for bot in runtime.bots}
@@ -1221,6 +1220,10 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     bot = await self._get_bot(bot_cfg.token)
                     await bot.delete_webhook(drop_pending_updates=True)
                     await self._ensure_poller(self.connected_integration_id, bot_cfg)
+                await self._ensure_stream_workers(self.connected_integration_id)
+                await redis_client.sadd(
+                    self._active_ci_ids_key(), self.connected_integration_id
+                )
                 return {
                     "status": "connected",
                     "mode": "longpolling",
@@ -1240,6 +1243,8 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             if runtime.telegram_secret_token:
                 kwargs_set_webhook["secret_token"] = runtime.telegram_secret_token
             await bot.set_webhook(**kwargs_set_webhook)
+            await self._ensure_stream_workers(self.connected_integration_id)
+            await redis_client.sadd(self._active_ci_ids_key(), self.connected_integration_id)
 
             return {
                 "status": "connected",
@@ -1250,8 +1255,33 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 "webhooks_subscription": webhook_subscribe,
             }
         except Exception as error:
+            try:
+                await self._stop_pollers_for_ci(self.connected_integration_id)
+                await self._stop_stream_workers(self.connected_integration_id)
+                await redis_client.srem(
+                    self._active_ci_ids_key(), self.connected_integration_id
+                )
+            except Exception as rollback_error:
+                logger.warning(
+                    "connect rollback failed: ci=%s error=%s",
+                    self.connected_integration_id,
+                    rollback_error,
+                )
+
             logger.exception("connect failed: %s", error)
-            return self._error_response(1003, f"connect failed: {error}").dict()
+            error_text = str(error)
+            if (
+                runtime
+                and runtime.update_mode == "webhook"
+                and "bad webhook" in error_text.lower()
+                and "failed to resolve host" in error_text.lower()
+            ):
+                error_text = (
+                    "webhook setup failed: Telegram cannot resolve webhook host. "
+                    "Use a public HTTPS domain in integration_url or set "
+                    "app_settings.telegram_update_mode=longpolling."
+                )
+            return self._error_response(1003, f"connect failed: {error_text}").dict()
         finally:
             await self._release_lock(lock_key, lock_token)
 
