@@ -86,6 +86,9 @@ class TelegramBotCrmChannelConfig:
         "LeadClosed",
     }
 
+    AUTO_CREATE_CONTACT_NONE = "none"
+    AUTO_CREATE_CONTACT_RETAIL_CUSTOMER = "retail_customer"
+
 
 @dataclass
 class BotSlotConfig:
@@ -95,6 +98,8 @@ class BotSlotConfig:
     channel_id: int
     lead_subject_template: Optional[str]
     default_responsible_user_id: Optional[int]
+    auto_create_contact_mode: str
+    retail_customer_group_id: Optional[int]
     bot_hash: str
 
 
@@ -183,9 +188,27 @@ def _external_contact_id(bot_hash: str, tg_chat_id: str) -> str:
 
 def _update_mode_from_value(raw: Optional[str]) -> str:
     mode = str(raw or "").strip().lower()
-    if mode in {"longpolling", "long_polling", "long-polling", "polling"}:
+    if not mode or mode == "webhook":
+        return "webhook"
+    if mode == "longpolling":
         return "longpolling"
-    return "webhook"
+    raise ValueError("telegram_update_mode must be one of: webhook, longpolling")
+
+
+def _auto_create_contact_mode_from_value(raw: Optional[str]) -> str:
+    mode = str(raw or "").strip().lower()
+    if not mode:
+        return TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_NONE
+    if mode not in {
+        TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_NONE,
+        TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_RETAIL_CUSTOMER,
+    }:
+        raise ValueError(
+            "BOT_1_AUTO_CREATE_CONTACT must be one of: "
+            f"{TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_NONE}, "
+            f"{TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_RETAIL_CUSTOMER}"
+        )
+    return mode
 
 
 def _tg_chat_id_cast(chat_id: str) -> Any:
@@ -203,6 +226,11 @@ def _sanitize_file_name(name: str) -> str:
     if not trimmed:
         return "file.bin"
     return trimmed[:200]
+
+
+def _normalize_phone(value: Any) -> Optional[str]:
+    digits = "".join(ch for ch in str(value or "") if ch.isdigit())
+    return digits or None
 
 
 def _file_ext_from_name(name: str, fallback: str = "bin") -> str:
@@ -782,6 +810,15 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         )
 
     @staticmethod
+    def _retail_customer_by_tg_key(
+        connected_integration_id: str, bot_hash: str, tg_chat_id: str
+    ) -> str:
+        return (
+            f"{TelegramBotCrmChannelConfig.REDIS_PREFIX}retail_customer_by_tg:"
+            f"{connected_integration_id}:{bot_hash}:{tg_chat_id}"
+        )
+
+    @staticmethod
     def _worker_heartbeat_key(connected_integration_id: str) -> str:
         return (
             f"{TelegramBotCrmChannelConfig.REDIS_PREFIX}worker:heartbeat:"
@@ -895,13 +932,6 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
 
     @staticmethod
     def _parse_bots(settings_map: Dict[str, str]) -> List[BotSlotConfig]:
-        for slot in range(2, 6):
-            if _parse_bool(settings_map.get(f"bot_{slot}_enabled"), False):
-                raise ValueError(
-                    "Single-bot mode: only BOT_1_* settings are supported; "
-                    f"disable BOT_{slot}_ENABLED"
-                )
-
         enabled = _parse_bool(settings_map.get("bot_1_enabled"), False)
         if not enabled:
             raise ValueError("BOT_1_ENABLED=true is required")
@@ -916,19 +946,41 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if not channel_id or channel_id <= 0:
             raise ValueError("BOT_1_CHANNEL_ID must be a positive integer")
 
+        auto_create_contact_mode = _auto_create_contact_mode_from_value(
+            settings_map.get("bot_1_auto_create_contact")
+        )
+        retail_customer_group_id = _parse_int(
+            settings_map.get("bot_1_retail_customer_group_id")
+        )
+        if retail_customer_group_id is not None and retail_customer_group_id <= 0:
+            raise ValueError("BOT_1_RETAIL_CUSTOMER_GROUP_ID must be a positive integer")
+        if (
+            auto_create_contact_mode
+            == TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_RETAIL_CUSTOMER
+            and not retail_customer_group_id
+        ):
+            raise ValueError(
+                "BOT_1_RETAIL_CUSTOMER_GROUP_ID is required when "
+                "BOT_1_AUTO_CREATE_CONTACT=retail_customer"
+            )
+
+        lead_subject_template = (
+            str(settings_map.get("bot_1_lead_subject_template") or "").strip()
+            or "{display_name}"
+        )
+
         return [
             BotSlotConfig(
                 slot=1,
                 token=token,
                 pipeline_id=pipeline_id,
                 channel_id=channel_id,
-                lead_subject_template=str(
-                    settings_map.get("bot_1_lead_subject_template") or ""
-                ).strip()
-                or None,
+                lead_subject_template=lead_subject_template,
                 default_responsible_user_id=_parse_int(
                     settings_map.get("bot_1_default_responsible_user_id")
                 ),
+                auto_create_contact_mode=auto_create_contact_mode,
+                retail_customer_group_id=retail_customer_group_id,
                 bot_hash=_bot_hash(token),
             )
         ]
@@ -939,11 +991,8 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             connected_integration_id
         )
         bots = TelegramBotCrmChannelIntegration._parse_bots(settings_map)
-        # Keep behavior aligned with telegram_bot_orders:
-        # global ENV mode is primary, setting is only fallback.
-        mode = _update_mode_from_value(
-            app_settings.telegram_update_mode or settings_map.get("telegram_update_mode")
-        )
+        # Transport mode is parsed strictly: only webhook/longpolling are accepted.
+        mode = _update_mode_from_value(settings_map.get("telegram_update_mode"))
 
         runtime = RuntimeConfig(
             connected_integration_id=connected_integration_id,
@@ -1146,8 +1195,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         try:
             runtime = await self._load_runtime(self.connected_integration_id)
             logger.info(
-                "telegram_update_mode=%r resolved_mode=%s ci=%s",
-                app_settings.telegram_update_mode,
+                "telegram_update_mode=%s ci=%s",
                 runtime.update_mode,
                 self.connected_integration_id,
             )
@@ -1304,13 +1352,12 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         runtime = await self._load_runtime(self.connected_integration_id)
         single_bot = runtime.bots[0]
         query = envelope.get("query") or {}
-        bot_hash = str(query.get("bot_hash") or "").strip()
-        if not bot_hash:
-            bot_hash = single_bot.bot_hash
-        if bot_hash != single_bot.bot_hash:
+        query_bot_hash = str(query.get("bot_hash") or "").strip()
+        if query_bot_hash and query_bot_hash != single_bot.bot_hash:
             return self._error_response(
                 400, "single-bot mode: invalid bot_hash for Telegram webhook"
             ).dict()
+        bot_hash = single_bot.bot_hash
 
         if runtime.telegram_secret_token:
             headers = envelope.get("headers") or {}
@@ -1392,45 +1439,38 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
     def _normalize_regos_webhook_payload(
         action: Optional[str], data: Optional[Dict], kwargs: Dict[str, Any]
     ) -> Tuple[Optional[str], Dict[str, Any], Optional[str]]:
-        event_action: Optional[str] = None
-        event_data: Dict[str, Any] = {}
-        event_id: Optional[str] = None
+        event_id = str(kwargs.get("event_id") or "").strip() or None
 
+        # Canonical webhook call: action + payload in method params.
         if isinstance(action, str) and action in TelegramBotCrmChannelConfig.SUPPORTED_INBOUND_WEBHOOKS:
-            event_action = action
-            event_data = data or {}
-            event_id = kwargs.get("event_id")
-            return event_action, event_data, event_id
+            return action, data or {}, event_id
 
+        # Wrapped call used by some gateways: action=HandleWebhook with nested action/data.
         if action == "HandleWebhook":
-            payload = data or {}
-            event_id = str(payload.get("event_id") or kwargs.get("event_id") or "").strip() or None
+            payload = data if isinstance(data, dict) else {}
             nested = payload.get("data")
-            if isinstance(nested, dict):
-                nested_action = nested.get("action")
-                nested_data = nested.get("data")
-                if isinstance(nested_action, str):
-                    event_action = nested_action
-                if isinstance(nested_data, dict):
-                    event_data = nested_data
-                elif isinstance(nested, dict):
-                    event_data = dict(nested)
-            return event_action, event_data, event_id
+            wrapped_event_id = (
+                str(payload.get("event_id") or event_id or "").strip() or None
+            )
+            if not isinstance(nested, dict):
+                return None, {}, wrapped_event_id
+            nested_action = nested.get("action")
+            nested_data = nested.get("data")
+            if not isinstance(nested_action, str):
+                return None, {}, wrapped_event_id
+            if isinstance(nested_data, dict):
+                return nested_action, nested_data, wrapped_event_id
+            return nested_action, dict(nested), wrapped_event_id
 
+        # Alternative canonical envelope: data={"action": "...", "data": {...}, "event_id": "..."}.
         if isinstance(data, dict):
-            if isinstance(data.get("action"), str) and isinstance(data.get("data"), dict):
-                event_action = data.get("action")
-                event_data = data.get("data") or {}
-                event_id = str(data.get("event_id") or kwargs.get("event_id") or "").strip() or None
-                return event_action, event_data, event_id
+            nested_action = data.get("action")
+            nested_data = data.get("data")
+            nested_event_id = str(data.get("event_id") or event_id or "").strip() or None
+            if isinstance(nested_action, str) and isinstance(nested_data, dict):
+                return nested_action, nested_data, nested_event_id
 
-        if isinstance(action, str):
-            event_action = action
-            event_data = data or {}
-            event_id = kwargs.get("event_id")
-            return event_action, event_data, event_id
-
-        return None, {}, None
+        return None, {}, event_id
 
     @staticmethod
     def _error_response(code: int, description: str) -> IntegrationErrorResponse:
@@ -1543,9 +1583,246 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 result = template.format_map(payload).strip()
                 if result:
                     return result[:250]
-            except Exception:
-                pass
+            except Exception as error:
+                logger.warning(
+                    "Invalid bot_1_lead_subject_template; fallback to display_name: %s",
+                    error,
+                )
         return str(payload["display_name"] or tg_chat_id)[:250]
+
+    @classmethod
+    def _build_retail_customer_payload(
+        cls, message: Dict[str, Any], tg_chat_id: str
+    ) -> Dict[str, Optional[str]]:
+        contact_payload = cls._extract_contact_payload(message, tg_chat_id)
+        first_name = (
+            cls._normalize_text_value(contact_payload.get("first_name"))
+            or cls._normalize_text_value(contact_payload.get("display_name"))
+            or tg_chat_id
+        )
+        last_name = cls._normalize_text_value(contact_payload.get("last_name"))
+        full_name = cls._normalize_text_value(contact_payload.get("full_name"))
+        if not full_name:
+            full_name = " ".join([part for part in [first_name, last_name] if part]).strip() or None
+
+        contact = message.get("contact")
+        phone = None
+        if isinstance(contact, dict):
+            phone = _normalize_phone(contact.get("phone_number"))
+
+        return {
+            "first_name": first_name,
+            "last_name": last_name,
+            "full_name": full_name,
+            "main_phone": phone,
+        }
+
+    @classmethod
+    async def _find_existing_retail_customer_id(
+        cls,
+        connected_integration_id: str,
+        tg_chat_id: str,
+    ) -> Optional[int]:
+        telegram_id = cls._normalize_text_value(tg_chat_id)
+        if not telegram_id:
+            return None
+        payload = {
+            "filters": [
+                Filter(
+                    field="field_telegram_id",
+                    operator=FilterOperator.Equal,
+                    value=telegram_id,
+                ).model_dump(mode="json")
+            ],
+            "limit": 10,
+            "offset": 0,
+        }
+        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+            resp = await api.call(
+                "RetailCustomer/Get",
+                payload,
+                APIBaseResponse[List[Dict[str, Any]]],
+            )
+        if not resp.ok:
+            response_payload = resp.result if isinstance(resp.result, dict) else {}
+            error_code = response_payload.get("error")
+            description = str(response_payload.get("description") or "").lower()
+            if error_code == 7501 or "field_telegram_id" in description:
+                logger.warning(
+                    "RetailCustomer/Get by field_telegram_id is not available: %s",
+                    resp.result,
+                )
+                return None
+            logger.warning(
+                "RetailCustomer/Get rejected during pre-create telegram lookup: payload=%s result=%s",
+                payload,
+                resp.result,
+            )
+            return None
+        rows = resp.result if isinstance(resp.result, list) else []
+        if resp.result is not None and not isinstance(resp.result, list):
+            logger.warning("RetailCustomer/Get returned non-list result")
+            return None
+
+        matched_ids: List[int] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            found_id = _parse_int(str(row.get("id") or ""))
+            if not found_id or found_id <= 0:
+                continue
+            fields = row.get("fields")
+            if not isinstance(fields, list):
+                continue
+            for field_row in fields:
+                if not isinstance(field_row, dict):
+                    continue
+                if str(field_row.get("key") or "") != "field_telegram_id":
+                    continue
+                if str(field_row.get("value") or "") == telegram_id:
+                    matched_ids.append(found_id)
+                    break
+        if len(matched_ids) == 1:
+            return matched_ids[0]
+        if len(matched_ids) > 1:
+            logger.warning(
+                "RetailCustomer pre-create lookup is ambiguous by field_telegram_id: "
+                "ci=%s tg_chat_id=%s matched_ids=%s",
+                connected_integration_id,
+                telegram_id,
+                matched_ids,
+            )
+            return None
+
+        if rows and isinstance(rows[0], dict):
+            # Fallback for installations where `fields` are not returned in payload.
+            fallback_id = _parse_int(str(rows[0].get("id") or ""))
+            if fallback_id and fallback_id > 0:
+                return fallback_id
+        return None
+
+    @classmethod
+    async def _ensure_retail_customer_contact(
+        cls,
+        connected_integration_id: str,
+        bot_cfg: BotSlotConfig,
+        tg_chat_id: str,
+        message: Dict[str, Any],
+    ) -> Optional[int]:
+        mapping_key = cls._retail_customer_by_tg_key(
+            connected_integration_id, bot_cfg.bot_hash, tg_chat_id
+        )
+        cached_raw = await cls._redis_get(mapping_key)
+        cached_id = _parse_int(cached_raw)
+        if cached_id and cached_id > 0:
+            return cached_id
+
+        customer_payload = cls._build_retail_customer_payload(message, tg_chat_id)
+        group_id = bot_cfg.retail_customer_group_id
+        if not group_id:
+            logger.warning(
+                "Auto-contact create skipped: ci=%s bot_hash=%s tg_chat_id=%s reason=group_id_not_configured",
+                connected_integration_id,
+                bot_cfg.bot_hash,
+                tg_chat_id,
+            )
+            return None
+
+        existing_customer_id = await cls._find_existing_retail_customer_id(
+            connected_integration_id=connected_integration_id,
+            tg_chat_id=tg_chat_id,
+        )
+        if existing_customer_id and existing_customer_id > 0:
+            await cls._redis_set_mapping(mapping_key, str(existing_customer_id))
+            logger.debug(
+                "Auto-contact reused existing customer: ci=%s bot_hash=%s tg_chat_id=%s customer_id=%s",
+                connected_integration_id,
+                bot_cfg.bot_hash,
+                tg_chat_id,
+                existing_customer_id,
+            )
+            return existing_customer_id
+
+        main_phone = customer_payload.get("main_phone")
+        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+            resp = await api.call(
+                "RetailCustomer/Add",
+                {
+                    "group_id": group_id,
+                    "first_name": str(customer_payload.get("first_name") or tg_chat_id),
+                    "last_name": customer_payload.get("last_name"),
+                    "full_name": customer_payload.get("full_name"),
+                    "main_phone": main_phone,
+                    "fields": [{"key": "field_telegram_id", "value": str(tg_chat_id)}],
+                },
+                APIBaseResponse[Dict[str, Any]],
+            )
+        if not resp.ok:
+            logger.warning(
+                "RetailCustomer/Add rejected during auto-contact create: ci=%s bot_hash=%s tg_chat_id=%s payload=%s",
+                connected_integration_id,
+                bot_cfg.bot_hash,
+                tg_chat_id,
+                resp.result,
+            )
+            return None
+
+        customer_id = (
+            _parse_int(str(resp.result.get("new_id") or ""))
+            if isinstance(resp.result, dict)
+            else None
+        )
+        if not customer_id or customer_id <= 0:
+            logger.warning(
+                "RetailCustomer/Add returned empty new_id: ci=%s bot_hash=%s tg_chat_id=%s payload=%s",
+                connected_integration_id,
+                bot_cfg.bot_hash,
+                tg_chat_id,
+                resp.result,
+            )
+            return None
+
+        await cls._redis_set_mapping(mapping_key, str(customer_id))
+        logger.debug(
+            "Auto-contact created: ci=%s bot_hash=%s tg_chat_id=%s customer_id=%s group_id=%s has_phone=%s",
+            connected_integration_id,
+            bot_cfg.bot_hash,
+            tg_chat_id,
+            customer_id,
+            group_id,
+            bool(main_phone),
+        )
+        return customer_id
+
+    @classmethod
+    async def _ensure_auto_contact_best_effort(
+        cls,
+        connected_integration_id: str,
+        bot_cfg: BotSlotConfig,
+        tg_chat_id: str,
+        message: Dict[str, Any],
+    ) -> None:
+        if (
+            bot_cfg.auto_create_contact_mode
+            != TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_RETAIL_CUSTOMER
+        ):
+            return
+
+        try:
+            await cls._ensure_retail_customer_contact(
+                connected_integration_id=connected_integration_id,
+                bot_cfg=bot_cfg,
+                tg_chat_id=tg_chat_id,
+                message=message,
+            )
+        except Exception as error:
+            logger.warning(
+                "Auto-contact create failed: ci=%s bot_hash=%s tg_chat_id=%s error=%s",
+                connected_integration_id,
+                bot_cfg.bot_hash,
+                tg_chat_id,
+                error,
+            )
 
     @classmethod
     async def _resolve_client_avatar_url(
@@ -2456,6 +2733,15 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if not lead_id or not chat_id:
             return
 
+        # Contact creation is executed after lead resolution, so the same path
+        # works for both newly created and already existing leads.
+        await cls._ensure_auto_contact_best_effort(
+            connected_integration_id=connected_integration_id,
+            bot_cfg=bot_cfg,
+            tg_chat_id=tg_chat_id,
+            message=message,
+        )
+
         await cls._sync_lead_from_telegram_best_effort(
             connected_integration_id=connected_integration_id,
             state_ttl_sec=runtime.state_ttl_sec,
@@ -2936,6 +3222,28 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         )
 
     @classmethod
+    async def _resolve_cached_lead_mapping(
+        cls,
+        connected_integration_id: str,
+        bot_hash: str,
+        tg_chat_id: str,
+    ) -> Tuple[Optional[int], Optional[str]]:
+        # Redis-only fast path used before any CRM lookup/create.
+        lead_id_raw = await cls._redis_get(
+            cls._lead_by_tg_key(connected_integration_id, bot_hash, tg_chat_id)
+        )
+        lead_id = _parse_int(lead_id_raw)
+        if not lead_id:
+            return None, None
+
+        chat_id = await cls._redis_get(
+            cls._chat_by_lead_key(connected_integration_id, lead_id)
+        )
+        if not chat_id:
+            return None, None
+        return lead_id, chat_id
+
+    @classmethod
     async def _resolve_or_create_lead(
         cls,
         connected_integration_id: str,
@@ -2944,14 +3252,13 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         tg_chat_id: str,
         message: Dict[str, Any],
     ) -> Tuple[Optional[int], Optional[str]]:
-        lead_key = cls._lead_by_tg_key(connected_integration_id, bot_cfg.bot_hash, tg_chat_id)
-        lead_id_raw = await cls._redis_get(lead_key)
-        if lead_id_raw:
-            lead_id = _parse_int(lead_id_raw)
-            if lead_id:
-                chat_id = await cls._redis_get(cls._chat_by_lead_key(connected_integration_id, lead_id))
-                if chat_id:
-                    return lead_id, chat_id
+        cached_lead_id, cached_chat_id = await cls._resolve_cached_lead_mapping(
+            connected_integration_id=connected_integration_id,
+            bot_hash=bot_cfg.bot_hash,
+            tg_chat_id=tg_chat_id,
+        )
+        if cached_lead_id and cached_chat_id:
+            return cached_lead_id, cached_chat_id
 
         recovered = await cls._recover_lead_by_external_chat(
             connected_integration_id=connected_integration_id,
@@ -2971,27 +3278,25 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         lock_token = await cls._acquire_lock(lock_key, runtime.state_ttl_sec)
         if not lock_token:
             await asyncio.sleep(0.25)
-            lead_id_raw = await cls._redis_get(lead_key)
-            if lead_id_raw:
-                lead_id = _parse_int(lead_id_raw)
-                if lead_id:
-                    chat_id = await cls._redis_get(
-                        cls._chat_by_lead_key(connected_integration_id, lead_id)
-                    )
-                    if chat_id:
-                        return lead_id, chat_id
+            # Another worker may have created the lead while we were waiting.
+            cached_lead_id, cached_chat_id = await cls._resolve_cached_lead_mapping(
+                connected_integration_id=connected_integration_id,
+                bot_hash=bot_cfg.bot_hash,
+                tg_chat_id=tg_chat_id,
+            )
+            if cached_lead_id and cached_chat_id:
+                return cached_lead_id, cached_chat_id
             return None, None
 
         try:
-            lead_id_raw = await cls._redis_get(lead_key)
-            if lead_id_raw:
-                lead_id = _parse_int(lead_id_raw)
-                if lead_id:
-                    chat_id = await cls._redis_get(
-                        cls._chat_by_lead_key(connected_integration_id, lead_id)
-                    )
-                    if chat_id:
-                        return lead_id, chat_id
+            # Double-check mapping under lock to avoid duplicate lead creation.
+            cached_lead_id, cached_chat_id = await cls._resolve_cached_lead_mapping(
+                connected_integration_id=connected_integration_id,
+                bot_hash=bot_cfg.bot_hash,
+                tg_chat_id=tg_chat_id,
+            )
+            if cached_lead_id and cached_chat_id:
+                return cached_lead_id, cached_chat_id
 
             lead_subject = cls._build_subject(
                 bot_cfg.lead_subject_template, message, tg_chat_id
@@ -3065,14 +3370,13 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         bot_cfg: BotSlotConfig,
         tg_chat_id: str,
     ) -> Tuple[Optional[int], Optional[str]]:
-        lead_key = cls._lead_by_tg_key(connected_integration_id, bot_cfg.bot_hash, tg_chat_id)
-        lead_id_raw = await cls._redis_get(lead_key)
-        if lead_id_raw:
-            lead_id = _parse_int(lead_id_raw)
-            if lead_id:
-                chat_id = await cls._redis_get(cls._chat_by_lead_key(connected_integration_id, lead_id))
-                if chat_id:
-                    return lead_id, chat_id
+        cached_lead_id, cached_chat_id = await cls._resolve_cached_lead_mapping(
+            connected_integration_id=connected_integration_id,
+            bot_hash=bot_cfg.bot_hash,
+            tg_chat_id=tg_chat_id,
+        )
+        if cached_lead_id and cached_chat_id:
+            return cached_lead_id, cached_chat_id
 
         recovered = await cls._recover_lead_by_external_chat(
             connected_integration_id=connected_integration_id,
@@ -3901,7 +4205,3 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             return
         bot = await cls._get_bot(bot_cfg.token)
         await bot.send_message(chat_id=_tg_chat_id_cast(tg_chat_id), text=text)
-
-    @staticmethod
-    def _is_longpolling_mode() -> bool:
-        return _update_mode_from_value(app_settings.telegram_update_mode) == "longpolling"
