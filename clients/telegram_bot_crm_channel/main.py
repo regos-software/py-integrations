@@ -838,10 +838,17 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         )
 
     @staticmethod
-    async def _redis_set_mapping(key: str, value: str) -> None:
+    async def _redis_set_mapping(
+        key: str,
+        value: str,
+        ttl_sec: Optional[int] = None,
+    ) -> None:
         if not _redis_enabled():
             return
-        await redis_client.set(key, value)
+        resolved_ttl = _parse_int(str(ttl_sec or ""), None)
+        if not resolved_ttl or resolved_ttl <= 0:
+            resolved_ttl = TelegramBotCrmChannelConfig.DEFAULT_STATE_TTL_SEC
+        await redis_client.set(key, value, ex=max(resolved_ttl, 1))
 
     @staticmethod
     async def _redis_get(key: str) -> Optional[str]:
