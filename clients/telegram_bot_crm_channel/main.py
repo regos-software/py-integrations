@@ -2271,6 +2271,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {}
         field_names = [
+            "subject",
             "external_contact_id",
             "client_name",
             "client_phone",
