@@ -2,141 +2,73 @@
 
 ## 1. Цель
 
-Реализовать интеграцию `asterisk_crm_channel`, которая получает события звонков из Asterisk (ARI), создает/находит обращения в CRM и пишет события звонка в чат обращения.
+Интеграция `asterisk_crm_channel` принимает события звонков из Asterisk (ARI), обрабатывает их через централизованный асинхронный пайплайн, создает/находит активный `Lead` в CRM и фиксирует ход звонка в чате обращения.
 
-Результат для бизнеса:
+Бизнес-результат:
 
-- входящие/исходящие звонки фиксируются в CRM;
-- при первом контакте автоматически создается `Lead`;
-- запись звонка прикрепляется в чат обращения (или отправляется ссылка на запись).
+- входящие и исходящие звонки отражаются в CRM в реальном времени;
+- при первом контакте по номеру формируется обращение;
+- запись звонка автоматически прикрепляется в чат обращения (или публикуется рабочая ссылка);
+- повторные доставки событий остаются идемпотентными.
 
-## 2. Исходные условия
+## 2. Каноническая модель интеграции
 
-По вашему серверу:
-
-- включен Asterisk HTTP/ARI;
-- HTTP Prefix: `/vuetibhfocbz`;
-- сервер Asterisk слушает `127.0.0.1:8088`;
-- доступны URI: `/ari/...`, `/ws`, `/metrics/...`.
-
-Вывод:
-
-- интеграция должна подключаться к Asterisk локально (на том же сервере), либо через reverse proxy;
-- во все Asterisk URL обязательно добавлять prefix `/vuetibhfocbz`.
-
-## 3. Границы MVP
-
-Входит в MVP:
-
-- подписка на поток событий ARI (WebSocket);
-- нормализация событий звонка;
-- поиск/создание `Lead` по номеру телефона;
-- запись событий звонка в чат `Lead`;
-- обработка события готовности записи и прикрепление файла;
-- работа с несколькими `connected_integration_id`;
-- корректная работа в кластере (несколько инстансов интеграции).
-
-Не входит в MVP:
-
-- управление звонком из CRM (answer/hold/transfer/hangup);
-- полноценная call-center аналитика;
-- потоковая передача аудио в реальном времени.
-
-## 4. Модель интеграции
-
-Ключ интеграции:
-
-- `asterisk_crm_channel` (lower snake_case).
+Ключ интеграции: `asterisk_crm_channel`.
 
 Точки входа:
 
 - `/clients/asterisk_crm_channel` (`Connect`, `ReConnect`, `Disconnect`, `UpdateSettings`);
-- `/external/{connected_integration_id}/external/` (опционально для HTTP-событий от dialplan/агента);
-- `/webhook/{connected_integration_id}/` (входящие webhook REGOS, если понадобятся).
+- `/external/{connected_integration_id}/external/` для HTTP-событий от dialplan/агента;
+- ARI WebSocket `ws(s)://<host>:<port>/<prefix>/ari/events`.
 
-Важно:
+Единый принцип обработки:
 
-- для HTTP webhook: сначала `200 OK`, затем асинхронная обработка.
+1. Любой входящий источник приводит событие к одному нормализованному контракту.
+2. Событие сразу ставится в Redis Stream.
+3. Вся CRM-логика выполняется только воркерами Stream consumer group.
+4. HTTP endpoint отвечает `200 OK` после успешной постановки в очередь.
 
-## 5. Настройки (single account)
+## 3. Настройки (ConnectedIntegrationSetting)
 
-Набор настроек для одного Asterisk-аккаунта:
+Используются ключи в `lower_snake_case` без дублирующих синонимов.
 
-1. `ASTERISK_ENABLED`  
-Тип: bool  
-Описание: включает/выключает интеграцию.
+Обязательные:
 
-2. `ASTERISK_ACCOUNT_KEY`  
-Тип: string  
-Описание: стабильный уникальный ключ экземпляра Asterisk; используется для вычисления `asterisk_hash`.
+- `asterisk_enabled` (`bool`)
+- `asterisk_account_key` (`string`)
+- `asterisk_base_url` (`string`, содержит HTTP prefix, например `http://127.0.0.1:8088/vuetibhfocbz`)
+- `asterisk_ari_app` (`string`)
+- `asterisk_ari_user` (`string`)
+- `asterisk_ari_password` (`string`)
+- `asterisk_pipeline_id` (`int > 0`)
+- `asterisk_channel_id` (`int > 0`)
 
-3. `ASTERISK_BASE_URL`  
-Тип: string  
-Описание: базовый URL Asterisk с prefix, пример: `http://127.0.0.1:8088/vuetibhfocbz`.
+Опциональные:
 
-4. `ASTERISK_ARI_APP`  
-Тип: string  
-Описание: имя ARI приложения (`Stasis app`), события которого слушает интеграция.
+- `asterisk_default_responsible_user_id` (`int > 0`)
+- `asterisk_lead_subject_template` (`string`, default: `Call {direction} {from_phone}`)
+- `asterisk_allowed_did_list` (`string`, CSV)
+- `asterisk_recording_base_url` (`string`)
+- `lead_dedupe_ttl_sec` (`int >= 60`, default: `86400`)
+- `state_ttl_sec` (`int >= 60`, default: `86400`)
+- `reconcile_lookback_min` (`int >= 1`, default: `120`)
 
-5. `ASTERISK_ARI_USER`  
-Тип: string  
-Описание: ARI username.
+Производные значения:
 
-6. `ASTERISK_ARI_PASSWORD`  
-Тип: string  
-Описание: ARI password.
+- `asterisk_hash = md5(asterisk_account_key)`
+- `normalized_phone = normalize(phone)` (цифры, канонический формат интеграции)
 
-7. `ASTERISK_PIPELINE_ID`  
-Тип: int  
-Описание: pipeline для создания `Lead`.
+## 4. Нормализованный контракт события звонка
 
-8. `ASTERISK_CHANNEL_ID`  
-Тип: int  
-Описание: CRM channel для `Lead`.
-
-9. `ASTERISK_DEFAULT_RESPONSIBLE_USER_ID`  
-Тип: int, optional  
-Описание: ответственный по умолчанию.
-
-10. `ASTERISK_LEAD_SUBJECT_TEMPLATE`  
-Тип: string, optional  
-Описание: шаблон темы лида, например: `Call {direction} {from_phone}`.
-
-11. `ASTERISK_ALLOWED_DID_LIST`  
-Тип: string, optional  
-Описание: список разрешенных DID/входящих номеров (через запятую).
-
-12. `ASTERISK_RECORDING_BASE_URL`  
-Тип: string, optional  
-Описание: URL для скачивания записей (если запись отдается HTTP).
-
-13. `ASTERISK_RECONCILE_ENABLED`  
-Тип: bool  
-Описание: включить восстановление состояния после рестарта/потери Redis.
-
-14. `ASTERISK_RECONCILE_LOOKBACK_MIN`  
-Тип: int  
-Описание: окно истории (в минутах) для reconcile.
-
-Общие:
-
-- `LEAD_DEDUPE_TTL_SEC`
-- `STATE_TTL_SEC`
-
-Внутренний идентификатор:
-
-- `asterisk_hash = md5(ASTERISK_ACCOUNT_KEY)`.
-
-## 6. Нормализованный контракт события звонка
-
-Минимальные поля после нормализации:
+Минимальные поля:
 
 - `event_id`
-- `external_call_id` (предпочтительно `linkedid`)
+- `external_call_id` (приоритетно `linkedid`)
 - `asterisk_hash`
-- `direction` (`inbound` / `outbound`)
+- `direction` (`inbound` | `outbound`)
 - `from_phone`
 - `to_phone`
+- `client_phone` (номер, по которому ведется lead-корреляция)
 - `status` (`started`, `ringing`, `answered`, `missed`, `completed`, `failed`, `recording_ready`)
 - `event_ts`
 - `talk_duration_sec` (optional)
@@ -144,117 +76,169 @@
 - `operator_ext` (optional)
 - `raw_payload`
 
-Если `event_id` не пришел из источника, вычисляется детерминированно из `external_call_id + status + event_ts`.
+Генерация `event_id`:
 
-## 7. Источники событий Asterisk
+- если источник передал `event_id`, используется он;
+- иначе: `md5(external_call_id + ":" + status + ":" + event_ts)`.
 
-Основной источник (MVP):
-
-- ARI WebSocket: `ws(s)://<host>:<port>/<prefix>/ari/events?...`
-
-Целевые события:
-
-- `StasisStart`
-- `ChannelStateChange`
-- `Dial`
-- `ChannelHangupRequest`
-- `ChannelDestroyed`
-- события записи (`RecordingStarted`, `RecordingFinished` или эквивалентный поток вашего сценария)
-
-Опциональный источник:
-
-- HTTP push от dialplan/внешнего агента на `/external/{connected_integration_id}/external/`.
-
-## 8. Бизнес-флоу
-
-1. Интеграция подключается к ARI и получает событие звонка.
-2. Событие нормализуется и ставится в Redis Stream.
-3. Worker проверяет идемпотентность события.
-4. По номеру телефона ищется активный `Lead`.
-5. Если активного `Lead` нет, создается новый в `ASTERISK_PIPELINE_ID` / `ASTERISK_CHANNEL_ID`.
-6. В чат обращения добавляется сообщение о состоянии звонка.
-7. При `recording_ready` запись прикрепляется в чат (или отправляется ссылка fallback).
-8. Повторные доставки/повторы Asterisk не создают дубликаты в CRM.
-
-## 9. Правила маппинга в CRM
+## 5. CRM-корреляция и единая логика Lead
 
 Ключи корреляции:
 
 - `connected_integration_id`
 - `asterisk_hash`
-- нормализованный номер телефона
+- `normalized_phone`
 - `external_call_id`
 
-Поля `Lead/Add`:
+Каноничное заполнение `Lead/Add`:
 
-- `channel_id = ASTERISK_CHANNEL_ID`
-- `pipeline_id = ASTERISK_PIPELINE_ID`
-- `responsible_user_id = ASTERISK_DEFAULT_RESPONSIBLE_USER_ID` (optional)
-- `client_phone` = номер клиента
-- `subject` = шаблон/дефолт
+- `channel_id = asterisk_channel_id`
+- `pipeline_id = asterisk_pipeline_id`
+- `responsible_user_id = asterisk_default_responsible_user_id` (если задан)
+- `client_phone = normalized_phone`
+- `subject = render(asterisk_lead_subject_template)`
 - `external_contact_id = ast:{asterisk_hash}:{normalized_phone}`
 - `bot_id = asterisk_hash`
-- `external_chat_id` = стабильный call/party id (если применимо)
+- `external_chat_id = normalized_phone`
 
-Примечание:
+Алгоритм `resolve_or_create_active_lead`:
 
-- `dedupe_key` не используется.
+1. Проверка Redis mapping по телефону.
+2. Если mapping отсутствует: `Lead/Get` по `bot_id + external_contact_id` и статусам `New/InProgress/WaitingClient`.
+3. Если активный лид найден: кэширование mapping.
+4. Если активный лид не найден: `Lead/Add`, затем `Lead/Get` для получения `chat_id`, затем кэширование mapping.
+5. Создание нового лида защищается distributed lock по `(connected_integration_id, asterisk_hash, normalized_phone)`.
 
-## 10. Надежность и кластер
+## 6. Логика сообщений в чат CRM
 
-Обязательно:
+Для каждого нормализованного call-события формируется CRM-сообщение с `external_message_id`:
 
-- Redis обязателен;
-- обработка через Redis Streams + consumer group;
-- retry + DLQ;
-- идемпотентность событий;
-- distributed lock для критических секций (создание лида);
-- только один активный ARI consumer на `connected_integration_id` (leader lock);
-- изоляция ключей Redis по `connected_integration_id`.
+- `astmsg:{asterisk_hash}:{external_call_id}:{status}:{event_id}`
 
-Сценарий потери Redis:
+Запись в CRM:
 
-- маппинги восстанавливаются из CRM и/или reconcile из истории Asterisk.
+- `ChatMessage/Add` в чат лида;
+- при `recording_ready`:
+1. попытка загрузить запись и отправить как файл через `ChatMessage/AddFile`;
+2. публикация системного/обычного текстового сообщения со ссылкой, если файл недоступен.
 
-## 11. Безопасность
+Обработка ошибки закрытой связанной сущности (`error=1220`):
 
-- не логировать `ASTERISK_ARI_PASSWORD` и секреты;
-- маскировать auth-заголовки;
-- валидировать входящие HTTP события (если используются);
-- ограничить доступ к Asterisk API (лучше localhost/reverse proxy/IP allowlist).
+Для call-state событий (`started`, `ringing`, `answered`, `missed`, `completed`, `failed`):
 
-## 12. Наблюдаемость
+1. Сбросить mapping для старой связки.
+2. Выполнить `resolve_or_create_active_lead`.
+3. Повторить `ChatMessage/Add` один раз с новым `lead_id/chat_id`.
+4. Если повтор неуспешен, событие идет в retry/DLQ.
 
-Логи/метрики:
+Для `recording_ready`:
 
-- подключения/переподключения ARI;
-- принято/обработано/повторно обработано/в DLQ;
-- создано лидов / найдено существующих;
-- ошибки прикрепления записей;
-- reconcile summary.
+1. Обработать событие как `late_recording_closed_lead`.
+2. Сохранить `recording_url` и метаданные звонка в audit/reconcile state.
+3. Завершить обработку события без создания нового лида.
 
-## 13. Достаточность REGOS API
+## 7. Политика статусов лида
 
-Для MVP достаточно текущего API:
+Статусы меняются централизованно через `Lead/Edit` (best-effort):
 
-- `Lead/Get`, `Lead/Add`, `Lead/Edit`, `Lead/Close`
-- `ChatMessage/Add`, `ChatMessage/Get`, `ChatMessage/MarkSent`
+- `InProgress`:
+  - входящий звонок (`direction=inbound`) со статусами `started|ringing|answered`;
+  - исходящий звонок после фактического ответа клиента (`direction=outbound`, `status=answered`).
+- `WaitingClient`:
+  - исходящий звонок оператора со статусами `started|ringing`.
+
+Терминальные статусы (`Closed`, `Converted`) не перезаписываются.
+
+## 8. Redis: централизация ключей
+
+Префикс: `clients:asterisk_crm_channel:`
+
+Системные ключи:
+
+- `settings:{connected_integration_id}`
+- `active_ci_ids`
+- `stream:asterisk_in:{connected_integration_id}`
+- `stream:dlq:{connected_integration_id}`
+- `worker:heartbeat:{connected_integration_id}:{instance_id}`
+- `lock:ari_consumer:{connected_integration_id}`
+- `lock:create_lead:{connected_integration_id}:{asterisk_hash}:{normalized_phone}`
+- `dedupe:event:{connected_integration_id}:{event_id}`
+
+Централизованный mapping (единый payload):
+
+- `mapping:by_phone:{connected_integration_id}:{asterisk_hash}:{normalized_phone}`
+- `mapping:by_call:{connected_integration_id}:{asterisk_hash}:{external_call_id}`
+
+Оба mapping-ключа хранят одинаковый JSON:
+
+- `lead_id`
+- `chat_id`
+- `asterisk_hash`
+- `normalized_phone`
+- `external_call_id`
+- `last_event_ts`
+
+TTL-политика:
+
+- ключи runtime-состояния всегда создаются с явным TTL;
+- `TTL=1` для любых ключей интеграции запрещен;
+- бессрочные runtime-ключи (`TTL=-1`) запрещены;
+- `dedupe:event:*` использует `lead_dedupe_ttl_sec` (`>= 60`);
+- `mapping:*`, `settings:*` используют `state_ttl_sec` (`>= 60`);
+- `lock:*` и `worker:heartbeat:*` используют фиксированный операционный TTL `>= 30`.
+
+## 9. Надежность и кластер
+
+Базовый runtime-контур:
+
+- Redis Streams + consumer group;
+- retry с ограничением попыток;
+- DLQ для финально неуспешных событий;
+- идемпотентность на уровне `event_id`;
+- единственный активный ARI consumer на `connected_integration_id` через leader lock;
+- горизонтальная масштабируемость воркеров обработки.
+
+Reconcile:
+
+- после перезапуска сервиса/Redis интеграция выполняет восстановление состояния за окно `reconcile_lookback_min`;
+- в процессе reconcile восстанавливаются mapping-ключи и незавершенные call-связки.
+
+## 10. Безопасность и наблюдаемость
+
+Безопасность:
+
+- маскирование auth-данных в логах;
+- хранение секретов только в интеграционных настройках;
+- доступ к Asterisk API через локальный контур или доверенный reverse proxy.
+
+Наблюдаемость:
+
+- метрики подключения/переподключения ARI;
+- счетчики processed/retried/dlq;
+- счетчики lead_created/lead_reused;
+- счетчики recording_attached/recording_link_fallback;
+- отдельные счетчики обработки `error=1220`, успешных повторов и `late_recording_closed_lead`.
+
+## 11. Используемые REGOS API методы
+
+- `Lead/Get`, `Lead/Add`, `Lead/Edit`
+- `ChatMessage/Add`, `ChatMessage/Get`
 - `ChatMessage/AddFile`
 - `ConnectedIntegrationSetting/Get`
-- `ConnectedIntegration/Edit` (если нужны подписки webhook REGOS)
 
-## 14. Критерии приемки
+## 12. Критерии приемки
 
-- входящий звонок создает/находит `Lead` и пишет событие в чат;
-- повтор одного и того же события не создает дублей;
-- запись звонка прикрепляется как файл или отправляется ссылкой;
-- интеграция работает с несколькими `connected_integration_id`;
-- корректная работа при нескольких инстансах;
-- после перезапуска Redis состояние восстанавливается reconcile-механизмом.
+1. Входящий звонок создает или находит активный лид и добавляет событие в чат.
+2. Повторная доставка того же call-события не создает дубли сообщений.
+3. `recording_ready` прикрепляет файл записи в чат, ссылка работает как fallback.
+4. Обработка `error=1220` для call-state событий приводит к созданию/поиску нового активного лида и успешному повтору записи сообщения.
+5. Обработка `error=1220` для `recording_ready` завершается как `late_recording_closed_lead` с сохранением `recording_url` в состоянии reconcile.
+6. Интеграция стабильно работает при нескольких инстансах и нескольких `connected_integration_id`.
+7. После восстановления Redis reconcile возвращает рабочие mapping-связи.
 
-## 15. Deliverables
+## 13. Deliverables
 
 - `clients/asterisk_crm_channel/main.py`
 - `clients/asterisk_crm_channel/README.md`
 - регистрация клиента в `routes/clients.py`
-- runbook с примерами env и шагами reconnect
+- runbook с настройками и операционными шагами reconnect/reconcile

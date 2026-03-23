@@ -20,6 +20,13 @@ class LeadStatusEnum(str, Enum):
     Closed = "Closed"
 
 
+class LeadSetStatusEnum(str, Enum):
+    New = "New"
+    InProgress = "InProgress"
+    WaitingClient = "WaitingClient"
+    Closed = "Closed"
+
+
 class Lead(BaseSchema):
     """Lead read model."""
 
@@ -155,7 +162,6 @@ class LeadEditRequest(BaseSchema):
     channel_id: Optional[int] = PydField(default=None, ge=1, description="Channel id.")
     pipeline_id: Optional[int] = PydField(default=None, ge=1, description="Pipeline id.")
     stage_id: Optional[int] = PydField(default=None, ge=1, description="Stage id.")
-    status: Optional[LeadStatusEnum] = PydField(default=None, description="Status.")
     subject: Optional[str] = PydField(default=None, description="Lead subject.")
     external_contact_id: Optional[str] = PydField(
         default=None, description="External contact id."
@@ -192,6 +198,21 @@ class LeadEditResponse(APIBaseResponse[ArrayResult]):
     model_config = ConfigDict(extra="ignore")
 
 
+class LeadSetStatusRequest(BaseSchema):
+    """Request for Lead/SetStatus."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: int = PydField(..., ge=1, description="Lead id.")
+    status: LeadSetStatusEnum = PydField(..., description="Lead status.")
+
+
+class LeadSetStatusResponse(APIBaseResponse[ArrayResult]):
+    """Response for Lead/SetStatus."""
+
+    model_config = ConfigDict(extra="ignore")
+
+
 __all__ = [
     "Lead",
     "LeadAddRequest",
@@ -200,5 +221,8 @@ __all__ = [
     "LeadEditResponse",
     "LeadGetRequest",
     "LeadGetResponse",
+    "LeadSetStatusEnum",
+    "LeadSetStatusRequest",
+    "LeadSetStatusResponse",
     "LeadStatusEnum",
 ]

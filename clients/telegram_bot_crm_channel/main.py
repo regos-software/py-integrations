@@ -40,6 +40,7 @@ from schemas.api.crm.lead import (
     LeadAddRequest,
     LeadEditRequest,
     LeadGetRequest,
+    LeadSetStatusRequest,
     LeadStatusEnum,
 )
 from schemas.api.crm.pipeline import CrmEntityTypeEnum, PipelineGetRequest
@@ -3602,15 +3603,15 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 if current_status == status:
                     return
 
-                response = await api.crm.lead.edit(
-                    LeadEditRequest(id=lead_id, status=status)
+                response = await api.crm.lead.set_status(
+                    LeadSetStatusRequest(id=lead_id, status=status.value)
                 )
             if response.ok:
                 return
 
             payload = response.result if isinstance(response.result, dict) else {}
             logger.warning(
-                "Lead/Edit status rejected: ci=%s lead_id=%s from_status=%s to_status=%s reason=%s error=%s description=%s",
+                "Lead/SetStatus rejected: ci=%s lead_id=%s from_status=%s to_status=%s reason=%s error=%s description=%s",
                 connected_integration_id,
                 lead_id,
                 current_status,
