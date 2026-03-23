@@ -100,6 +100,7 @@ class TelegramBotCrmChannelConfig:
 
     AUTO_CREATE_CONTACT_NONE = "none"
     AUTO_CREATE_CONTACT_RETAIL_CUSTOMER = "retail_customer"
+    CHAT_MESSAGE_ADD_CLOSED_ENTITY_ERROR = 1220
 
 
 @dataclass
@@ -143,6 +144,15 @@ class TelegramFileTooLargeError(RuntimeError):
         self.size_bytes = size_bytes
         self.limit_bytes = limit_bytes
         super().__init__("Telegram file exceeds size limit")
+
+
+class ChatMessageAddClosedEntityError(RuntimeError):
+    def __init__(self, description: Optional[str] = None) -> None:
+        self.description = str(description or "").strip() or None
+        super().__init__(
+            "ChatMessage/Add rejected for closed linked entity"
+            + (f": {self.description}" if self.description else "")
+        )
 
 
 def _now_ts() -> int:
@@ -3072,15 +3082,78 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if not tg_message_id:
             return
 
+        try:
+            await cls._add_or_get_regos_message_by_telegram(
+                connected_integration_id=connected_integration_id,
+                bot_hash=bot_hash,
+                tg_chat_id=tg_chat_id,
+                tg_message_id=tg_message_id,
+                lead_id=lead_id,
+                chat_id=chat_id,
+                text=text,
+                file_ids=file_ids,
+            )
+            return
+        except ChatMessageAddClosedEntityError as error:
+            logger.info(
+                "ChatMessage/Add rejected for closed linked entity. Retrying with a fresh lead: ci=%s bot_hash=%s tg_chat_id=%s old_lead_id=%s old_chat_id=%s error=%s",
+                connected_integration_id,
+                bot_hash,
+                tg_chat_id,
+                lead_id,
+                chat_id,
+                error,
+            )
+
+        fresh_lead_id, fresh_chat_id = await cls._resolve_or_create_lead(
+            connected_integration_id=connected_integration_id,
+            runtime=runtime,
+            bot_cfg=bot_cfg,
+            tg_chat_id=tg_chat_id,
+            message=message,
+        )
+        if not fresh_lead_id or not fresh_chat_id:
+            raise RuntimeError(
+                "Failed to resolve fresh lead after ChatMessage/Add rejected for closed linked entity"
+            )
+
+        await cls._sync_lead_from_telegram_best_effort(
+            connected_integration_id=connected_integration_id,
+            state_ttl_sec=runtime.state_ttl_sec,
+            bot_cfg=bot_cfg,
+            lead_id=fresh_lead_id,
+            tg_chat_id=tg_chat_id,
+            message=message,
+        )
+        await cls._set_lead_status_best_effort(
+            connected_integration_id=connected_integration_id,
+            lead_id=fresh_lead_id,
+            status=LeadStatusEnum.InProgress,
+            reason="client_message",
+        )
+        await cls._mark_chat_read_best_effort(
+            connected_integration_id=connected_integration_id,
+            chat_id=fresh_chat_id,
+        )
+
+        fresh_text, fresh_file_ids = await cls._prepare_telegram_message_content(
+            connected_integration_id=connected_integration_id,
+            bot_cfg=bot_cfg,
+            chat_id=fresh_chat_id,
+            message=message,
+        )
+        if not fresh_text and not fresh_file_ids:
+            return
+
         await cls._add_or_get_regos_message_by_telegram(
             connected_integration_id=connected_integration_id,
             bot_hash=bot_hash,
             tg_chat_id=tg_chat_id,
             tg_message_id=tg_message_id,
-            lead_id=lead_id,
-            chat_id=chat_id,
-            text=text,
-            file_ids=file_ids,
+            lead_id=fresh_lead_id,
+            chat_id=fresh_chat_id,
+            text=fresh_text,
+            file_ids=fresh_file_ids,
         )
 
     @classmethod
@@ -3369,6 +3442,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             )
             error_code = result_payload.get("error")
             error_description = result_payload.get("description")
+            error_code_int = _parse_int(str(error_code or ""), None)
             await cls._clear_cached_target_mapping(
                 connected_integration_id=connected_integration_id,
                 bot_hash=bot_hash,
@@ -3384,6 +3458,11 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 bot_hash,
                 tg_chat_id,
             )
+            if (
+                error_code_int
+                == TelegramBotCrmChannelConfig.CHAT_MESSAGE_ADD_CLOSED_ENTITY_ERROR
+            ):
+                raise ChatMessageAddClosedEntityError(error_description)
             raise RuntimeError(
                 "ChatMessage/Add rejected: "
                 f"error={error_code} description={error_description}"
