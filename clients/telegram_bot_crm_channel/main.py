@@ -255,6 +255,22 @@ def _normalize_phone(value: Any) -> Optional[str]:
     return digits or None
 
 
+def _normalize_telegram_name(value: Any, *, max_len: int) -> str:
+    text = str(value or "")
+    if not text:
+        return ""
+    text = text.replace("\u00A0", " ")
+    text = text.replace("\u200B", "")
+    text = text.replace("\u200C", "")
+    text = text.replace("\u200D", "")
+    text = text.replace("\uFEFF", "")
+    text = re.sub(r"[\x00-\x1F\x7F]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return ""
+    return text[:max_len]
+
+
 def _resolve_avatar_user_id(message: Dict[str, Any]) -> Tuple[Optional[int], str]:
     contact = message.get("contact")
     contact = contact if isinstance(contact, dict) else {}
@@ -1686,23 +1702,33 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         contact = contact if isinstance(contact, dict) else {}
         chat = message.get("chat") or {}
 
-        first_name = (
+        first_name_raw = (
             str(contact.get("first_name") or "").strip()
             or str(author.get("first_name") or "").strip()
             or str(chat.get("first_name") or "").strip()
         )
-        last_name = (
+        last_name_raw = (
             str(contact.get("last_name") or "").strip()
             or str(author.get("last_name") or "").strip()
             or str(chat.get("last_name") or "").strip()
         )
-        username = (
+        username_raw = (
             str(author.get("username") or "").strip()
             or str(chat.get("username") or "").strip()
         )
+        first_name = _normalize_telegram_name(first_name_raw, max_len=120)
+        last_name = _normalize_telegram_name(last_name_raw, max_len=120)
+        username = _normalize_telegram_name(username_raw, max_len=64).lstrip("@")
+        username = re.sub(r"\s+", "", username)
 
-        full_name = " ".join([first_name, last_name]).strip()
-        display_name = full_name or username or tg_chat_id
+        full_name = _normalize_telegram_name(
+            " ".join([part for part in [first_name, last_name] if part]),
+            max_len=250,
+        )
+        display_name = _normalize_telegram_name(
+            full_name or username or tg_chat_id,
+            max_len=250,
+        ) or str(tg_chat_id).strip()[:250]
 
         return {
             "chat_id": tg_chat_id,
@@ -1720,15 +1746,15 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         )
         if template:
             try:
-                result = template.format_map(payload).strip()
+                result = _normalize_telegram_name(template.format_map(payload), max_len=250)
                 if result:
-                    return result[:250]
+                    return result
             except Exception as error:
                 logger.warning(
                     "Invalid bot_1_lead_subject_template; fallback to display_name: %s",
                     error,
                 )
-        return str(payload["display_name"] or tg_chat_id)[:250]
+        return _normalize_telegram_name(payload["display_name"] or tg_chat_id, max_len=250)
 
     @classmethod
     def _build_retail_customer_payload(
@@ -2155,11 +2181,21 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
     async def _resolve_client_avatar_url(
         cls, bot_cfg: BotSlotConfig, message: Dict[str, Any]
     ) -> Optional[str]:
+        chat = message.get("chat")
+        chat = chat if isinstance(chat, dict) else {}
         sender_business_bot = message.get("sender_business_bot")
         sender_chat = message.get("sender_chat")
         is_from_offline = bool(message.get("is_from_offline"))
         user_id_int, user_id_source = _resolve_avatar_user_id(message)
-        if not user_id_int:
+        chat_id_int = _parse_int(str(chat.get("id") or ""), None)
+        chat_type = str(chat.get("type") or "").strip().lower()
+        private_chat_id = (
+            int(chat_id_int)
+            if chat_type == "private" and chat_id_int and chat_id_int > 0
+            else None
+        )
+
+        if not user_id_int and not private_chat_id:
             if isinstance(sender_business_bot, dict):
                 logger.debug(
                     "Avatar resolve skipped: bot_hash=%s reason=outgoing_business_message",
@@ -2186,56 +2222,114 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
 
         try:
             logger.debug(
-                "Avatar resolve started: bot_hash=%s tg_user_id=%s source=%s",
+                "Avatar resolve started: bot_hash=%s tg_user_id=%s user_source=%s tg_chat_id=%s chat_type=%s",
                 bot_cfg.bot_hash,
                 user_id_int,
                 user_id_source,
+                private_chat_id,
+                chat_type or "unknown",
             )
             bot = await cls._get_bot(bot_cfg.token)
-            photos = await bot.get_user_profile_photos(user_id=user_id_int, limit=1)
-            rows = photos.photos[0] if photos and photos.photos else []
-            if not rows:
+
+            avatar_file_id: Optional[str] = None
+            avatar_source = "none"
+
+            if user_id_int:
+                try:
+                    photos = await bot.get_user_profile_photos(user_id=user_id_int, limit=1)
+                    rows = photos.photos[0] if photos and photos.photos else []
+                    if rows:
+                        best = max(
+                            [row for row in rows if getattr(row, "file_id", None)],
+                            key=lambda row: int(getattr(row, "file_size", 0) or 0),
+                            default=None,
+                        )
+                        if best and getattr(best, "file_id", None):
+                            avatar_file_id = str(best.file_id).strip()
+                            avatar_source = "user_profile_photos"
+                        else:
+                            logger.debug(
+                                "Avatar resolve user lookup result: bot_hash=%s tg_user_id=%s status=no_file_id",
+                                bot_cfg.bot_hash,
+                                user_id_int,
+                            )
+                    else:
+                        logger.debug(
+                            "Avatar resolve user lookup result: bot_hash=%s tg_user_id=%s status=no_photos",
+                            bot_cfg.bot_hash,
+                            user_id_int,
+                        )
+                except Exception as error:
+                    logger.debug(
+                        "Avatar resolve user lookup failed: bot_hash=%s tg_user_id=%s error=%s",
+                        bot_cfg.bot_hash,
+                        user_id_int,
+                        error,
+                    )
+
+            if not avatar_file_id and private_chat_id:
+                try:
+                    chat_info = await bot.get_chat(chat_id=private_chat_id)
+                    chat_photo = getattr(chat_info, "photo", None)
+                    chat_file_id = str(
+                        getattr(chat_photo, "big_file_id", None)
+                        or getattr(chat_photo, "small_file_id", None)
+                        or ""
+                    ).strip()
+                    if chat_file_id:
+                        avatar_file_id = chat_file_id
+                        avatar_source = "chat_photo"
+                    else:
+                        logger.debug(
+                            "Avatar resolve chat lookup result: bot_hash=%s tg_chat_id=%s status=no_chat_photo",
+                            bot_cfg.bot_hash,
+                            private_chat_id,
+                        )
+                except Exception as error:
+                    logger.debug(
+                        "Avatar resolve chat lookup failed: bot_hash=%s tg_chat_id=%s error=%s",
+                        bot_cfg.bot_hash,
+                        private_chat_id,
+                        error,
+                    )
+
+            if not avatar_file_id:
                 logger.debug(
-                    "Avatar resolve result: bot_hash=%s tg_user_id=%s status=no_photos",
+                    "Avatar resolve result: bot_hash=%s tg_user_id=%s tg_chat_id=%s status=not_found",
                     bot_cfg.bot_hash,
                     user_id_int,
+                    private_chat_id,
                 )
                 return None
-            best = max(
-                [row for row in rows if getattr(row, "file_id", None)],
-                key=lambda row: int(getattr(row, "file_size", 0) or 0),
-                default=None,
-            )
-            if not best:
-                logger.debug(
-                    "Avatar resolve result: bot_hash=%s tg_user_id=%s status=no_file_id",
-                    bot_cfg.bot_hash,
-                    user_id_int,
-                )
-                return None
-            file_info = await bot.get_file(best.file_id)
+
+            file_info = await bot.get_file(avatar_file_id)
             file_path = str(file_info.file_path or "").strip()
             if not file_path:
                 logger.debug(
-                    "Avatar resolve result: bot_hash=%s tg_user_id=%s status=no_file_path file_id=%s",
+                    "Avatar resolve result: bot_hash=%s tg_user_id=%s tg_chat_id=%s source=%s status=no_file_path file_id=%s",
                     bot_cfg.bot_hash,
                     user_id_int,
-                    getattr(best, "file_id", None),
+                    private_chat_id,
+                    avatar_source,
+                    avatar_file_id,
                 )
                 return None
             logger.debug(
-                "Avatar resolve success: bot_hash=%s tg_user_id=%s file_id=%s file_path=%s",
+                "Avatar resolve success: bot_hash=%s tg_user_id=%s tg_chat_id=%s source=%s file_id=%s file_path=%s",
                 bot_cfg.bot_hash,
                 user_id_int,
-                getattr(best, "file_id", None),
+                private_chat_id,
+                avatar_source,
+                avatar_file_id,
                 file_path,
             )
             return f"https://api.telegram.org/file/bot{bot_cfg.token}/{file_path}"
         except Exception as error:
             logger.debug(
-                "Avatar resolve failed: bot_hash=%s tg_user_id=%s error=%s",
+                "Avatar resolve failed: bot_hash=%s tg_user_id=%s tg_chat_id=%s error=%s",
                 bot_cfg.bot_hash,
                 user_id_int,
+                private_chat_id,
                 error,
             )
             return None
