@@ -31,7 +31,6 @@ from schemas.api.chat.chat_message import (
     ChatMessageAddRequest,
     ChatMessageGetRequest,
     ChatMessageMarkReadRequest,
-    ChatMessageMarkSentRequest,
     ChatMessageTypeEnum,
 )
 from schemas.api.common.filters import Filter, FilterOperator
@@ -3582,12 +3581,26 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         reason: str,
     ) -> None:
         if not lead_id:
+            logger.debug(
+                "Skip Lead/SetStatus: ci=%s lead_id=%s to_status=%s reason=%s skip_reason=empty_lead_id",
+                connected_integration_id,
+                lead_id,
+                status,
+                reason,
+            )
             return
 
         try:
             async with RegosAPI(connected_integration_id=connected_integration_id) as api:
                 lead = await api.crm.lead.get_by_id(lead_id)
                 if not lead:
+                    logger.debug(
+                        "Skip Lead/SetStatus: ci=%s lead_id=%s to_status=%s reason=%s skip_reason=lead_not_found",
+                        connected_integration_id,
+                        lead_id,
+                        status,
+                        reason,
+                    )
                     return
 
                 current_status: Optional[LeadStatusEnum]
@@ -3599,14 +3612,38 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     except ValueError:
                         current_status = None
                 if current_status in {LeadStatusEnum.Closed, LeadStatusEnum.Converted}:
+                    logger.debug(
+                        "Skip Lead/SetStatus: ci=%s lead_id=%s from_status=%s to_status=%s reason=%s skip_reason=terminal_status",
+                        connected_integration_id,
+                        lead_id,
+                        current_status,
+                        status,
+                        reason,
+                    )
                     return
                 if current_status == status:
+                    logger.debug(
+                        "Skip Lead/SetStatus: ci=%s lead_id=%s from_status=%s to_status=%s reason=%s skip_reason=already_target_status",
+                        connected_integration_id,
+                        lead_id,
+                        current_status,
+                        status,
+                        reason,
+                    )
                     return
 
                 response = await api.crm.lead.set_status(
                     LeadSetStatusRequest(id=lead_id, status=status.value)
                 )
             if response.ok:
+                logger.debug(
+                    "Lead/SetStatus applied: ci=%s lead_id=%s from_status=%s to_status=%s reason=%s",
+                    connected_integration_id,
+                    lead_id,
+                    current_status,
+                    status,
+                    reason,
+                )
                 return
 
             payload = response.result if isinstance(response.result, dict) else {}
@@ -3643,6 +3680,15 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             connected_integration_id=connected_integration_id,
             chat_id=chat_id,
         )
+        if not lead_id:
+            logger.debug(
+                "Skip Lead/SetStatus by chat: ci=%s chat_id=%s to_status=%s reason=%s skip_reason=lead_not_resolved_by_chat",
+                connected_integration_id,
+                chat_id,
+                status,
+                reason,
+            )
+            return
         await cls._set_lead_status_best_effort(
             connected_integration_id=connected_integration_id,
             lead_id=lead_id,
@@ -4502,6 +4548,15 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     status=LeadStatusEnum.WaitingClient,
                     reason="operator_reply",
                 )
+            else:
+                logger.debug(
+                    "Skip WaitingClient status on outbound relay: ci=%s chat_id=%s message_id=%s message_type=%s author_entity_type=%s",
+                    connected_integration_id,
+                    chat_id,
+                    message_id,
+                    chat_message.message_type,
+                    chat_message.author_entity_type,
+                )
 
             sent_tg_message_id = await cls._send_chat_message_to_telegram(
                 bot_cfg=bot_cfg,
@@ -4513,12 +4568,6 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             if not sent_tg_message_id:
                 return
 
-            await api.chat.chat_message.mark_sent(
-                ChatMessageMarkSentRequest(
-                    id=message_id,
-                    external_message_id=f"tgout:{bot_hash}:{sent_tg_message_id}",
-                )
-            )
             await cls._redis_set_mapping(
                 cls._msgmap_regos_to_tg_key(connected_integration_id, message_id),
                 str(sent_tg_message_id),
