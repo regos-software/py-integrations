@@ -2178,7 +2178,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             )
 
     @classmethod
-    async def _resolve_client_avatar_url(
+    async def _resolve_client_photo_url(
         cls, bot_cfg: BotSlotConfig, message: Dict[str, Any]
     ) -> Optional[str]:
         chat = message.get("chat")
@@ -2449,7 +2449,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
 
         normalized_avatar_state = str(avatar_state or "").strip().lower()
         payload["avatar_state"] = "present" if normalized_avatar_state == "present" else "missing"
-        payload["client_avatar_url"] = cls._normalize_text_value(avatar_url) or ""
+        payload["client_photo_url"] = cls._normalize_text_value(avatar_url) or ""
         payload["avatar_check_after_ts"] = max(avatar_check_after_ts, 0)
         return payload
 
@@ -2487,7 +2487,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             patch = cls._build_lead_sync_patch_from_cached(desired_payload, cached_payload)
 
             cached_avatar_state = str(cached_payload.get("avatar_state") or "").strip().lower()
-            cached_avatar_url = cls._normalize_text_value(cached_payload.get("client_avatar_url"))
+            cached_avatar_url = cls._normalize_text_value(cached_payload.get("client_photo_url"))
             cached_avatar_check_after_ts = (
                 _parse_int(str(cached_payload.get("avatar_check_after_ts") or ""), 0) or 0
             )
@@ -2524,11 +2524,11 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             )
 
             if avatar_check_due:
-                resolved_avatar_url = await cls._resolve_client_avatar_url(bot_cfg, message)
+                resolved_avatar_url = await cls._resolve_client_photo_url(bot_cfg, message)
                 if resolved_avatar_url:
                     normalized_resolved = cls._normalize_text_value(resolved_avatar_url)
                     if normalized_resolved and normalized_resolved != cached_avatar_url:
-                        patch["client_avatar_url"] = normalized_resolved
+                        patch["client_photo_url"] = normalized_resolved
                         logger.debug(
                             "Lead sync avatar patch prepared: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s",
                             connected_integration_id,
@@ -2592,14 +2592,14 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     bot_cfg.bot_hash,
                     tg_chat_id,
                     sorted(patch.keys()),
-                    "client_avatar_url" in patch,
+                    "client_photo_url" in patch,
                 )
                 async with RegosAPI(connected_integration_id=connected_integration_id) as api:
                     response = await api.crm.lead.edit(LeadEditRequest(id=lead_id, **patch))
                 if response.ok:
-                    if "client_avatar_url" in patch:
+                    if "client_photo_url" in patch:
                         avatar_state = "present"
-                        avatar_url = cls._normalize_text_value(patch.get("client_avatar_url"))
+                        avatar_url = cls._normalize_text_value(patch.get("client_photo_url"))
                         avatar_check_after_ts = now_ts + state_ttl_sec
                     await cls._redis_set_with_ttl(
                         cache_key,
@@ -2666,7 +2666,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     return
 
                 patch = cls._build_lead_sync_patch(lead, desired_payload)
-                avatar_url = cls._normalize_text_value(lead.client_avatar_url)
+                avatar_url = cls._normalize_text_value(lead.client_photo_url)
                 avatar_state = "present" if avatar_url else "missing"
                 avatar_check_after_ts = (
                     now_ts + state_ttl_sec
@@ -2682,9 +2682,9 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                         bot_cfg.bot_hash,
                         tg_chat_id,
                     )
-                    avatar_url = await cls._resolve_client_avatar_url(bot_cfg, message)
+                    avatar_url = await cls._resolve_client_photo_url(bot_cfg, message)
                     if avatar_url:
-                        patch["client_avatar_url"] = avatar_url
+                        patch["client_photo_url"] = avatar_url
                         avatar_state = "present"
                         avatar_check_after_ts = now_ts + state_ttl_sec
                         logger.debug(
@@ -2732,13 +2732,13 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     bot_cfg.bot_hash,
                     tg_chat_id,
                     sorted(patch.keys()),
-                    "client_avatar_url" in patch,
+                    "client_photo_url" in patch,
                 )
                 response = await api.crm.lead.edit(LeadEditRequest(id=lead_id, **patch))
                 if response.ok:
-                    if "client_avatar_url" in patch:
+                    if "client_photo_url" in patch:
                         avatar_state = "present"
-                        avatar_url = cls._normalize_text_value(patch.get("client_avatar_url"))
+                        avatar_url = cls._normalize_text_value(patch.get("client_photo_url"))
                         avatar_check_after_ts = now_ts + state_ttl_sec
                     await cls._redis_set_with_ttl(
                         cache_key,
@@ -3951,13 +3951,13 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             contact = message.get("contact")
             if isinstance(contact, dict):
                 client_phone = str(contact.get("phone_number") or "").strip() or None
-            client_avatar_url = await cls._resolve_client_avatar_url(bot_cfg, message)
+            client_photo_url = await cls._resolve_client_photo_url(bot_cfg, message)
             logger.debug(
                 "Lead create payload prepared: ci=%s bot_hash=%s tg_chat_id=%s has_avatar=%s has_phone=%s",
                 connected_integration_id,
                 bot_cfg.bot_hash,
                 tg_chat_id,
-                bool(client_avatar_url),
+                bool(client_photo_url),
                 bool(client_phone),
             )
 
@@ -3973,7 +3973,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                         ),
                         client_name=client_name,
                         client_phone=client_phone,
-                        client_avatar_url=client_avatar_url,
+                        client_photo_url=client_photo_url,
                         external_chat_id=tg_chat_id,
                         bot_id=bot_cfg.bot_hash,
                     )
@@ -3993,7 +3993,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     bot_cfg.bot_hash,
                     tg_chat_id,
                     lead.id,
-                    bool(cls._normalize_text_value(getattr(lead, "client_avatar_url", None))),
+                    bool(cls._normalize_text_value(getattr(lead, "client_photo_url", None))),
                 )
 
             await cls._save_lead_mapping(

@@ -49,8 +49,8 @@ class Lead(BaseSchema):
     )
     client_name: Optional[str] = PydField(default=None, description="Client name.")
     client_phone: Optional[str] = PydField(default=None, description="Client phone.")
-    client_avatar_url: Optional[str] = PydField(
-        default=None, description="Client avatar URL."
+    client_photo_url: Optional[str] = PydField(
+        default=None, description="Client photo URL."
     )
     external_chat_id: Optional[str] = PydField(
         default=None, description="External chat id."
@@ -141,8 +141,8 @@ class LeadAddRequest(BaseSchema):
     )
     client_name: Optional[str] = PydField(default=None, description="Client name.")
     client_phone: Optional[str] = PydField(default=None, description="Client phone.")
-    client_avatar_url: Optional[str] = PydField(
-        default=None, description="Client avatar URL."
+    client_photo_url: Optional[str] = PydField(
+        default=None, description="Client photo URL."
     )
     external_chat_id: Optional[str] = PydField(
         default=None, description="External chat id."
@@ -168,8 +168,8 @@ class LeadEditRequest(BaseSchema):
     )
     client_name: Optional[str] = PydField(default=None, description="Client name.")
     client_phone: Optional[str] = PydField(default=None, description="Client phone.")
-    client_avatar_url: Optional[str] = PydField(
-        default=None, description="Client avatar URL."
+    client_photo_url: Optional[str] = PydField(
+        default=None, description="Client photo URL."
     )
     external_chat_id: Optional[str] = PydField(
         default=None, description="External chat id."
