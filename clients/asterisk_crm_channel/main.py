@@ -1608,6 +1608,11 @@ return 0
 
                 if current_status in {LeadStatusEnum.Closed, LeadStatusEnum.Converted}:
                     return
+                if (
+                    current_status == LeadStatusEnum.New
+                    and not getattr(lead, "responsible_user_id", None)
+                ):
+                    return
                 if current_status == status:
                     return
 

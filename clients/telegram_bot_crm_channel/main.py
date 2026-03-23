@@ -3621,6 +3621,19 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                         reason,
                     )
                     return
+                if (
+                    current_status == LeadStatusEnum.New
+                    and not getattr(lead, "responsible_user_id", None)
+                ):
+                    logger.debug(
+                        "Skip Lead/SetStatus: ci=%s lead_id=%s from_status=%s to_status=%s reason=%s skip_reason=new_without_responsible",
+                        connected_integration_id,
+                        lead_id,
+                        current_status,
+                        status,
+                        reason,
+                    )
+                    return
                 if current_status == status:
                     logger.debug(
                         "Skip Lead/SetStatus: ci=%s lead_id=%s from_status=%s to_status=%s reason=%s skip_reason=already_target_status",
