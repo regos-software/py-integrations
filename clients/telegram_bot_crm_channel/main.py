@@ -319,6 +319,16 @@ def _is_telegram_internal_external_message(external_message_id: Optional[str]) -
     return value.startswith("tgmsg:") or value.startswith("tgsys:")
 
 
+def _is_lead_entity_type(entity_type: Optional[str]) -> bool:
+    value = str(entity_type or "").strip().lower()
+    return value in {"lead", "2"}
+
+
+def _is_user_entity_type(entity_type: Optional[str]) -> bool:
+    value = str(entity_type or "").strip().lower()
+    return value in {"user", "1"}
+
+
 def _extract_deleted_telegram_messages(payload: Dict[str, Any]) -> List[Tuple[str, int]]:
     rows: List[Tuple[str, int]] = []
 
@@ -730,25 +740,19 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         return f"{TelegramBotCrmChannelConfig.REDIS_PREFIX}active_ci_ids"
 
     @staticmethod
-    def _lead_by_tg_key(
+    # Canonical conversation cache for Telegram <-> CRM routing.
+    def _mapping_by_tg_key(
         connected_integration_id: str, bot_hash: str, tg_chat_id: str
     ) -> str:
         return (
-            f"{TelegramBotCrmChannelConfig.REDIS_PREFIX}lead_by_tg:"
+            f"{TelegramBotCrmChannelConfig.REDIS_PREFIX}mapping:by_tg:"
             f"{connected_integration_id}:{bot_hash}:{tg_chat_id}"
         )
 
     @staticmethod
-    def _chat_by_lead_key(connected_integration_id: str, lead_id: int) -> str:
+    def _mapping_by_chat_key(connected_integration_id: str, chat_id: str) -> str:
         return (
-            f"{TelegramBotCrmChannelConfig.REDIS_PREFIX}chat_by_lead:"
-            f"{connected_integration_id}:{lead_id}"
-        )
-
-    @staticmethod
-    def _tg_by_chat_key(connected_integration_id: str, chat_id: str) -> str:
-        return (
-            f"{TelegramBotCrmChannelConfig.REDIS_PREFIX}tg_by_chat:"
+            f"{TelegramBotCrmChannelConfig.REDIS_PREFIX}mapping:by_chat:"
             f"{connected_integration_id}:{chat_id}"
         )
 
@@ -835,6 +839,44 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         return (
             f"{TelegramBotCrmChannelConfig.REDIS_PREFIX}worker:heartbeat:"
             f"{connected_integration_id}:{_INSTANCE_ID}"
+        )
+
+    @staticmethod
+    def _parse_cached_mapping(raw: Optional[str]) -> Optional[Dict[str, Any]]:
+        if not raw:
+            return None
+        try:
+            parsed = _json_loads(raw)
+        except Exception:
+            return None
+        if isinstance(parsed, dict):
+            return parsed
+        return None
+
+    @classmethod
+    async def _save_cached_mapping(
+        cls,
+        connected_integration_id: str,
+        bot_hash: str,
+        tg_chat_id: str,
+        lead_id: int,
+        chat_id: str,
+    ) -> None:
+        payload = _json_dumps(
+            {
+                "bot_hash": str(bot_hash),
+                "tg_chat_id": str(tg_chat_id),
+                "lead_id": int(lead_id),
+                "chat_id": str(chat_id),
+            }
+        )
+        await cls._redis_set_mapping(
+            cls._mapping_by_tg_key(connected_integration_id, bot_hash, tg_chat_id),
+            payload,
+        )
+        await cls._redis_set_mapping(
+            cls._mapping_by_chat_key(connected_integration_id, str(chat_id)),
+            payload,
         )
 
     @staticmethod
@@ -1505,11 +1547,9 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 return None, {}, wrapped_event_id
             nested_action = nested.get("action")
             nested_data = nested.get("data")
-            if not isinstance(nested_action, str):
+            if not isinstance(nested_action, str) or not isinstance(nested_data, dict):
                 return None, {}, wrapped_event_id
-            if isinstance(nested_data, dict):
-                return nested_action, nested_data, wrapped_event_id
-            return nested_action, dict(nested), wrapped_event_id
+            return nested_action, nested_data, wrapped_event_id
 
         # Alternative canonical envelope: data={"action": "...", "data": {...}, "event_id": "..."}.
         if isinstance(data, dict):
@@ -3006,6 +3046,13 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             tg_chat_id=tg_chat_id,
             message=message,
         )
+        # Client wrote to the chat -> lead must be in active processing state.
+        await cls._set_lead_status_best_effort(
+            connected_integration_id=connected_integration_id,
+            lead_id=lead_id,
+            status=LeadStatusEnum.InProgress,
+            reason="client_message",
+        )
 
         await cls._mark_chat_read_best_effort(
             connected_integration_id=connected_integration_id,
@@ -3446,6 +3493,84 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             )
 
     @classmethod
+    async def _set_lead_status_best_effort(
+        cls,
+        connected_integration_id: str,
+        lead_id: Optional[int],
+        status: LeadStatusEnum,
+        *,
+        reason: str,
+    ) -> None:
+        if not lead_id:
+            return
+
+        try:
+            async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+                lead = await api.crm.lead.get_by_id(lead_id)
+                if not lead:
+                    return
+
+                current_status: Optional[LeadStatusEnum]
+                if isinstance(lead.status, LeadStatusEnum):
+                    current_status = lead.status
+                else:
+                    try:
+                        current_status = LeadStatusEnum(str(lead.status or "").strip())
+                    except ValueError:
+                        current_status = None
+                if current_status in {LeadStatusEnum.Closed, LeadStatusEnum.Converted}:
+                    return
+                if current_status == status:
+                    return
+
+                response = await api.crm.lead.edit(
+                    LeadEditRequest(id=lead_id, status=status)
+                )
+            if response.ok:
+                return
+
+            payload = response.result if isinstance(response.result, dict) else {}
+            logger.warning(
+                "Lead/Edit status rejected: ci=%s lead_id=%s from_status=%s to_status=%s reason=%s error=%s description=%s",
+                connected_integration_id,
+                lead_id,
+                current_status,
+                status,
+                reason,
+                payload.get("error"),
+                payload.get("description"),
+            )
+        except Exception as error:
+            logger.warning(
+                "Lead status update failed: ci=%s lead_id=%s to_status=%s reason=%s error=%s",
+                connected_integration_id,
+                lead_id,
+                status,
+                reason,
+                error,
+            )
+
+    @classmethod
+    async def _set_lead_status_by_chat_best_effort(
+        cls,
+        connected_integration_id: str,
+        chat_id: str,
+        status: LeadStatusEnum,
+        *,
+        reason: str,
+    ) -> None:
+        lead_id = await cls._resolve_lead_id_by_chat(
+            connected_integration_id=connected_integration_id,
+            chat_id=chat_id,
+        )
+        await cls._set_lead_status_best_effort(
+            connected_integration_id=connected_integration_id,
+            lead_id=lead_id,
+            status=status,
+            reason=reason,
+        )
+
+    @classmethod
     async def _clear_cached_target_mapping(
         cls,
         connected_integration_id: str,
@@ -3454,25 +3579,22 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         lead_id: Optional[int] = None,
         chat_id: Optional[str] = None,
     ) -> None:
-        if lead_id is None:
-            lead_id_raw = await cls._redis_get(
-                cls._lead_by_tg_key(connected_integration_id, bot_hash, tg_chat_id)
-            )
-            lead_id = _parse_int(lead_id_raw)
-        if chat_id is None and lead_id:
-            chat_id = await cls._redis_get(
-                cls._chat_by_lead_key(connected_integration_id, lead_id)
-            )
+        mapping_by_tg_key = cls._mapping_by_tg_key(
+            connected_integration_id, bot_hash, tg_chat_id
+        )
+        cached_payload = cls._parse_cached_mapping(await cls._redis_get(mapping_by_tg_key))
+        if cached_payload:
+            if lead_id is None:
+                lead_id = _parse_int(str(cached_payload.get("lead_id") or ""))
+            if chat_id is None:
+                chat_id = str(cached_payload.get("chat_id") or "").strip() or None
 
         await cls._redis_delete(
-            cls._lead_by_tg_key(connected_integration_id, bot_hash, tg_chat_id),
-            cls._chat_by_lead_key(connected_integration_id, lead_id)
-            if lead_id
-            else "",
+            mapping_by_tg_key,
             cls._lead_sync_cache_key(connected_integration_id, lead_id)
             if lead_id
             else "",
-            cls._tg_by_chat_key(connected_integration_id, str(chat_id))
+            cls._mapping_by_chat_key(connected_integration_id, str(chat_id))
             if chat_id
             else "",
         )
@@ -3485,16 +3607,18 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         tg_chat_id: str,
     ) -> Tuple[Optional[int], Optional[str]]:
         # Redis-only fast path used before any CRM lookup/create.
-        lead_id_raw = await cls._redis_get(
-            cls._lead_by_tg_key(connected_integration_id, bot_hash, tg_chat_id)
+        cached_payload = cls._parse_cached_mapping(
+            await cls._redis_get(
+                cls._mapping_by_tg_key(connected_integration_id, bot_hash, tg_chat_id)
+            )
         )
-        lead_id = _parse_int(lead_id_raw)
-        if not lead_id:
+        if not cached_payload:
             return None, None
 
-        chat_id = await cls._redis_get(
-            cls._chat_by_lead_key(connected_integration_id, lead_id)
-        )
+        lead_id = _parse_int(str(cached_payload.get("lead_id") or ""))
+        chat_id = str(cached_payload.get("chat_id") or "").strip()
+        if not lead_id:
+            return None, None
         if not chat_id:
             return None, None
         return lead_id, chat_id
@@ -3696,17 +3820,12 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
     ) -> None:
         if not (lead.id and lead.chat_id):
             return
-        await cls._redis_set_mapping(
-            cls._lead_by_tg_key(connected_integration_id, bot_hash, tg_chat_id),
-            str(lead.id),
-        )
-        await cls._redis_set_mapping(
-            cls._chat_by_lead_key(connected_integration_id, lead.id),
-            str(lead.chat_id),
-        )
-        await cls._redis_set_mapping(
-            cls._tg_by_chat_key(connected_integration_id, str(lead.chat_id)),
-            _json_dumps({"bot_hash": bot_hash, "tg_chat_id": tg_chat_id}),
+        await cls._save_cached_mapping(
+            connected_integration_id=connected_integration_id,
+            bot_hash=bot_hash,
+            tg_chat_id=tg_chat_id,
+            lead_id=int(lead.id),
+            chat_id=str(lead.chat_id),
         )
 
     @classmethod
@@ -3908,16 +4027,16 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             if await cls._redis_get(dedupe_key):
                 return
 
-            if action == "ChatMessageAdded":
-                await cls._handle_chat_message_added(connected_integration_id, runtime, payload)
-            elif action == "ChatMessageEdited":
-                await cls._handle_chat_message_edited(connected_integration_id, runtime, payload)
-            elif action == "ChatMessageDeleted":
-                await cls._handle_chat_message_deleted(connected_integration_id, runtime, payload)
-            elif action == "ChatWriting":
-                await cls._handle_chat_writing(connected_integration_id, runtime, payload)
-            elif action == "LeadClosed":
-                await cls._handle_lead_closed(connected_integration_id, runtime, payload)
+            handlers = {
+                "ChatMessageAdded": cls._handle_chat_message_added,
+                "ChatMessageEdited": cls._handle_chat_message_edited,
+                "ChatMessageDeleted": cls._handle_chat_message_deleted,
+                "ChatWriting": cls._handle_chat_writing,
+                "LeadClosed": cls._handle_lead_closed,
+            }
+            handler = handlers.get(action)
+            if handler:
+                await handler(connected_integration_id, runtime, payload)
 
             await cls._redis_set_with_ttl(dedupe_key, "1", runtime.lead_dedupe_ttl_sec)
         finally:
@@ -4114,19 +4233,68 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             )
 
     @classmethod
+    async def _resolve_lead_id_by_chat(
+        cls,
+        connected_integration_id: str,
+        chat_id: str,
+    ) -> Optional[int]:
+        mapping_by_chat_key = cls._mapping_by_chat_key(connected_integration_id, chat_id)
+        cached_payload = cls._parse_cached_mapping(await cls._redis_get(mapping_by_chat_key)) or {}
+        cached_lead_id = _parse_int(str(cached_payload.get("lead_id") or ""))
+        if cached_lead_id:
+            return cached_lead_id
+
+        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+            chat_response = await api.call(
+                "Chat/Get",
+                {"ids": [chat_id], "limit": 1, "offset": 0},
+                APIBaseResponse[List[Dict[str, Any]]],
+            )
+        if not chat_response.ok:
+            logger.warning(
+                "Chat/Get rejected while resolving lead by chat: ci=%s chat_id=%s payload=%s",
+                connected_integration_id,
+                chat_id,
+                chat_response.result,
+            )
+            return None
+
+        chat_rows = chat_response.result or []
+        if not chat_rows:
+            return None
+        lead_id = cls._extract_lead_id_from_chat_payload(chat_rows[0])
+        if not lead_id:
+            return None
+
+        bot_hash = str(cached_payload.get("bot_hash") or "").strip()
+        tg_chat_id = str(cached_payload.get("tg_chat_id") or "").strip()
+        if bot_hash and tg_chat_id:
+            await cls._save_cached_mapping(
+                connected_integration_id=connected_integration_id,
+                bot_hash=bot_hash,
+                tg_chat_id=tg_chat_id,
+                lead_id=lead_id,
+                chat_id=chat_id,
+            )
+        else:
+            await cls._redis_set_mapping(
+                mapping_by_chat_key,
+                _json_dumps({"lead_id": int(lead_id), "chat_id": chat_id}),
+            )
+        return lead_id
+
+    @classmethod
     async def _resolve_target_by_chat(
         cls, connected_integration_id: str, chat_id: str
     ) -> Optional[Tuple[str, str]]:
-        cached = await cls._redis_get(cls._tg_by_chat_key(connected_integration_id, chat_id))
-        if cached:
-            try:
-                parsed = _json_loads(cached)
-                bot_hash = str(parsed.get("bot_hash") or "").strip()
-                tg_chat_id = str(parsed.get("tg_chat_id") or "").strip()
-                if bot_hash and tg_chat_id:
-                    return bot_hash, tg_chat_id
-            except Exception:
-                pass
+        cached_payload = cls._parse_cached_mapping(
+            await cls._redis_get(cls._mapping_by_chat_key(connected_integration_id, chat_id))
+        )
+        if cached_payload:
+            bot_hash = str(cached_payload.get("bot_hash") or "").strip()
+            tg_chat_id = str(cached_payload.get("tg_chat_id") or "").strip()
+            if bot_hash and tg_chat_id:
+                return bot_hash, tg_chat_id
 
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
             chat_response = await api.call(
@@ -4172,14 +4340,12 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         lead = Lead.model_validate(lead_rows[0])
         if not (lead and lead.bot_id and lead.external_chat_id and lead.id):
             return None
-        await cls._redis_set_mapping(
-            cls._chat_by_lead_key(connected_integration_id, lead.id), str(chat_id)
-        )
-        await cls._redis_set_mapping(
-            cls._tg_by_chat_key(connected_integration_id, chat_id),
-            _json_dumps(
-                {"bot_hash": str(lead.bot_id), "tg_chat_id": str(lead.external_chat_id)}
-            ),
+        await cls._save_cached_mapping(
+            connected_integration_id=connected_integration_id,
+            bot_hash=str(lead.bot_id),
+            tg_chat_id=str(lead.external_chat_id),
+            lead_id=int(lead.id),
+            chat_id=chat_id,
         )
         return str(lead.bot_id), str(lead.external_chat_id)
 
@@ -4194,7 +4360,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             if not isinstance(participant, dict):
                 continue
             entity_type_raw = str(participant.get("entity_type") or "").strip().lower()
-            if entity_type_raw not in {"lead", "2"}:
+            if not _is_lead_entity_type(entity_type_raw):
                 continue
             entity_id = _parse_int(str(participant.get("entity_id") or ""))
             if entity_id and entity_id > 0:
@@ -4210,16 +4376,16 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if not chat_id or not message_id:
             return
 
-        target = await cls._resolve_target_by_chat(connected_integration_id, chat_id)
-        if not target:
+        telegram_target = await cls._resolve_target_by_chat(connected_integration_id, chat_id)
+        if not telegram_target:
             return
-        bot_hash, tg_chat_id = target
+        bot_hash, tg_chat_id = telegram_target
         bot_cfg = runtime.bots_by_hash.get(bot_hash)
         if not bot_cfg:
             return
 
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-            response = await api.chat.chat_message.get(
+            chat_message_response = await api.chat.chat_message.get(
                 ChatMessageGetRequest(
                     chat_id=chat_id,
                     ids=[message_id],
@@ -4228,23 +4394,40 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     include_staff_private=True,
                 )
             )
-            if not response.result:
+            if not chat_message_response.result:
                 return
-            msg = response.result[0]
-            if not msg:
+            chat_message = chat_message_response.result[0]
+            if not chat_message:
                 return
-            if _is_telegram_internal_external_message(msg.external_message_id):
+            if _is_telegram_internal_external_message(chat_message.external_message_id):
                 return
-            if msg.message_type == ChatMessageTypeEnum.Private and not runtime.send_private_messages:
+            if (
+                chat_message.message_type == ChatMessageTypeEnum.Private
+                and not runtime.send_private_messages
+            ):
                 return
-            if msg.message_type == ChatMessageTypeEnum.System and not runtime.forward_system_messages:
+            if (
+                chat_message.message_type == ChatMessageTypeEnum.System
+                and not runtime.forward_system_messages
+            ):
                 return
+
+            # CRM staff replied to the client -> lead is waiting for the client answer.
+            is_regular_message = chat_message.message_type == ChatMessageTypeEnum.Regular
+            is_operator_reply = _is_user_entity_type(chat_message.author_entity_type)
+            if is_regular_message and is_operator_reply:
+                await cls._set_lead_status_by_chat_best_effort(
+                    connected_integration_id=connected_integration_id,
+                    chat_id=chat_id,
+                    status=LeadStatusEnum.WaitingClient,
+                    reason="operator_reply",
+                )
 
             sent_tg_message_id = await cls._send_chat_message_to_telegram(
                 bot_cfg=bot_cfg,
                 tg_chat_id=tg_chat_id,
-                text=msg.text or "",
-                file_ids=msg.file_ids or [],
+                text=chat_message.text or "",
+                file_ids=chat_message.file_ids or [],
                 connected_integration_id=connected_integration_id,
             )
             if not sent_tg_message_id:
@@ -4464,7 +4647,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
 
         author_entity_type = str(payload.get("author_entity_type") or "").strip().lower()
         author_entity_id = _parse_int(str(payload.get("author_entity_id") or ""))
-        if author_entity_type in {"lead", "2"}:
+        if _is_lead_entity_type(author_entity_type):
             logger.debug(
                 "Skip ChatWriting relay for lead author: ci=%s chat_id=%s author_entity_id=%s",
                 connected_integration_id,

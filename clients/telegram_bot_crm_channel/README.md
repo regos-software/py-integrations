@@ -7,6 +7,9 @@ Telegram <-> CRM chat bridge in strict single-bot mode (`bot_1_*`).
 - Receives inbound Telegram messages and writes them to CRM chat.
 - Sends outbound CRM chat messages to Telegram.
 - Creates a lead on first inbound message and reuses it while open.
+- Updates lead status automatically:
+  - `InProgress` when a client writes in Telegram.
+  - `WaitingClient` when an operator replies from CRM.
 - Uses Redis for queueing, dedupe, and mappings.
 
 ## Settings source
