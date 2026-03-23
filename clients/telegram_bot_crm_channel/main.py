@@ -255,6 +255,47 @@ def _normalize_phone(value: Any) -> Optional[str]:
     return digits or None
 
 
+def _resolve_avatar_user_id(message: Dict[str, Any]) -> Tuple[Optional[int], str]:
+    contact = message.get("contact")
+    contact = contact if isinstance(contact, dict) else {}
+    from_author = message.get("from")
+    from_author = from_author if isinstance(from_author, dict) else {}
+    from_user = message.get("from_user")
+    from_user = from_user if isinstance(from_user, dict) else {}
+    sender_user = message.get("sender_user")
+    sender_user = sender_user if isinstance(sender_user, dict) else {}
+    chat = message.get("chat")
+    chat = chat if isinstance(chat, dict) else {}
+
+    candidates = [
+        ("contact.user_id", contact.get("user_id")),
+        ("from.id", from_author.get("id")),
+        ("from_user.id", from_user.get("id")),
+        ("sender_user.id", sender_user.get("id")),
+    ]
+    chat_type = str(chat.get("type") or "").strip().lower()
+    if chat_type == "private":
+        candidates.append(("chat.id", chat.get("id")))
+
+    for source, raw in candidates:
+        user_id = _parse_int(str(raw or ""), None)
+        if user_id and user_id > 0:
+            return int(user_id), source
+    return None, "none"
+
+
+def _message_has_avatar_user_hint(message: Dict[str, Any]) -> bool:
+    sender_business_bot = message.get("sender_business_bot")
+    if isinstance(sender_business_bot, dict):
+        return False
+    sender_chat = message.get("sender_chat")
+    if isinstance(sender_chat, dict):
+        return False
+
+    user_id, _ = _resolve_avatar_user_id(message)
+    return bool(user_id)
+
+
 def _file_ext_from_name(name: str, fallback: str = "bin") -> str:
     if "." not in name:
         return fallback
@@ -2114,35 +2155,17 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
     async def _resolve_client_avatar_url(
         cls, bot_cfg: BotSlotConfig, message: Dict[str, Any]
     ) -> Optional[str]:
-        author = cls._extract_message_author(message)
-        contact = message.get("contact")
-        contact = contact if isinstance(contact, dict) else {}
-        chat = message.get("chat")
-        chat = chat if isinstance(chat, dict) else {}
         sender_business_bot = message.get("sender_business_bot")
         sender_chat = message.get("sender_chat")
         is_from_offline = bool(message.get("is_from_offline"))
-
-        if isinstance(sender_business_bot, dict):
-            logger.debug(
-                "Avatar resolve skipped: bot_hash=%s reason=outgoing_business_message",
-                bot_cfg.bot_hash,
-            )
-            return None
-
-        user_id = contact.get("user_id") or author.get("id")
-        if not user_id:
-            # In private chats chat.id usually equals user id; use it as fallback.
-            chat_type = str(chat.get("type") or "").strip().lower()
-            chat_id = chat.get("id")
-            if chat_type == "private" and chat_id is not None:
-                user_id = chat_id
+        user_id_int, user_id_source = _resolve_avatar_user_id(message)
+        if not user_id_int:
+            if isinstance(sender_business_bot, dict):
                 logger.debug(
-                    "Avatar resolve user_id fallback: bot_hash=%s source=chat.id chat_id=%s",
+                    "Avatar resolve skipped: bot_hash=%s reason=outgoing_business_message",
                     bot_cfg.bot_hash,
-                    chat_id,
                 )
-        if not user_id:
+                return None
             if isinstance(sender_chat, dict):
                 logger.debug(
                     "Avatar resolve skipped: bot_hash=%s reason=sender_chat_only",
@@ -2160,21 +2183,13 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 bot_cfg.bot_hash,
             )
             return None
-        try:
-            user_id_int = int(user_id)
-        except (TypeError, ValueError):
-            logger.debug(
-                "Avatar resolve skipped: bot_hash=%s reason=invalid_user_id user_id=%r",
-                bot_cfg.bot_hash,
-                user_id,
-            )
-            return None
 
         try:
             logger.debug(
-                "Avatar resolve started: bot_hash=%s tg_user_id=%s",
+                "Avatar resolve started: bot_hash=%s tg_user_id=%s source=%s",
                 bot_cfg.bot_hash,
                 user_id_int,
+                user_id_source,
             )
             bot = await cls._get_bot(bot_cfg.token)
             photos = await bot.get_user_profile_photos(user_id=user_id_int, limit=1)
@@ -2361,6 +2376,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             min(state_ttl_sec, TelegramBotCrmChannelConfig.LEAD_SYNC_AVATAR_RECHECK_SEC),
             300,
         )
+        avatar_fast_recheck_sec = min(avatar_recheck_sec, 300)
 
         cached_payload_raw = await cls._redis_get(cache_key)
         cached_payload = cls._parse_lead_sync_cache(cached_payload_raw)
@@ -2381,17 +2397,27 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             cached_avatar_check_after_ts = (
                 _parse_int(str(cached_payload.get("avatar_check_after_ts") or ""), 0) or 0
             )
+            has_avatar_user_hint = _message_has_avatar_user_hint(message)
+            retry_in_sec = max(cached_avatar_check_after_ts - now_ts, 0)
+            early_retry = (
+                cached_avatar_state != "present"
+                and has_avatar_user_hint
+                and retry_in_sec > avatar_fast_recheck_sec
+            )
             avatar_check_due = (
-                cached_avatar_state != "present" and now_ts >= cached_avatar_check_after_ts
+                cached_avatar_state != "present"
+                and (now_ts >= cached_avatar_check_after_ts or early_retry)
             )
             logger.debug(
-                "Lead sync cache state: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s avatar_state=%s avatar_check_due=%s patch_keys=%s",
+                "Lead sync cache state: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s avatar_state=%s avatar_check_due=%s early_retry=%s has_avatar_user_hint=%s patch_keys=%s",
                 connected_integration_id,
                 lead_id,
                 bot_cfg.bot_hash,
                 tg_chat_id,
                 cached_avatar_state or "missing",
                 avatar_check_due,
+                early_retry,
+                has_avatar_user_hint,
                 sorted(patch.keys()),
             )
 
@@ -2428,7 +2454,11 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     )
                 else:
                     avatar_state = "missing"
-                    avatar_check_after_ts = now_ts + avatar_recheck_sec
+                    avatar_check_after_ts = (
+                        now_ts + avatar_fast_recheck_sec
+                        if has_avatar_user_hint
+                        else now_ts + avatar_recheck_sec
+                    )
                     logger.debug(
                         "Lead sync avatar recheck result: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s status=not_found",
                         connected_integration_id,
