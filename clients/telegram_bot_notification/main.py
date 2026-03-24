@@ -186,7 +186,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                 settings_response = (
                     await api.integrations.connected_integration_setting.get(
                         ConnectedIntegrationSettingRequest(
-                            integration_key=str(TelegramBotConfig.INTEGRATION_KEY)
+                            connected_integration_id=self.connected_integration_id,
                         )
                     )
                 ).result
@@ -228,7 +228,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                             ConnectedIntegrationSettingEditItem(
                                 key=TelegramSettings.CHAT_IDS.value,
                                 value=json.dumps(subscribers),
-                                integration_key=str(TelegramBotConfig.INTEGRATION_KEY),
+                                connected_integration_id=self.connected_integration_id,
                             )
                         ]
                     )
@@ -269,7 +269,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                             ConnectedIntegrationSettingEditItem(
                                 key=TelegramSettings.CHAT_IDS.value,
                                 value=json.dumps(subscribers),
-                                integration_key=str(TelegramBotConfig.INTEGRATION_KEY),
+                                connected_integration_id=self.connected_integration_id,
                             )
                         ]
                     )

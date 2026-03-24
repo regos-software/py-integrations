@@ -1024,7 +1024,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
             response = await api.integrations.connected_integration_setting.get(
                 ConnectedIntegrationSettingRequest(
-                    integration_key=TelegramBotCrmChannelConfig.INTEGRATION_KEY
+                    connected_integration_id=connected_integration_id,
                 )
             )
         settings_map = {

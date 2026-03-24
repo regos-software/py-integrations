@@ -70,7 +70,9 @@ class EskizSmsIntegration(IntegrationSmsBase, ClientBase):
             ) as api:
                 settings_response = (
                     await api.integrations.connected_integration_setting.get(
-                        ConnectedIntegrationSettingRequest(integration_key="sms_eskiz")
+                        ConnectedIntegrationSettingRequest(
+                            connected_integration_id=self.connected_integration_id,
+                        )
                     )
                 ).result
 

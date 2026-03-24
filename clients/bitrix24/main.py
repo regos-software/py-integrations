@@ -50,7 +50,7 @@ class TsdIntegration(ClientBase):
             settings_response = (
                 await api.integrations.connected_integration_setting.get(
                     ConnectedIntegrationSettingRequest(
-                        integration_key=self.INTEGRATION_KEY
+                        connected_integration_id=self.connected_integration_id,
                     )
                 )
             ).result
