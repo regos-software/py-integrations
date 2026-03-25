@@ -3484,16 +3484,26 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             message=message,
         )
 
-        await cls._maybe_request_phone_best_effort(
-            connected_integration_id=connected_integration_id,
-            runtime=runtime,
-            bot_cfg=bot_cfg,
-            lead_id=lead_id,
-            tg_chat_id=tg_chat_id,
-            message=message,
-            customer_id=customer_id,
-            retail_has_phone_hint=retail_has_phone_hint,
-        )
+        try:
+            await cls._maybe_request_phone_best_effort(
+                connected_integration_id=connected_integration_id,
+                runtime=runtime,
+                bot_cfg=bot_cfg,
+                lead_id=lead_id,
+                tg_chat_id=tg_chat_id,
+                message=message,
+                customer_id=customer_id,
+                retail_has_phone_hint=retail_has_phone_hint,
+            )
+        except Exception as error:
+            logger.warning(
+                "Phone request flow failed (ignored): ci=%s bot_hash=%s tg_chat_id=%s lead_id=%s error=%s",
+                connected_integration_id,
+                bot_hash,
+                tg_chat_id,
+                lead_id,
+                error,
+            )
         # Client wrote to the chat -> lead must be in active processing state.
         await cls._set_lead_status_best_effort(
             connected_integration_id=connected_integration_id,
