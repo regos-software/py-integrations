@@ -1673,9 +1673,9 @@ return 0
                 value=runtime.asterisk_hash,
             ),
             Filter(
-                field="external_contact_id",
+                field="external_chat_id",
                 operator=FilterOperator.Equal,
-                value=_external_contact_id(runtime.asterisk_hash, normalized_phone),
+                value=normalized_phone,
             ),
         ]
         async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
