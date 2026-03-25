@@ -877,7 +877,7 @@ return 0
         if event_type in {"dialbegin", "dialstate"}:
             return "ringing"
         if event_type == "newstate":
-            return _normalize_status(
+            return cls._normalize_status(
                 cls._payload_pick(payload, "channelstatedesc", "state", "channelstate")
             )
         if event_type in {"bridgeenter", "bridgecreate", "bridge", "link"}:
@@ -928,7 +928,7 @@ return 0
             if disposition in {"busy", "failed", "congestion"}:
                 return "failed"
             return "completed"
-        return _normalize_status(event_type)
+        return cls._normalize_status(event_type)
 
     @classmethod
     def _derive_direction_from_ami(
