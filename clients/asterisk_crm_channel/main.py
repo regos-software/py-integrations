@@ -2111,7 +2111,7 @@ return 0
             return [body]
         return []
 
-    async def connect(self) -> Any:
+    async def connect(self, **_: Any) -> Any:
         if not self.connected_integration_id:
             return self._error_response(1000, "connected_integration_id is required").dict()
         if not _redis_enabled():
@@ -2127,20 +2127,20 @@ return 0
             "instance_id": _INSTANCE_ID,
         }
 
-    async def disconnect(self) -> Any:
+    async def disconnect(self, **_: Any) -> Any:
         if not self.connected_integration_id:
             return self._error_response(1000, "connected_integration_id is required").dict()
         await self._stop_ami_worker(self.connected_integration_id)
         await self._stop_stream_worker(self.connected_integration_id)
         return {"status": "disconnected"}
 
-    async def reconnect(self) -> Any:
+    async def reconnect(self, **_: Any) -> Any:
         if not self.connected_integration_id:
             return self._error_response(1000, "connected_integration_id is required").dict()
         await self.disconnect()
         return await self.connect()
 
-    async def update_settings(self, settings: dict) -> Any:
+    async def update_settings(self, settings: Optional[dict] = None, **_: Any) -> Any:
         if not self.connected_integration_id:
             return self._error_response(1000, "connected_integration_id is required").dict()
         await self._redis_delete(self._settings_cache_key(self.connected_integration_id))
