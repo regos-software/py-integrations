@@ -11,8 +11,9 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote_plus, urljoin, urlparse, urlunparse
 
+import aiohttp
 import httpx
 from redis.exceptions import ResponseError
 from starlette.responses import JSONResponse
@@ -47,6 +48,9 @@ logger = setup_logger("asterisk_crm_channel")
 class AsteriskCrmChannelConfig:
     INTEGRATION_KEY = "asterisk_crm_channel"
     REDIS_PREFIX = "clients:asterisk_crm_channel:"
+    DEFAULT_ARI_APP = "crm_bridge"
+    INGEST_MODE_ARI = "ari"
+    INGEST_MODE_EXTERNAL_ONLY = "external_only"
 
     SETTINGS_TTL = max(int(app_settings.redis_cache_ttl or 60), 60)
     DEFAULT_DEDUPE_TTL_SEC = 24 * 60 * 60
@@ -62,6 +66,10 @@ class AsteriskCrmChannelConfig:
     LOCK_TTL_SEC = 30
     PROCESSING_LOCK_TTL_SEC = 120
     HEARTBEAT_TTL_SEC = 30
+    ARI_CONNECT_TIMEOUT_SEC = 30
+    ARI_HEARTBEAT_SEC = 20
+    ARI_RECONNECT_MIN_SEC = 1
+    ARI_RECONNECT_MAX_SEC = 30
 
     CHAT_MESSAGE_ADD_CLOSED_ENTITY_ERROR = 1220
 
@@ -84,8 +92,7 @@ class AsteriskCrmChannelConfig:
 @dataclass
 class RuntimeConfig:
     connected_integration_id: str
-    enabled: bool
-    account_key: str
+    ingest_mode: str
     asterisk_hash: str
     base_url: str
     ari_app: str
@@ -136,6 +143,7 @@ class ChatMessageAddClosedEntityError(RuntimeError):
 
 _MANAGER_LOCK = asyncio.Lock()
 _WORKER_TASKS: Dict[str, asyncio.Task] = {}
+_ARI_TASKS: Dict[str, asyncio.Task] = {}
 _INSTANCE_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
 _HTTP_CLIENT: Optional[httpx.AsyncClient] = None
 
@@ -174,23 +182,12 @@ def _to_int(value: Any, default: Optional[int] = None) -> Optional[int]:
         return default
 
 
-def _to_bool(value: Any, default: bool = False) -> bool:
-    if value is None:
-        return default
-    text = str(value).strip().lower()
-    if text in {"1", "true", "yes", "y", "on"}:
-        return True
-    if text in {"0", "false", "no", "n", "off"}:
-        return False
-    return default
-
-
 def _normalize_phone(value: Any) -> Optional[str]:
     digits = "".join(ch for ch in str(value or "") if ch.isdigit())
     return digits or None
 
 
-def _hash_account_key(value: str) -> str:
+def _hash_scope_key(value: str) -> str:
     return hashlib.md5(str(value or "").encode("utf-8")).hexdigest()
 
 
@@ -254,6 +251,47 @@ def _resolve_recording_url(base_url: Optional[str], raw_url: Optional[str]) -> O
     if not base:
         return url
     return urljoin(base.rstrip("/") + "/", url.lstrip("/"))
+
+
+def _build_ari_events_ws_url(base_url: str, ari_app: str) -> str:
+    parsed = urlparse(str(base_url or "").strip())
+    if not parsed.scheme or not parsed.netloc:
+        raise ValueError("asterisk_base_url must be an absolute URL")
+
+    ws_scheme = "wss" if parsed.scheme == "https" else "ws"
+    path = parsed.path.rstrip("/")
+    if path.endswith("/ari/events"):
+        events_path = path
+    elif path.endswith("/ari"):
+        events_path = f"{path}/events"
+    else:
+        events_path = f"{path}/ari/events"
+    query_parts = [f"app={quote_plus(str(ari_app or '').strip())}"]
+    query_parts.append("subscribeAll=true")
+    query = "&".join(query_parts)
+    return urlunparse((ws_scheme, parsed.netloc, events_path, "", query, ""))
+
+
+def _ingest_mode_from_value(raw: Any) -> str:
+    value = str(raw or "").strip().lower()
+    if not value:
+        return AsteriskCrmChannelConfig.INGEST_MODE_ARI
+    if value in {
+        AsteriskCrmChannelConfig.INGEST_MODE_ARI,
+        "ari_ws",
+        "ari_websocket",
+    }:
+        return AsteriskCrmChannelConfig.INGEST_MODE_ARI
+    if value in {
+        AsteriskCrmChannelConfig.INGEST_MODE_EXTERNAL_ONLY,
+        "external",
+    }:
+        return AsteriskCrmChannelConfig.INGEST_MODE_EXTERNAL_ONLY
+    raise ValueError(
+        "asterisk_ingest_mode must be one of: "
+        f"{AsteriskCrmChannelConfig.INGEST_MODE_ARI}, "
+        f"{AsteriskCrmChannelConfig.INGEST_MODE_EXTERNAL_ONLY}"
+    )
 
 
 def _status_from_direction_event(direction: str, status: str) -> Optional[LeadStatusEnum]:
@@ -514,25 +552,30 @@ return 0
             connected_integration_id
         )
 
-        enabled = _to_bool(settings_map.get("asterisk_enabled"), True)
-        account_key = str(settings_map.get("asterisk_account_key") or "").strip()
+        ingest_mode = _ingest_mode_from_value(settings_map.get("asterisk_ingest_mode"))
         base_url = str(settings_map.get("asterisk_base_url") or "").strip()
-        ari_app = str(settings_map.get("asterisk_ari_app") or "").strip()
+        ari_app = (
+            str(settings_map.get("asterisk_ari_app") or "").strip()
+            or AsteriskCrmChannelConfig.DEFAULT_ARI_APP
+        )
         ari_user = str(settings_map.get("asterisk_ari_user") or "").strip()
         ari_password = str(settings_map.get("asterisk_ari_password") or "").strip()
 
         pipeline_id = _to_int(settings_map.get("asterisk_pipeline_id"), None)
         channel_id = _to_int(settings_map.get("asterisk_channel_id"), None)
-        if not account_key:
-            raise ValueError("asterisk_account_key is required")
-        if not base_url:
-            raise ValueError("asterisk_base_url is required")
-        if not ari_app:
-            raise ValueError("asterisk_ari_app is required")
-        if not ari_user:
-            raise ValueError("asterisk_ari_user is required")
-        if not ari_password:
-            raise ValueError("asterisk_ari_password is required")
+        if ingest_mode == AsteriskCrmChannelConfig.INGEST_MODE_ARI:
+            if not base_url:
+                raise ValueError("asterisk_base_url is required for asterisk_ingest_mode=ari")
+            if not ari_user:
+                raise ValueError("asterisk_ari_user is required for asterisk_ingest_mode=ari")
+            if not ari_password:
+                raise ValueError(
+                    "asterisk_ari_password is required for asterisk_ingest_mode=ari"
+                )
+            try:
+                _build_ari_events_ws_url(base_url, ari_app)
+            except ValueError as error:
+                raise ValueError(f"asterisk_base_url is invalid: {error}") from error
         if not pipeline_id or pipeline_id <= 0:
             raise ValueError("asterisk_pipeline_id must be > 0")
         if not channel_id or channel_id <= 0:
@@ -547,9 +590,8 @@ return 0
 
         return RuntimeConfig(
             connected_integration_id=connected_integration_id,
-            enabled=enabled,
-            account_key=account_key,
-            asterisk_hash=_hash_account_key(account_key),
+            ingest_mode=ingest_mode,
+            asterisk_hash=_hash_scope_key(connected_integration_id),
             base_url=base_url,
             ari_app=ari_app,
             ari_user=ari_user,
@@ -846,6 +888,162 @@ return 0
         )
 
     @classmethod
+    def _derive_status_from_ari(cls, payload: Dict[str, Any]) -> Optional[str]:
+        event_type = str(payload.get("type") or payload.get("event_name") or "").strip().lower()
+        if not event_type:
+            return None
+
+        if event_type == "channelstatechange":
+            return _normalize_status(cls._payload_pick(payload, "channel.state", "state"))
+        if event_type in {"recordingfinished", "liverecordingstopped", "liverecordingfinished"}:
+            return "recording_ready"
+        if event_type in {"channelhanguprequest", "channeldestroyed", "stasisend"}:
+            cause_txt = str(
+                cls._payload_pick(payload, "cause_txt", "channel.cause_txt") or ""
+            ).strip().lower()
+            if cause_txt in {"no_answer", "noanswer", "no answer"}:
+                return "missed"
+            if cause_txt in {"busy", "congestion", "cancelled", "canceled", "failed"}:
+                return "failed"
+            return "completed"
+        return _normalize_status(event_type)
+
+    @classmethod
+    def _derive_direction_from_ari(
+        cls,
+        runtime: RuntimeConfig,
+        payload: Dict[str, Any],
+    ) -> str:
+        explicit = cls._payload_pick(payload, "direction", "call_direction")
+        if explicit is not None:
+            return cls._normalize_direction(explicit, payload)
+
+        caller = _normalize_phone(
+            cls._payload_pick(payload, "channel.caller.number", "caller.number", "caller")
+        )
+        connected = _normalize_phone(
+            cls._payload_pick(
+                payload,
+                "channel.connected.number",
+                "connected.number",
+                "channel.dialplan.exten",
+                "dialplan.exten",
+            )
+        )
+        if runtime.allowed_did_set:
+            if connected and connected in runtime.allowed_did_set:
+                return "inbound"
+            if caller and caller in runtime.allowed_did_set:
+                return "outbound"
+
+        context = str(
+            cls._payload_pick(payload, "channel.dialplan.context", "dialplan.context", "context")
+            or ""
+        ).strip().lower()
+        if "internal" in context:
+            return "outbound"
+        if any(token in context for token in {"external", "incoming", "trunk"}):
+            return "inbound"
+        return "inbound"
+
+    @classmethod
+    def _normalize_ari_payload_to_external(
+        cls,
+        runtime: RuntimeConfig,
+        payload: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return None
+
+        status = cls._derive_status_from_ari(payload)
+        if not status:
+            return None
+
+        normalized = dict(payload)
+        normalized["status"] = status
+        normalized["direction"] = cls._derive_direction_from_ari(runtime, payload)
+        normalized.setdefault(
+            "event_ts", cls._payload_pick(payload, "timestamp", "event_ts", "ts")
+        )
+
+        external_call_id = cls._payload_pick(
+            payload,
+            "external_call_id",
+            "linkedid",
+            "linked_id",
+            "call_id",
+            "uniqueid",
+            "channel.linkedid",
+            "channel.id",
+        )
+        if external_call_id:
+            normalized["external_call_id"] = str(external_call_id).strip()
+
+        if not cls._payload_pick(normalized, "event_id"):
+            try:
+                source = _json_dumps(payload)
+            except Exception:
+                source = str(payload)
+            normalized["event_id"] = hashlib.md5(
+                f"ari:{source}".encode("utf-8")
+            ).hexdigest()
+
+        if status == "recording_ready":
+            recording_url = cls._payload_pick(
+                normalized,
+                "recording_url",
+                "recording.url",
+                "recording.file",
+                "file_url",
+            )
+            if not recording_url:
+                recording_name = str(
+                    cls._payload_pick(payload, "recording.name", "recording.filename", "name")
+                    or ""
+                ).strip()
+                recording_format = str(
+                    cls._payload_pick(payload, "recording.format") or ""
+                ).strip()
+                if recording_name:
+                    if "." not in recording_name and recording_format:
+                        recording_name = f"{recording_name}.{recording_format}"
+                    normalized["recording_url"] = _resolve_recording_url(
+                        runtime.recording_base_url,
+                        recording_name,
+                    )
+
+        return normalized
+
+    @classmethod
+    def _normalize_ari_event(
+        cls,
+        runtime: RuntimeConfig,
+        payload: Dict[str, Any],
+    ) -> Optional[CallEvent]:
+        external_payload = cls._normalize_ari_payload_to_external(runtime, payload)
+        if not external_payload:
+            return None
+        return cls._normalize_external_event(runtime, external_payload)
+
+    @classmethod
+    async def _enqueue_runtime_event(
+        cls,
+        runtime: RuntimeConfig,
+        event: CallEvent,
+    ) -> None:
+        await cls._enqueue(
+            cls._stream_key(runtime.connected_integration_id),
+            {
+                "connected_integration_id": runtime.connected_integration_id,
+                "event": cls._event_to_dict(event),
+                "attempt": "0",
+                "enqueued_at": str(_now_ts()),
+                "state_ttl_sec": str(runtime.state_ttl_sec),
+            },
+            stream_ttl_sec=runtime.state_ttl_sec,
+        )
+
+    @classmethod
     async def _ensure_consumer_group(cls, stream_key: str) -> None:
         if not _redis_enabled():
             return
@@ -909,6 +1107,18 @@ return 0
             )
 
     @classmethod
+    async def _ensure_ari_worker(cls, runtime: RuntimeConfig) -> None:
+        connected_integration_id = runtime.connected_integration_id
+        async with _MANAGER_LOCK:
+            task = _ARI_TASKS.get(connected_integration_id)
+            if task and not task.done():
+                return
+            _ARI_TASKS[connected_integration_id] = asyncio.create_task(
+                cls._ari_listener_loop(runtime),
+                name=f"asterisk_crm_ari_{connected_integration_id}",
+            )
+
+    @classmethod
     async def _stop_stream_worker(cls, connected_integration_id: str) -> None:
         async with _MANAGER_LOCK:
             task = _WORKER_TASKS.pop(connected_integration_id, None)
@@ -921,6 +1131,116 @@ return 0
             pass
         except Exception:
             logger.exception("Error while stopping stream worker: ci=%s", connected_integration_id)
+
+    @classmethod
+    async def _stop_ari_worker(cls, connected_integration_id: str) -> None:
+        async with _MANAGER_LOCK:
+            task = _ARI_TASKS.pop(connected_integration_id, None)
+        if not task:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("Error while stopping ARI worker: ci=%s", connected_integration_id)
+
+    @classmethod
+    async def _ari_listener_loop(cls, runtime: RuntimeConfig) -> None:
+        connected_integration_id = runtime.connected_integration_id
+        ws_url = _build_ari_events_ws_url(runtime.base_url, runtime.ari_app)
+        auth = aiohttp.BasicAuth(runtime.ari_user, runtime.ari_password)
+        timeout = aiohttp.ClientTimeout(
+            total=None,
+            connect=AsteriskCrmChannelConfig.ARI_CONNECT_TIMEOUT_SEC,
+            sock_connect=AsteriskCrmChannelConfig.ARI_CONNECT_TIMEOUT_SEC,
+            sock_read=None,
+        )
+        reconnect_delay = AsteriskCrmChannelConfig.ARI_RECONNECT_MIN_SEC
+        logger.info(
+            "Asterisk ARI listener started: ci=%s ws=%s",
+            connected_integration_id,
+            ws_url,
+        )
+        try:
+            while True:
+                try:
+                    await cls._ensure_stream_worker(connected_integration_id)
+                    async with aiohttp.ClientSession(
+                        auth=auth,
+                        timeout=timeout,
+                    ) as session:
+                        async with session.ws_connect(
+                            ws_url,
+                            heartbeat=AsteriskCrmChannelConfig.ARI_HEARTBEAT_SEC,
+                            autoping=True,
+                        ) as ws:
+                            reconnect_delay = AsteriskCrmChannelConfig.ARI_RECONNECT_MIN_SEC
+                            logger.info(
+                                "Asterisk ARI websocket connected: ci=%s",
+                                connected_integration_id,
+                            )
+                            async for message in ws:
+                                if message.type == aiohttp.WSMsgType.TEXT:
+                                    raw_text = str(message.data or "").strip()
+                                    if not raw_text:
+                                        continue
+                                    try:
+                                        payload = _json_loads(raw_text)
+                                    except Exception:
+                                        logger.warning(
+                                            "ARI event JSON parse failed: ci=%s payload=%s",
+                                            connected_integration_id,
+                                            raw_text[:300],
+                                        )
+                                        continue
+
+                                    if not isinstance(payload, dict):
+                                        continue
+                                    event = cls._normalize_ari_event(runtime, payload)
+                                    if not event:
+                                        continue
+                                    try:
+                                        await cls._enqueue_runtime_event(runtime, event)
+                                        await cls._ensure_stream_worker(connected_integration_id)
+                                    except Exception as enqueue_error:
+                                        logger.exception(
+                                            "ARI event enqueue failed: ci=%s event_id=%s error=%s",
+                                            connected_integration_id,
+                                            event.event_id,
+                                            enqueue_error,
+                                        )
+                                elif message.type in (
+                                    aiohttp.WSMsgType.CLOSE,
+                                    aiohttp.WSMsgType.CLOSED,
+                                    aiohttp.WSMsgType.CLOSING,
+                                ):
+                                    raise RuntimeError(
+                                        f"ARI websocket closed: type={message.type}"
+                                    )
+                                elif message.type == aiohttp.WSMsgType.ERROR:
+                                    raise RuntimeError(f"ARI websocket error: {ws.exception()}")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    logger.warning(
+                        "Asterisk ARI listener error: ci=%s reconnect_in=%ss error=%s",
+                        connected_integration_id,
+                        reconnect_delay,
+                        error,
+                    )
+                    await asyncio.sleep(reconnect_delay)
+                    reconnect_delay = min(
+                        reconnect_delay * 2,
+                        AsteriskCrmChannelConfig.ARI_RECONNECT_MAX_SEC,
+                    )
+        finally:
+            current_task = asyncio.current_task()
+            async with _MANAGER_LOCK:
+                active = _ARI_TASKS.get(connected_integration_id)
+                if active is current_task:
+                    _ARI_TASKS.pop(connected_integration_id, None)
 
     @classmethod
     async def _stream_worker_loop(cls, connected_integration_id: str) -> None:
@@ -1090,9 +1410,6 @@ return 0
         event_payload: Dict[str, Any],
     ) -> None:
         runtime = await cls._load_runtime(connected_integration_id)
-        if not runtime.enabled:
-            logger.info("Asterisk integration disabled; event skipped: ci=%s", connected_integration_id)
-            return
 
         event = cls._event_from_dict(event_payload)
         if not event:
@@ -1660,20 +1977,24 @@ return 0
             return self._error_response(1001, "Redis is required for this integration").dict()
 
         runtime = await self._load_runtime(self.connected_integration_id)
-        if not runtime.enabled:
-            return {"status": "disabled"}
-
         await self._ensure_consumer_group(self._stream_key(self.connected_integration_id))
         await self._ensure_stream_worker(self.connected_integration_id)
+        if runtime.ingest_mode == AsteriskCrmChannelConfig.INGEST_MODE_ARI:
+            await self._ensure_ari_worker(runtime)
+            mode = "ari_ws_with_external_fallback"
+        else:
+            await self._stop_ari_worker(self.connected_integration_id)
+            mode = AsteriskCrmChannelConfig.INGEST_MODE_EXTERNAL_ONLY
         return {
             "status": "connected",
-            "mode": "external_http_stream",
+            "mode": mode,
             "instance_id": _INSTANCE_ID,
         }
 
     async def disconnect(self) -> Any:
         if not self.connected_integration_id:
             return self._error_response(1000, "connected_integration_id is required").dict()
+        await self._stop_ari_worker(self.connected_integration_id)
         await self._stop_stream_worker(self.connected_integration_id)
         return {"status": "disconnected"}
 
@@ -1696,7 +2017,7 @@ return 0
         data: Optional[Dict[str, Any]] = None,
         **_: Any,
     ) -> Dict[str, Any]:
-        # This integration consumes external Asterisk events via /external endpoint.
+        # Events are consumed via ARI worker and/or /external endpoint; webhook endpoint is unused.
         return {"status": "ignored", "action": action, "has_data": bool(data)}
 
     async def handle_external(self, envelope: Dict[str, Any]) -> Any:
@@ -1711,8 +2032,6 @@ return 0
             )
 
         runtime = await self._load_runtime(self.connected_integration_id)
-        if not runtime.enabled:
-            return {"status": "ignored", "reason": "integration_disabled"}
 
         raw_events = self._extract_events_from_body(envelope.get("body"))
         if not raw_events:
@@ -1720,24 +2039,13 @@ return 0
 
         accepted = 0
         ignored = 0
-        stream_key = self._stream_key(self.connected_integration_id)
         for raw_event in raw_events:
             normalized = self._normalize_external_event(runtime, raw_event)
             if not normalized:
                 ignored += 1
                 continue
 
-            await self._enqueue(
-                stream_key,
-                {
-                    "connected_integration_id": self.connected_integration_id,
-                    "event": self._event_to_dict(normalized),
-                    "attempt": "0",
-                    "enqueued_at": str(_now_ts()),
-                    "state_ttl_sec": str(runtime.state_ttl_sec),
-                },
-                stream_ttl_sec=runtime.state_ttl_sec,
-            )
+            await self._enqueue_runtime_event(runtime, normalized)
             accepted += 1
 
         await self._ensure_stream_worker(self.connected_integration_id)

@@ -24,7 +24,6 @@ All keys are read from `ConnectedIntegrationSetting` for integration key
 
 | Key | Required | Allowed values | Default | Description |
 |---|---|---|---|---|
-| `bot_1_enabled` | Yes | `true` / `false` | `false` | Enables integration. Must be `true` to run. |
 | `bot_1_token` | Yes | Telegram bot token | - | Telegram Bot API token. |
 | `bot_1_pipeline_id` | Yes | positive integer | - | CRM pipeline id for created leads. |
 | `bot_1_channel_id` | Yes | positive integer | - | CRM channel id used in `Lead/Add`. |
@@ -38,6 +37,7 @@ All keys are read from `ConnectedIntegrationSetting` for integration key
 | `send_private_messages` | No | `true` / `false` | `false` | Forward CRM `Private` messages to Telegram. |
 | `forward_system_messages` | No | `true` / `false` | `false` | Forward CRM `System` messages to Telegram. |
 | `lead_closed_message_template` | No | string | empty | Message sent to Telegram on `LeadClosed`. |
+| `phone_request_text` | No | string | empty | If set, bot asks for phone in private chat when `Lead.client_phone` and/or `RetailCustomer.main_phone` is missing. |
 
 ## Auto-create contact
 
@@ -50,6 +50,15 @@ When `bot_1_auto_create_contact=retail_customer`:
 5. If existing contact is updated, integration sends `System` message: `Обновлен розничный покупатель: {Имя}`.
 
 If contact create fails, lead flow still continues (best effort).
+
+## Phone request
+
+- Works only in private chats and only when `phone_request_text` is configured.
+- Number is accepted only from the message `contact` that belongs to the same Telegram user (`contact.user_id == from.id`).
+- Source of truth is CRM fields:
+  - `Lead.client_phone`
+  - `RetailCustomer.main_phone` (when `bot_1_auto_create_contact=retail_customer`)
+- Redis stores only temporary prompt/cache state. After Redis reset the state is rehydrated from CRM.
 
 ## Delivery failures
 
