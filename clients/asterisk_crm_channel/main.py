@@ -103,6 +103,7 @@ class RuntimeConfig:
     lead_dedupe_ttl_sec: int
     state_ttl_sec: int
     reconcile_lookback_min: int
+    default_country_code: str
 
 
 @dataclass
@@ -193,6 +194,35 @@ def _normalize_phone(value: Any) -> Optional[str]:
                 digits = chunk
                 break
     return digits or None
+
+
+def _normalize_country_code(value: Any, default: str = "998") -> str:
+    digits = "".join(ch for ch in str(value or "") if ch.isdigit())
+    return digits or default
+
+
+def _is_internal_extension(value: Optional[str]) -> bool:
+    digits = _normalize_phone(value)
+    return bool(digits and 2 <= len(digits) <= 6)
+
+
+def _to_international_phone(value: Any, country_code: str) -> Optional[str]:
+    digits = _normalize_phone(value)
+    if not digits:
+        return None
+    if _is_internal_extension(digits):
+        return digits
+
+    cc = _normalize_country_code(country_code)
+    if digits.startswith("00") and len(digits) > 2:
+        digits = digits[2:]
+    if digits.startswith(cc):
+        return digits
+    if len(digits) == 10 and digits.startswith("0"):
+        return f"{cc}{digits[1:]}"
+    if len(digits) == 9:
+        return f"{cc}{digits}"
+    return digits
 
 
 def _hash_scope_key(value: str) -> str:
@@ -531,12 +561,12 @@ return 0
         return settings_map
 
     @staticmethod
-    def _parse_allowed_did_set(raw: Optional[str]) -> set[str]:
+    def _parse_allowed_did_set(raw: Optional[str], country_code: str) -> set[str]:
         if not raw:
             return set()
         values: set[str] = set()
         for chunk in str(raw).replace(";", ",").split(","):
-            normalized = _normalize_phone(chunk)
+            normalized = _to_international_phone(chunk, country_code)
             if normalized:
                 values.add(normalized)
         return values
@@ -558,6 +588,9 @@ return 0
         ami_password = (
             str(settings_map.get("asterisk_ami_password") or "").strip()
             or str(settings_map.get("asterisk_ami_secret") or "").strip()
+        )
+        default_country_code = _normalize_country_code(
+            settings_map.get("asterisk_default_country_code"), "998"
         )
 
         pipeline_id = _to_int(settings_map.get("asterisk_pipeline_id"), None)
@@ -593,7 +626,8 @@ return 0
                 or "Call {direction} {from_phone}"
             ),
             allowed_did_set=AsteriskCrmChannelIntegration._parse_allowed_did_set(
-                settings_map.get("asterisk_allowed_did_list")
+                settings_map.get("asterisk_allowed_did_list"),
+                default_country_code,
             ),
             recording_base_url=(
                 str(settings_map.get("asterisk_recording_base_url") or "").strip() or None
@@ -618,6 +652,7 @@ return 0
                 _to_int(settings_map.get("reconcile_lookback_min"), 120) or 120,
                 1,
             ),
+            default_country_code=default_country_code,
         )
 
     @staticmethod
@@ -896,7 +931,8 @@ return 0
             return None
 
         if event_type in {"newchannel", "newcallerid", "newexten"}:
-            return "started"
+            # Too noisy for CRM chat; keep only meaningful call stages.
+            return None
         if event_type in {"dialbegin", "dialstate"}:
             return "ringing"
         if event_type == "newstate":
@@ -963,7 +999,7 @@ return 0
         if explicit is not None:
             return cls._normalize_direction(explicit, payload)
 
-        caller = _normalize_phone(
+        caller = _to_international_phone(
             cls._payload_pick(
                 payload,
                 "calleridnum",
@@ -971,9 +1007,10 @@ return 0
                 "src",
                 "caller",
                 "channelcalleridnum",
-            )
+            ),
+            runtime.default_country_code,
         )
-        connected = _normalize_phone(
+        connected = _to_international_phone(
             cls._payload_pick(
                 payload,
                 "connectedlinenum",
@@ -983,8 +1020,17 @@ return 0
                 "dialstring",
                 "destcalleridnum",
                 "to",
-            )
+            ),
+            runtime.default_country_code,
         )
+        caller_is_ext = _is_internal_extension(caller)
+        connected_is_ext = _is_internal_extension(connected)
+        if caller and connected:
+            if caller_is_ext and not connected_is_ext:
+                return "outbound"
+            if connected_is_ext and not caller_is_ext:
+                return "inbound"
+
         if runtime.allowed_did_set:
             if connected and connected in runtime.allowed_did_set:
                 return "inbound"
@@ -1000,9 +1046,9 @@ return 0
             return "inbound"
 
         if caller and connected:
-            if len(caller) <= 5 and len(connected) >= 7:
+            if caller_is_ext and len(connected) >= 7:
                 return "outbound"
-            if len(connected) <= 5 and len(caller) >= 7:
+            if connected_is_ext and len(caller) >= 7:
                 return "inbound"
         return "inbound"
 
@@ -1022,7 +1068,8 @@ return 0
 
         normalized = dict(source)
         normalized["status"] = status
-        normalized["direction"] = cls._derive_direction_from_ami(runtime, source)
+        direction = cls._derive_direction_from_ami(runtime, source)
+        normalized["direction"] = direction
         normalized.setdefault(
             "event_ts",
             cls._payload_pick(source, "timestamp", "eventtv", "eventtime", "event_ts", "ts"),
@@ -1041,7 +1088,7 @@ return 0
         if external_call_id:
             normalized["external_call_id"] = str(external_call_id).strip()
 
-        from_phone = _normalize_phone(
+        from_phone = _to_international_phone(
             cls._payload_pick(
                 source,
                 "from_phone",
@@ -1051,9 +1098,10 @@ return 0
                 "callerid",
                 "caller",
                 "channelcalleridnum",
-            )
+            ),
+            runtime.default_country_code,
         )
-        to_phone = _normalize_phone(
+        to_phone = _to_international_phone(
             cls._payload_pick(
                 source,
                 "to_phone",
@@ -1065,12 +1113,81 @@ return 0
                 "dnid",
                 "dialstring",
                 "destcalleridnum",
-            )
+            ),
+            runtime.default_country_code,
         )
-        if from_phone:
-            normalized["from_phone"] = from_phone
-        if to_phone:
-            normalized["to_phone"] = to_phone
+        from_is_ext = _is_internal_extension(from_phone)
+        to_is_ext = _is_internal_extension(to_phone)
+
+        explicit_client_phone = _to_international_phone(
+            cls._payload_pick(source, "client_phone", "customer_phone"),
+            runtime.default_country_code,
+        )
+        client_phone = (
+            explicit_client_phone if explicit_client_phone and not _is_internal_extension(explicit_client_phone) else None
+        )
+        if not client_phone:
+            if direction == "inbound":
+                if from_phone and not from_is_ext:
+                    client_phone = from_phone
+                elif to_phone and not to_is_ext:
+                    client_phone = to_phone
+            else:
+                if to_phone and not to_is_ext:
+                    client_phone = to_phone
+                elif from_phone and not from_is_ext:
+                    client_phone = from_phone
+        if client_phone:
+            normalized["client_phone"] = client_phone
+
+        operator_candidates = [
+            _to_international_phone(
+                cls._payload_pick(source, "operator_ext", "agent_ext", "agent"), runtime.default_country_code
+            ),
+            _to_international_phone(
+                cls._payload_pick(
+                    source,
+                    "extension",
+                    "sourceextension",
+                    "destinationextension",
+                    "connectedlinenum",
+                    "destcalleridnum",
+                    "exten",
+                ),
+                runtime.default_country_code,
+            ),
+        ]
+        operator_ext: Optional[str] = None
+        for candidate in operator_candidates:
+            if not candidate:
+                continue
+            if client_phone and candidate == client_phone:
+                continue
+            operator_ext = candidate
+            if _is_internal_extension(candidate):
+                break
+
+        if not operator_ext:
+            if direction == "inbound":
+                if to_phone and to_phone != client_phone:
+                    operator_ext = to_phone
+                elif from_phone and from_phone != client_phone:
+                    operator_ext = from_phone
+            else:
+                if from_phone and from_phone != client_phone:
+                    operator_ext = from_phone
+                elif to_phone and to_phone != client_phone:
+                    operator_ext = to_phone
+        if operator_ext:
+            normalized["operator_ext"] = operator_ext
+
+        # Render participants in stable semantic order.
+        if direction == "inbound":
+            normalized["from_phone"] = client_phone or from_phone or ""
+            normalized["to_phone"] = operator_ext or to_phone or ""
+        else:
+            normalized["from_phone"] = operator_ext or from_phone or ""
+            normalized["to_phone"] = client_phone or to_phone or ""
 
         talk_duration_sec = _to_int(
             cls._payload_pick(source, "talk_duration_sec", "billableseconds", "billsec", "duration"),
@@ -1078,12 +1195,6 @@ return 0
         )
         if talk_duration_sec is not None:
             normalized["talk_duration_sec"] = int(talk_duration_sec)
-
-        operator_ext = _normalize_phone(
-            cls._payload_pick(source, "operator_ext", "agent_ext", "extension", "connectedlinenum")
-        )
-        if operator_ext:
-            normalized["operator_ext"] = operator_ext
 
         if status == "recording_ready":
             recording_value = cls._payload_pick(
@@ -1648,6 +1759,15 @@ return 0
         stable_client_phone = _normalize_phone(cached.get("client_phone"))
         if stable_client_phone:
             event.client_phone = stable_client_phone
+        stable_operator_ext = _normalize_phone(cached.get("operator_ext"))
+        if stable_operator_ext:
+            event.operator_ext = stable_operator_ext
+        stable_from_phone = _normalize_phone(cached.get("from_phone"))
+        if stable_from_phone:
+            event.from_phone = stable_from_phone
+        stable_to_phone = _normalize_phone(cached.get("to_phone"))
+        if stable_to_phone:
+            event.to_phone = stable_to_phone
 
         posted_statuses = {
             str(item).strip().lower()
@@ -1673,6 +1793,9 @@ return 0
             event.direction if event.direction in {"inbound", "outbound"} else stable_direction
         )
         stable_client_phone = _normalize_phone(event.client_phone) or stable_client_phone
+        stable_operator_ext = _normalize_phone(event.operator_ext) or stable_operator_ext
+        stable_from_phone = _normalize_phone(event.from_phone) or stable_from_phone
+        stable_to_phone = _normalize_phone(event.to_phone) or stable_to_phone
         next_last_rank = max(last_rank, current_rank)
         if status and status != "recording_ready":
             posted_statuses.add(status)
@@ -1683,6 +1806,9 @@ return 0
             {
                 "direction": stable_direction or "",
                 "client_phone": stable_client_phone or "",
+                "operator_ext": stable_operator_ext or "",
+                "from_phone": stable_from_phone or "",
+                "to_phone": stable_to_phone or "",
                 "posted_statuses": sorted(posted_statuses),
                 "last_rank": int(next_last_rank),
                 "recording_posted": recording_posted,
