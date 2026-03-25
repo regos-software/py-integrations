@@ -1,49 +1,35 @@
-﻿# asterisk_crm_channel
+# asterisk_crm_channel
 
 ## Назначение
 
-Интеграция передает события звонков из Asterisk в CRM:
+Интеграция работает в режиме AMI и передает события звонков из Asterisk в CRM:
 
 - создает или переиспользует активный лид по номеру клиента;
-- пишет в чат лида этапы звонка;
+- пишет этапы звонка в чат лида;
 - прикладывает запись разговора;
-- меняет статус лида по ходу звонка.
+- обновляет статус лида по логике звонка.
 
-## Режимы получения событий
+## Режим работы
 
-Поддерживаются два режима.
+Поддерживаемый рабочий режим: AMI.
 
-1. `ari` (по умолчанию)
-
-- Интеграция сама подключается к Asterisk ARI (`/ari/events`) по websocket.
-- Внешний endpoint `/external` остается резервным источником.
-- Для этого режима нужен ARI-пользователь и (обычно) `Stasis(...)` в диалплане.
-
-2. `external_only`
-
-- Интеграция не подключается к ARI.
-- События принимаются только через `POST /clients/asterisk_crm_channel/external`.
-- Подходит для FreePBX, если нельзя трогать текущий диалплан и очереди.
+- интеграция подключается к Asterisk Manager Interface;
+- поток событий берется из AMI, без `Stasis(...)`;
+- `/external` остается как резервный endpoint для внешней подачи событий.
 
 ## Настройки интеграции
 
-### Обязательные для всех режимов
+### Обязательные
 
+- `asterisk_ami_host`: адрес Asterisk AMI (IP/домен).
+- `asterisk_ami_user`: логин AMI-пользователя.
+- `asterisk_ami_password`: пароль AMI-пользователя.
 - `asterisk_pipeline_id`: ID воронки CRM.
 - `asterisk_channel_id`: ID канала CRM.
 
-### Обязательные только для режима `ari`
-
-- `asterisk_base_url`: адрес Asterisk (`http://IP:8088` или `https://domain`).
-- `asterisk_ari_user`: логин ARI-пользователя.
-- `asterisk_ari_password`: пароль ARI-пользователя.
-
 ### Необязательные
 
-- `asterisk_ingest_mode`: режим получения событий (`ari` или `external_only`).
-  - По умолчанию: `ari`.
-- `asterisk_ari_app`: имя ARI-приложения.
-  - По умолчанию: `crm_bridge`.
+- `asterisk_ami_port`: порт AMI.
 - `asterisk_default_responsible_user_id`: ответственный по умолчанию.
 - `asterisk_lead_subject_template`: шаблон названия лида.
 - `asterisk_allowed_did_list`: список DID-номеров для фильтра входящих.
@@ -52,135 +38,71 @@
 - `state_ttl_sec`: время хранения служебного состояния.
 - `reconcile_lookback_min`: окно сверки событий звонка.
 
+Значение по умолчанию для `asterisk_ami_port`: `5038`.
+
 ## Флоу работы
 
-1. Происходит звонок.
-2. Интеграция получает событие (из ARI или через `/external`).
-3. Определяется номер клиента и направление звонка.
-4. Ищется активный лид, либо создается новый.
-5. В чат лида записываются этапы звонка.
-6. Когда появляется запись, она прикрепляется в тот же лид.
-7. Статус лида обновляется автоматически, закрытые/конвертированные лиды не переоткрываются.
+1. В Asterisk происходит звонок.
+2. Интеграция получает события этого звонка через AMI.
+3. Определяются номер клиента и направление звонка.
+4. Ищется активный лид или создается новый.
+5. Этапы звонка пишутся в чат лида.
+6. Если появляется запись разговора, она прикрепляется в тот же лид.
+7. Статус лида обновляется по этапам звонка.
 
-## Внешний endpoint (`external`)
+## Порядок настройки на стороне Asterisk (AMI)
 
-Адрес:
-
-- `POST /clients/asterisk_crm_channel/external`
-- header: `connected-integration-id: <id>`
-
-Тело может быть:
-
-- один объект события;
-- `{ "event": {...} }`;
-- `{ "events": [{...}, {...}] }`;
-- массив событий.
-
-Минимально для нормализации нужны:
-
-- идентификатор звонка (`external_call_id` или `linkedid/uniqueid/...`);
-- статус (`started|ringing|answered|missed|completed|failed|recording_ready`);
-- номера (`from_phone`/`to_phone` или их аналоги).
-
-## Настройка FreePBX через интерфейс (без `Stasis`)
-
-Этот вариант рекомендован, если у вас уже рабочая телефония/очереди и вы не хотите менять диалплан.
-
-1. В настройках интеграции установите:
-
-- `asterisk_ingest_mode=external_only`
-- `asterisk_pipeline_id=<...>`
-- `asterisk_channel_id=<...>`
-
-2. В FreePBX создайте пользователя AMI (Asterisk Manager):
-
-- обычно раздел `Admin` -> `Asterisk Manager Users`.
-
-3. Разрешите доступ к AMI с сервера интеграции:
-
-- через FreePBX Firewall (`Connectivity` -> `Firewall`),
-- порт AMI обычно `5038`.
-
-4. Ничего не меняйте в существующих `Inbound Routes`, `Queues`, `Ring Groups`.
-
-5. Ваш текущий адаптер/скрипт, который слушает AMI/CEL/QueueLog, должен отправлять события в:
-
-- `POST /clients/asterisk_crm_channel/external`
-
-6. Выполните тест:
-
-- входящий звонок;
-- исходящий звонок;
-- проверка, что лид создается/обновляется и события появляются в чате.
-
-## Настройка режима `ari` (если нужен прямой поток из Asterisk)
-
-1. Включите HTTP в `http.conf`.
-
-Пример:
-
+1. Откройте `manager.conf` и включите AMI в секции `[general]`:
 ```ini
 [general]
 enabled = yes
+port = 5038
 bindaddr = 0.0.0.0
-bindport = 8088
 ```
 
-2. Включите ARI и создайте пользователя в `ari.conf`.
+2. Ограничьте сетевой доступ к AMI:
+- откройте порт `5038` только для IP сервера интеграции;
+- если интеграция стоит на том же сервере, используйте только `127.0.0.1`.
 
-Пример:
-
+3. Создайте отдельного AMI-пользователя для интеграции в `manager.conf`:
 ```ini
-[general]
-enabled = yes
-pretty = yes
-
-[crm_user]
-type = user
-read_only = no
-password = STRONG_PASSWORD
+[crm_integration]
+secret = CHANGE_ME_STRONG_PASSWORD
+deny = 0.0.0.0/0.0.0.0
+permit = 10.10.10.25/255.255.255.255
+read = call,cdr,reporting
+write = system
+writetimeout = 1000
 ```
 
-3. Перезагрузите модули Asterisk.
+4. Не выдавайте лишние права:
+- не используйте `write=originate`;
+- не добавляйте `write=config,command,dialplan,user,agent` без реальной необходимости;
+- для этой интеграции обычно достаточно `read=call,cdr,reporting` и `write=system`.
 
-```text
-module reload res_http_websocket.so
-module reload res_ari.so
-http show status
-ari show users
+5. Примените конфигурацию:
+```bash
+asterisk -rx "manager reload"
 ```
 
-4. Убедитесь, что имя приложения совпадает:
-
-- в интеграции: `asterisk_ari_app` (или дефолт `crm_bridge`),
-- в диалплане: `Stasis(<это же имя>)`.
-
-Пример:
-
-```ini
-[from-trunk]
-exten => _X.,1,NoOp(Inbound to CRM bridge)
- same => n,Stasis(crm_bridge)
- same => n,Hangup()
+6. Проверьте, что пользователь активен:
+```bash
+asterisk -rx "manager show users"
 ```
 
-5. Заполните в CRM:
-
-- `asterisk_ingest_mode=ari`
-- `asterisk_base_url`
-- `asterisk_ari_user`
-- `asterisk_ari_password`
+7. Заполните настройки интеграции в CRM:
+- `asterisk_ami_host`
+- `asterisk_ami_port` (если не `5038`)
+- `asterisk_ami_user`
+- `asterisk_ami_password`
 - `asterisk_pipeline_id`
 - `asterisk_channel_id`
 
-6. Сделайте тестовые звонки и проверьте лид/сообщения/записи.
+8. Выполните тест:
+- один входящий звонок;
+- один исходящий звонок;
+- проверка: лид создается или обновляется, этапы пишутся в чат, запись привязывается к лиду.
 
-## Частые вопросы
+## FreePBX
 
-`Можно ли не использовать Stasis?`
-
-- Да. Используйте `asterisk_ingest_mode=external_only` и отправку событий через `/external`.
-
-`Нужен ли asterisk_account_key?`
-
-- Нет. Эта настройка удалена.
+Для FreePBX используйте AMI-пользователя, которого создает или обслуживает FreePBX, и откройте доступ к AMI только для сервера интеграции. Маршрутизацию через `Stasis(...)` настраивать не нужно.
