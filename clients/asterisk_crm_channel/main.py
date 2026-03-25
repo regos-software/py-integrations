@@ -180,6 +180,18 @@ def _to_int(value: Any, default: Optional[int] = None) -> Optional[int]:
 
 def _normalize_phone(value: Any) -> Optional[str]:
     digits = "".join(ch for ch in str(value or "") if ch.isdigit())
+    # Some AMI fields may contain duplicated number tokens concatenated together.
+    if len(digits) >= 10:
+        for parts in (2, 3, 4):
+            if len(digits) % parts != 0:
+                continue
+            chunk_len = len(digits) // parts
+            if chunk_len < 5:
+                continue
+            chunk = digits[:chunk_len]
+            if chunk and chunk * parts == digits:
+                digits = chunk
+                break
     return digits or None
 
 
@@ -357,6 +369,17 @@ class AsteriskCrmChannelIntegration(ClientBase):
         return (
             f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
             f"late_recording:{connected_integration_id}:{asterisk_hash}:{external_call_id}"
+        )
+
+    @staticmethod
+    def _call_progress_key(
+        connected_integration_id: str,
+        asterisk_hash: str,
+        external_call_id: str,
+    ) -> str:
+        return (
+            f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
+            f"call_progress:{connected_integration_id}:{asterisk_hash}:{external_call_id}"
         )
 
     @staticmethod
@@ -1567,6 +1590,15 @@ return 0
             return
 
         try:
+            event = await cls._dedupe_and_stabilize_call_event(runtime, event)
+            if not event:
+                await cls._redis_set_with_ttl(
+                    dedupe_key,
+                    "1",
+                    runtime.lead_dedupe_ttl_sec,
+                    min_ttl_sec=60,
+                )
+                return
             lead_ctx = await cls._resolve_or_create_active_lead(runtime, event)
             lead_ctx = await cls._write_event_with_1220_policy(runtime, event, lead_ctx)
             await cls._save_mapping(runtime, event, lead_ctx)
@@ -1580,6 +1612,89 @@ return 0
         except Exception:
             await cls._redis_delete(dedupe_key)
             raise
+
+    @staticmethod
+    def _status_rank(status: str) -> int:
+        return {
+            "started": 10,
+            "ringing": 20,
+            "answered": 30,
+            "missed": 40,
+            "failed": 40,
+            "completed": 40,
+            "recording_ready": 50,
+        }.get(str(status or "").strip().lower(), 0)
+
+    @classmethod
+    async def _dedupe_and_stabilize_call_event(
+        cls,
+        runtime: RuntimeConfig,
+        event: CallEvent,
+    ) -> Optional[CallEvent]:
+        if not event.external_call_id:
+            return event
+
+        progress_key = cls._call_progress_key(
+            runtime.connected_integration_id,
+            runtime.asterisk_hash,
+            event.external_call_id,
+        )
+        cached = cls._parse_cached_json(await cls._redis_get(progress_key)) or {}
+
+        stable_direction = str(cached.get("direction") or "").strip().lower()
+        if stable_direction in {"inbound", "outbound"}:
+            event.direction = stable_direction
+
+        stable_client_phone = _normalize_phone(cached.get("client_phone"))
+        if stable_client_phone:
+            event.client_phone = stable_client_phone
+
+        posted_statuses = {
+            str(item).strip().lower()
+            for item in (cached.get("posted_statuses") or [])
+            if str(item).strip()
+        }
+        last_rank = _to_int(cached.get("last_rank"), 0) or 0
+        current_rank = cls._status_rank(event.status)
+        status = str(event.status or "").strip().lower()
+
+        should_emit = True
+        if status == "recording_ready":
+            should_emit = not bool(cached.get("recording_posted"))
+        else:
+            if status in posted_statuses:
+                should_emit = False
+            elif last_rank >= 40 and current_rank <= 40:
+                should_emit = False
+            elif current_rank and current_rank < last_rank:
+                should_emit = False
+
+        stable_direction = (
+            event.direction if event.direction in {"inbound", "outbound"} else stable_direction
+        )
+        stable_client_phone = _normalize_phone(event.client_phone) or stable_client_phone
+        next_last_rank = max(last_rank, current_rank)
+        if status and status != "recording_ready":
+            posted_statuses.add(status)
+        recording_posted = bool(cached.get("recording_posted")) or status == "recording_ready"
+
+        await cls._redis_set_json_with_ttl(
+            progress_key,
+            {
+                "direction": stable_direction or "",
+                "client_phone": stable_client_phone or "",
+                "posted_statuses": sorted(posted_statuses),
+                "last_rank": int(next_last_rank),
+                "recording_posted": recording_posted,
+                "updated_at": _now_ts(),
+            },
+            runtime.state_ttl_sec,
+            min_ttl_sec=300,
+        )
+
+        if not should_emit:
+            return None
+        return event
 
     @classmethod
     async def _save_mapping(
@@ -1778,10 +1893,8 @@ return 0
 
     @staticmethod
     def _event_external_message_id(event: CallEvent) -> str:
-        return (
-            f"astmsg:{event.asterisk_hash}:{event.external_call_id}:"
-            f"{event.status}:{event.event_id}"
-        )
+        # Stable id makes ChatMessage/Add idempotent for repeated AMI events.
+        return f"astmsg:{event.asterisk_hash}:{event.external_call_id}:{event.status}"
 
     @staticmethod
     def _render_call_text(event: CallEvent) -> str:
