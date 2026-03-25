@@ -102,7 +102,9 @@ class TelegramBotCrmChannelConfig:
     AUTO_CREATE_CONTACT_RETAIL_CUSTOMER = "retail_customer"
     CHAT_MESSAGE_ADD_CLOSED_ENTITY_ERROR = 1220
     PHONE_PROMPT_COOLDOWN_SEC = 24 * 60 * 60
-    PHONE_SHARE_BUTTON_TEXT = "Share phone number"
+    PHONE_SHARE_BUTTON_TEXT = "Поделиться номером / Raqamni ulashish"
+    PHONE_REQUEST_SENT_SYSTEM_TEXT = "Запросили у клиента номер телефона."
+    PHONE_RECEIVED_SYSTEM_TEXT = "Клиент отправил номер телефона: {phone}"
     UNKNOWN_CLIENT_NAME = "Unknown"
 
 
@@ -132,6 +134,7 @@ class RuntimeConfig:
     forward_system_messages: bool
     lead_closed_message_template: Optional[str]
     phone_request_text: Optional[str]
+    phone_share_button_text: str
 
 
 _MANAGER_LOCK = asyncio.Lock()
@@ -1168,6 +1171,14 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             or None,
             phone_request_text=str(settings_map.get("phone_request_text") or "").strip()
             or None,
+            phone_share_button_text=(
+                _normalize_telegram_name(
+                    settings_map.get("phone_share_button_text")
+                    or TelegramBotCrmChannelConfig.PHONE_SHARE_BUTTON_TEXT,
+                    max_len=64,
+                )
+                or TelegramBotCrmChannelConfig.PHONE_SHARE_BUTTON_TEXT
+            ),
         )
         return runtime
 
@@ -1664,6 +1675,9 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         raw_phone = str(contact.get("phone_number") or "").strip()
         if not raw_phone:
             return None
+        normalized_phone = _normalize_phone(raw_phone)
+        if not normalized_phone:
+            return None
 
         author = cls._extract_message_author(message)
         author_id = _parse_int(str(author.get("id") or ""), None)
@@ -1675,7 +1689,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 contact_user_id,
             )
             return None
-        return raw_phone
+        return normalized_phone
 
     @staticmethod
     def _is_private_chat_message(message: Dict[str, Any]) -> bool:
@@ -1810,6 +1824,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         runtime: RuntimeConfig,
         bot_cfg: BotSlotConfig,
         lead_id: int,
+        chat_id: str,
         tg_chat_id: str,
         message: Dict[str, Any],
         customer_id: Optional[int],
@@ -1835,6 +1850,20 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         prompted_at_ts = int(state.get("prompted_at_ts") or 0) if state else 0
 
         if own_contact_has_phone:
+            message_id = _parse_int(str(message.get("message_id") or ""), None) or _now_ts()
+            phone_text = (
+                cls._normalize_text_value(own_contact_phone) or "не указан"
+            )
+            await cls._send_phone_system_message_best_effort(
+                connected_integration_id=connected_integration_id,
+                chat_id=chat_id,
+                external_message_id=(
+                    f"tgsys:phone_received:{bot_cfg.bot_hash}:{tg_chat_id}:{message_id}"
+                ),
+                text=TelegramBotCrmChannelConfig.PHONE_RECEIVED_SYSTEM_TEXT.format(
+                    phone=phone_text
+                ),
+            )
             await cls._save_phone_state(
                 connected_integration_id=connected_integration_id,
                 bot_hash=bot_cfg.bot_hash,
@@ -1905,7 +1934,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                         keyboard=[
                             [
                                 KeyboardButton(
-                                    text=TelegramBotCrmChannelConfig.PHONE_SHARE_BUTTON_TEXT,
+                                    text=runtime.phone_share_button_text,
                                     request_contact=True,
                                 )
                             ]
@@ -1915,6 +1944,15 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     ),
                 )
                 prompted_at_ts = now_ts
+                message_id = _parse_int(str(message.get("message_id") or ""), None) or now_ts
+                await cls._send_phone_system_message_best_effort(
+                    connected_integration_id=connected_integration_id,
+                    chat_id=chat_id,
+                    external_message_id=(
+                        f"tgsys:phone_request_prompt:{bot_cfg.bot_hash}:{tg_chat_id}:{message_id}"
+                    ),
+                    text=TelegramBotCrmChannelConfig.PHONE_REQUEST_SENT_SYSTEM_TEXT,
+                )
             except Exception as error:
                 logger.warning(
                     "Failed to send phone request prompt: ci=%s bot_hash=%s tg_chat_id=%s error=%s",
@@ -2475,6 +2513,45 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 chat_id,
                 customer_id,
                 action,
+                error,
+            )
+
+    @classmethod
+    async def _send_phone_system_message_best_effort(
+        cls,
+        connected_integration_id: str,
+        chat_id: str,
+        external_message_id: str,
+        text: str,
+    ) -> None:
+        if not chat_id or not text:
+            return
+        try:
+            async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+                response = await api.call(
+                    "ChatMessage/Add",
+                    {
+                        "chat_id": chat_id,
+                        "message_type": ChatMessageTypeEnum.System.value,
+                        "text": str(text),
+                        "external_message_id": str(external_message_id),
+                    },
+                    APIBaseResponse[Dict[str, Any]],
+                )
+            if not response.ok:
+                logger.warning(
+                    "Phone-flow system message rejected: ci=%s chat_id=%s external_message_id=%s payload=%s",
+                    connected_integration_id,
+                    chat_id,
+                    external_message_id,
+                    response.result,
+                )
+        except Exception as error:
+            logger.warning(
+                "Failed to send phone-flow system message: ci=%s chat_id=%s external_message_id=%s error=%s",
+                connected_integration_id,
+                chat_id,
+                external_message_id,
                 error,
             )
 
@@ -3490,6 +3567,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 runtime=runtime,
                 bot_cfg=bot_cfg,
                 lead_id=lead_id,
+                chat_id=chat_id,
                 tg_chat_id=tg_chat_id,
                 message=message,
                 customer_id=customer_id,

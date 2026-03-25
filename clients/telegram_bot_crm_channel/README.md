@@ -38,6 +38,7 @@ All keys are read from `ConnectedIntegrationSetting` for integration key
 | `forward_system_messages` | No | `true` / `false` | `false` | Forward CRM `System` messages to Telegram. |
 | `lead_closed_message_template` | No | string | empty | Message sent to Telegram on `LeadClosed`. |
 | `phone_request_text` | No | string | empty | If set, bot asks for phone in private chat when `Lead.client_phone` and/or `RetailCustomer.main_phone` is missing. |
+| `phone_share_button_text` | No | string (up to 64 chars) | `Поделиться номером / Raqamni ulashish` | Overrides button text for contact-share keyboard in phone request flow. |
 
 ## Auto-create contact
 
@@ -54,6 +55,7 @@ If contact create fails, lead flow still continues (best effort).
 ## Phone request
 
 - Works only in private chats and only when `phone_request_text` is configured.
+- Button caption can be overridden by `phone_share_button_text`.
 - Number is accepted only from the message `contact` that belongs to the same Telegram user (`contact.user_id == from.id`).
 - Source of truth is CRM fields:
   - `Lead.client_phone`
