@@ -170,6 +170,16 @@ def _json_dumps(payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
+def _to_jsonable(payload: Any) -> Any:
+    if payload is None or isinstance(payload, (str, int, float, bool)):
+        return payload
+    if isinstance(payload, dict):
+        return {str(key): _to_jsonable(value) for key, value in payload.items()}
+    if isinstance(payload, (list, tuple, set)):
+        return [_to_jsonable(item) for item in payload]
+    return str(payload)
+
+
 def _json_loads(raw: str) -> Any:
     return json.loads(raw)
 
@@ -2105,9 +2115,19 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         entities = message.get(entities_key)
         if not isinstance(entities, list) or not entities:
             return raw_text
+
+        has_link_entities = any(
+            isinstance(entity, dict)
+            and str(entity.get("type") or "").strip().lower() in {"url", "text_link"}
+            for entity in entities
+        )
         links_fallback_text = _render_links_from_telegram_entities_to_crm_markdown(
             raw_text, entities
         )
+        # Prefer entity-based link rendering because aiogram html_text may keep plain URL
+        # for "url" entities (without <a>), while CRM expects markdown links.
+        if has_link_entities and links_fallback_text and links_fallback_text != raw_text:
+            return links_fallback_text
 
         try:
             tg_message = Message.model_validate(message)
@@ -3549,7 +3569,13 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                             {
                                 "connected_integration_id": connected_integration_id,
                                 "bot_hash": bot_config.bot_hash,
-                                "payload": update.model_dump(mode="json", by_alias=True),
+                                "payload": _to_jsonable(
+                                    update.model_dump(
+                                        mode="python",
+                                        by_alias=True,
+                                        exclude_none=True,
+                                    )
+                                ),
                                 "attempt": "0",
                                 "enqueued_at": str(_now_ts()),
                             },
@@ -4701,16 +4727,34 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     )
                     continue
                 payload_b64 = base64.b64encode(file_bytes).decode("ascii")
-                response = await api.call(
-                    "ChatMessage/AddFile",
-                    ChatMessageAddFileRequest(
-                        chat_id=chat_id,
-                        name=file_meta["name"],
-                        extension=file_meta["extension"],
-                        data=payload_b64,
-                    ),
-                    APIBaseResponse[Dict[str, Any]],
-                )
+                try:
+                    response = await api.call(
+                        "ChatMessage/AddFile",
+                        ChatMessageAddFileRequest(
+                            chat_id=chat_id,
+                            name=file_meta["name"],
+                            extension=file_meta["extension"],
+                            data=payload_b64,
+                        ),
+                        APIBaseResponse[Dict[str, Any]],
+                    )
+                except httpx.HTTPStatusError as error:
+                    status_code = (
+                        int(error.response.status_code)
+                        if getattr(error, "response", None) is not None
+                        else None
+                    )
+                    if status_code == 413:
+                        oversized_files_count += 1
+                        logger.info(
+                            "Skip telegram file on CRM gateway size limit (413): ci=%s chat_id=%s file=%s size=%sB",
+                            connected_integration_id,
+                            chat_id,
+                            file_name,
+                            len(file_bytes),
+                        )
+                        continue
+                    raise
                 result_payload = response.result if isinstance(response.result, dict) else {}
                 if not response.ok:
                     error_code = result_payload.get("error")
