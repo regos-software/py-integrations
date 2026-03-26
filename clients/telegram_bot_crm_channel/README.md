@@ -1,81 +1,73 @@
 # telegram_bot_crm_channel
 
-Telegram <-> CRM chat bridge in strict single-bot mode (`bot_1_*`).
+## Наименование интеграции
 
-## What it does
+- Русский: `Единый чат Telegram в CRM`
+- O'zbekcha: `Telegram chatlarini CRMda birlashtirish`
+- English: `Unified Telegram Chat in CRM`
 
-- Receives inbound Telegram messages and writes them to CRM chat.
-- Sends outbound CRM chat messages to Telegram.
-- Creates a lead on first inbound message and reuses it while open.
-- Updates lead status automatically:
-  - `InProgress` when a client writes in Telegram.
-  - `WaitingClient` when an operator replies from CRM.
-- Uses Redis for queueing, dedupe, and mappings.
+## Краткое описание
 
-## Settings source
+- Русский: `Объединяет переписку с клиентами из Telegram в CRM, чтобы команда отвечала быстрее и не теряла обращения.`
+- O'zbekcha: `Telegramdagi mijoz yozishmalarini CRMga olib kirib, javoblarni tezlashtiradi va murojaatlarni yo'qotmaydi.`
+- English: `Brings Telegram customer conversations into CRM so teams respond faster and no request is missed.`
 
-All keys are read from `ConnectedIntegrationSetting` for integration key
-`telegram_bot_crm_channel`.
+## Полное описание
 
-`telegram_update_mode` is taken only from global config
-`app_settings.telegram_update_mode` (not from integration settings).
+- Русский:
+  `<p>Интеграция переносит диалог с клиентом из Telegram в CRM и сохраняет всю переписку в одной ленте. Менеджеры отвечают из CRM, а клиент получает сообщения в привычном мессенджере.</p><ul><li>Входящие сообщения автоматически попадают в карточку обращения.</li><li>Ответы команды из CRM отправляются клиенту в Telegram.</li><li>История сообщений и файлов хранится в одном месте.</li><li>При необходимости можно аккуратно запрашивать и сохранять номер телефона клиента.</li></ul><p>Решение подходит компаниям, которым важны скорость ответа, прозрачность коммуникаций и контроль качества сервиса.</p>`
+- O'zbekcha:
+  `<p>Integratsiya Telegramdagi mijoz muloqotini CRMga olib kiradi va barcha yozishmalarni bitta lentada saqlaydi. Menejerlar CRMdan javob beradi, mijoz esa xabarni odatdagi messenjerdan oladi.</p><ul><li>Kiruvchi xabarlar avtomatik ravishda murojaat kartasiga tushadi.</li><li>Jamoa CRMdan javob yuboradi, mijoz Telegramda qabul qiladi.</li><li>Xabarlar va fayllar tarixi bitta joyda saqlanadi.</li><li>Zarurat bo'lsa, mijoz telefon raqamini muloyim so'rab saqlash mumkin.</li></ul><p>Yechim tezkor javob, shaffof aloqa va xizmat sifatini nazorat qilish muhim bo'lgan jamoalar uchun mos.</p>`
+- English:
+  `<p>The integration brings Telegram customer conversations into CRM and keeps the full message history in one timeline. Managers reply from CRM, while customers continue chatting in Telegram.</p><ul><li>Incoming messages are added to the request card automatically.</li><li>Team replies from CRM are delivered to Telegram.</li><li>Messages and files stay in one place.</li><li>If needed, customer phone numbers can be requested and saved during the conversation.</li></ul><p>This is ideal for teams that need faster response times, transparent communication, and better service control.</p>`
 
-## Settings
+## Список обрабатываемых вебхуков
 
-| Key | Required | Allowed values | Default | Description |
-|---|---|---|---|---|
-| `bot_1_token` | Yes | Telegram bot token | - | Telegram Bot API token. |
-| `bot_1_pipeline_id` | Yes | positive integer | - | CRM pipeline id for created leads. |
-| `bot_1_channel_id` | Yes | positive integer | - | CRM channel id used in `Lead/Add`. |
-| `bot_1_lead_subject_template` | No | `format_map` template | `{display_name}` | Lead subject template. Placeholders: `chat_id`, `first_name`, `last_name`, `username`, `full_name`, `display_name`. |
-| `bot_1_default_responsible_user_id` | No | positive integer | empty | `responsible_user_id` in `Lead/Add`. |
-| `bot_1_auto_create_contact` | No | `none`, `retail_customer` | `none` | Auto-create contact before `Lead/Add`. |
-| `bot_1_retail_customer_group_id` | Conditionally | positive integer | empty | Required when `bot_1_auto_create_contact=retail_customer`. Used as `group_id` for `RetailCustomer/Add`. |
-| `telegram_secret_token` | No | non-empty string | empty | Expected `x-telegram-bot-api-secret-token` for Telegram webhook. |
-| `lead_dedupe_ttl_sec` | No | integer `>= 60` | `86400` | TTL for inbound dedupe keys. |
-| `state_ttl_sec` | No | integer `>= 60` | `86400` | TTL for state keys (locks/cache/mappings). |
-| `send_private_messages` | No | `true` / `false` | `false` | Forward CRM `Private` messages to Telegram. |
-| `forward_system_messages` | No | `true` / `false` | `false` | Forward CRM `System` messages to Telegram. |
-| `lead_closed_message_template` | No | string | empty | Message sent to Telegram on `LeadClosed`. |
-| `phone_request_text` | No | string | empty | If set, bot asks for phone in private chat when `Lead.client_phone` and/or `RetailCustomer.main_phone` is missing. |
-| `phone_share_button_text` | No | string (up to 64 chars) | `Поделиться номером / Raqamni ulashish` | Overrides button text for contact-share keyboard in phone request flow. |
+- CRM:
+  - `ChatMessageAdded`
+  - `ChatMessageEdited`
+  - `ChatMessageDeleted`
+  - `ChatWriting`
+  - `LeadClosed`
+- Telegram update types:
+  - `message`
+  - `business_message`
+  - `edited_message`
+  - `edited_business_message`
+  - `deleted_business_messages`
 
-## Auto-create contact
+## Настройки интеграции
 
-When `bot_1_auto_create_contact=retail_customer`:
+| Ключ | Обязательно | Тип данных | Наименование (RU / UZ / EN) | Описание (RU / UZ / EN) | Placeholder (RU / UZ / EN) |
+|---|---|---|---|---|---|
+| `bot_1_token` | Да | String | `Доступ к Telegram-боту` / `Telegram botga kirish` / `Telegram bot access` | `Ключ доступа для работы диалогов` / `Suhbatlar ishlashi uchun kirish kaliti` / `Access key to run conversations` | `Вставьте токен` / `Tokenni kiriting` / `Paste token` |
+| `bot_1_pipeline_id` | Да | Integer | `Воронка обращений` / `Murojaatlar voronkasi` / `Leads pipeline` | `Куда попадут новые обращения` / `Yangi murojaatlar qayerga tushadi` / `Where new requests will appear` | `Например: 12` / `Masalan: 12` / `Example: 12` |
+| `bot_1_channel_id` | Да | Integer | `Канал общения` / `Muloqot kanali` / `Communication channel` | `Канал CRM для переписки` / `Yozishmalar uchun CRM kanali` / `CRM channel for conversation` | `Например: 5` / `Masalan: 5` / `Example: 5` |
+| `bot_1_lead_subject_template` | Нет | String | `Название обращения` / `Murojaat nomi` / `Lead title` | `Шаблон заголовка нового обращения` / `Yangi murojaat sarlavhasi shabloni` / `Template for new lead title` | `{display_name}` / `{display_name}` / `{display_name}` |
+| `bot_1_default_responsible_user_id` | Нет | Integer | `Ответственный по умолчанию` / `Standart mas'ul` / `Default owner` | `Кто назначается при создании обращения` / `Murojaat yaratilganda kim biriktiriladi` / `Who is assigned when a lead is created` | `Например: 101` / `Masalan: 101` / `Example: 101` |
+| `bot_1_auto_create_contact` | Нет | Enum | `Связывать с клиентской карточкой` / `Mijoz kartasiga bog'lash` / `Auto-link customer card` | `Автоматически связывать диалог с карточкой клиента` / `Suhbatni mijoz kartasi bilan avtomatik bog'lash` / `Automatically link chat with a customer card` | `none или retail_customer` / `none yoki retail_customer` / `none or retail_customer` |
+| `bot_1_retail_customer_group_id` | Условно | Integer | `Группа клиентов` / `Mijozlar guruhi` / `Customer group` | `Нужно, если включено автосоздание карточки` / `Karta auto-yaratish yoqilgan bo'lsa kerak` / `Required when auto customer card creation is enabled` | `Например: 3` / `Masalan: 3` / `Example: 3` |
+| `telegram_secret_token` | Нет | String | `Защита входящих событий` / `Kiruvchi hodisalar himoyasi` / `Inbound event protection` | `Дополнительная проверка подлинности запросов` / `So'rovlarni qo'shimcha tekshirish` / `Extra request authenticity check` | `Введите секрет` / `Maxfiy qiymatni kiriting` / `Enter secret` |
+| `lead_dedupe_ttl_sec` | Нет | Integer | `Защита от дублей` / `Dublikatdan himoya` / `Duplicate protection` | `Период подавления повторов в секундах` / `Takrorlarni bloklash muddati (sekund)` / `Duplicate suppression window in seconds` | `86400` / `86400` / `86400` |
+| `state_ttl_sec` | Нет | Integer | `Срок хранения состояния` / `Holat saqlash muddati` / `State retention` | `Как долго хранить служебное состояние диалога` / `Suhbat holatini qancha saqlash` / `How long dialog state is retained` | `86400` / `86400` / `86400` |
+| `send_private_messages` | Нет | Boolean | `Отправлять приватные сообщения` / `Private xabarlarni yuborish` / `Send private messages` | `Передавать ли приватные сообщения из CRM в Telegram` / `CRMdagi private xabarlarni Telegramga uzatish` / `Forward private CRM messages to Telegram` | `false` / `false` / `false` |
+| `forward_system_messages` | Нет | Boolean | `Отправлять системные сообщения` / `Tizim xabarlarini yuborish` / `Forward system messages` | `Передавать ли системные сообщения из CRM в Telegram` / `CRM tizim xabarlarini Telegramga uzatish` / `Forward CRM system messages to Telegram` | `false` / `false` / `false` |
+| `lead_closed_message_template` | Нет | String | `Сообщение о завершении` / `Yakunlash xabari` / `Closure message` | `Текст для клиента при закрытии обращения` / `Murojaat yopilganda mijozga matn` / `Client text when lead is closed` | `Спасибо за обращение` / `Murojaatingiz uchun rahmat` / `Thank you for contacting us` |
+| `phone_request_text` | Нет | String | `Запрос номера телефона` / `Telefon raqamini so'rash` / `Phone request prompt` | `Текст, которым попросим клиента отправить номер` / `Mijozdan raqam so'rash matni` / `Text used to request a phone number` | `Пожалуйста, отправьте номер` / `Iltimos, raqamingizni yuboring` / `Please share your number` |
+| `phone_share_button_text` | Нет | String | `Текст кнопки отправки номера` / `Raqam yuborish tugmasi` / `Phone share button` | `Подпись кнопки для отправки контакта` / `Kontakt yuborish tugmasi yozuvi` / `Caption for contact share button` | `Поделиться номером` / `Raqamni ulashish` / `Share phone number` |
 
-1. Integration tries to find existing `RetailCustomer` by Telegram id field (`field_telegram_id`).
-2. If not found, creates `RetailCustomer` in `bot_1_retail_customer_group_id`.
-3. Stores mapping `(connected_integration_id, bot_hash, tg_chat_id) -> customer_id` in Redis.
-4. If contact is created, integration sends `System` message: `Создан розничный покупатель: {Имя}`.
-5. If existing contact is updated, integration sends `System` message: `Обновлен розничный покупатель: {Имя}`.
+## Дополнительно (глобальная настройка сервиса)
 
-If contact create fails, lead flow still continues (best effort).
+- `app_settings.telegram_update_mode` (Enum: `webhook` или `longpolling`) задаётся на уровне сервиса, а не в настройках конкретного подключения.
 
-## Phone request
+## Порядок настройки внешней системы (Telegram)
 
-- Works only in private chats and only when `phone_request_text` is configured.
-- Button caption can be overridden by `phone_share_button_text`.
-- Number is accepted only from the message `contact` that belongs to the same Telegram user (`contact.user_id == from.id`).
-- Source of truth is CRM fields:
-  - `Lead.client_phone`
-  - `RetailCustomer.main_phone` (when `bot_1_auto_create_contact=retail_customer`)
-- Redis stores only temporary prompt/cache state. After Redis reset the state is rehydrated from CRM.
-
-## Delivery failures
-
-- If outbound delivery to Telegram fails after retries, integration writes a CRM `System` message to the same chat.
-- The message contains a human-readable reason in Russian and a short technical reason for debugging.
-
-## Global Config
-
-- `app_settings.telegram_update_mode`: `webhook` or `longpolling`.
-- In `webhook` mode `integration_url` must be public HTTPS with DNS resolvable from Telegram.
-
-## CRM webhooks used
-
-- `ChatMessageAdded`
-- `ChatMessageEdited`
-- `ChatMessageDeleted`
-- `ChatWriting`
-- `LeadClosed`
+1. Создайте бота в `@BotFather` и получите токен.
+2. Запустите бота (`/start`) от тестового аккаунта, чтобы бот мог отправлять ответы.
+3. В CRM заполните обязательные настройки: `bot_1_token`, `bot_1_pipeline_id`, `bot_1_channel_id`.
+4. При необходимости заполните дополнительные настройки (авто-связывание карточки, тексты, режимы пересылки).
+5. Выполните подключение интеграции (`Connect`).
+6. Проверьте сценарий:
+   - сообщение из Telegram появляется в CRM;
+   - ответ из CRM уходит в Telegram;
+   - редактирование/удаление сообщений и отправка файлов работают корректно.

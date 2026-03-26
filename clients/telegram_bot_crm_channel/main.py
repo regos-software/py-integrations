@@ -16,7 +16,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from aiogram import Bot
-from aiogram.types import BufferedInputFile, KeyboardButton, Message, ReplyKeyboardMarkup
+from aiogram.types import (
+    BufferedInputFile,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
+)
 from redis.exceptions import ResponseError
 from starlette.responses import JSONResponse
 
@@ -105,6 +110,7 @@ class TelegramBotCrmChannelConfig:
     PHONE_SHARE_BUTTON_TEXT = "Поделиться номером / Raqamni ulashish"
     PHONE_REQUEST_SENT_SYSTEM_TEXT = "Запросили у клиента номер телефона."
     PHONE_RECEIVED_SYSTEM_TEXT = "Клиент отправил номер телефона: {phone}"
+    PHONE_STATE_FIELD = "phone_state"
     UNKNOWN_CLIENT_NAME = "Unknown"
 
 
@@ -285,6 +291,54 @@ def _sanitize_file_name(name: str) -> str:
 def _normalize_phone(value: Any) -> Optional[str]:
     digits = "".join(ch for ch in str(value or "") if ch.isdigit())
     return digits or None
+
+
+_PHONE_IN_TEXT_RE = re.compile(r"(?:\+?\d[\d\s\-()]{7,}\d)")
+
+
+def _is_phone_candidate(
+    digits: Optional[str],
+    *,
+    raw_chunk: str,
+    allow_plain_nine_digit: bool,
+) -> bool:
+    value = str(digits or "").strip()
+    if not value:
+        return False
+    if len(value) == 14:
+        # PINFL length, never treat as phone.
+        return False
+    if len(value) not in {9, 12}:
+        return False
+    if len(value) == 12:
+        return True
+
+    # 9 digits are ambiguous (phone vs INN). Accept plain 9 only in explicit flow.
+    if allow_plain_nine_digit:
+        return True
+    raw = str(raw_chunk or "")
+    has_formatting = any(char in raw for char in "+-() ") and raw != value
+    if has_formatting:
+        return True
+    # Keep a lightweight numeric heuristic for local numbers that start like country code.
+    return value.startswith("998")
+
+
+def _extract_phone_from_text(value: Any, *, allow_plain_nine_digit: bool = False) -> Optional[str]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+
+    for match in _PHONE_IN_TEXT_RE.finditer(text):
+        raw_chunk = str(match.group(0) or "").strip()
+        candidate = _normalize_phone(raw_chunk)
+        if _is_phone_candidate(
+            candidate,
+            raw_chunk=raw_chunk,
+            allow_plain_nine_digit=allow_plain_nine_digit,
+        ):
+            return candidate
+    return None
 
 
 def _normalize_telegram_name(value: Any, *, max_len: int) -> str:
@@ -602,11 +656,60 @@ def _sanitize_code_language(raw: str) -> str:
     return ""
 
 
+def _extract_crm_quote_line(line: str) -> Optional[str]:
+    raw = str(line or "")
+    stripped = raw.lstrip()
+    if not stripped or stripped.startswith("\\>"):
+        return None
+    if not stripped.startswith(">"):
+        return None
+
+    idx = 0
+    while idx < len(stripped) and stripped[idx] == ">":
+        idx += 1
+    content = stripped[idx:]
+    if content.startswith(" "):
+        content = content[1:]
+    return content
+
+
 def _crm_markdown_to_telegram_html(markdown_text: str) -> str:
-    source = str(markdown_text or "")
+    source = str(markdown_text or "").replace("\r\n", "\n").replace("\r", "\n")
     if not source:
         return ""
-    return _parse_crm_markdown_segment(source)
+    if ">" not in source:
+        return _parse_crm_markdown_segment(source)
+
+    blocks: List[str] = []
+    plain_lines: List[str] = []
+    quote_lines: List[str] = []
+
+    def _flush_plain() -> None:
+        if not plain_lines:
+            return
+        blocks.append(_parse_crm_markdown_segment("\n".join(plain_lines)))
+        plain_lines.clear()
+
+    def _flush_quote() -> None:
+        if not quote_lines:
+            return
+        quote_html = _parse_crm_markdown_segment("\n".join(quote_lines))
+        blocks.append(f"<blockquote>{quote_html}</blockquote>")
+        quote_lines.clear()
+
+    for line in source.split("\n"):
+        quote_content = _extract_crm_quote_line(line)
+        if quote_content is None:
+            _flush_quote()
+            plain_lines.append(line)
+            continue
+        _flush_plain()
+        quote_lines.append(quote_content)
+
+    _flush_quote()
+    _flush_plain()
+
+    return "\n".join(blocks)
 
 
 def _parse_crm_markdown_segment(text: str) -> str:
@@ -890,49 +993,50 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         super().__init__()
 
     @staticmethod
+    def _redis_key(*parts: Any) -> str:
+        segments = [str(part).strip(": ") for part in parts if str(part or "").strip(": ")]
+        suffix = ":".join(segments)
+        return f"{TelegramBotCrmChannelConfig.REDIS_PREFIX}{suffix}"
+
+    @staticmethod
     def _settings_cache_key(connected_integration_id: str) -> str:
-        return (
-            f"{TelegramBotCrmChannelConfig.REDIS_PREFIX}settings:{connected_integration_id}"
-        )
+        return TelegramBotCrmChannelIntegration._redis_key("settings", connected_integration_id)
 
     @staticmethod
     def _stream_key(kind: str, connected_integration_id: str) -> str:
-        return (
-            f"{TelegramBotCrmChannelConfig.REDIS_PREFIX}stream:{kind}:{connected_integration_id}"
+        return TelegramBotCrmChannelIntegration._redis_key(
+            "stream", kind, connected_integration_id
         )
 
     @staticmethod
     def _dlq_stream_key(connected_integration_id: str) -> str:
-        return (
-            f"{TelegramBotCrmChannelConfig.REDIS_PREFIX}stream:dlq:{connected_integration_id}"
+        return TelegramBotCrmChannelIntegration._redis_key(
+            "stream", "dlq", connected_integration_id
         )
 
     @staticmethod
     def _active_ci_ids_key() -> str:
-        return f"{TelegramBotCrmChannelConfig.REDIS_PREFIX}active_ci_ids"
+        return TelegramBotCrmChannelIntegration._redis_key("active_ci_ids")
 
     @staticmethod
     # Canonical conversation cache for Telegram <-> CRM routing.
     def _mapping_by_tg_key(
         connected_integration_id: str, bot_hash: str, tg_chat_id: str
     ) -> str:
-        return (
-            f"{TelegramBotCrmChannelConfig.REDIS_PREFIX}mapping:by_tg:"
-            f"{connected_integration_id}:{bot_hash}:{tg_chat_id}"
+        return TelegramBotCrmChannelIntegration._redis_key(
+            "mapping", "by_tg", connected_integration_id, bot_hash, tg_chat_id
         )
 
     @staticmethod
     def _mapping_by_chat_key(connected_integration_id: str, chat_id: str) -> str:
-        return (
-            f"{TelegramBotCrmChannelConfig.REDIS_PREFIX}mapping:by_chat:"
-            f"{connected_integration_id}:{chat_id}"
+        return TelegramBotCrmChannelIntegration._redis_key(
+            "mapping", "by_chat", connected_integration_id, chat_id
         )
 
     @staticmethod
     def _msgmap_regos_to_tg_key(connected_integration_id: str, chat_message_id: str) -> str:
-        return (
-            f"{TelegramBotCrmChannelConfig.REDIS_PREFIX}msgmap:regos_to_tg:"
-            f"{connected_integration_id}:{chat_message_id}"
+        return TelegramBotCrmChannelIntegration._redis_key(
+            "msgmap", "regos_to_tg", connected_integration_id, chat_message_id
         )
 
     @staticmethod
@@ -942,84 +1046,73 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         tg_chat_id: str,
         tg_message_id: int,
     ) -> str:
-        return (
-            f"{TelegramBotCrmChannelConfig.REDIS_PREFIX}msgmap:tg_to_regos:"
-            f"{connected_integration_id}:{bot_hash}:{tg_chat_id}:{tg_message_id}"
+        return TelegramBotCrmChannelIntegration._redis_key(
+            "msgmap",
+            "tg_to_regos",
+            connected_integration_id,
+            bot_hash,
+            tg_chat_id,
+            tg_message_id,
         )
 
     @staticmethod
     def _dedupe_tg_update_key(
         connected_integration_id: str, bot_hash: str, update_id: int
     ) -> str:
-        return (
-            f"{TelegramBotCrmChannelConfig.REDIS_PREFIX}dedupe:telegram_update:"
-            f"{connected_integration_id}:{bot_hash}:{update_id}"
+        return TelegramBotCrmChannelIntegration._redis_key(
+            "dedupe", "telegram_update", connected_integration_id, bot_hash, update_id
         )
 
     @staticmethod
     def _dedupe_webhook_key(connected_integration_id: str, event_hash: str) -> str:
-        return (
-            f"{TelegramBotCrmChannelConfig.REDIS_PREFIX}dedupe:webhook:"
-            f"{connected_integration_id}:{event_hash}"
+        return TelegramBotCrmChannelIntegration._redis_key(
+            "dedupe", "webhook", connected_integration_id, event_hash
         )
 
     @staticmethod
     def _lock_connect_key(connected_integration_id: str) -> str:
-        return (
-            f"{TelegramBotCrmChannelConfig.REDIS_PREFIX}lock:connect:"
-            f"{connected_integration_id}"
+        return TelegramBotCrmChannelIntegration._redis_key(
+            "lock", "connect", connected_integration_id
         )
 
     @staticmethod
     def _lock_create_lead_key(
         connected_integration_id: str, bot_hash: str, tg_chat_id: str
     ) -> str:
-        return (
-            f"{TelegramBotCrmChannelConfig.REDIS_PREFIX}lock:create_lead:"
-            f"{connected_integration_id}:{bot_hash}:{tg_chat_id}"
+        return TelegramBotCrmChannelIntegration._redis_key(
+            "lock", "create_lead", connected_integration_id, bot_hash, tg_chat_id
         )
 
     @staticmethod
     def _lock_polling_owner_key(bot_hash: str) -> str:
-        return f"{TelegramBotCrmChannelConfig.REDIS_PREFIX}lock:polling_owner:{bot_hash}"
+        return TelegramBotCrmChannelIntegration._redis_key(
+            "lock", "polling_owner", bot_hash
+        )
 
     @staticmethod
     def _typing_key(connected_integration_id: str, bot_hash: str, tg_chat_id: str) -> str:
-        return (
-            f"{TelegramBotCrmChannelConfig.REDIS_PREFIX}typing:"
-            f"{connected_integration_id}:{bot_hash}:{tg_chat_id}"
+        return TelegramBotCrmChannelIntegration._redis_key(
+            "typing", connected_integration_id, bot_hash, tg_chat_id
         )
 
     @staticmethod
     def _lead_sync_cache_key(connected_integration_id: str, lead_id: int) -> str:
-        return (
-            f"{TelegramBotCrmChannelConfig.REDIS_PREFIX}lead_sync:"
-            f"{connected_integration_id}:{lead_id}"
+        return TelegramBotCrmChannelIntegration._redis_key(
+            "lead_sync", connected_integration_id, lead_id
         )
 
     @staticmethod
     def _retail_customer_by_tg_key(
         connected_integration_id: str, bot_hash: str, tg_chat_id: str
     ) -> str:
-        return (
-            f"{TelegramBotCrmChannelConfig.REDIS_PREFIX}retail_customer_by_tg:"
-            f"{connected_integration_id}:{bot_hash}:{tg_chat_id}"
-        )
-
-    @staticmethod
-    def _phone_state_key(
-        connected_integration_id: str, bot_hash: str, tg_chat_id: str
-    ) -> str:
-        return (
-            f"{TelegramBotCrmChannelConfig.REDIS_PREFIX}phone_state:"
-            f"{connected_integration_id}:{bot_hash}:{tg_chat_id}"
+        return TelegramBotCrmChannelIntegration._redis_key(
+            "retail_customer_by_tg", connected_integration_id, bot_hash, tg_chat_id
         )
 
     @staticmethod
     def _worker_heartbeat_key(connected_integration_id: str) -> str:
-        return (
-            f"{TelegramBotCrmChannelConfig.REDIS_PREFIX}worker:heartbeat:"
-            f"{connected_integration_id}:{_INSTANCE_ID}"
+        return TelegramBotCrmChannelIntegration._redis_key(
+            "worker", "heartbeat", connected_integration_id, _INSTANCE_ID
         )
 
     @staticmethod
@@ -1043,16 +1136,24 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         lead_id: int,
         chat_id: str,
     ) -> None:
-        payload = _json_dumps(
-            {
-                "bot_hash": str(bot_hash),
-                "tg_chat_id": str(tg_chat_id),
-                "lead_id": int(lead_id),
-                "chat_id": str(chat_id),
-            }
+        mapping_by_tg_key = cls._mapping_by_tg_key(
+            connected_integration_id, bot_hash, tg_chat_id
         )
+        current_payload = cls._parse_cached_mapping(await cls._redis_get(mapping_by_tg_key)) or {}
+        phone_state = cls._parse_phone_state(
+            current_payload.get(TelegramBotCrmChannelConfig.PHONE_STATE_FIELD)
+        )
+        payload_obj: Dict[str, Any] = {
+            "bot_hash": str(bot_hash),
+            "tg_chat_id": str(tg_chat_id),
+            "lead_id": int(lead_id),
+            "chat_id": str(chat_id),
+        }
+        if phone_state:
+            payload_obj[TelegramBotCrmChannelConfig.PHONE_STATE_FIELD] = phone_state
+        payload = _json_dumps(payload_obj)
         await cls._redis_set_mapping(
-            cls._mapping_by_tg_key(connected_integration_id, bot_hash, tg_chat_id),
+            mapping_by_tg_key,
             payload,
         )
         await cls._redis_set_mapping(
@@ -1790,6 +1891,26 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             return None
         return normalized_phone
 
+    @classmethod
+    def _extract_client_phone(
+        cls,
+        message: Dict[str, Any],
+        *,
+        allow_plain_nine_digit: bool = False,
+    ) -> Optional[str]:
+        contact_phone = cls._extract_own_contact_phone(message)
+        if contact_phone:
+            return contact_phone
+
+        for field_name in ("text", "caption"):
+            extracted = _extract_phone_from_text(
+                message.get(field_name),
+                allow_plain_nine_digit=allow_plain_nine_digit,
+            )
+            if extracted:
+                return extracted
+        return None
+
     @staticmethod
     def _is_private_chat_message(message: Dict[str, Any]) -> bool:
         chat = message.get("chat")
@@ -1798,32 +1919,21 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         return str(chat.get("type") or "").strip().lower() == "private"
 
     @staticmethod
-    def _parse_phone_state(raw: Optional[str]) -> Optional[Dict[str, Any]]:
-        payload = TelegramBotCrmChannelIntegration._parse_cached_mapping(raw)
-        if not payload:
+    def _parse_phone_state(raw: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(raw, dict):
             return None
 
-        lead_raw = payload.get("lead_has_phone")
-        retail_raw = payload.get("retail_has_phone")
-        prompted_raw = payload.get("prompted_at_ts")
+        lead_raw = raw.get("lead_has_phone")
+        retail_raw = raw.get("retail_has_phone")
+        prompted_raw = raw.get("prompted_at_ts")
         return {
-            "lead_has_phone": lead_raw if isinstance(lead_raw, bool) else _parse_bool(str(lead_raw), False),
+            "lead_has_phone": lead_raw
+            if isinstance(lead_raw, bool)
+            else _parse_bool(str(lead_raw), False),
             "retail_has_phone": retail_raw
             if isinstance(retail_raw, bool)
             else _parse_bool(str(retail_raw), False),
             "prompted_at_ts": max(_parse_int(str(prompted_raw or ""), 0) or 0, 0),
-        }
-
-    @staticmethod
-    def _build_phone_state_payload(
-        lead_has_phone: bool,
-        retail_has_phone: bool,
-        prompted_at_ts: int,
-    ) -> Dict[str, Any]:
-        return {
-            "lead_has_phone": bool(lead_has_phone),
-            "retail_has_phone": bool(retail_has_phone),
-            "prompted_at_ts": max(int(prompted_at_ts or 0), 0),
         }
 
     @classmethod
@@ -1838,17 +1948,24 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         prompted_at_ts: int,
         ttl_sec: int,
     ) -> None:
-        await cls._redis_set_mapping(
-            cls._phone_state_key(connected_integration_id, bot_hash, tg_chat_id),
-            _json_dumps(
-                cls._build_phone_state_payload(
-                    lead_has_phone=lead_has_phone,
-                    retail_has_phone=retail_has_phone,
-                    prompted_at_ts=prompted_at_ts,
-                )
-            ),
-            ttl_sec,
-        )
+        mapping_key = cls._mapping_by_tg_key(connected_integration_id, bot_hash, tg_chat_id)
+        mapping_payload = cls._parse_cached_mapping(await cls._redis_get(mapping_key)) or {}
+        mapping_payload[TelegramBotCrmChannelConfig.PHONE_STATE_FIELD] = {
+            "lead_has_phone": bool(lead_has_phone),
+            "retail_has_phone": bool(retail_has_phone),
+            "prompted_at_ts": max(int(prompted_at_ts or 0), 0),
+        }
+
+        payload_json = _json_dumps(mapping_payload)
+        await cls._redis_set_mapping(mapping_key, payload_json, ttl_sec)
+
+        chat_id = str(mapping_payload.get("chat_id") or "").strip()
+        if chat_id:
+            await cls._redis_set_mapping(
+                cls._mapping_by_chat_key(connected_integration_id, chat_id),
+                payload_json,
+                ttl_sec,
+            )
 
     @classmethod
     async def _resolve_lead_has_phone_best_effort(
@@ -1917,6 +2034,117 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             return None
 
     @classmethod
+    async def _set_lead_phone_if_missing_best_effort(
+        cls,
+        connected_integration_id: str,
+        lead_id: int,
+        phone: Optional[str],
+    ) -> bool:
+        normalized_phone = _normalize_phone(phone)
+        if not normalized_phone:
+            return False
+        try:
+            async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+                lead = await api.crm.lead.get_by_id(lead_id)
+                if not lead:
+                    return False
+                current_phone = _normalize_phone(getattr(lead, "client_phone", None))
+                if current_phone:
+                    return False
+                response = await api.crm.lead.edit(
+                    LeadEditRequest(id=lead_id, client_phone=normalized_phone)
+                )
+            if not response.ok:
+                logger.warning(
+                    "Lead/Edit rejected while saving phone from text: ci=%s lead_id=%s payload=%s",
+                    connected_integration_id,
+                    lead_id,
+                    response.result,
+                )
+                return False
+            return True
+        except Exception as error:
+            logger.warning(
+                "Failed to save lead phone from text: ci=%s lead_id=%s error=%s",
+                connected_integration_id,
+                lead_id,
+                error,
+            )
+            return False
+
+    @classmethod
+    async def _set_retail_phone_if_missing_best_effort(
+        cls,
+        connected_integration_id: str,
+        tg_chat_id: str,
+        customer_id: Optional[int],
+        phone: Optional[str],
+    ) -> bool:
+        normalized_phone = _normalize_phone(phone)
+        if not normalized_phone:
+            return False
+
+        try:
+            existing_row: Optional[Dict[str, Any]] = None
+            resolved_customer_id: Optional[int] = None
+
+            if customer_id and customer_id > 0:
+                async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+                    response = await api.call(
+                        "RetailCustomer/Get",
+                        {"ids": [customer_id], "limit": 1, "offset": 0},
+                        APIBaseResponse[List[Dict[str, Any]]],
+                    )
+                if response.ok and isinstance(response.result, list) and response.result:
+                    row = response.result[0]
+                    if isinstance(row, dict):
+                        existing_row = row
+                        resolved_customer_id = _parse_int(str(row.get("id") or ""), None)
+
+            if not existing_row:
+                existing_row = await cls._find_existing_retail_customer(
+                    connected_integration_id=connected_integration_id,
+                    tg_chat_id=tg_chat_id,
+                )
+                if isinstance(existing_row, dict):
+                    resolved_customer_id = _parse_int(
+                        str(existing_row.get("id") or ""), None
+                    )
+
+            if not existing_row or not resolved_customer_id or resolved_customer_id <= 0:
+                return False
+
+            current_phone = _normalize_phone(existing_row.get("main_phone"))
+            if current_phone:
+                return False
+
+            async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+                response = await api.call(
+                    "RetailCustomer/Edit",
+                    {"id": resolved_customer_id, "main_phone": normalized_phone},
+                    APIBaseResponse[Dict[str, Any]],
+                )
+            if not response.ok:
+                logger.warning(
+                    "RetailCustomer/Edit rejected while saving phone from text: "
+                    "ci=%s customer_id=%s payload=%s",
+                    connected_integration_id,
+                    resolved_customer_id,
+                    response.result,
+                )
+                return False
+            return True
+        except Exception as error:
+            logger.warning(
+                "Failed to save retail customer phone from text: ci=%s tg_chat_id=%s customer_id=%s error=%s",
+                connected_integration_id,
+                tg_chat_id,
+                customer_id,
+                error,
+            )
+            return False
+
+    @classmethod
     async def _maybe_request_phone_best_effort(
         cls,
         connected_integration_id: str,
@@ -1933,26 +2161,51 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if not request_text or not cls._is_private_chat_message(message):
             return
 
-        own_contact_phone = cls._extract_own_contact_phone(message)
-        own_contact_has_phone = bool(_normalize_phone(own_contact_phone))
+        mapping_payload = cls._parse_cached_mapping(
+            await cls._redis_get(
+                cls._mapping_by_tg_key(
+                    connected_integration_id, bot_cfg.bot_hash, tg_chat_id
+                )
+            )
+        ) or {}
+        state = cls._parse_phone_state(
+            mapping_payload.get(TelegramBotCrmChannelConfig.PHONE_STATE_FIELD)
+        )
+        prompted_at_ts = int(state.get("prompted_at_ts") or 0) if state else 0
+        allow_plain_nine_digit = prompted_at_ts > 0
+        client_phone = cls._extract_client_phone(
+            message,
+            allow_plain_nine_digit=allow_plain_nine_digit,
+        )
+        client_has_phone = bool(_normalize_phone(client_phone))
         retail_required = (
             bot_cfg.auto_create_contact_mode
             == TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_RETAIL_CUSTOMER
             and bool(bot_cfg.retail_customer_group_id)
         )
 
-        state = cls._parse_phone_state(
-            await cls._redis_get(
-                cls._phone_state_key(connected_integration_id, bot_cfg.bot_hash, tg_chat_id)
-            )
+        state_has_both_phones = bool(
+            state
+            and bool(state.get("lead_has_phone"))
+            and bool(state.get("retail_has_phone"))
+            and not prompted_at_ts
         )
-        prompted_at_ts = int(state.get("prompted_at_ts") or 0) if state else 0
-
-        if own_contact_has_phone:
-            message_id = _parse_int(str(message.get("message_id") or ""), None) or _now_ts()
-            phone_text = (
-                cls._normalize_text_value(own_contact_phone) or "не указан"
+        if client_has_phone and not state_has_both_phones:
+            await cls._set_lead_phone_if_missing_best_effort(
+                connected_integration_id=connected_integration_id,
+                lead_id=lead_id,
+                phone=client_phone,
             )
+            if retail_required:
+                await cls._set_retail_phone_if_missing_best_effort(
+                    connected_integration_id=connected_integration_id,
+                    tg_chat_id=tg_chat_id,
+                    customer_id=customer_id,
+                    phone=client_phone,
+                )
+
+            message_id = _parse_int(str(message.get("message_id") or ""), None) or _now_ts()
+            phone_text = cls._normalize_text_value(client_phone) or "не указан"
             await cls._send_phone_system_message_best_effort(
                 connected_integration_id=connected_integration_id,
                 chat_id=chat_id,
@@ -1963,13 +2216,33 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     phone=phone_text
                 ),
             )
+            refreshed_lead_has_phone = await cls._resolve_lead_has_phone_best_effort(
+                connected_integration_id=connected_integration_id,
+                lead_id=lead_id,
+            )
+            if refreshed_lead_has_phone is None:
+                refreshed_lead_has_phone = bool(_normalize_phone(client_phone))
+
+            if retail_required:
+                refreshed_retail_has_phone = await cls._resolve_retail_has_phone_best_effort(
+                    connected_integration_id=connected_integration_id,
+                    tg_chat_id=tg_chat_id,
+                    customer_id=customer_id,
+                )
+                if refreshed_retail_has_phone is None:
+                    refreshed_retail_has_phone = bool(_normalize_phone(client_phone))
+            else:
+                refreshed_retail_has_phone = True
+
             await cls._save_phone_state(
                 connected_integration_id=connected_integration_id,
                 bot_hash=bot_cfg.bot_hash,
                 tg_chat_id=tg_chat_id,
-                lead_has_phone=True,
-                retail_has_phone=True,
-                prompted_at_ts=0,
+                lead_has_phone=bool(refreshed_lead_has_phone),
+                retail_has_phone=bool(refreshed_retail_has_phone),
+                prompted_at_ts=0
+                if bool(refreshed_lead_has_phone) and bool(refreshed_retail_has_phone)
+                else prompted_at_ts,
                 ttl_sec=runtime.state_ttl_sec,
             )
             return
@@ -2294,7 +2567,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if not full_name:
             full_name = " ".join([part for part in [first_name, last_name] if part]).strip() or None
 
-        phone = _normalize_phone(cls._extract_own_contact_phone(message))
+        phone = _normalize_phone(cls._extract_client_phone(message))
 
         return {
             "first_name": first_name,
@@ -2439,7 +2712,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
 
         desired_phone = _normalize_phone(customer_payload.get("main_phone"))
         current_phone = _normalize_phone(existing_row.get("main_phone"))
-        if desired_phone and desired_phone != current_phone:
+        if desired_phone and not current_phone:
             payload["main_phone"] = desired_phone
 
         desired_telegram_id = str(tg_chat_id)
@@ -2920,7 +3193,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             cls._build_subject(bot_cfg.lead_subject_template, message, tg_chat_id)
         )
 
-        client_phone = cls._normalize_text_value(cls._extract_own_contact_phone(message))
+        client_phone = cls._normalize_text_value(cls._extract_client_phone(message))
 
         return {
             "subject": subject,
@@ -2947,6 +3220,8 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             if not desired_value:
                 continue
             current_value = cls._normalize_text_value(getattr(lead, field_name, None))
+            if field_name == "client_phone" and current_value:
+                continue
             if current_value != desired_value:
                 patch[field_name] = desired_value
         return patch
@@ -2969,6 +3244,8 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             if not desired_value:
                 continue
             cached_value = cls._normalize_text_value(cached_payload.get(field_name))
+            if field_name == "client_phone" and cached_value:
+                continue
             if cached_value != desired_value:
                 patch[field_name] = desired_value
         return patch
@@ -4539,7 +4816,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             contact_payload = cls._extract_contact_payload(message, tg_chat_id)
             client_name = contact_payload["display_name"] or None
 
-            client_phone = cls._normalize_text_value(cls._extract_own_contact_phone(message))
+            client_phone = cls._normalize_text_value(cls._extract_client_phone(message))
             client_photo_url = await cls._resolve_client_photo_url(bot_cfg, message)
             logger.debug(
                 "Lead create payload prepared: ci=%s bot_hash=%s tg_chat_id=%s has_avatar=%s has_phone=%s",

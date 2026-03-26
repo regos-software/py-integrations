@@ -106,6 +106,7 @@ class RuntimeConfig:
     state_ttl_sec: int
     default_country_code: str
     assign_responsible_by_operator_ext: bool
+    message_language: str
 
 
 @dataclass
@@ -218,6 +219,33 @@ def _normalize_country_code(value: Any, default: str = "998") -> str:
     return digits or default
 
 
+def _normalize_message_language(value: Any, default: str = "ru") -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return default
+    aliases = {
+        "ru": "ru",
+        "rus": "ru",
+        "russian": "ru",
+        "рус": "ru",
+        "русский": "ru",
+        "uz": "uz",
+        "uzb": "uz",
+        "uzbek": "uz",
+        "uzbekcha": "uz",
+        "o'zbek": "uz",
+        "ozbek": "uz",
+        "уз": "uz",
+        "узбек": "uz",
+        "en": "en",
+        "eng": "en",
+        "english": "en",
+        "анг": "en",
+        "английский": "en",
+    }
+    return aliases.get(text, default)
+
+
 def _is_internal_extension(value: Optional[str]) -> bool:
     digits = _normalize_phone(value)
     return bool(digits and 2 <= len(digits) <= 6)
@@ -233,12 +261,14 @@ def _to_international_phone(value: Any, country_code: str) -> Optional[str]:
     cc = _normalize_country_code(country_code)
     if digits.startswith("00") and len(digits) > 2:
         digits = digits[2:]
-    if digits.startswith(cc):
-        return digits
+    # Normalize common local formats first, even if the local number
+    # accidentally starts with country-code digits (e.g. 998668988).
     if len(digits) == 10 and digits.startswith("0"):
         return f"{cc}{digits[1:]}"
     if len(digits) == 9:
         return f"{cc}{digits}"
+    if digits.startswith(cc):
+        return digits
     return digits
 
 
@@ -248,6 +278,36 @@ def _hash_scope_key(value: str) -> str:
 
 def _external_id(asterisk_hash: str, normalized_phone: str) -> str:
     return f"ast:{asterisk_hash}:{normalized_phone}"
+
+
+def _phone_filter_candidates(
+    normalized_phone: str,
+    country_code: str,
+) -> List[str]:
+    phone = _normalize_phone(normalized_phone)
+    if not phone:
+        return []
+
+    cc = _normalize_country_code(country_code)
+    candidates: List[str] = [phone]
+
+    if cc and phone.startswith(cc):
+        local = phone[len(cc) :]
+        if local:
+            candidates.append(local)
+    elif cc and len(phone) == 9:
+        candidates.append(f"{cc}{phone}")
+
+    # Preserve order and remove duplicates.
+    unique: List[str] = []
+    seen = set()
+    for item in candidates:
+        value = str(item or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        unique.append(value)
+    return unique
 
 
 def _safe_subject(template: str, event: CallEvent) -> str:
@@ -336,8 +396,78 @@ def _status_from_direction_event(direction: str, status: str) -> Optional[LeadSt
 
 
 class AsteriskCrmChannelIntegration(ClientBase):
+    MESSAGE_TEXTS: Dict[str, Dict[str, str]] = {
+        "ru": {
+            "inbound_started": "Входящий звонок с номера {client_phone}",
+            "inbound_missed": "Звонок пропущен",
+            "inbound_answered_with_operator": "Звонок принят оператором {operator_name}",
+            "inbound_answered": "Звонок принят оператором",
+            "inbound_completed_with_duration": "Звонок завершен\nДлительность разговора: {talk_duration}с",
+            "inbound_completed": "Звонок завершен",
+            "outbound_started": "Исходящий звонок на номер {client_phone}",
+            "outbound_failed": "Исходящий звонок не состоялся",
+            "outbound_answered": "Клиент ответил на исходящий звонок",
+            "outbound_completed_with_duration": "Исходящий звонок завершен\nДлительность разговора: {talk_duration}с",
+            "outbound_completed": "Исходящий звонок завершен",
+            "generic_event": "Событие звонка",
+            "recording_ready_title": "[Asterisk] Запись звонка готова",
+            "call_id_label": "Call ID: {external_call_id}",
+            "recording_link": "Ссылка на запись: {recording_url}",
+            "recording_url_missing": "Ссылка на запись не передана",
+        },
+        "uz": {
+            "inbound_started": "{client_phone} raqamidan kiruvchi qo'ng'iroq",
+            "inbound_missed": "Qo'ng'iroq o'tkazib yuborildi",
+            "inbound_answered_with_operator": "Qo'ng'iroqni operator qabul qildi: {operator_name}",
+            "inbound_answered": "Qo'ng'iroqni operator qabul qildi",
+            "inbound_completed_with_duration": "Qo'ng'iroq yakunlandi\nSuhbat davomiyligi: {talk_duration}s",
+            "inbound_completed": "Qo'ng'iroq yakunlandi",
+            "outbound_started": "{client_phone} raqamiga chiquvchi qo'ng'iroq",
+            "outbound_failed": "Chiquvchi qo'ng'iroq amalga oshmadi",
+            "outbound_answered": "Mijoz chiquvchi qo'ng'iroqqa javob berdi",
+            "outbound_completed_with_duration": "Chiquvchi qo'ng'iroq yakunlandi\nSuhbat davomiyligi: {talk_duration}s",
+            "outbound_completed": "Chiquvchi qo'ng'iroq yakunlandi",
+            "generic_event": "Qo'ng'iroq hodisasi",
+            "recording_ready_title": "[Asterisk] Qo'ng'iroq yozuvi tayyor",
+            "call_id_label": "Qo'ng'iroq ID: {external_call_id}",
+            "recording_link": "Yozuv havolasi: {recording_url}",
+            "recording_url_missing": "Yozuv havolasi yuborilmadi",
+        },
+        "en": {
+            "inbound_started": "Incoming call from {client_phone}",
+            "inbound_missed": "Call missed",
+            "inbound_answered_with_operator": "Call answered by operator {operator_name}",
+            "inbound_answered": "Call answered by operator",
+            "inbound_completed_with_duration": "Call completed\nTalk duration: {talk_duration}s",
+            "inbound_completed": "Call completed",
+            "outbound_started": "Outgoing call to {client_phone}",
+            "outbound_failed": "Outgoing call failed",
+            "outbound_answered": "Customer answered the outgoing call",
+            "outbound_completed_with_duration": "Outgoing call completed\nTalk duration: {talk_duration}s",
+            "outbound_completed": "Outgoing call completed",
+            "generic_event": "Call event",
+            "recording_ready_title": "[Asterisk] Call recording is ready",
+            "call_id_label": "Call ID: {external_call_id}",
+            "recording_link": "Recording link: {recording_url}",
+            "recording_url_missing": "Recording URL is not provided",
+        },
+    }
+
     def __init__(self):
         super().__init__()
+
+    @classmethod
+    def _text(cls, language: str, key: str, **kwargs: Any) -> str:
+        lang = _normalize_message_language(language, "ru")
+        text = (
+            cls.MESSAGE_TEXTS.get(lang, {}).get(key)
+            or cls.MESSAGE_TEXTS["ru"].get(key)
+            or key
+        )
+        try:
+            return text.format(**kwargs)
+        except Exception:
+            return text
 
     @staticmethod
     def _settings_cache_key(connected_integration_id: str) -> str:
@@ -438,6 +568,17 @@ class AsteriskCrmChannelIntegration(ClientBase):
         return (
             f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
             f"operator_user:{connected_integration_id}:{asterisk_hash}:{operator_ext}"
+        )
+
+    @staticmethod
+    def _operator_name_cache_key(
+        connected_integration_id: str,
+        asterisk_hash: str,
+        operator_ext: str,
+    ) -> str:
+        return (
+            f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
+            f"operator_name:{connected_integration_id}:{asterisk_hash}:{operator_ext}"
         )
 
     @staticmethod
@@ -691,6 +832,10 @@ return 0
             assign_responsible_by_operator_ext=_to_bool(
                 settings_map.get("asterisk_assign_responsible_by_operator_ext"),
                 True,
+            ),
+            message_language=_normalize_message_language(
+                settings_map.get("asterisk_message_language"),
+                "ru",
             ),
         )
 
@@ -1771,14 +1916,89 @@ return 0
     @staticmethod
     def _status_rank(status: str) -> int:
         return {
-            "started": 10,
-            "ringing": 20,
-            "answered": 30,
-            "missed": 40,
-            "failed": 40,
-            "completed": 40,
+            "inbound_started": 20,
+            "outbound_started": 20,
+            "inbound_answered": 30,
+            "outbound_answered": 30,
+            "inbound_missed": 40,
+            "outbound_failed": 40,
+            "inbound_completed": 40,
+            "outbound_completed": 40,
             "recording_ready": 50,
         }.get(str(status or "").strip().lower(), 0)
+
+    @staticmethod
+    def _chat_event_code(event: CallEvent) -> str:
+        direction = event.direction if event.direction in {"inbound", "outbound"} else "unknown"
+        status = str(event.status or "").strip().lower()
+        if status == "recording_ready":
+            return "recording_ready"
+
+        if direction == "inbound":
+            if status in {"started", "ringing"}:
+                return "inbound_started"
+            if status == "answered":
+                return "inbound_answered"
+            if status in {"missed", "failed"}:
+                return "inbound_missed"
+            if status == "completed":
+                return "inbound_completed"
+            return f"inbound_{status or 'unknown'}"
+
+        if direction == "outbound":
+            if status in {"started", "ringing"}:
+                return "outbound_started"
+            if status == "answered":
+                return "outbound_answered"
+            if status in {"missed", "failed"}:
+                return "outbound_failed"
+            if status == "completed":
+                return "outbound_completed"
+            return f"outbound_{status or 'unknown'}"
+
+        return f"{direction}_{status or 'unknown'}"
+
+    @classmethod
+    def _should_suppress_noise_event(cls, event: CallEvent) -> bool:
+        status = str(event.status or "").strip().lower()
+        if not status:
+            return True
+
+        talk_duration = _to_int(event.talk_duration_sec, 0) or 0
+        to_phone = _normalize_phone(event.to_phone)
+        operator_phone = cls._operator_phone_from_event(event) or _normalize_phone(
+            event.operator_ext
+        )
+
+        # Skip low-value intermediate answered state without known operator.
+        if status == "answered" and not operator_phone:
+            return True
+
+        # For outbound, ringing without operator endpoint is too noisy.
+        if event.direction == "outbound" and status == "ringing" and not operator_phone:
+            return True
+
+        # Suppress queue leg noise for inbound ringing/starting to internal extensions.
+        if (
+            event.direction == "inbound"
+            and status in {"started", "ringing"}
+            and to_phone
+            and _is_internal_extension(to_phone)
+        ):
+            return True
+
+        # Queue fan-out emits many "missed/failed" legs per extension.
+        # Suppress per-extension zero-talk legs to keep only meaningful call result.
+        if (
+            event.direction == "inbound"
+            and status in {"missed", "failed"}
+            and talk_duration <= 0
+            and to_phone
+            and _is_internal_extension(to_phone)
+        ):
+            return True
+
+        return False
 
     @classmethod
     async def _dedupe_and_stabilize_call_event(
@@ -1819,19 +2039,26 @@ return 0
             if str(item).strip()
         }
         last_rank = _to_int(cached.get("last_rank"), 0) or 0
-        current_rank = cls._status_rank(event.status)
-        status = str(event.status or "").strip().lower()
+        stage_code = cls._chat_event_code(event)
+        current_rank = cls._status_rank(stage_code)
+        status = stage_code
 
-        should_emit = True
-        if status == "recording_ready":
-            should_emit = not bool(cached.get("recording_posted"))
-        else:
-            if status in posted_statuses:
-                should_emit = False
-            elif last_rank >= 40 and current_rank <= 40:
-                should_emit = False
-            elif current_rank and current_rank < last_rank:
-                should_emit = False
+        should_emit = not cls._should_suppress_noise_event(event)
+        if should_emit:
+            if status == "recording_ready":
+                should_emit = not bool(cached.get("recording_posted"))
+            else:
+                if status in posted_statuses:
+                    should_emit = False
+                elif status == "inbound_missed" and (
+                    "inbound_answered" in posted_statuses
+                    or "inbound_completed" in posted_statuses
+                ):
+                    should_emit = False
+                elif last_rank >= 40 and current_rank <= 40:
+                    should_emit = False
+                elif current_rank and current_rank < last_rank:
+                    should_emit = False
 
         stable_direction = (
             event.direction if event.direction in {"inbound", "outbound"} else stable_direction
@@ -1841,7 +2068,7 @@ return 0
         stable_from_phone = _normalize_phone(event.from_phone) or stable_from_phone
         stable_to_phone = _normalize_phone(event.to_phone) or stable_to_phone
         next_last_rank = max(last_rank, current_rank)
-        if status and status != "recording_ready":
+        if should_emit and status and status != "recording_ready":
             posted_statuses.add(status)
         recording_posted = bool(cached.get("recording_posted")) or status == "recording_ready"
 
@@ -1923,6 +2150,30 @@ return 0
                 return True
         return False
 
+    @staticmethod
+    def _extract_user_display_name(user_payload: Dict[str, Any]) -> Optional[str]:
+        if not isinstance(user_payload, dict):
+            return None
+
+        full_name = str(user_payload.get("full_name") or "").strip()
+        if full_name:
+            return full_name
+
+        parts = [
+            str(user_payload.get("first_name") or "").strip(),
+            str(user_payload.get("middle_name") or "").strip(),
+            str(user_payload.get("last_name") or "").strip(),
+        ]
+        composed = " ".join(part for part in parts if part).strip()
+        if composed:
+            return composed
+
+        for field in ("login", "email"):
+            value = str(user_payload.get(field) or "").strip()
+            if value:
+                return value
+        return None
+
     @classmethod
     async def _resolve_user_id_by_operator_ext_best_effort(
         cls,
@@ -1938,10 +2189,60 @@ return 0
             runtime.asterisk_hash,
             normalized_ext,
         )
+        name_cache_key = cls._operator_name_cache_key(
+            runtime.connected_integration_id,
+            runtime.asterisk_hash,
+            normalized_ext,
+        )
         cached_user_id = _to_int(await cls._redis_get(cache_key), None)
         if cached_user_id and cached_user_id > 0:
             return cached_user_id
 
+        def _resolve_from_rows(
+            rows: List[Dict[str, Any]],
+            *,
+            allow_single_fallback: bool,
+        ) -> Tuple[Optional[int], Optional[str]]:
+            if not rows:
+                return None, None
+
+            matched_user_ids: List[int] = []
+            matched_by_id: Dict[int, Dict[str, Any]] = {}
+            fallback_row: Optional[Dict[str, Any]] = None
+            if allow_single_fallback and len(rows) == 1 and isinstance(rows[0], dict):
+                fallback_row = rows[0]
+
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                user_id = _to_int(row.get("id"), None)
+                if not user_id:
+                    continue
+                if cls._user_matches_operator_ext(row, normalized_ext):
+                    matched_user_ids.append(user_id)
+                    matched_by_id[user_id] = row
+
+            unique_matches = sorted(set(matched_user_ids))
+            if len(unique_matches) == 1:
+                user_id = unique_matches[0]
+                return user_id, cls._extract_user_display_name(matched_by_id.get(user_id) or {})
+            if len(unique_matches) > 1:
+                logger.warning(
+                    "Operator extension matched multiple users: ci=%s operator_ext=%s users=%s",
+                    runtime.connected_integration_id,
+                    normalized_ext,
+                    unique_matches,
+                )
+                return None, None
+            fallback_user_id = (
+                _to_int(fallback_row.get("id"), None) if isinstance(fallback_row, dict) else None
+            )
+            fallback_name = (
+                cls._extract_user_display_name(fallback_row) if isinstance(fallback_row, dict) else None
+            )
+            return fallback_user_id, fallback_name
+
+        # Primary lookup by internal extension, according to User/Get docs.
         try:
             async with RegosAPI(
                 connected_integration_id=runtime.connected_integration_id
@@ -1950,8 +2251,8 @@ return 0
                     "User/Get",
                     {
                         "active": True,
-                        "search": normalized_ext,
-                        "limit": 200,
+                        "internal_phone": normalized_ext,
+                        "limit": 50,
                         "offset": 0,
                     },
                     APIBaseResponse[List[Dict[str, Any]]],
@@ -1963,11 +2264,69 @@ return 0
                 normalized_ext,
                 error,
             )
+            response = None
+
+        if response is not None and not response.ok:
+            logger.warning(
+                "User/Get rejected for internal extension match: ci=%s operator_ext=%s payload=%s",
+                runtime.connected_integration_id,
+                normalized_ext,
+                response.result,
+            )
+            response = None
+
+        resolved_user_id: Optional[int] = None
+        resolved_user_name: Optional[str] = None
+        if response and response.ok:
+            internal_rows = response.result if isinstance(response.result, list) else []
+            resolved_user_id, resolved_user_name = _resolve_from_rows(
+                internal_rows,
+                allow_single_fallback=True,
+            )
+            if resolved_user_id:
+                await cls._redis_set_with_ttl(
+                    cache_key,
+                    str(resolved_user_id),
+                    runtime.state_ttl_sec,
+                    min_ttl_sec=300,
+                )
+                if resolved_user_name:
+                    await cls._redis_set_with_ttl(
+                        name_cache_key,
+                        resolved_user_name,
+                        runtime.state_ttl_sec,
+                        min_ttl_sec=300,
+                    )
+                return resolved_user_id
+
+        # Backward-compatible fallback for old environments where `internal_phone`
+        # may be unavailable in User/Get.
+        try:
+            async with RegosAPI(
+                connected_integration_id=runtime.connected_integration_id
+            ) as api:
+                response = await api.call(
+                    "User/Get",
+                    {
+                        "active": True,
+                        "search": normalized_ext,
+                        "limit": 50,
+                        "offset": 0,
+                    },
+                    APIBaseResponse[List[Dict[str, Any]]],
+                )
+        except Exception as error:
+            logger.warning(
+                "User/Get fallback search failed for operator extension match: ci=%s operator_ext=%s error=%s",
+                runtime.connected_integration_id,
+                normalized_ext,
+                error,
+            )
             return None
 
         if not response.ok:
             logger.warning(
-                "User/Get rejected for operator extension match: ci=%s operator_ext=%s payload=%s",
+                "User/Get fallback search rejected for operator extension match: ci=%s operator_ext=%s payload=%s",
                 runtime.connected_integration_id,
                 normalized_ext,
                 response.result,
@@ -1975,37 +2334,10 @@ return 0
             return None
 
         rows = response.result if isinstance(response.result, list) else []
-        if not rows:
-            return None
-
-        matched_user_ids: List[int] = []
-        fallback_user_id: Optional[int] = None
-        if len(rows) == 1 and isinstance(rows[0], dict):
-            fallback_user_id = _to_int(rows[0].get("id"), None)
-
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            user_id = _to_int(row.get("id"), None)
-            if not user_id:
-                continue
-            if cls._user_matches_operator_ext(row, normalized_ext):
-                matched_user_ids.append(user_id)
-
-        resolved_user_id: Optional[int] = None
-        unique_matches = sorted(set(matched_user_ids))
-        if len(unique_matches) == 1:
-            resolved_user_id = unique_matches[0]
-        elif len(unique_matches) > 1:
-            logger.warning(
-                "Operator extension matched multiple users: ci=%s operator_ext=%s users=%s",
-                runtime.connected_integration_id,
-                normalized_ext,
-                unique_matches,
-            )
-            return None
-        else:
-            resolved_user_id = fallback_user_id
+        resolved_user_id, resolved_user_name = _resolve_from_rows(
+            rows,
+            allow_single_fallback=False,
+        )
 
         if not resolved_user_id:
             return None
@@ -2016,7 +2348,105 @@ return 0
             runtime.state_ttl_sec,
             min_ttl_sec=300,
         )
+        if resolved_user_name:
+            await cls._redis_set_with_ttl(
+                name_cache_key,
+                resolved_user_name,
+                runtime.state_ttl_sec,
+                min_ttl_sec=300,
+            )
         return resolved_user_id
+
+    @classmethod
+    async def _resolve_operator_name_by_operator_ext_best_effort(
+        cls,
+        runtime: RuntimeConfig,
+        operator_ext: str,
+    ) -> Optional[str]:
+        normalized_ext = _normalize_phone(operator_ext)
+        if not normalized_ext:
+            return None
+
+        name_cache_key = cls._operator_name_cache_key(
+            runtime.connected_integration_id,
+            runtime.asterisk_hash,
+            normalized_ext,
+        )
+        cached_name = str(await cls._redis_get(name_cache_key) or "").strip()
+        if cached_name:
+            return cached_name
+
+        user_id = await cls._resolve_user_id_by_operator_ext_best_effort(runtime, normalized_ext)
+        if not user_id:
+            return None
+
+        cached_name = str(await cls._redis_get(name_cache_key) or "").strip()
+        if cached_name:
+            return cached_name
+
+        try:
+            async with RegosAPI(
+                connected_integration_id=runtime.connected_integration_id
+            ) as api:
+                response = await api.call(
+                    "User/Get",
+                    {
+                        "ids": [user_id],
+                        "active": True,
+                        "limit": 1,
+                        "offset": 0,
+                    },
+                    APIBaseResponse[List[Dict[str, Any]]],
+                )
+        except Exception as error:
+            logger.warning(
+                "User/Get by id failed for operator name resolve: ci=%s operator_ext=%s user_id=%s error=%s",
+                runtime.connected_integration_id,
+                normalized_ext,
+                user_id,
+                error,
+            )
+            return None
+
+        if not response.ok:
+            logger.warning(
+                "User/Get by id rejected for operator name resolve: ci=%s operator_ext=%s user_id=%s payload=%s",
+                runtime.connected_integration_id,
+                normalized_ext,
+                user_id,
+                response.result,
+            )
+            return None
+
+        rows = response.result if isinstance(response.result, list) else []
+        if not rows or not isinstance(rows[0], dict):
+            return None
+
+        name = cls._extract_user_display_name(rows[0])
+        if not name:
+            return None
+
+        await cls._redis_set_with_ttl(
+            name_cache_key,
+            name,
+            runtime.state_ttl_sec,
+            min_ttl_sec=300,
+        )
+        return name
+
+    @classmethod
+    async def _resolve_operator_display_name_best_effort(
+        cls,
+        runtime: RuntimeConfig,
+        event: CallEvent,
+    ) -> Optional[str]:
+        operator_ext = _normalize_phone(event.operator_ext) or cls._operator_phone_from_event(event)
+        if not operator_ext:
+            return None
+        return await cls._resolve_operator_name_by_operator_ext_best_effort(
+            runtime,
+            operator_ext,
+        )
 
     @classmethod
     async def _maybe_assign_responsible_from_operator_best_effort(
@@ -2166,7 +2596,7 @@ return 0
         return None
 
     @classmethod
-    async def _find_active_lead(
+    async def _find_active_lead_by_external_id(
         cls,
         runtime: RuntimeConfig,
         normalized_phone: str,
@@ -2193,6 +2623,102 @@ return 0
         if not lead or not lead.id or not lead.chat_id:
             return None
         return lead
+
+    @staticmethod
+    def _pick_latest_active_lead(leads: List[Lead]) -> Optional[Lead]:
+        valid = [
+            row
+            for row in (leads or [])
+            if row and getattr(row, "id", None) and getattr(row, "chat_id", None)
+        ]
+        if not valid:
+            return None
+        return max(valid, key=lambda row: int(row.id or 0))
+
+    @classmethod
+    async def _find_active_lead_by_client_phone(
+        cls,
+        runtime: RuntimeConfig,
+        normalized_phone: str,
+    ) -> Optional[Lead]:
+        candidates = _phone_filter_candidates(
+            normalized_phone,
+            runtime.default_country_code,
+        )
+        if not candidates:
+            return None
+
+        for phone in candidates:
+            filters = [
+                Filter(
+                    field="client_phone",
+                    operator=FilterOperator.Equal,
+                    value=phone,
+                ),
+            ]
+            try:
+                async with RegosAPI(
+                    connected_integration_id=runtime.connected_integration_id
+                ) as api:
+                    response = await api.crm.lead.get(
+                        LeadGetRequest(
+                            filters=filters,
+                            statuses=list(AsteriskCrmChannelConfig.ACTIVE_LEAD_STATUSES),
+                            limit=50,
+                            offset=0,
+                        )
+                    )
+            except Exception as error:
+                logger.warning(
+                    "Lead/Get by client_phone failed: ci=%s phone=%s error=%s",
+                    runtime.connected_integration_id,
+                    phone,
+                    error,
+                )
+                return None
+            rows = response.result or []
+            lead = cls._pick_latest_active_lead(rows)
+            if not lead:
+                continue
+            if len(rows) > 1:
+                lead_ids = sorted(
+                    int(row.id)
+                    for row in rows
+                    if row and getattr(row, "id", None)
+                )
+                logger.info(
+                    "Multiple active leads matched by client_phone, picked latest: ci=%s phone=%s lead_ids=%s selected=%s",
+                    runtime.connected_integration_id,
+                    phone,
+                    lead_ids,
+                    lead.id,
+                )
+            return lead
+        return None
+
+    @classmethod
+    async def _find_active_lead(
+        cls,
+        runtime: RuntimeConfig,
+        event: CallEvent,
+    ) -> Optional[Lead]:
+        # For both inbound and outbound calls we first try to reuse an active lead
+        # by customer phone (for example, an existing chat lead).
+        by_phone = await cls._find_active_lead_by_client_phone(
+            runtime,
+            event.client_phone,
+        )
+        if by_phone:
+            return by_phone
+
+        by_external = await cls._find_active_lead_by_external_id(
+            runtime,
+            event.client_phone,
+        )
+        if by_external:
+            return by_external
+
+        return None
 
     @classmethod
     async def _create_lead(cls, runtime: RuntimeConfig, event: CallEvent) -> Lead:
@@ -2232,7 +2758,7 @@ return 0
         if mapped:
             return mapped
 
-        recovered = await cls._find_active_lead(runtime, event.client_phone)
+        recovered = await cls._find_active_lead(runtime, event)
         if recovered and recovered.id and recovered.chat_id:
             lead_ctx = LeadContext(lead_id=int(recovered.id), chat_id=str(recovered.chat_id))
             await cls._save_mapping(runtime, event, lead_ctx)
@@ -2249,7 +2775,7 @@ return 0
             mapped = await cls._resolve_mapping(runtime, event)
             if mapped:
                 return mapped
-            recovered = await cls._find_active_lead(runtime, event.client_phone)
+            recovered = await cls._find_active_lead(runtime, event)
             if recovered and recovered.id and recovered.chat_id:
                 lead_ctx = LeadContext(lead_id=int(recovered.id), chat_id=str(recovered.chat_id))
                 await cls._save_mapping(runtime, event, lead_ctx)
@@ -2261,7 +2787,7 @@ return 0
             if mapped:
                 return mapped
 
-            recovered = await cls._find_active_lead(runtime, event.client_phone)
+            recovered = await cls._find_active_lead(runtime, event)
             if recovered and recovered.id and recovered.chat_id:
                 lead_ctx = LeadContext(lead_id=int(recovered.id), chat_id=str(recovered.chat_id))
                 await cls._save_mapping(runtime, event, lead_ctx)
@@ -2274,33 +2800,86 @@ return 0
         finally:
             await cls._release_lock(lock_key, lock_token)
 
-    @staticmethod
-    def _event_external_message_id(event: CallEvent) -> str:
+    @classmethod
+    def _event_external_message_id(cls, event: CallEvent) -> str:
         # Stable id makes ChatMessage/Add idempotent for repeated AMI events.
-        return f"astmsg:{event.asterisk_hash}:{event.external_call_id}:{event.status}"
+        return f"astmsg:{event.asterisk_hash}:{event.external_call_id}:{cls._chat_event_code(event)}"
 
     @staticmethod
-    def _render_call_text(event: CallEvent) -> str:
-        status_title = {
-            "started": "started",
-            "ringing": "ringing",
-            "answered": "answered",
-            "missed": "missed",
-            "completed": "completed",
-            "failed": "failed",
-        }.get(event.status, event.status)
-        direction_title = "inbound" if event.direction == "inbound" else "outbound"
-        lines = [
-            f"[Asterisk] Call {direction_title} {status_title}",
-            f"Call ID: {event.external_call_id}",
-            f"From: {event.from_phone or '-'}",
-            f"To: {event.to_phone or '-'}",
-        ]
-        if event.talk_duration_sec is not None and event.talk_duration_sec >= 0:
-            lines.append(f"Talk duration: {event.talk_duration_sec}s")
-        if event.operator_ext:
-            lines.append(f"Operator ext: {event.operator_ext}")
-        return "\n".join(lines)
+    def _event_type(event: CallEvent) -> str:
+        return AsteriskCrmChannelIntegration._chat_event_code(event)
+
+    @staticmethod
+    def _operator_phone_from_event(event: CallEvent) -> Optional[str]:
+        client_phone = _normalize_phone(event.client_phone)
+        preferred: List[Optional[str]]
+        if event.direction == "inbound":
+            preferred = [event.to_phone, event.from_phone]
+        else:
+            preferred = [event.from_phone, event.to_phone]
+
+        for candidate in preferred:
+            normalized = _normalize_phone(candidate)
+            if not normalized:
+                continue
+            if client_phone and normalized == client_phone:
+                continue
+            return normalized
+        return None
+
+    @classmethod
+    def _render_call_text(
+        cls,
+        event: CallEvent,
+        language: str,
+        *,
+        operator_name: Optional[str] = None,
+    ) -> str:
+        code = cls._chat_event_code(event)
+        client_phone = event.client_phone or "-"
+        operator_phone = cls._operator_phone_from_event(event)
+        talk_duration = _to_int(event.talk_duration_sec, None)
+
+        if code == "inbound_started":
+            return cls._text(language, "inbound_started", client_phone=client_phone)
+        if code == "inbound_missed":
+            return cls._text(language, "inbound_missed")
+        if code == "inbound_answered":
+            resolved_operator_name = str(operator_name or "").strip() or operator_phone
+            return (
+                cls._text(
+                    language,
+                    "inbound_answered_with_operator",
+                    operator_name=resolved_operator_name,
+                )
+                if resolved_operator_name
+                else cls._text(language, "inbound_answered")
+            )
+        if code == "inbound_completed":
+            if talk_duration is not None and talk_duration >= 0:
+                return cls._text(
+                    language,
+                    "inbound_completed_with_duration",
+                    talk_duration=talk_duration,
+                )
+            return cls._text(language, "inbound_completed")
+
+        if code == "outbound_started":
+            return cls._text(language, "outbound_started", client_phone=client_phone)
+        if code == "outbound_failed":
+            return cls._text(language, "outbound_failed")
+        if code == "outbound_answered":
+            return cls._text(language, "outbound_answered")
+        if code == "outbound_completed":
+            if talk_duration is not None and talk_duration >= 0:
+                return cls._text(
+                    language,
+                    "outbound_completed_with_duration",
+                    talk_duration=talk_duration,
+                )
+            return cls._text(language, "outbound_completed")
+
+        return cls._text(language, "generic_event")
 
     @classmethod
     async def _chat_message_add(
@@ -2400,10 +2979,11 @@ return 0
         event: CallEvent,
         lead_ctx: LeadContext,
     ) -> None:
+        language = runtime.message_language
         file_ids: List[int] = []
         text_lines = [
-            "[Asterisk] Call recording is ready",
-            f"Call ID: {event.external_call_id}",
+            cls._text(language, "recording_ready_title"),
+            cls._text(language, "call_id_label", external_call_id=event.external_call_id),
         ]
 
         if event.recording_url:
@@ -2430,9 +3010,11 @@ return 0
                     event.external_call_id,
                     error,
                 )
-                text_lines.append(f"Recording: {event.recording_url}")
+                text_lines.append(
+                    cls._text(language, "recording_link", recording_url=event.recording_url)
+                )
         else:
-            text_lines.append("Recording URL is not provided")
+            text_lines.append(cls._text(language, "recording_url_missing"))
 
         await cls._chat_message_add(
             runtime=runtime,
@@ -2486,11 +3068,21 @@ return 0
             if event.status == "recording_ready":
                 await cls._post_recording_event(runtime, event, lead_ctx)
             else:
+                operator_name: Optional[str] = None
+                if cls._chat_event_code(event) == "inbound_answered":
+                    operator_name = await cls._resolve_operator_display_name_best_effort(
+                        runtime,
+                        event,
+                    )
                 await cls._chat_message_add(
                     runtime=runtime,
                     lead_ctx=lead_ctx,
                     event=event,
-                    text=cls._render_call_text(event),
+                    text=cls._render_call_text(
+                        event,
+                        runtime.message_language,
+                        operator_name=operator_name,
+                    ),
                 )
             return lead_ctx
         except ChatMessageAddClosedEntityError as error:
@@ -2507,11 +3099,21 @@ return 0
             # Call-state event for closed lead: rebuild mapping and retry once.
             await cls._clear_mapping(runtime, event)
             fresh = await cls._resolve_or_create_active_lead(runtime, event)
+            operator_name: Optional[str] = None
+            if cls._chat_event_code(event) == "inbound_answered":
+                operator_name = await cls._resolve_operator_display_name_best_effort(
+                    runtime,
+                    event,
+                )
             await cls._chat_message_add(
                 runtime=runtime,
                 lead_ctx=fresh,
                 event=event,
-                text=cls._render_call_text(event),
+                text=cls._render_call_text(
+                    event,
+                    runtime.message_language,
+                    operator_name=operator_name,
+                ),
             )
             return fresh
 
