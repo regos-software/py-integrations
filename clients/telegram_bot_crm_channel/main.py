@@ -3497,7 +3497,9 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         bot = await cls._get_bot(bot_config.token)
         offset: Optional[int] = None
         lock_key = cls._lock_polling_owner_key(bot_config.bot_hash)
-        owner = _INSTANCE_ID
+        # Owner must be unique per CI+bot within a process.
+        # Using only instance id lets multiple pollers in one process treat the lock as "mine".
+        owner = f"{_INSTANCE_ID}:{connected_integration_id}:{bot_config.bot_hash}"
         logger.info(
             "Longpolling worker started for bot_hash=%s ci=%s",
             bot_config.bot_hash,
