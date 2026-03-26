@@ -359,6 +359,11 @@ def _file_ext_from_mime(mime_type: Optional[str], fallback: str = "bin") -> str:
         "audio/wav": "wav",
         "audio/x-wav": "wav",
         "audio/flac": "flac",
+        "video/mp4": "mp4",
+        "video/quicktime": "mov",
+        "video/x-matroska": "mkv",
+        "video/x-msvideo": "avi",
+        "video/3gpp": "3gp",
     }
     if mime in mapping:
         return mapping[mime]
@@ -388,6 +393,18 @@ def _is_audio_extension(extension: Optional[str]) -> bool:
         "wav",
         "flac",
         "webm",
+    }
+
+
+def _is_video_extension(extension: Optional[str]) -> bool:
+    return str(extension or "").lower() in {
+        "mp4",
+        "mov",
+        "m4v",
+        "webm",
+        "mkv",
+        "avi",
+        "3gp",
     }
 
 
@@ -770,15 +787,7 @@ class _TelegramHtmlToCrmMarkdownParser(HTMLParser):
             href = str(attrs.get("href") or "").strip()
             if not href:
                 return content
-            href_plain = html.unescape(href).strip()
-            content_plain = _unescape_markdown_text(content).strip()
-            if not href_plain:
-                return content
-            # Keep inbound Telegram links as plain text to avoid CRM markdown
-            # link parsing edge-cases that can reject message insert.
-            if not content_plain or content_plain == href_plain:
-                return _escape_markdown_text(href_plain)
-            return f"{content} ({_escape_markdown_text(href_plain)})"
+            return f"[{content}]({_escape_markdown_link_url(href)})"
         if tag == "code":
             if str(parent.get("tag") or "") == "pre":
                 language = _extract_language_from_code_tag(attrs)
@@ -808,6 +817,62 @@ def _telegram_html_to_crm_markdown(html_text: str) -> str:
     parser.feed(str(html_text or ""))
     parser.close()
     return parser.markdown()
+
+
+def _render_links_from_telegram_entities_to_crm_markdown(
+    raw_text: str, entities: List[Any]
+) -> str:
+    source = str(raw_text or "")
+    if not source or not isinstance(entities, list):
+        return source
+    try:
+        encoded = bytearray(source.encode("utf-16-le"))
+        replacements: List[Tuple[int, int, str]] = []
+        for entity in entities:
+            if not isinstance(entity, dict):
+                continue
+            entity_type = str(entity.get("type") or "").strip().lower()
+            if entity_type not in {"url", "text_link"}:
+                continue
+
+            raw_offset = entity.get("offset")
+            raw_length = entity.get("length")
+            offset = _parse_int(None if raw_offset is None else str(raw_offset), None)
+            length = _parse_int(None if raw_length is None else str(raw_length), None)
+            if offset is None or length is None or length <= 0:
+                continue
+
+            start = int(offset) * 2
+            end = (int(offset) + int(length)) * 2
+            if start < 0 or end > len(encoded) or start >= end:
+                continue
+
+            label = bytes(encoded[start:end]).decode("utf-16-le", errors="ignore").strip()
+            if entity_type == "url":
+                url = label
+            else:
+                url = str(entity.get("url") or "").strip()
+            if not url:
+                continue
+
+            label_text = label or url
+            link_md = (
+                f"[{_escape_markdown_text(label_text)}]"
+                f"({_escape_markdown_link_url(url)})"
+            )
+            replacements.append((start, end, link_md))
+
+        if not replacements:
+            return source
+
+        replacements.sort(key=lambda item: item[0], reverse=True)
+        for start, end, replacement in replacements:
+            encoded[start:end] = replacement.encode("utf-16-le")
+
+        rendered = bytes(encoded).decode("utf-16-le", errors="ignore").strip()
+        return rendered or source
+    except Exception:
+        return source
 
 
 class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
@@ -2000,6 +2065,33 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
     def _telegram_message_to_crm_markdown(
         cls, connected_integration_id: str, message: Dict[str, Any]
     ) -> Optional[str]:
+        body_text = cls._telegram_message_body_to_crm_markdown(
+            connected_integration_id=connected_integration_id,
+            message=message,
+        )
+
+        reply_message = message.get("reply_to_message")
+        if not isinstance(reply_message, dict):
+            return body_text
+
+        reply_text = cls._telegram_message_body_to_crm_markdown(
+            connected_integration_id=connected_integration_id,
+            message=reply_message,
+        )
+        if not reply_text:
+            reply_text = cls._reply_message_placeholder_text(reply_message)
+
+        reply_quote = cls._build_crm_reply_quote(reply_text)
+        if not reply_quote:
+            return body_text
+        if body_text:
+            return f"{reply_quote}\n\n{body_text}"
+        return reply_quote
+
+    @classmethod
+    def _telegram_message_body_to_crm_markdown(
+        cls, connected_integration_id: str, message: Dict[str, Any]
+    ) -> Optional[str]:
         has_text = message.get("text") is not None
         raw_text = (
             str(message.get("text") or "").strip()
@@ -2013,12 +2105,15 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         entities = message.get(entities_key)
         if not isinstance(entities, list) or not entities:
             return raw_text
+        links_fallback_text = _render_links_from_telegram_entities_to_crm_markdown(
+            raw_text, entities
+        )
 
         try:
             tg_message = Message.model_validate(message)
             html_text = str(tg_message.html_text or "").strip()
             if not html_text:
-                return raw_text
+                return links_fallback_text or raw_text
             markdown_text = _telegram_html_to_crm_markdown(html_text).strip()
             if markdown_text:
                 logger.debug(
@@ -2035,7 +2130,58 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 entities_key,
                 error,
             )
-        return raw_text
+        return links_fallback_text or raw_text
+
+    @staticmethod
+    def _reply_message_placeholder_text(message: Dict[str, Any]) -> str:
+        if message.get("photo"):
+            return "[Фото]"
+        if message.get("video"):
+            return "[Видео]"
+        if message.get("voice"):
+            return "[Голосовое сообщение]"
+        if message.get("audio"):
+            return "[Аудио]"
+        if message.get("document"):
+            return "[Файл]"
+        if message.get("sticker"):
+            return "[Стикер]"
+        if message.get("contact"):
+            return "[Контакт]"
+        if message.get("location"):
+            return "[Локация]"
+        if message.get("poll"):
+            return "[Опрос]"
+        return "[Сообщение]"
+
+    @staticmethod
+    def _build_crm_reply_quote(text: Optional[str]) -> Optional[str]:
+        raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not raw:
+            return None
+
+        max_chars = 700
+        max_lines = 6
+        truncated = False
+
+        if len(raw) > max_chars:
+            raw = raw[:max_chars].rstrip()
+            truncated = True
+
+        lines = raw.split("\n")
+        if len(lines) > max_lines:
+            lines = lines[:max_lines]
+            truncated = True
+
+        quote_lines: List[str] = []
+        for line in lines:
+            escaped = _escape_markdown_text(line.strip())
+            quote_lines.append(f"> {escaped}" if escaped else ">")
+        if truncated:
+            quote_lines.append("> ...")
+
+        result = "\n".join(quote_lines).strip()
+        return result or None
 
     @staticmethod
     def _crm_markdown_to_telegram_payload(text: str) -> Tuple[str, Optional[str]]:
@@ -4611,6 +4757,36 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     }
                 )
 
+        video = message.get("video")
+        if isinstance(video, dict) and video.get("file_id"):
+            video_name_raw = str(video.get("file_name") or "").strip()
+            if video_name_raw:
+                video_name = _sanitize_file_name(video_name_raw)
+                video_ext = _file_ext_from_name(video_name, "mp4")
+            else:
+                video_ext = _file_ext_from_mime(video.get("mime_type"), "mp4")
+                video_name = f"video_{message_id}.{video_ext}"
+            result.append(
+                {
+                    "file_id": str(video["file_id"]),
+                    "name": video_name,
+                    "extension": video_ext,
+                    "size_bytes": _parse_int(str(video.get("file_size") or ""), None),
+                }
+            )
+
+        video_note = message.get("video_note")
+        if isinstance(video_note, dict) and video_note.get("file_id"):
+            video_note_ext = _file_ext_from_mime(video_note.get("mime_type"), "mp4")
+            result.append(
+                {
+                    "file_id": str(video_note["file_id"]),
+                    "name": f"video_note_{message_id}.{video_note_ext}",
+                    "extension": video_note_ext,
+                    "size_bytes": _parse_int(str(video_note.get("file_size") or ""), None),
+                }
+            )
+
         audio = message.get("audio")
         if isinstance(audio, dict) and audio.get("file_id"):
             audio_name_raw = str(audio.get("file_name") or "").strip()
@@ -5239,6 +5415,13 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 sent = await bot.send_photo(
                     chat_id=target_chat,
                     photo=input_file,
+                    caption=caption,
+                    parse_mode=parse_mode if caption and parse_mode else None,
+                )
+            elif _is_video_extension(file_model.extension):
+                sent = await bot.send_video(
+                    chat_id=target_chat,
+                    video=input_file,
                     caption=caption,
                     parse_mode=parse_mode if caption and parse_mode else None,
                 )
