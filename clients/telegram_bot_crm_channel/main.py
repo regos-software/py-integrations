@@ -211,8 +211,23 @@ def _bot_hash(token: str) -> str:
     return hashlib.md5(token.encode("utf-8")).hexdigest()
 
 
-def _external_contact_id(bot_hash: str, tg_chat_id: str) -> str:
+def _lead_external_id(bot_hash: str, tg_chat_id: str) -> str:
     return f"tg:{bot_hash}:{tg_chat_id}"
+
+
+def _parse_tg_lead_external_id(value: Any) -> Tuple[Optional[str], Optional[str]]:
+    text = str(value or "").strip()
+    if not text:
+        return None, None
+    prefix, sep, tail = text.partition(":")
+    if prefix != "tg" or not sep or not tail:
+        return None, None
+    bot_hash, sep2, tg_chat_id = tail.partition(":")
+    bot_hash = str(bot_hash or "").strip()
+    tg_chat_id = str(tg_chat_id or "").strip()
+    if not sep2 or not bot_hash or not tg_chat_id:
+        return None, None
+    return bot_hash, tg_chat_id
 
 
 def _update_mode_from_value(raw: Optional[str]) -> str:
@@ -755,7 +770,15 @@ class _TelegramHtmlToCrmMarkdownParser(HTMLParser):
             href = str(attrs.get("href") or "").strip()
             if not href:
                 return content
-            return f"[{content}]({_escape_markdown_link_url(href)})"
+            href_plain = html.unescape(href).strip()
+            content_plain = _unescape_markdown_text(content).strip()
+            if not href_plain:
+                return content
+            # Keep inbound Telegram links as plain text to avoid CRM markdown
+            # link parsing edge-cases that can reject message insert.
+            if not content_plain or content_plain == href_plain:
+                return _escape_markdown_text(href_plain)
+            return f"{content} ({_escape_markdown_text(href_plain)})"
         if tag == "code":
             if str(parent.get("tag") or "") == "pre":
                 language = _extract_language_from_code_tag(attrs)
@@ -1222,6 +1245,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         connected_integration_id: str,
     ) -> Dict[str, Any]:
         payload = {
+            "connected_integration_id": connected_integration_id,
             "webhooks": sorted(TelegramBotCrmChannelConfig.SUPPORTED_INBOUND_WEBHOOKS)
         }
         try:
@@ -2734,11 +2758,9 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
 
         return {
             "subject": subject,
-            "external_contact_id": _external_contact_id(bot_cfg.bot_hash, tg_chat_id),
+            "external_id": _lead_external_id(bot_cfg.bot_hash, tg_chat_id),
             "client_name": client_name,
             "client_phone": client_phone,
-            "external_chat_id": tg_chat_id,
-            "bot_id": bot_cfg.bot_hash,
         }
 
     @classmethod
@@ -2750,11 +2772,9 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         patch: Dict[str, str] = {}
         field_names = [
             "subject",
-            "external_contact_id",
+            "external_id",
             "client_name",
             "client_phone",
-            "external_chat_id",
-            "bot_id",
         ]
         for field_name in field_names:
             desired_value = cls._normalize_text_value(desired_payload.get(field_name))
@@ -2774,11 +2794,9 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         patch: Dict[str, str] = {}
         field_names = [
             "subject",
-            "external_contact_id",
+            "external_id",
             "client_name",
             "client_phone",
-            "external_chat_id",
-            "bot_id",
         ]
         for field_name in field_names:
             desired_value = cls._normalize_text_value(desired_payload.get(field_name))
@@ -2813,11 +2831,9 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         payload: Dict[str, Any] = {}
         field_names = [
             "subject",
-            "external_contact_id",
+            "external_id",
             "client_name",
             "client_phone",
-            "external_chat_id",
-            "bot_id",
         ]
         for field_name in field_names:
             payload[field_name] = cls._normalize_text_value(desired_payload.get(field_name)) or ""
@@ -4367,14 +4383,10 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                         pipeline_id=bot_cfg.pipeline_id,
                         responsible_user_id=bot_cfg.default_responsible_user_id,
                         subject=lead_subject,
-                        external_contact_id=_external_contact_id(
-                            bot_cfg.bot_hash, tg_chat_id
-                        ),
+                        external_id=_lead_external_id(bot_cfg.bot_hash, tg_chat_id),
                         client_name=client_name,
                         client_phone=client_phone,
                         client_photo_url=client_photo_url,
-                        external_chat_id=tg_chat_id,
-                        bot_id=bot_cfg.bot_hash,
                     )
                 )
                 new_id = None
@@ -4444,11 +4456,10 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         tg_chat_id: str,
     ) -> Optional[Lead]:
         filters = [
-            Filter(field="bot_id", operator=FilterOperator.Equal, value=bot_hash),
             Filter(
-                field="external_chat_id",
+                field="external_id",
                 operator=FilterOperator.Equal,
-                value=tg_chat_id,
+                value=_lead_external_id(bot_hash, tg_chat_id),
             ),
         ]
         statuses = [
@@ -5056,16 +5067,19 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if not lead_rows:
             return None
         lead = Lead.model_validate(lead_rows[0])
-        if not (lead and lead.bot_id and lead.external_chat_id and lead.id):
+        if not (lead and lead.id):
+            return None
+        bot_hash, tg_chat_id = _parse_tg_lead_external_id(getattr(lead, "external_id", None))
+        if not bot_hash or not tg_chat_id:
             return None
         await cls._save_cached_mapping(
             connected_integration_id=connected_integration_id,
-            bot_hash=str(lead.bot_id),
-            tg_chat_id=str(lead.external_chat_id),
+            bot_hash=str(bot_hash),
+            tg_chat_id=str(tg_chat_id),
             lead_id=int(lead.id),
             chat_id=chat_id,
         )
-        return str(lead.bot_id), str(lead.external_chat_id)
+        return str(bot_hash), str(tg_chat_id)
 
     @staticmethod
     def _extract_lead_id_from_chat_payload(chat_payload: Any) -> Optional[int]:
@@ -5433,8 +5447,9 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if not text.strip():
             return
 
-        bot_hash = str(lead.bot_id or "").strip()
-        tg_chat_id = str(lead.external_chat_id or "").strip()
+        bot_hash, tg_chat_id = _parse_tg_lead_external_id(getattr(lead, "external_id", None))
+        bot_hash = str(bot_hash or "").strip()
+        tg_chat_id = str(tg_chat_id or "").strip()
         if not bot_hash or not tg_chat_id:
             if lead.chat_id:
                 target = await cls._resolve_target_by_chat(connected_integration_id, str(lead.chat_id))

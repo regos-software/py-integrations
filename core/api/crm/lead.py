@@ -10,6 +10,8 @@ from schemas.api.crm.lead import (
     LeadEditResponse,
     LeadGetRequest,
     LeadGetResponse,
+    LeadSetResponsibleRequest,
+    LeadSetResponsibleResponse,
     LeadSetStatusRequest,
     LeadSetStatusResponse,
 )
@@ -19,6 +21,7 @@ class LeadService:
     PATH_GET = "Lead/Get"
     PATH_ADD = "Lead/Add"
     PATH_EDIT = "Lead/Edit"
+    PATH_SET_RESPONSIBLE = "Lead/SetResponsible"
     PATH_SET_STATUS = "Lead/SetStatus"
 
     def __init__(self, api):
@@ -32,6 +35,13 @@ class LeadService:
 
     async def edit(self, req: LeadEditRequest) -> LeadEditResponse:
         return await self.api.call(self.PATH_EDIT, req, LeadEditResponse)
+
+    async def set_responsible(
+        self, req: LeadSetResponsibleRequest
+    ) -> LeadSetResponsibleResponse:
+        return await self.api.call(
+            self.PATH_SET_RESPONSIBLE, req, LeadSetResponsibleResponse
+        )
 
     async def set_status(self, req: LeadSetStatusRequest) -> LeadSetStatusResponse:
         return await self.api.call(self.PATH_SET_STATUS, req, LeadSetStatusResponse)

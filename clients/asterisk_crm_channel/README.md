@@ -31,16 +31,17 @@
 
 - `asterisk_ami_port`: порт AMI.
 - `asterisk_default_responsible_user_id`: ответственный по умолчанию.
+- `asterisk_assign_responsible_by_operator_ext`: назначать ответственного по внутреннему номеру оператора, который ответил.
 - `asterisk_lead_subject_template`: шаблон названия лида.
 - `asterisk_allowed_did_list`: список DID-номеров для фильтра входящих.
 - `asterisk_recording_base_url`: базовый URL для файлов записи.
 - `asterisk_default_country_code`: код страны для нормализации номеров в международный формат.
 - `lead_dedupe_ttl_sec`: время защиты от дублей.
 - `state_ttl_sec`: время хранения служебного состояния.
-- `reconcile_lookback_min`: окно сверки событий звонка.
 
 Значение по умолчанию для `asterisk_ami_port`: `5038`.
 Значение по умолчанию для `asterisk_default_country_code`: `998`.
+Значение по умолчанию для `asterisk_assign_responsible_by_operator_ext`: `true`.
 
 ## Флоу работы
 
@@ -107,4 +108,4 @@ asterisk -rx "manager show users"
 
 ## FreePBX
 
-Для FreePBX используйте AMI-пользователя, которого создает или обслуживает FreePBX, и откройте доступ к AMI только для сервера интеграции. Маршрутизацию через `Stasis(...)` настраивать не нужно.
+Для FreePBX используйте AMI-пользователя, которого создает или обслуживает FreePBX, и откройте доступ к AMI только для сервера интеграции. 

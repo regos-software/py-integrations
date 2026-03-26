@@ -5,6 +5,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import socket
 import time
 import uuid
@@ -33,6 +34,7 @@ from schemas.api.crm.lead import (
     Lead,
     LeadAddRequest,
     LeadGetRequest,
+    LeadSetResponsibleRequest,
     LeadSetStatusRequest,
     LeadStatusEnum,
 )
@@ -102,8 +104,8 @@ class RuntimeConfig:
     recording_base_url: Optional[str]
     lead_dedupe_ttl_sec: int
     state_ttl_sec: int
-    reconcile_lookback_min: int
     default_country_code: str
+    assign_responsible_by_operator_ext: bool
 
 
 @dataclass
@@ -179,6 +181,21 @@ def _to_int(value: Any, default: Optional[int] = None) -> Optional[int]:
         return default
 
 
+def _to_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if not text:
+        return bool(default)
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return bool(default)
+
+
 def _normalize_phone(value: Any) -> Optional[str]:
     digits = "".join(ch for ch in str(value or "") if ch.isdigit())
     # Some AMI fields may contain duplicated number tokens concatenated together.
@@ -229,7 +246,7 @@ def _hash_scope_key(value: str) -> str:
     return hashlib.md5(str(value or "").encode("utf-8")).hexdigest()
 
 
-def _external_contact_id(asterisk_hash: str, normalized_phone: str) -> str:
+def _external_id(asterisk_hash: str, normalized_phone: str) -> str:
     return f"ast:{asterisk_hash}:{normalized_phone}"
 
 
@@ -410,6 +427,28 @@ class AsteriskCrmChannelIntegration(ClientBase):
         return (
             f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
             f"call_progress:{connected_integration_id}:{asterisk_hash}:{external_call_id}"
+        )
+
+    @staticmethod
+    def _operator_user_cache_key(
+        connected_integration_id: str,
+        asterisk_hash: str,
+        operator_ext: str,
+    ) -> str:
+        return (
+            f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
+            f"operator_user:{connected_integration_id}:{asterisk_hash}:{operator_ext}"
+        )
+
+    @staticmethod
+    def _call_responsible_key(
+        connected_integration_id: str,
+        asterisk_hash: str,
+        external_call_id: str,
+    ) -> str:
+        return (
+            f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
+            f"call_responsible:{connected_integration_id}:{asterisk_hash}:{external_call_id}"
         )
 
     @staticmethod
@@ -648,11 +687,11 @@ return 0
                 or AsteriskCrmChannelConfig.DEFAULT_STATE_TTL_SEC,
                 60,
             ),
-            reconcile_lookback_min=max(
-                _to_int(settings_map.get("reconcile_lookback_min"), 120) or 120,
-                1,
-            ),
             default_country_code=default_country_code,
+            assign_responsible_by_operator_ext=_to_bool(
+                settings_map.get("asterisk_assign_responsible_by_operator_ext"),
+                True,
+            ),
         )
 
     @staticmethod
@@ -1711,6 +1750,11 @@ return 0
                 )
                 return
             lead_ctx = await cls._resolve_or_create_active_lead(runtime, event)
+            await cls._maybe_assign_responsible_from_operator_best_effort(
+                runtime=runtime,
+                event=event,
+                lead_ctx=lead_ctx,
+            )
             lead_ctx = await cls._write_event_with_1220_policy(runtime, event, lead_ctx)
             await cls._save_mapping(runtime, event, lead_ctx)
             await cls._apply_status_policy_best_effort(runtime, event, lead_ctx.lead_id)
@@ -1822,6 +1866,226 @@ return 0
             return None
         return event
 
+    @staticmethod
+    def _extract_digit_tokens(value: Any) -> set[str]:
+        if value is None:
+            return set()
+        if isinstance(value, dict):
+            tokens: set[str] = set()
+            for nested in value.values():
+                tokens.update(AsteriskCrmChannelIntegration._extract_digit_tokens(nested))
+            return tokens
+        if isinstance(value, (list, tuple, set)):
+            tokens: set[str] = set()
+            for nested in value:
+                tokens.update(AsteriskCrmChannelIntegration._extract_digit_tokens(nested))
+            return tokens
+        text = str(value or "")
+        return {
+            token
+            for token in (_normalize_phone(raw) for raw in re.findall(r"\d{2,20}", text))
+            if token
+        }
+
+    @classmethod
+    def _user_matches_operator_ext(
+        cls,
+        user_payload: Dict[str, Any],
+        operator_ext: str,
+    ) -> bool:
+        if not operator_ext:
+            return False
+        candidate_paths = (
+            "internal_number",
+            "internal_phone",
+            "internal_ext",
+            "extension",
+            "ext",
+            "operator_ext",
+            "short_number",
+            "phone",
+            "main_phone",
+            "phones",
+            "sip",
+            "sip_number",
+            "sip_extension",
+            "telephony.extension",
+            "telephony.internal_number",
+            "telephony.internal_ext",
+            "pbx.extension",
+        )
+        for path in candidate_paths:
+            value = cls._payload_get(user_payload, path)
+            if value is None:
+                continue
+            tokens = cls._extract_digit_tokens(value)
+            if operator_ext in tokens:
+                return True
+        return False
+
+    @classmethod
+    async def _resolve_user_id_by_operator_ext_best_effort(
+        cls,
+        runtime: RuntimeConfig,
+        operator_ext: str,
+    ) -> Optional[int]:
+        normalized_ext = _normalize_phone(operator_ext)
+        if not normalized_ext:
+            return None
+
+        cache_key = cls._operator_user_cache_key(
+            runtime.connected_integration_id,
+            runtime.asterisk_hash,
+            normalized_ext,
+        )
+        cached_user_id = _to_int(await cls._redis_get(cache_key), None)
+        if cached_user_id and cached_user_id > 0:
+            return cached_user_id
+
+        try:
+            async with RegosAPI(
+                connected_integration_id=runtime.connected_integration_id
+            ) as api:
+                response = await api.call(
+                    "User/Get",
+                    {
+                        "active": True,
+                        "search": normalized_ext,
+                        "limit": 200,
+                        "offset": 0,
+                    },
+                    APIBaseResponse[List[Dict[str, Any]]],
+                )
+        except Exception as error:
+            logger.warning(
+                "User/Get failed for operator extension match: ci=%s operator_ext=%s error=%s",
+                runtime.connected_integration_id,
+                normalized_ext,
+                error,
+            )
+            return None
+
+        if not response.ok:
+            logger.warning(
+                "User/Get rejected for operator extension match: ci=%s operator_ext=%s payload=%s",
+                runtime.connected_integration_id,
+                normalized_ext,
+                response.result,
+            )
+            return None
+
+        rows = response.result if isinstance(response.result, list) else []
+        if not rows:
+            return None
+
+        matched_user_ids: List[int] = []
+        fallback_user_id: Optional[int] = None
+        if len(rows) == 1 and isinstance(rows[0], dict):
+            fallback_user_id = _to_int(rows[0].get("id"), None)
+
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            user_id = _to_int(row.get("id"), None)
+            if not user_id:
+                continue
+            if cls._user_matches_operator_ext(row, normalized_ext):
+                matched_user_ids.append(user_id)
+
+        resolved_user_id: Optional[int] = None
+        unique_matches = sorted(set(matched_user_ids))
+        if len(unique_matches) == 1:
+            resolved_user_id = unique_matches[0]
+        elif len(unique_matches) > 1:
+            logger.warning(
+                "Operator extension matched multiple users: ci=%s operator_ext=%s users=%s",
+                runtime.connected_integration_id,
+                normalized_ext,
+                unique_matches,
+            )
+            return None
+        else:
+            resolved_user_id = fallback_user_id
+
+        if not resolved_user_id:
+            return None
+
+        await cls._redis_set_with_ttl(
+            cache_key,
+            str(resolved_user_id),
+            runtime.state_ttl_sec,
+            min_ttl_sec=300,
+        )
+        return resolved_user_id
+
+    @classmethod
+    async def _maybe_assign_responsible_from_operator_best_effort(
+        cls,
+        runtime: RuntimeConfig,
+        event: CallEvent,
+        lead_ctx: LeadContext,
+    ) -> None:
+        if not runtime.assign_responsible_by_operator_ext:
+            return
+        if event.status not in {"answered", "completed"}:
+            return
+        operator_ext = _normalize_phone(event.operator_ext)
+        if not operator_ext:
+            return
+
+        target_user_id = await cls._resolve_user_id_by_operator_ext_best_effort(
+            runtime,
+            operator_ext,
+        )
+        if not target_user_id:
+            return
+
+        call_key = cls._call_responsible_key(
+            runtime.connected_integration_id,
+            runtime.asterisk_hash,
+            event.external_call_id,
+        )
+        already_bound = _to_int(await cls._redis_get(call_key), None)
+        if already_bound and already_bound == target_user_id:
+            return
+        if already_bound and already_bound != target_user_id:
+            return
+
+        try:
+            async with RegosAPI(
+                connected_integration_id=runtime.connected_integration_id
+            ) as api:
+                response = await api.crm.lead.set_responsible(
+                    LeadSetResponsibleRequest(
+                        id=lead_ctx.lead_id, responsible_user_id=target_user_id
+                    )
+                )
+            if not response.ok:
+                logger.warning(
+                    "Lead/SetResponsible rejected while binding responsible by operator extension: ci=%s lead_id=%s operator_ext=%s user_id=%s payload=%s",
+                    runtime.connected_integration_id,
+                    lead_ctx.lead_id,
+                    operator_ext,
+                    target_user_id,
+                    response.result,
+                )
+                return
+            await cls._redis_set_with_ttl(
+                call_key,
+                str(target_user_id),
+                runtime.state_ttl_sec,
+                min_ttl_sec=300,
+            )
+        except Exception as error:
+            logger.warning(
+                "Failed to bind responsible by operator extension: ci=%s lead_id=%s operator_ext=%s user_id=%s error=%s",
+                runtime.connected_integration_id,
+                lead_ctx.lead_id,
+                operator_ext,
+                target_user_id,
+                error,
+            )
+
     @classmethod
     async def _save_mapping(
         cls,
@@ -1909,14 +2173,9 @@ return 0
     ) -> Optional[Lead]:
         filters = [
             Filter(
-                field="bot_id",
+                field="external_id",
                 operator=FilterOperator.Equal,
-                value=runtime.asterisk_hash,
-            ),
-            Filter(
-                field="external_chat_id",
-                operator=FilterOperator.Equal,
-                value=normalized_phone,
+                value=_external_id(runtime.asterisk_hash, normalized_phone),
             ),
         ]
         async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
@@ -1942,13 +2201,11 @@ return 0
             pipeline_id=runtime.pipeline_id,
             responsible_user_id=runtime.default_responsible_user_id,
             subject=_safe_subject(runtime.lead_subject_template, event),
-            external_contact_id=_external_contact_id(
+            external_id=_external_id(
                 runtime.asterisk_hash,
                 event.client_phone,
             ),
             client_phone=event.client_phone,
-            external_chat_id=event.client_phone,
-            bot_id=runtime.asterisk_hash,
         )
         async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
             add_response = await api.crm.lead.add(payload)

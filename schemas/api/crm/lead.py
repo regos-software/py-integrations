@@ -44,18 +44,12 @@ class Lead(BaseSchema):
         default=None, description="Participant user ids."
     )
     subject: Optional[str] = PydField(default=None, description="Subject.")
-    external_contact_id: Optional[str] = PydField(
-        default=None, description="External contact id."
-    )
+    external_id: Optional[str] = PydField(default=None, description="External id.")
     client_name: Optional[str] = PydField(default=None, description="Client name.")
     client_phone: Optional[str] = PydField(default=None, description="Client phone.")
     client_photo_url: Optional[str] = PydField(
         default=None, description="Client photo URL."
     )
-    external_chat_id: Optional[str] = PydField(
-        default=None, description="External chat id."
-    )
-    bot_id: Optional[str] = PydField(default=None, description="External bot id.")
     first_response_date: Optional[int] = PydField(
         default=None, description="First response unix time."
     )
@@ -136,18 +130,12 @@ class LeadAddRequest(BaseSchema):
         default=None, description="Participant user ids."
     )
     subject: Optional[str] = PydField(default=None, description="Lead subject.")
-    external_contact_id: Optional[str] = PydField(
-        default=None, description="External contact id."
-    )
+    external_id: Optional[str] = PydField(default=None, description="External id.")
     client_name: Optional[str] = PydField(default=None, description="Client name.")
     client_phone: Optional[str] = PydField(default=None, description="Client phone.")
     client_photo_url: Optional[str] = PydField(
         default=None, description="Client photo URL."
     )
-    external_chat_id: Optional[str] = PydField(
-        default=None, description="External chat id."
-    )
-    bot_id: Optional[str] = PydField(default=None, description="External bot id.")
     fields: Optional[List[FieldValueAdd]] = PydField(
         default=None, description="Custom field values."
     )
@@ -163,18 +151,12 @@ class LeadEditRequest(BaseSchema):
     pipeline_id: Optional[int] = PydField(default=None, ge=1, description="Pipeline id.")
     stage_id: Optional[int] = PydField(default=None, ge=1, description="Stage id.")
     subject: Optional[str] = PydField(default=None, description="Lead subject.")
-    external_contact_id: Optional[str] = PydField(
-        default=None, description="External contact id."
-    )
+    external_id: Optional[str] = PydField(default=None, description="External id.")
     client_name: Optional[str] = PydField(default=None, description="Client name.")
     client_phone: Optional[str] = PydField(default=None, description="Client phone.")
     client_photo_url: Optional[str] = PydField(
         default=None, description="Client photo URL."
     )
-    external_chat_id: Optional[str] = PydField(
-        default=None, description="External chat id."
-    )
-    bot_id: Optional[str] = PydField(default=None, description="External bot id.")
     fields: Optional[List[FieldValueEdit]] = PydField(
         default=None, description="Custom field changes."
     )
@@ -213,6 +195,21 @@ class LeadSetStatusResponse(APIBaseResponse[ArrayResult]):
     model_config = ConfigDict(extra="ignore")
 
 
+class LeadSetResponsibleRequest(BaseSchema):
+    """Request for Lead/SetResponsible."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: int = PydField(..., ge=1, description="Lead id.")
+    responsible_user_id: int = PydField(..., ge=1, description="Responsible user id.")
+
+
+class LeadSetResponsibleResponse(APIBaseResponse[ArrayResult]):
+    """Response for Lead/SetResponsible."""
+
+    model_config = ConfigDict(extra="ignore")
+
+
 __all__ = [
     "Lead",
     "LeadAddRequest",
@@ -221,6 +218,8 @@ __all__ = [
     "LeadEditResponse",
     "LeadGetRequest",
     "LeadGetResponse",
+    "LeadSetResponsibleRequest",
+    "LeadSetResponsibleResponse",
     "LeadSetStatusEnum",
     "LeadSetStatusRequest",
     "LeadSetStatusResponse",
