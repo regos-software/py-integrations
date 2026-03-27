@@ -2437,6 +2437,9 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             else str(message.get("caption") or "").strip()
         )
         if not raw_text:
+            location_text = cls._telegram_location_to_crm_markdown(message)
+            if location_text:
+                return location_text
             return None
 
         entities_key = "entities" if has_text else "caption_entities"
@@ -2479,6 +2482,32 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 error,
             )
         return links_fallback_text or raw_text
+
+    @staticmethod
+    def _telegram_location_to_crm_markdown(message: Dict[str, Any]) -> Optional[str]:
+        location = message.get("location")
+        if not isinstance(location, dict):
+            venue = message.get("venue")
+            if isinstance(venue, dict):
+                location = venue.get("location")
+        if not isinstance(location, dict):
+            return None
+
+        latitude_raw = location.get("latitude")
+        longitude_raw = location.get("longitude")
+        try:
+            latitude = float(latitude_raw)
+            longitude = float(longitude_raw)
+        except (TypeError, ValueError):
+            return None
+
+        lat = f"{latitude:.6f}".rstrip("0").rstrip(".")
+        lon = f"{longitude:.6f}".rstrip("0").rstrip(".")
+        if not lat or not lon:
+            return None
+
+        map_url = f"https://maps.google.com/?q={lat},{lon}"
+        return f"[Локация]({map_url})\nКоординаты: {lat}, {lon}"
 
     @staticmethod
     def _reply_message_placeholder_text(message: Dict[str, Any]) -> str:
