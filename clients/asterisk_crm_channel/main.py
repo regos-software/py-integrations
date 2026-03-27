@@ -69,6 +69,9 @@ class AsteriskCrmChannelConfig:
     AMI_PING_INTERVAL_SEC = 20
     AMI_RECONNECT_MIN_SEC = 1
     AMI_RECONNECT_MAX_SEC = 30
+    AMI_OWNER_LOCK_TTL_SEC = 30
+    AMI_OWNER_LOCK_REFRESH_SEC = 10
+    AMI_OWNER_WAIT_SEC = 2
 
     CHAT_MESSAGE_ADD_CLOSED_ENTITY_ERROR = 1220
 
@@ -477,6 +480,10 @@ class AsteriskCrmChannelIntegration(ClientBase):
         )
 
     @staticmethod
+    def _active_ci_ids_key() -> str:
+        return f"{AsteriskCrmChannelConfig.REDIS_PREFIX}active_ci_ids"
+
+    @staticmethod
     def _stream_key(connected_integration_id: str) -> str:
         return (
             f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
@@ -495,6 +502,13 @@ class AsteriskCrmChannelIntegration(ClientBase):
         return (
             f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
             f"worker:heartbeat:{connected_integration_id}:{_INSTANCE_ID}"
+        )
+
+    @staticmethod
+    def _ami_owner_lock_key(connected_integration_id: str) -> str:
+        return (
+            f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
+            f"lock:ami_owner:{connected_integration_id}"
         )
 
     @staticmethod
@@ -657,6 +671,24 @@ class AsteriskCrmChannelIntegration(ClientBase):
         await redis_client.delete(*rows)
 
     @classmethod
+    async def _mark_ci_active(cls, connected_integration_id: str) -> None:
+        if not _redis_enabled():
+            return
+        ci = str(connected_integration_id or "").strip()
+        if not ci:
+            return
+        await redis_client.sadd(cls._active_ci_ids_key(), ci)
+
+    @classmethod
+    async def _mark_ci_inactive(cls, connected_integration_id: str) -> None:
+        if not _redis_enabled():
+            return
+        ci = str(connected_integration_id or "").strip()
+        if not ci:
+            return
+        await redis_client.srem(cls._active_ci_ids_key(), ci)
+
+    @classmethod
     async def _acquire_lock(cls, lock_key: str, ttl_sec: int) -> Optional[str]:
         token = uuid.uuid4().hex
         ok = await cls._redis_set_nx_with_ttl(
@@ -685,6 +717,35 @@ return 0
             current = await redis_client.get(lock_key)
             if current == token:
                 await redis_client.delete(lock_key)
+
+    @classmethod
+    async def _refresh_lock(cls, lock_key: str, token: Optional[str], ttl_sec: int) -> bool:
+        if not _redis_enabled():
+            return False
+        if not lock_key or not token:
+            return False
+        ttl = max(
+            _to_int(ttl_sec, AsteriskCrmChannelConfig.LOCK_TTL_SEC)
+            or AsteriskCrmChannelConfig.LOCK_TTL_SEC,
+            AsteriskCrmChannelConfig.LOCK_TTL_SEC,
+        )
+        script = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+return 0
+"""
+        try:
+            result = await redis_client.eval(script, 1, lock_key, token, str(ttl))
+            return bool(int(result or 0))
+        except Exception:
+            try:
+                current = await redis_client.get(lock_key)
+                if current != token:
+                    return False
+                return bool(await redis_client.expire(lock_key, ttl))
+            except Exception:
+                return False
 
     @staticmethod
     def _parse_cached_json(raw: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -1512,6 +1573,51 @@ return 0
             )
 
     @classmethod
+    async def restore_active_connections(cls) -> Dict[str, int]:
+        if not _redis_enabled():
+            return {"total": 0, "restored": 0, "failed": 0}
+
+        try:
+            raw_ids = await redis_client.smembers(cls._active_ci_ids_key())
+        except Exception as error:
+            logger.warning("Failed to read active Asterisk integrations set: %s", error)
+            return {"total": 0, "restored": 0, "failed": 0}
+
+        ci_ids = sorted(
+            str(value or "").strip()
+            for value in (raw_ids or set())
+            if str(value or "").strip()
+        )
+        if not ci_ids:
+            logger.info("Asterisk auto-restore: no active integrations found")
+            return {"total": 0, "restored": 0, "failed": 0}
+
+        restored = 0
+        failed = 0
+        for connected_integration_id in ci_ids:
+            try:
+                runtime = await cls._load_runtime(connected_integration_id)
+                await cls._ensure_consumer_group(cls._stream_key(connected_integration_id))
+                await cls._ensure_stream_worker(connected_integration_id)
+                await cls._ensure_ami_worker(runtime)
+                restored += 1
+            except Exception as error:
+                failed += 1
+                logger.exception(
+                    "Asterisk auto-restore failed: ci=%s error=%s",
+                    connected_integration_id,
+                    error,
+                )
+
+        logger.info(
+            "Asterisk auto-restore completed: total=%s restored=%s failed=%s",
+            len(ci_ids),
+            restored,
+            failed,
+        )
+        return {"total": len(ci_ids), "restored": restored, "failed": failed}
+
+    @classmethod
     async def _stop_stream_worker(cls, connected_integration_id: str) -> None:
         async with _MANAGER_LOCK:
             task = _WORKER_TASKS.pop(connected_integration_id, None)
@@ -1622,6 +1728,12 @@ return 0
     @classmethod
     async def _ami_listener_loop(cls, runtime: RuntimeConfig) -> None:
         connected_integration_id = runtime.connected_integration_id
+        owner_lock_key = cls._ami_owner_lock_key(connected_integration_id)
+        owner_lock_token: Optional[str] = None
+        owner_refresh_every = max(
+            AsteriskCrmChannelConfig.AMI_OWNER_LOCK_REFRESH_SEC,
+            1,
+        )
         reconnect_delay = AsteriskCrmChannelConfig.AMI_RECONNECT_MIN_SEC
         logger.info(
             "Asterisk AMI listener started: ci=%s host=%s port=%s",
@@ -1632,6 +1744,21 @@ return 0
         try:
             while True:
                 try:
+                    if not owner_lock_token:
+                        owner_lock_token = await cls._acquire_lock(
+                            owner_lock_key,
+                            AsteriskCrmChannelConfig.AMI_OWNER_LOCK_TTL_SEC,
+                        )
+                        if not owner_lock_token:
+                            await asyncio.sleep(AsteriskCrmChannelConfig.AMI_OWNER_WAIT_SEC)
+                            continue
+                        reconnect_delay = AsteriskCrmChannelConfig.AMI_RECONNECT_MIN_SEC
+                        logger.info(
+                            "Asterisk AMI ownership acquired: ci=%s instance=%s",
+                            connected_integration_id,
+                            _INSTANCE_ID,
+                        )
+
                     await cls._ensure_stream_worker(connected_integration_id)
                     reader, writer = await asyncio.wait_for(
                         asyncio.open_connection(runtime.ami_host, runtime.ami_port),
@@ -1640,11 +1767,22 @@ return 0
                     try:
                         await cls._ami_login(runtime, reader, writer)
                         reconnect_delay = AsteriskCrmChannelConfig.AMI_RECONNECT_MIN_SEC
+                        last_owner_refresh = time.monotonic()
                         logger.info(
                             "Asterisk AMI connected and authorized: ci=%s",
                             connected_integration_id,
                         )
                         while True:
+                            if time.monotonic() - last_owner_refresh >= owner_refresh_every:
+                                lock_refreshed = await cls._refresh_lock(
+                                    owner_lock_key,
+                                    owner_lock_token,
+                                    AsteriskCrmChannelConfig.AMI_OWNER_LOCK_TTL_SEC,
+                                )
+                                if not lock_refreshed:
+                                    raise RuntimeError("Asterisk AMI owner lock lost")
+                                last_owner_refresh = time.monotonic()
+
                             try:
                                 packet = await asyncio.wait_for(
                                     cls._ami_read_packet(reader),
@@ -1694,6 +1832,10 @@ return 0
                         reconnect_delay * 2,
                         AsteriskCrmChannelConfig.AMI_RECONNECT_MAX_SEC,
                     )
+                finally:
+                    if owner_lock_token:
+                        await cls._release_lock(owner_lock_key, owner_lock_token)
+                        owner_lock_token = None
         finally:
             current_task = asyncio.current_task()
             async with _MANAGER_LOCK:
@@ -3216,9 +3358,14 @@ return 0
             return self._error_response(1001, "Redis is required for this integration").dict()
 
         runtime = await self._load_runtime(self.connected_integration_id)
-        await self._ensure_consumer_group(self._stream_key(self.connected_integration_id))
-        await self._ensure_stream_worker(self.connected_integration_id)
-        await self._ensure_ami_worker(runtime)
+        await self._mark_ci_active(self.connected_integration_id)
+        try:
+            await self._ensure_consumer_group(self._stream_key(self.connected_integration_id))
+            await self._ensure_stream_worker(self.connected_integration_id)
+            await self._ensure_ami_worker(runtime)
+        except Exception:
+            await self._mark_ci_inactive(self.connected_integration_id)
+            raise
         return {
             "status": "connected",
             "mode": "ami_with_external_fallback",
@@ -3228,6 +3375,7 @@ return 0
     async def disconnect(self, **_: Any) -> Any:
         if not self.connected_integration_id:
             return self._error_response(1000, "connected_integration_id is required").dict()
+        await self._mark_ci_inactive(self.connected_integration_id)
         await self._stop_ami_worker(self.connected_integration_id)
         await self._stop_stream_worker(self.connected_integration_id)
         return {"status": "disconnected"}

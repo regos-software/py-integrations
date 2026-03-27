@@ -1531,6 +1531,61 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             except Exception:
                 logger.exception("Error while stopping poller")
 
+    @classmethod
+    async def restore_active_connections(cls) -> Dict[str, int]:
+        if not _redis_enabled():
+            return {"total": 0, "restored": 0, "failed": 0}
+
+        try:
+            raw_ids = await redis_client.smembers(cls._active_ci_ids_key())
+        except Exception as error:
+            logger.warning("Failed to read active Telegram integrations set: %s", error)
+            return {"total": 0, "restored": 0, "failed": 0}
+
+        ci_ids = sorted(
+            str(value or "").strip()
+            for value in (raw_ids or set())
+            if str(value or "").strip()
+        )
+        if not ci_ids:
+            logger.info("Telegram auto-restore: no active integrations found")
+            return {"total": 0, "restored": 0, "failed": 0}
+
+        restored = 0
+        failed = 0
+
+        for connected_integration_id in ci_ids:
+            try:
+                runtime = await cls._load_runtime(connected_integration_id)
+                await cls._ensure_stream_workers(connected_integration_id)
+
+                if runtime.update_mode == "longpolling":
+                    keep_hashes = {bot.bot_hash for bot in runtime.bots}
+                    await cls._stop_pollers_for_ci(
+                        connected_integration_id, keep_hashes=keep_hashes
+                    )
+                    for bot_cfg in runtime.bots:
+                        await cls._ensure_poller(connected_integration_id, bot_cfg)
+                else:
+                    await cls._stop_pollers_for_ci(connected_integration_id)
+
+                restored += 1
+            except Exception as error:
+                failed += 1
+                logger.exception(
+                    "Telegram auto-restore failed: ci=%s error=%s",
+                    connected_integration_id,
+                    error,
+                )
+
+        logger.info(
+            "Telegram auto-restore completed: total=%s restored=%s failed=%s",
+            len(ci_ids),
+            restored,
+            failed,
+        )
+        return {"total": len(ci_ids), "restored": restored, "failed": failed}
+
     async def connect(self, data: Optional[Dict] = None, **kwargs) -> Dict[str, Any]:
         if not self.connected_integration_id:
             return self._error_response(1000, "connected_integration_id is required").dict()
