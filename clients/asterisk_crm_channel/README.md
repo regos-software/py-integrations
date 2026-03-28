@@ -56,6 +56,18 @@
 | `lead_dedupe_ttl_sec` | Нет | Integer | `TTL дедупликации` / `Deduplikatsiya TTL` / `Dedupe TTL` | `Срок защиты от дублей, сек` / `Dublikatdan himoya muddati, sek` / `Duplicate protection TTL, sec` | `86400` / `86400` / `86400` |
 | `state_ttl_sec` | Нет | Integer | `TTL состояния` / `Holat TTL` / `State TTL` | `Срок хранения служебного состояния, сек` / `Xizmat holati saqlash muddati, sek` / `Runtime state TTL, sec` | `86400` / `86400` / `86400` |
 
+### Как работает `asterisk_recording_base_url`
+
+- Если событие уже содержит полный URL записи (`https://...`), параметр `asterisk_recording_base_url` не используется.
+- Если в событии приходит только имя/путь файла (например `2026/03/27/call-123.wav` или `records/call-123.wav`), интеграция делает `urljoin(base_url, recording_file)`.
+- В `asterisk_recording_base_url` указывайте публичный HTTP(S)-префикс, доступный серверу интеграции, например `https://pbx.example.com/records/`.
+- Если `base_url` не указан и приходит относительный путь, файл не сможет скачаться и в чат уйдет только текстовое сообщение без вложения.
+
+### Учет `ConnectedIntegration.is_active`
+
+- Интеграция проверяет `ConnectedIntegration/Get` и учитывает `is_active`.
+- При `is_active = false` интеграция не поднимает/восстанавливает AMI-обработчики и игнорирует `/external` события.
+
 ## Порядок настройки внешней системы (Asterisk / FreePBX)
 
 ### 1. Включить AMI

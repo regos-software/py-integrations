@@ -1,17 +1,20 @@
 import asyncio
 import re
-from typing import Optional, Union, Any, Dict
+import time
+from typing import Optional, Union, Any, Dict, Tuple
 
 from fastapi import APIRouter, Header, Request, Path, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.responses import JSONResponse
 
+from core.api.regos_api import RegosAPI
 from schemas.integration.base import (
     IntegrationRequest,
     IntegrationSuccessResponse,
     IntegrationErrorResponse,
     IntegrationErrorModel,
 )
+from schemas.api.base import APIBaseResponse
 from core.logger import setup_logger
 
 # Импорт доступных интеграций (класс, не модуль)
@@ -48,6 +51,113 @@ EXCLUDED_SERVICE_HEADERS = {
     "content-length",
     "accept-encoding",
 }
+
+CONNECTED_INTEGRATION_ACTIVE_CACHE_TTL_SEC = 60
+_CONNECTED_INTEGRATION_ACTIVE_CACHE: Dict[str, Tuple[bool, float]] = {}
+_CONNECTED_INTEGRATION_ACTIVE_CACHE_LOCK = asyncio.Lock()
+
+
+def _extract_connected_integration_active_flag(payload: Any) -> Optional[bool]:
+    if isinstance(payload, dict):
+        for key in ("is_active", "isActive"):
+            if key in payload:
+                value = payload.get(key)
+                if isinstance(value, bool):
+                    return value
+                text = str(value or "").strip().lower()
+                if text in {"1", "true", "yes", "y", "on"}:
+                    return True
+                if text in {"0", "false", "no", "n", "off"}:
+                    return False
+        for nested_key in (
+            "connected_integration",
+            "integration",
+            "item",
+            "data",
+            "result",
+        ):
+            nested = payload.get(nested_key)
+            if nested is None:
+                continue
+            nested_value = _extract_connected_integration_active_flag(nested)
+            if nested_value is not None:
+                return nested_value
+        return None
+    if isinstance(payload, list):
+        for row in payload:
+            nested_value = _extract_connected_integration_active_flag(row)
+            if nested_value is not None:
+                return nested_value
+        return None
+    return None
+
+
+async def _is_connected_integration_active(
+    connected_integration_id: Optional[str],
+    *,
+    force_refresh: bool = False,
+) -> bool:
+    ci = str(connected_integration_id or "").strip()
+    if not ci:
+        return True
+
+    now = time.monotonic()
+    if not force_refresh:
+        async with _CONNECTED_INTEGRATION_ACTIVE_CACHE_LOCK:
+            cached = _CONNECTED_INTEGRATION_ACTIVE_CACHE.get(ci)
+        if cached and cached[1] > now:
+            return cached[0]
+
+    detected: Optional[bool] = None
+    last_error: Optional[Exception] = None
+    request_payloads = (
+        {},
+        {"connected_integration_id": ci, "limit": 1, "offset": 0},
+    )
+    for payload in request_payloads:
+        try:
+            async with RegosAPI(connected_integration_id=ci) as api:
+                response = await api.call(
+                    "ConnectedIntegration/Get",
+                    payload,
+                    APIBaseResponse[Any],
+                )
+            if not response.ok:
+                continue
+            detected = _extract_connected_integration_active_flag(response.result)
+            if detected is not None:
+                break
+        except Exception as error:
+            last_error = error
+
+    if detected is None:
+        if last_error is not None:
+            logger.warning(
+                "ConnectedIntegration/Get failed for active check, fallback active=true: ci=%s error=%s",
+                ci,
+                last_error,
+            )
+        detected = True
+
+    active = bool(detected)
+    async with _CONNECTED_INTEGRATION_ACTIVE_CACHE_LOCK:
+        _CONNECTED_INTEGRATION_ACTIVE_CACHE[ci] = (
+            active,
+            now + CONNECTED_INTEGRATION_ACTIVE_CACHE_TTL_SEC,
+        )
+    return active
+
+
+def _inactive_integration_error(connected_integration_id: Optional[str]) -> IntegrationErrorResponse:
+    ci = str(connected_integration_id or "").strip()
+    description = (
+        f"ConnectedIntegration '{ci}' is inactive"
+        if ci
+        else "ConnectedIntegration is inactive"
+    )
+    return IntegrationErrorResponse(
+        result=IntegrationErrorModel(error=403, description=description)
+    )
 
 
 async def _cleanup_integration(
@@ -219,6 +329,16 @@ async def handle_integration(
             )
         )
 
+    action_key = camel_to_snake(request_body.action)
+    if connected_integration_id and action_key not in {"disconnect"}:
+        is_active = await _is_connected_integration_active(
+            connected_integration_id,
+            force_refresh=action_key in {"connect", "reconnect", "update_settings"},
+        )
+        if not is_active:
+            await _cleanup_integration(integration_instance)
+            return _inactive_integration_error(connected_integration_id)
+
     try:
         logger.info(
             f"Вызов метода '{action_name}' с данными: {type(request_body.data)}"
@@ -290,6 +410,14 @@ async def handel_ui(
             status_code=500,
             content={"error": 500, "description": "Ошибка инициализации интеграции"},
         )
+
+    if connected_integration_id:
+        is_active = await _is_connected_integration_active(connected_integration_id)
+        if not is_active:
+            await _cleanup_integration(integration_instance)
+            inactive = _inactive_integration_error(connected_integration_id)
+            payload = inactive.model_dump(mode="json", exclude_none=True)
+            return JSONResponse(status_code=403, content=payload)
 
     # 3) Envelope (GET без тела)
     headers = _sanitize_headers(request.headers)
@@ -420,6 +548,18 @@ async def handle_external(
             status_code=500,
             content={"error": 500, "description": "Ошибка инициализации интеграции"},
         )
+
+    if connected_integration_id:
+        is_active = await _is_connected_integration_active(connected_integration_id)
+        if not is_active:
+            await _cleanup_integration(integration_instance)
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "status": "ignored",
+                    "reason": "connected_integration_inactive",
+                },
+            )
 
     # 3) Envelope: заголовки (без служебных) + Connected-Integration-Id, тело, query, и т.п.
     headers = _sanitize_headers(request.headers)

@@ -144,6 +144,10 @@ class ChatMessageAddClosedEntityError(RuntimeError):
         super().__init__(text)
 
 
+class ConnectedIntegrationInactiveError(RuntimeError):
+    pass
+
+
 _MANAGER_LOCK = asyncio.Lock()
 _WORKER_TASKS: Dict[str, asyncio.Task] = {}
 _AMI_TASKS: Dict[str, asyncio.Task] = {}
@@ -351,6 +355,14 @@ def _parse_event_ts(value: Any) -> int:
         return _now_ts()
 
 
+def _format_duration_hms(total_seconds: int) -> str:
+    seconds = max(int(total_seconds), 0)
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    tail_seconds = seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{tail_seconds:02d}"
+
+
 def _recording_name_from_url(url: str, external_call_id: str) -> Tuple[str, str]:
     parsed = urlparse(url)
     file_name = os.path.basename(parsed.path or "").strip()
@@ -405,12 +417,12 @@ class AsteriskCrmChannelIntegration(ClientBase):
             "inbound_missed": "Звонок пропущен",
             "inbound_answered_with_operator": "Звонок принят оператором {operator_name}",
             "inbound_answered": "Звонок принят оператором",
-            "inbound_completed_with_duration": "Звонок завершен\nДлительность разговора: {talk_duration}с",
+            "inbound_completed_with_duration": "Звонок завершен\nДлительность разговора: {talk_duration}",
             "inbound_completed": "Звонок завершен",
             "outbound_started": "Исходящий звонок на номер {client_phone}",
             "outbound_failed": "Исходящий звонок не состоялся",
             "outbound_answered": "Клиент ответил на исходящий звонок",
-            "outbound_completed_with_duration": "Исходящий звонок завершен\nДлительность разговора: {talk_duration}с",
+            "outbound_completed_with_duration": "Исходящий звонок завершен\nДлительность разговора: {talk_duration}",
             "outbound_completed": "Исходящий звонок завершен",
             "generic_event": "Событие звонка",
             "recording_ready_title": "[Asterisk] Запись звонка готова",
@@ -423,12 +435,12 @@ class AsteriskCrmChannelIntegration(ClientBase):
             "inbound_missed": "Qo'ng'iroq o'tkazib yuborildi",
             "inbound_answered_with_operator": "Qo'ng'iroqni operator qabul qildi: {operator_name}",
             "inbound_answered": "Qo'ng'iroqni operator qabul qildi",
-            "inbound_completed_with_duration": "Qo'ng'iroq yakunlandi\nSuhbat davomiyligi: {talk_duration}s",
+            "inbound_completed_with_duration": "Qo'ng'iroq yakunlandi\nSuhbat davomiyligi: {talk_duration}",
             "inbound_completed": "Qo'ng'iroq yakunlandi",
             "outbound_started": "{client_phone} raqamiga chiquvchi qo'ng'iroq",
             "outbound_failed": "Chiquvchi qo'ng'iroq amalga oshmadi",
             "outbound_answered": "Mijoz chiquvchi qo'ng'iroqqa javob berdi",
-            "outbound_completed_with_duration": "Chiquvchi qo'ng'iroq yakunlandi\nSuhbat davomiyligi: {talk_duration}s",
+            "outbound_completed_with_duration": "Chiquvchi qo'ng'iroq yakunlandi\nSuhbat davomiyligi: {talk_duration}",
             "outbound_completed": "Chiquvchi qo'ng'iroq yakunlandi",
             "generic_event": "Qo'ng'iroq hodisasi",
             "recording_ready_title": "[Asterisk] Qo'ng'iroq yozuvi tayyor",
@@ -441,12 +453,12 @@ class AsteriskCrmChannelIntegration(ClientBase):
             "inbound_missed": "Call missed",
             "inbound_answered_with_operator": "Call answered by operator {operator_name}",
             "inbound_answered": "Call answered by operator",
-            "inbound_completed_with_duration": "Call completed\nTalk duration: {talk_duration}s",
+            "inbound_completed_with_duration": "Call completed\nTalk duration: {talk_duration}",
             "inbound_completed": "Call completed",
             "outbound_started": "Outgoing call to {client_phone}",
             "outbound_failed": "Outgoing call failed",
             "outbound_answered": "Customer answered the outgoing call",
-            "outbound_completed_with_duration": "Outgoing call completed\nTalk duration: {talk_duration}s",
+            "outbound_completed_with_duration": "Outgoing call completed\nTalk duration: {talk_duration}",
             "outbound_completed": "Outgoing call completed",
             "generic_event": "Call event",
             "recording_ready_title": "[Asterisk] Call recording is ready",
@@ -477,6 +489,13 @@ class AsteriskCrmChannelIntegration(ClientBase):
         return (
             f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
             f"settings:{connected_integration_id}"
+        )
+
+    @staticmethod
+    def _ci_active_cache_key(connected_integration_id: str) -> str:
+        return (
+            f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
+            f"ci_active:{connected_integration_id}"
         )
 
     @staticmethod
@@ -767,6 +786,101 @@ return 0
         return _HTTP_CLIENT
 
     @staticmethod
+    def _extract_ci_active_flag(payload: Any) -> Optional[bool]:
+        if isinstance(payload, dict):
+            for key in ("is_active", "isActive"):
+                if key in payload:
+                    return _to_bool(payload.get(key), True)
+            for nested_key in ("connected_integration", "integration", "item", "data", "result"):
+                nested = payload.get(nested_key)
+                if nested is None:
+                    continue
+                nested_value = AsteriskCrmChannelIntegration._extract_ci_active_flag(nested)
+                if nested_value is not None:
+                    return nested_value
+            return None
+        if isinstance(payload, list):
+            for row in payload:
+                nested_value = AsteriskCrmChannelIntegration._extract_ci_active_flag(row)
+                if nested_value is not None:
+                    return nested_value
+            return None
+        return None
+
+    @classmethod
+    async def _is_connected_integration_active(
+        cls,
+        connected_integration_id: str,
+        *,
+        force_refresh: bool = False,
+    ) -> bool:
+        ci = str(connected_integration_id or "").strip()
+        if not ci:
+            raise ValueError("connected_integration_id is required")
+
+        cache_key = cls._ci_active_cache_key(ci)
+        if _redis_enabled() and not force_refresh:
+            cached = str(await redis_client.get(cache_key) or "").strip().lower()
+            if cached in {"1", "0"}:
+                return cached == "1"
+
+        request_payloads: Tuple[Dict[str, Any], ...] = (
+            {},
+            {"connected_integration_id": ci, "limit": 1, "offset": 0},
+        )
+        detected: Optional[bool] = None
+        last_error: Optional[Exception] = None
+        for payload in request_payloads:
+            try:
+                async with RegosAPI(connected_integration_id=ci) as api:
+                    response = await api.call(
+                        "ConnectedIntegration/Get",
+                        payload,
+                        APIBaseResponse[Any],
+                    )
+                if not response.ok:
+                    continue
+                detected = cls._extract_ci_active_flag(response.result)
+                if detected is not None:
+                    break
+            except Exception as error:
+                last_error = error
+
+        if detected is None:
+            if last_error is not None:
+                logger.warning(
+                    "ConnectedIntegration/Get failed for active check, fallback active=true: ci=%s error=%s",
+                    ci,
+                    last_error,
+                )
+            detected = True
+
+        if _redis_enabled():
+            await redis_client.set(
+                cache_key,
+                "1" if detected else "0",
+                ex=AsteriskCrmChannelConfig.SETTINGS_TTL,
+            )
+        return bool(detected)
+
+    @classmethod
+    async def _ensure_connected_integration_active(
+        cls,
+        connected_integration_id: str,
+        *,
+        force_refresh: bool = False,
+    ) -> None:
+        is_active = await cls._is_connected_integration_active(
+            connected_integration_id,
+            force_refresh=force_refresh,
+        )
+        if is_active:
+            return
+        raise ConnectedIntegrationInactiveError(
+            f"ConnectedIntegration {connected_integration_id} is inactive"
+        )
+
+    @staticmethod
     async def _fetch_settings_map(connected_integration_id: str) -> Dict[str, str]:
         cache_key = AsteriskCrmChannelIntegration._settings_cache_key(
             connected_integration_id
@@ -814,6 +928,9 @@ return 0
 
     @staticmethod
     async def _load_runtime(connected_integration_id: str) -> RuntimeConfig:
+        await AsteriskCrmChannelIntegration._ensure_connected_integration_active(
+            connected_integration_id
+        )
         settings_map = await AsteriskCrmChannelIntegration._fetch_settings_map(
             connected_integration_id
         )
@@ -1051,12 +1168,13 @@ return 0
         )
         if not client_phone:
             client_phone = from_phone if direction == "inbound" else to_phone
-        if not client_phone:
+        if not client_phone and status != "recording_ready":
             return None
 
         if (
             direction == "inbound"
             and runtime.allowed_did_set
+            and status != "recording_ready"
             and (not to_phone or to_phone not in runtime.allowed_did_set)
         ):
             return None
@@ -1081,6 +1199,11 @@ return 0
                 "recording.url",
                 "recording.file",
                 "file_url",
+                "recordingfile",
+                "recording_file",
+                "mixmonitorfilename",
+                "filename",
+                "file",
             ),
         )
         operator_ext = _normalize_phone(
@@ -1094,7 +1217,7 @@ return 0
             direction=direction,
             from_phone=from_phone or "",
             to_phone=to_phone or "",
-            client_phone=client_phone,
+            client_phone=client_phone or "",
             status=status,
             event_ts=event_ts,
             talk_duration_sec=talk_duration_sec,
@@ -1123,21 +1246,24 @@ return 0
 
     @staticmethod
     def _event_from_dict(payload: Dict[str, Any]) -> Optional[CallEvent]:
+        status = str(payload.get("status") or "").strip().lower()
+        if status not in AsteriskCrmChannelConfig.EVENT_STATUSES:
+            return None
+
         required = (
             "event_id",
             "external_call_id",
             "asterisk_hash",
             "direction",
-            "client_phone",
-            "status",
             "event_ts",
         )
         for field in required:
             if payload.get(field) in (None, ""):
                 return None
-        status = str(payload.get("status")).strip().lower()
-        if status not in AsteriskCrmChannelConfig.EVENT_STATUSES:
+        client_phone = _normalize_phone(payload.get("client_phone"))
+        if status != "recording_ready" and not client_phone:
             return None
+
         return CallEvent(
             event_id=str(payload["event_id"]).strip(),
             external_call_id=str(payload["external_call_id"]).strip(),
@@ -1145,7 +1271,7 @@ return 0
             direction=str(payload["direction"]).strip().lower(),
             from_phone=str(payload.get("from_phone") or "").strip(),
             to_phone=str(payload.get("to_phone") or "").strip(),
-            client_phone=str(payload["client_phone"]).strip(),
+            client_phone=client_phone or "",
             status=status,
             event_ts=_to_int(payload.get("event_ts"), _now_ts()) or _now_ts(),
             talk_duration_sec=_to_int(payload.get("talk_duration_sec"), None),
@@ -1192,8 +1318,11 @@ return 0
             dial_status = str(cls._payload_pick(payload, "dialstatus") or "").strip().lower()
             if dial_status in {"answer", "answered"}:
                 return "answered"
+            # Per-leg DialEnd noanswer/cancel frequently appears in queue fan-out
+            # while the same linked call is later answered by another operator.
+            # Treat it as non-final noise to avoid false "missed" in CRM.
             if dial_status in {"noanswer", "no_answer", "cancel", "cancelled", "canceled"}:
-                return "missed"
+                return None
             if dial_status in {
                 "busy",
                 "congestion",
@@ -1208,8 +1337,9 @@ return 0
                 cls._payload_pick(payload, "cause_txt", "cause-txt", "causetxt") or ""
             ).strip().lower()
             cause = _to_int(cls._payload_pick(payload, "cause"), None)
+            # Same reason as DialEnd: per-leg noanswer hangups are not final call result.
             if cause_text in {"noanswer", "no_answer", "no answer"} or cause in {19}:
-                return "missed"
+                return None
             if cause_text in {"busy", "congestion", "cancelled", "canceled", "failed"} or cause in {
                 17,
                 34,
@@ -1223,6 +1353,20 @@ return 0
                 return "failed"
             return "completed"
         if event_type == "cdr":
+            recording_value = cls._payload_pick(
+                payload,
+                "recording_url",
+                "recordingfile",
+                "recording_file",
+                "mixmonitorfilename",
+                "mixmonitor_filename",
+                "monitorfilename",
+                "filename",
+                "file",
+            )
+            if str(recording_value or "").strip():
+                # Many PBX setups publish recording path in CDR instead of MixMonitorStop.
+                return "recording_ready"
             disposition = str(cls._payload_pick(payload, "disposition") or "").strip().lower()
             billsec = _to_int(cls._payload_pick(payload, "billableseconds", "billsec"), 0) or 0
             if billsec > 0 or disposition in {"answer", "answered"}:
@@ -1601,6 +1745,13 @@ return 0
                 await cls._ensure_stream_worker(connected_integration_id)
                 await cls._ensure_ami_worker(runtime)
                 restored += 1
+            except ConnectedIntegrationInactiveError:
+                failed += 1
+                await cls._mark_ci_inactive(connected_integration_id)
+                logger.info(
+                    "Asterisk auto-restore skipped inactive integration: ci=%s",
+                    connected_integration_id,
+                )
             except Exception as error:
                 failed += 1
                 logger.exception(
@@ -1744,6 +1895,10 @@ return 0
         try:
             while True:
                 try:
+                    if not await cls._is_connected_integration_active(connected_integration_id):
+                        raise ConnectedIntegrationInactiveError(
+                            f"ConnectedIntegration {connected_integration_id} is inactive"
+                        )
                     if not owner_lock_token:
                         owner_lock_token = await cls._acquire_lock(
                             owner_lock_key,
@@ -1768,6 +1923,7 @@ return 0
                         await cls._ami_login(runtime, reader, writer)
                         reconnect_delay = AsteriskCrmChannelConfig.AMI_RECONNECT_MIN_SEC
                         last_owner_refresh = time.monotonic()
+                        last_active_check = time.monotonic()
                         logger.info(
                             "Asterisk AMI connected and authorized: ci=%s",
                             connected_integration_id,
@@ -1782,6 +1938,17 @@ return 0
                                 if not lock_refreshed:
                                     raise RuntimeError("Asterisk AMI owner lock lost")
                                 last_owner_refresh = time.monotonic()
+                            if (
+                                time.monotonic() - last_active_check
+                                >= AsteriskCrmChannelConfig.AMI_PING_INTERVAL_SEC
+                            ):
+                                if not await cls._is_connected_integration_active(
+                                    connected_integration_id
+                                ):
+                                    raise ConnectedIntegrationInactiveError(
+                                        f"ConnectedIntegration {connected_integration_id} is inactive"
+                                    )
+                                last_active_check = time.monotonic()
 
                             try:
                                 packet = await asyncio.wait_for(
@@ -1820,6 +1987,15 @@ return 0
                             pass
                 except asyncio.CancelledError:
                     raise
+                except ConnectedIntegrationInactiveError as error:
+                    logger.info(
+                        "Asterisk AMI listener stopped for inactive integration: ci=%s reason=%s",
+                        connected_integration_id,
+                        error,
+                    )
+                    await cls._mark_ci_inactive(connected_integration_id)
+                    await cls._stop_stream_worker(connected_integration_id)
+                    break
                 except Exception as error:
                     logger.warning(
                         "Asterisk AMI listener error: ci=%s reconnect_in=%ss error=%s",
@@ -1957,6 +2133,19 @@ return 0
                 AsteriskCrmChannelConfig.STREAM_GROUP,
                 message_id,
             )
+        except ConnectedIntegrationInactiveError as error:
+            await redis_client.xack(
+                stream_key,
+                AsteriskCrmChannelConfig.STREAM_GROUP,
+                message_id,
+            )
+            logger.info(
+                "Asterisk event skipped for inactive integration: ci=%s message_id=%s reason=%s",
+                connected_integration_id,
+                message_id,
+                error,
+            )
+            return
         except Exception as error:
             attempts += 1
             if attempts >= AsteriskCrmChannelConfig.STREAM_MAX_RETRIES:
@@ -2036,7 +2225,25 @@ return 0
                     min_ttl_sec=60,
                 )
                 return
-            lead_ctx = await cls._resolve_or_create_active_lead(runtime, event)
+            lead_ctx: Optional[LeadContext] = None
+            if event.status == "recording_ready" and not _normalize_phone(event.client_phone):
+                lead_ctx = await cls._resolve_mapping(runtime, event)
+                if not lead_ctx:
+                    logger.info(
+                        "Asterisk recording event skipped: no client_phone and no mapping: ci=%s call_id=%s event_id=%s",
+                        runtime.connected_integration_id,
+                        event.external_call_id,
+                        event.event_id,
+                    )
+                    await cls._redis_set_with_ttl(
+                        dedupe_key,
+                        "1",
+                        runtime.lead_dedupe_ttl_sec,
+                        min_ttl_sec=60,
+                    )
+                    return
+            if not lead_ctx:
+                lead_ctx = await cls._resolve_or_create_active_lead(runtime, event)
             await cls._maybe_assign_responsible_from_operator_best_effort(
                 runtime=runtime,
                 event=event,
@@ -2064,8 +2271,9 @@ return 0
             "outbound_answered": 30,
             "inbound_missed": 40,
             "outbound_failed": 40,
-            "inbound_completed": 40,
-            "outbound_completed": 40,
+            # Completed with talk duration is a stronger terminal state than missed/failed.
+            "inbound_completed": 45,
+            "outbound_completed": 45,
             "recording_ready": 50,
         }.get(str(status or "").strip().lower(), 0)
 
@@ -2112,10 +2320,6 @@ return 0
             event.operator_ext
         )
 
-        # Skip low-value intermediate answered state without known operator.
-        if status == "answered" and not operator_phone:
-            return True
-
         # For outbound, ringing without operator endpoint is too noisy.
         if event.direction == "outbound" and status == "ringing" and not operator_phone:
             return True
@@ -2137,6 +2341,17 @@ return 0
             and talk_duration <= 0
             and to_phone
             and _is_internal_extension(to_phone)
+        ):
+            return True
+
+        # Some PBX variants emit intermediate inbound no-answer legs without endpoint details.
+        # These events are usually noise and should not become CRM statuses.
+        if (
+            event.direction == "inbound"
+            and status in {"missed", "failed"}
+            and talk_duration <= 0
+            and not to_phone
+            and not operator_phone
         ):
             return True
 
@@ -2186,6 +2401,10 @@ return 0
         status = stage_code
 
         should_emit = not cls._should_suppress_noise_event(event)
+        completed_with_talk = (
+            status in {"inbound_completed", "outbound_completed"}
+            and (_to_int(event.talk_duration_sec, 0) or 0) > 0
+        )
         if should_emit:
             if status == "recording_ready":
                 should_emit = not bool(cached.get("recording_posted"))
@@ -2197,9 +2416,9 @@ return 0
                     or "inbound_completed" in posted_statuses
                 ):
                     should_emit = False
-                elif last_rank >= 40 and current_rank <= 40:
+                elif last_rank >= 40 and current_rank <= 40 and not completed_with_talk:
                     should_emit = False
-                elif current_rank and current_rank < last_rank:
+                elif current_rank and current_rank < last_rank and not completed_with_talk:
                     should_emit = False
 
         stable_direction = (
@@ -2665,24 +2884,26 @@ return 0
         event: CallEvent,
         lead_ctx: LeadContext,
     ) -> None:
+        normalized_phone = _normalize_phone(event.client_phone) or ""
         payload = {
             "lead_id": int(lead_ctx.lead_id),
             "chat_id": str(lead_ctx.chat_id),
             "asterisk_hash": runtime.asterisk_hash,
-            "normalized_phone": event.client_phone,
+            "normalized_phone": normalized_phone,
             "external_call_id": event.external_call_id,
             "last_event_ts": int(event.event_ts),
         }
-        await cls._redis_set_json_with_ttl(
-            cls._mapping_by_phone_key(
-                runtime.connected_integration_id,
-                runtime.asterisk_hash,
-                event.client_phone,
-            ),
-            payload,
-            runtime.state_ttl_sec,
-            min_ttl_sec=60,
-        )
+        if normalized_phone:
+            await cls._redis_set_json_with_ttl(
+                cls._mapping_by_phone_key(
+                    runtime.connected_integration_id,
+                    runtime.asterisk_hash,
+                    normalized_phone,
+                ),
+                payload,
+                runtime.state_ttl_sec,
+                min_ttl_sec=60,
+            )
         await cls._redis_set_json_with_ttl(
             cls._mapping_by_call_key(
                 runtime.connected_integration_id,
@@ -2696,18 +2917,23 @@ return 0
 
     @classmethod
     async def _clear_mapping(cls, runtime: RuntimeConfig, event: CallEvent) -> None:
-        await cls._redis_delete(
-            cls._mapping_by_phone_key(
-                runtime.connected_integration_id,
-                runtime.asterisk_hash,
-                event.client_phone,
-            ),
+        keys = [
             cls._mapping_by_call_key(
                 runtime.connected_integration_id,
                 runtime.asterisk_hash,
                 event.external_call_id,
-            ),
-        )
+            )
+        ]
+        normalized_phone = _normalize_phone(event.client_phone)
+        if normalized_phone:
+            keys.append(
+                cls._mapping_by_phone_key(
+                    runtime.connected_integration_id,
+                    runtime.asterisk_hash,
+                    normalized_phone,
+                )
+            )
+        await cls._redis_delete(*keys)
 
     @classmethod
     async def _resolve_mapping(
@@ -2720,13 +2946,17 @@ return 0
                 runtime.connected_integration_id,
                 runtime.asterisk_hash,
                 event.external_call_id,
-            ),
-            cls._mapping_by_phone_key(
-                runtime.connected_integration_id,
-                runtime.asterisk_hash,
-                event.client_phone,
-            ),
+            )
         ]
+        normalized_phone = _normalize_phone(event.client_phone)
+        if normalized_phone:
+            keys.append(
+                cls._mapping_by_phone_key(
+                    runtime.connected_integration_id,
+                    runtime.asterisk_hash,
+                    normalized_phone,
+                )
+            )
         for key in keys:
             payload = cls._parse_cached_json(await cls._redis_get(key))
             if not payload:
@@ -2844,6 +3074,8 @@ return 0
         runtime: RuntimeConfig,
         event: CallEvent,
     ) -> Optional[Lead]:
+        if not _normalize_phone(event.client_phone):
+            return None
         # For both inbound and outbound calls we first try to reuse an active lead
         # by customer phone (for example, an existing chat lead).
         by_phone = await cls._find_active_lead_by_client_phone(
@@ -2899,6 +3131,12 @@ return 0
         mapped = await cls._resolve_mapping(runtime, event)
         if mapped:
             return mapped
+        normalized_phone = _normalize_phone(event.client_phone)
+        if not normalized_phone:
+            raise RuntimeError(
+                "Cannot resolve or create lead: client_phone is empty and mapping is missing"
+            )
+        event.client_phone = normalized_phone
 
         recovered = await cls._find_active_lead(runtime, event)
         if recovered and recovered.id and recovered.chat_id:
@@ -2999,10 +3237,11 @@ return 0
             )
         if code == "inbound_completed":
             if talk_duration is not None and talk_duration >= 0:
+                talk_duration_hms = _format_duration_hms(talk_duration)
                 return cls._text(
                     language,
                     "inbound_completed_with_duration",
-                    talk_duration=talk_duration,
+                    talk_duration=talk_duration_hms,
                 )
             return cls._text(language, "inbound_completed")
 
@@ -3014,10 +3253,11 @@ return 0
             return cls._text(language, "outbound_answered")
         if code == "outbound_completed":
             if talk_duration is not None and talk_duration >= 0:
+                talk_duration_hms = _format_duration_hms(talk_duration)
                 return cls._text(
                     language,
                     "outbound_completed_with_duration",
-                    talk_duration=talk_duration,
+                    talk_duration=talk_duration_hms,
                 )
             return cls._text(language, "outbound_completed")
 
@@ -3357,7 +3597,14 @@ return 0
         if not _redis_enabled():
             return self._error_response(1001, "Redis is required for this integration").dict()
 
-        runtime = await self._load_runtime(self.connected_integration_id)
+        try:
+            await self._ensure_connected_integration_active(
+                self.connected_integration_id,
+                force_refresh=True,
+            )
+            runtime = await self._load_runtime(self.connected_integration_id)
+        except ConnectedIntegrationInactiveError as error:
+            return self._error_response(1004, str(error)).dict()
         await self._mark_ci_active(self.connected_integration_id)
         try:
             await self._ensure_consumer_group(self._stream_key(self.connected_integration_id))
@@ -3389,7 +3636,10 @@ return 0
     async def update_settings(self, settings: Optional[dict] = None, **_: Any) -> Any:
         if not self.connected_integration_id:
             return self._error_response(1000, "connected_integration_id is required").dict()
-        await self._redis_delete(self._settings_cache_key(self.connected_integration_id))
+        await self._redis_delete(
+            self._settings_cache_key(self.connected_integration_id),
+            self._ci_active_cache_key(self.connected_integration_id),
+        )
         reconnect_result = await self.reconnect()
         return {"status": "settings updated", "reconnect": reconnect_result}
 
@@ -3413,7 +3663,10 @@ return 0
                 ).dict(),
             )
 
-        runtime = await self._load_runtime(self.connected_integration_id)
+        try:
+            runtime = await self._load_runtime(self.connected_integration_id)
+        except ConnectedIntegrationInactiveError:
+            return {"status": "ignored", "reason": "connected_integration_inactive"}
 
         raw_events = self._extract_events_from_body(envelope.get("body"))
         if not raw_events:
