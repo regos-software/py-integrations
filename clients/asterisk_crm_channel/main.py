@@ -416,58 +416,58 @@ def _status_from_direction_event(direction: str, status: str) -> Optional[LeadSt
 class AsteriskCrmChannelIntegration(ClientBase):
     MESSAGE_TEXTS: Dict[str, Dict[str, str]] = {
         "ru": {
-            "inbound_started": "**Входящий звонок**\nНомер: {client_phone}",
-            "inbound_missed": "**Пропущен звонок**",
-            "inbound_answered_with_operator": "**Принят звонок**\nОператор: {operator_name}",
-            "inbound_answered": "**Принят звонок**",
-            "inbound_completed_with_duration": "**Завершен звонок**\nДлительность: {talk_duration}",
-            "inbound_completed": "**Завершен звонок**",
-            "outbound_started": "**Исходящий звонок**\nНомер: {client_phone}",
-            "outbound_failed": "**Звонок не состоялся**",
-            "outbound_answered": "**Клиент ответил**",
-            "outbound_completed_with_duration": "**Исходящий звонок завершен**\nДлительность: {talk_duration}",
-            "outbound_completed": "**Исходящий звонок завершен**",
-            "generic_event": "**Событие звонка**",
-            "recording_ready_title": "**[Asterisk] Запись готова**",
-            "call_id_label": "Call ID: {external_call_id}",
-            "recording_link": "Ссылка: {recording_url}",
-            "recording_url_missing": "Ссылка не передана",
+            "inbound_started": "**Телефония | Входящий звонок**\nКлиент: {client_phone}",
+            "inbound_missed": "**Телефония | Пропущенный звонок**",
+            "inbound_answered_with_operator": "**Телефония | Звонок принят**\nОператор: {operator_name}",
+            "inbound_answered": "**Телефония | Звонок принят**",
+            "inbound_completed_with_duration": "**Телефония | Звонок завершен**\nДлительность: {talk_duration}",
+            "inbound_completed": "**Телефония | Звонок завершен**",
+            "outbound_started": "**Телефония | Исходящий звонок**\nКлиент: {client_phone}",
+            "outbound_failed": "**Телефония | Исходящий звонок не состоялся**",
+            "outbound_answered": "**Телефония | Клиент ответил**",
+            "outbound_completed_with_duration": "**Телефония | Исходящий звонок завершен**\nДлительность: {talk_duration}",
+            "outbound_completed": "**Телефония | Исходящий звонок завершен**",
+            "generic_event": "**Телефония | Событие звонка**",
+            "recording_ready_title": "**Телефония | Запись разговора готова**",
+            "call_id_label": "ID звонка: {external_call_id}",
+            "recording_link": "Ссылка на запись: {recording_url}",
+            "recording_url_missing": "Ссылка на запись: не передана",
         },
         "uz": {
-            "inbound_started": "**Kiruvchi**\nRaqam: {client_phone}",
-            "inbound_missed": "**O'tkazib yuborildi**",
-            "inbound_answered_with_operator": "**Qabul qilindi**\nOperator: {operator_name}",
-            "inbound_answered": "**Qabul qilindi**",
-            "inbound_completed_with_duration": "**Yakunlandi**\nDavomiyligi: {talk_duration}",
-            "inbound_completed": "**Yakunlandi**",
-            "outbound_started": "**Chiquvchi**\nRaqam: {client_phone}",
-            "outbound_failed": "**Amalga oshmadi**",
-            "outbound_answered": "**Mijoz javob berdi**",
-            "outbound_completed_with_duration": "**Chiquvchi yakunlandi**\nDavomiyligi: {talk_duration}",
-            "outbound_completed": "**Chiquvchi yakunlandi**",
-            "generic_event": "**Qo'ng'iroq hodisasi**",
-            "recording_ready_title": "**[Asterisk] Yozuv tayyor**",
+            "inbound_started": "**Aloqa | Kiruvchi qo'ng'iroq**\nMijoz: {client_phone}",
+            "inbound_missed": "**Aloqa | O'tkazib yuborilgan qo'ng'iroq**",
+            "inbound_answered_with_operator": "**Aloqa | Qo'ng'iroq qabul qilindi**\nOperator: {operator_name}",
+            "inbound_answered": "**Aloqa | Qo'ng'iroq qabul qilindi**",
+            "inbound_completed_with_duration": "**Aloqa | Qo'ng'iroq yakunlandi**\nDavomiyligi: {talk_duration}",
+            "inbound_completed": "**Aloqa | Qo'ng'iroq yakunlandi**",
+            "outbound_started": "**Aloqa | Chiquvchi qo'ng'iroq**\nMijoz: {client_phone}",
+            "outbound_failed": "**Aloqa | Chiquvchi qo'ng'iroq amalga oshmadi**",
+            "outbound_answered": "**Aloqa | Mijoz javob berdi**",
+            "outbound_completed_with_duration": "**Aloqa | Chiquvchi qo'ng'iroq yakunlandi**\nDavomiyligi: {talk_duration}",
+            "outbound_completed": "**Aloqa | Chiquvchi qo'ng'iroq yakunlandi**",
+            "generic_event": "**Aloqa | Qo'ng'iroq hodisasi**",
+            "recording_ready_title": "**Aloqa | Qo'ng'iroq yozuvi tayyor**",
             "call_id_label": "Qo'ng'iroq ID: {external_call_id}",
-            "recording_link": "Havola: {recording_url}",
-            "recording_url_missing": "Havola yuborilmadi",
+            "recording_link": "Yozuv havolasi: {recording_url}",
+            "recording_url_missing": "Yozuv havolasi: yuborilmadi",
         },
         "en": {
-            "inbound_started": "**Inbound**\nNumber: {client_phone}",
-            "inbound_missed": "**Missed**",
-            "inbound_answered_with_operator": "**Answered**\nOperator: {operator_name}",
-            "inbound_answered": "**Answered**",
-            "inbound_completed_with_duration": "**Completed**\nDuration: {talk_duration}",
-            "inbound_completed": "**Completed**",
-            "outbound_started": "**Outbound**\nNumber: {client_phone}",
-            "outbound_failed": "**Failed**",
-            "outbound_answered": "**Customer answered**",
-            "outbound_completed_with_duration": "**Outbound completed**\nDuration: {talk_duration}",
-            "outbound_completed": "**Outbound completed**",
-            "generic_event": "**Call event**",
-            "recording_ready_title": "**[Asterisk] Recording ready**",
+            "inbound_started": "**Telephony | Inbound call**\nCustomer: {client_phone}",
+            "inbound_missed": "**Telephony | Missed call**",
+            "inbound_answered_with_operator": "**Telephony | Call answered**\nOperator: {operator_name}",
+            "inbound_answered": "**Telephony | Call answered**",
+            "inbound_completed_with_duration": "**Telephony | Call completed**\nDuration: {talk_duration}",
+            "inbound_completed": "**Telephony | Call completed**",
+            "outbound_started": "**Telephony | Outbound call**\nCustomer: {client_phone}",
+            "outbound_failed": "**Telephony | Outbound call failed**",
+            "outbound_answered": "**Telephony | Customer answered**",
+            "outbound_completed_with_duration": "**Telephony | Outbound call completed**\nDuration: {talk_duration}",
+            "outbound_completed": "**Telephony | Outbound call completed**",
+            "generic_event": "**Telephony | Call event**",
+            "recording_ready_title": "**Telephony | Call recording ready**",
             "call_id_label": "Call ID: {external_call_id}",
-            "recording_link": "Link: {recording_url}",
-            "recording_url_missing": "Recording link is missing",
+            "recording_link": "Recording link: {recording_url}",
+            "recording_url_missing": "Recording link: not provided",
         },
     }
 
@@ -2662,7 +2662,8 @@ return 0
                 event.talk_duration_sec = min(reported_duration, duration_from_answer)
         if event.status == "completed" and event.direction == "inbound" and answered_at is None:
             # IVR/queue can answer the call before any operator picks it up.
-            # For inbound calls, show talk duration only after operator answer stage.
+            # Treat such calls as missed from CRM perspective.
+            event.status = "missed"
             event.talk_duration_sec = None
 
         posted_statuses = {
@@ -3572,7 +3573,7 @@ return 0
             resolved_operator_name = str(operator_name or "").strip()
             resolved_operator_ext = str(operator_phone or "").strip()
             if resolved_operator_ext and resolved_operator_name:
-                resolved_operator_name = f"{resolved_operator_ext} {resolved_operator_name}"
+                resolved_operator_name = f"{resolved_operator_ext} | {resolved_operator_name}"
             elif resolved_operator_ext:
                 resolved_operator_name = resolved_operator_ext
             return (
