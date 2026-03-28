@@ -52,6 +52,7 @@ class AsteriskCrmChannelConfig:
     DEFAULT_AMI_PORT = 5038
 
     SETTINGS_TTL = max(int(app_settings.redis_cache_ttl or 60), 60)
+    CI_ACTIVE_MEMORY_TTL_SEC = 5
     DEFAULT_DEDUPE_TTL_SEC = 6 * 60 * 60
     DEFAULT_STATE_TTL_SEC = 6 * 60 * 60
     LEAD_STATE_CACHE_TTL_SEC = 5 * 60
@@ -171,6 +172,8 @@ _AMI_TASKS: Dict[str, asyncio.Task] = {}
 _INSTANCE_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
 _HTTP_CLIENT: Optional[httpx.AsyncClient] = None
 _CACHE_UNSET = object()
+_CI_ACTIVE_MEMORY_CACHE: Dict[str, Tuple[bool, int]] = {}
+_CI_ACTIVE_LOCKS: Dict[str, asyncio.Lock] = {}
 
 
 def _now_ts() -> int:
@@ -584,6 +587,41 @@ class AsteriskCrmChannelIntegration(ClientBase):
         return AsteriskCrmChannelIntegration._redis_key("ci_active", connected_integration_id)
 
     @staticmethod
+    def _ci_active_lock(connected_integration_id: str) -> asyncio.Lock:
+        ci = str(connected_integration_id or "").strip()
+        lock = _CI_ACTIVE_LOCKS.get(ci)
+        if lock is None:
+            lock = asyncio.Lock()
+            _CI_ACTIVE_LOCKS[ci] = lock
+        return lock
+
+    @staticmethod
+    def _ci_active_memory_cache_get(connected_integration_id: str) -> Optional[bool]:
+        ci = str(connected_integration_id or "").strip()
+        cached = _CI_ACTIVE_MEMORY_CACHE.get(ci)
+        if not cached:
+            return None
+        value, expires_at = cached
+        if int(expires_at) <= _now_ts():
+            _CI_ACTIVE_MEMORY_CACHE.pop(ci, None)
+            return None
+        return bool(value)
+
+    @staticmethod
+    def _ci_active_memory_cache_set(connected_integration_id: str, is_active: bool) -> None:
+        ci = str(connected_integration_id or "").strip()
+        if not ci:
+            return
+        ttl = max(
+            1,
+            min(
+                AsteriskCrmChannelConfig.CI_ACTIVE_MEMORY_TTL_SEC,
+                AsteriskCrmChannelConfig.SETTINGS_TTL,
+            ),
+        )
+        _CI_ACTIVE_MEMORY_CACHE[ci] = (bool(is_active), _now_ts() + ttl)
+
+    @staticmethod
     def _active_ci_ids_key() -> str:
         return AsteriskCrmChannelIntegration._redis_key("active_ci_ids")
 
@@ -662,6 +700,33 @@ class AsteriskCrmChannelIntegration(ClientBase):
         return AsteriskCrmChannelIntegration._redis_key(
             "mapping",
             "by_call",
+            connected_integration_id,
+            asterisk_hash,
+            external_call_id,
+        )
+
+    @staticmethod
+    def _call_alias_key(
+        connected_integration_id: str,
+        asterisk_hash: str,
+        raw_call_id: str,
+    ) -> str:
+        return AsteriskCrmChannelIntegration._redis_key(
+            "call_alias",
+            connected_integration_id,
+            asterisk_hash,
+            raw_call_id,
+        )
+
+    @staticmethod
+    def _lock_call_process_key(
+        connected_integration_id: str,
+        asterisk_hash: str,
+        external_call_id: str,
+    ) -> str:
+        return AsteriskCrmChannelIntegration._redis_key(
+            "lock",
+            "call_process",
             connected_integration_id,
             asterisk_hash,
             external_call_id,
@@ -1031,49 +1096,69 @@ return 0
             raise ValueError("connected_integration_id is required")
 
         cache_key = cls._ci_active_cache_key(ci)
-        if _redis_enabled() and not force_refresh:
-            cached = str(await redis_client.get(cache_key) or "").strip().lower()
-            if cached in {"1", "0"}:
-                return cached == "1"
+        if not force_refresh:
+            memory_cached = cls._ci_active_memory_cache_get(ci)
+            if memory_cached is not None:
+                return memory_cached
+            if _redis_enabled():
+                cached = str(await redis_client.get(cache_key) or "").strip().lower()
+                if cached in {"1", "0"}:
+                    detected = cached == "1"
+                    cls._ci_active_memory_cache_set(ci, detected)
+                    return detected
 
-        request_payloads: Tuple[Dict[str, Any], ...] = (
-            {},
-            {"connected_integration_id": ci, "limit": 1, "offset": 0},
-        )
-        detected: Optional[bool] = None
-        last_error: Optional[Exception] = None
-        for payload in request_payloads:
-            try:
-                async with RegosAPI(connected_integration_id=ci) as api:
-                    response = await api.call(
-                        "ConnectedIntegration/Get",
-                        payload,
-                        APIBaseResponse[Any],
-                    )
-                if not response.ok:
-                    continue
-                detected = cls._extract_ci_active_flag(response.result)
-                if detected is not None:
-                    break
-            except Exception as error:
-                last_error = error
+        active_lock = cls._ci_active_lock(ci)
+        async with active_lock:
+            if not force_refresh:
+                memory_cached = cls._ci_active_memory_cache_get(ci)
+                if memory_cached is not None:
+                    return memory_cached
+                if _redis_enabled():
+                    cached = str(await redis_client.get(cache_key) or "").strip().lower()
+                    if cached in {"1", "0"}:
+                        detected = cached == "1"
+                        cls._ci_active_memory_cache_set(ci, detected)
+                        return detected
 
-        if detected is None:
-            if last_error is not None:
-                logger.warning(
-                    "ConnectedIntegration/Get failed for active check, fallback active=true: ci=%s error=%s",
-                    ci,
-                    last_error,
-                )
-            detected = True
-
-        if _redis_enabled():
-            await redis_client.set(
-                cache_key,
-                "1" if detected else "0",
-                ex=AsteriskCrmChannelConfig.SETTINGS_TTL,
+            request_payloads: Tuple[Dict[str, Any], ...] = (
+                {},
+                {"connected_integration_id": ci, "limit": 1, "offset": 0},
             )
-        return bool(detected)
+            detected: Optional[bool] = None
+            last_error: Optional[Exception] = None
+            for payload in request_payloads:
+                try:
+                    async with RegosAPI(connected_integration_id=ci) as api:
+                        response = await api.call(
+                            "ConnectedIntegration/Get",
+                            payload,
+                            APIBaseResponse[Any],
+                        )
+                    if not response.ok:
+                        continue
+                    detected = cls._extract_ci_active_flag(response.result)
+                    if detected is not None:
+                        break
+                except Exception as error:
+                    last_error = error
+
+            if detected is None:
+                if last_error is not None:
+                    logger.warning(
+                        "ConnectedIntegration/Get failed for active check, fallback active=true: ci=%s error=%s",
+                        ci,
+                        last_error,
+                    )
+                detected = True
+
+            if _redis_enabled():
+                await redis_client.set(
+                    cache_key,
+                    "1" if detected else "0",
+                    ex=AsteriskCrmChannelConfig.SETTINGS_TTL,
+                )
+            cls._ci_active_memory_cache_set(ci, bool(detected))
+            return bool(detected)
 
     @classmethod
     async def _ensure_connected_integration_active(
@@ -1260,6 +1345,13 @@ return 0
                 return None
             current = current.get(part)
         return current
+
+    @staticmethod
+    def _normalize_call_id(value: Any) -> Optional[str]:
+        if isinstance(value, (dict, list, tuple, set)):
+            return None
+        text = str(value or "").strip()
+        return text or None
 
     @classmethod
     def _payload_pick(cls, payload: Dict[str, Any], *paths: str) -> Any:
@@ -1756,9 +1848,9 @@ return 0
             "linkedid",
             "linked_id",
             "call_id",
-            "bridgeuniqueid",
             "uniqueid",
             "destuniqueid",
+            "bridgeuniqueid",
         )
         if external_call_id:
             normalized["external_call_id"] = str(external_call_id).strip()
@@ -1955,6 +2047,91 @@ return 0
         if not external_payload:
             return None
         return cls._normalize_external_event(runtime, external_payload)
+
+    @classmethod
+    def _collect_call_id_candidates_from_event(cls, event: CallEvent) -> List[str]:
+        candidates: List[str] = []
+
+        def _add(value: Any) -> None:
+            normalized = cls._normalize_call_id(value)
+            if normalized and normalized not in candidates:
+                candidates.append(normalized)
+
+        raw_payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
+        for path in ("linkedid", "linked_id", "channel.linkedid"):
+            _add(cls._payload_get(raw_payload, path))
+        _add(event.external_call_id)
+        for path in (
+            "external_call_id",
+            "call_id",
+            "uniqueid",
+            "destuniqueid",
+            "bridgeuniqueid",
+            "channel.uniqueid",
+            "channel.id",
+            "destchannel.uniqueid",
+        ):
+            _add(cls._payload_get(raw_payload, path))
+        return candidates
+
+    @classmethod
+    async def _resolve_canonical_call_id_best_effort(
+        cls,
+        runtime: RuntimeConfig,
+        event: CallEvent,
+    ) -> Optional[str]:
+        candidates = cls._collect_call_id_candidates_from_event(event)
+        if not candidates:
+            return None
+
+        raw_payload = event.raw_payload if isinstance(event.raw_payload, dict) else {}
+        preferred_linked = cls._normalize_call_id(
+            cls._payload_pick(raw_payload, "linkedid", "linked_id", "channel.linkedid")
+        )
+
+        resolved_aliases: List[str] = []
+        canonical: Optional[str] = None
+        for candidate in candidates:
+            alias_key = cls._call_alias_key(
+                runtime.connected_integration_id,
+                runtime.asterisk_hash,
+                candidate,
+            )
+            alias = cls._normalize_call_id(await cls._redis_get(alias_key))
+            if alias:
+                resolved_aliases.append(alias)
+
+        if preferred_linked:
+            canonical = preferred_linked
+        elif resolved_aliases:
+            canonical = resolved_aliases[0]
+        else:
+            canonical = candidates[0]
+
+        for candidate in {canonical, *candidates, *resolved_aliases}:
+            alias_key = cls._call_alias_key(
+                runtime.connected_integration_id,
+                runtime.asterisk_hash,
+                candidate,
+            )
+            await cls._redis_set_with_ttl(
+                alias_key,
+                canonical,
+                runtime.state_ttl_sec,
+                min_ttl_sec=300,
+            )
+        return canonical
+
+    @classmethod
+    async def _canonicalize_event_call_id_best_effort(
+        cls,
+        runtime: RuntimeConfig,
+        event: CallEvent,
+    ) -> CallEvent:
+        canonical = await cls._resolve_canonical_call_id_best_effort(runtime, event)
+        if canonical:
+            event.external_call_id = canonical
+        return event
 
     @classmethod
     async def _enqueue_runtime_event(
@@ -2695,7 +2872,23 @@ return 0
             return
 
         emitted_event: Optional[CallEvent] = None
+        call_lock_key: Optional[str] = None
+        call_lock_token: Optional[str] = None
         try:
+            event = await cls._canonicalize_event_call_id_best_effort(runtime, event)
+            if event.external_call_id:
+                call_lock_key = cls._lock_call_process_key(
+                    runtime.connected_integration_id,
+                    runtime.asterisk_hash,
+                    event.external_call_id,
+                )
+                call_lock_token = await cls._acquire_lock(
+                    call_lock_key,
+                    AsteriskCrmChannelConfig.PROCESSING_LOCK_TTL_SEC,
+                )
+                if not call_lock_token:
+                    raise DeferredCallEvent("call_lock_busy", delay_sec=1)
+
             event = await cls._dedupe_and_stabilize_call_event(runtime, event)
             if not event:
                 await cls._redis_set_with_ttl(
@@ -2754,6 +2947,9 @@ return 0
                     )
             await cls._redis_delete(dedupe_key)
             raise
+        finally:
+            if call_lock_key and call_lock_token:
+                await cls._release_lock(call_lock_key, call_lock_token)
 
     @staticmethod
     def _status_rank(status: str) -> int:
@@ -2909,6 +3105,9 @@ return 0
         if stable_client_phone and not _normalize_phone(event.client_phone):
             event.client_phone = stable_client_phone
         stable_operator_ext = _normalize_phone(cached.get("operator_ext"))
+        locked_operator_ext = _normalize_phone(cached.get("locked_operator_ext"))
+        if locked_operator_ext:
+            event.operator_ext = locked_operator_ext
         if stable_operator_ext and not _normalize_phone(event.operator_ext):
             event.operator_ext = stable_operator_ext
         stable_from_phone = _normalize_phone(cached.get("from_phone"))
@@ -2923,9 +3122,12 @@ return 0
         raw_event_type = str(
             cls._payload_get(event.raw_payload or {}, "event") or ""
         ).strip().lower()
-        operator_phone = cls._operator_phone_from_event(event) or _normalize_phone(
+        raw_operator_phone = cls._operator_phone_from_event(event) or _normalize_phone(
             event.operator_ext
         )
+        operator_phone = locked_operator_ext or raw_operator_phone
+        if locked_operator_ext:
+            event.operator_ext = locked_operator_ext
         trusted_answered_event = (
             event.status == "answered"
             and (
@@ -2939,6 +3141,14 @@ return 0
         )
         if trusted_answered_event:
             decision_reasons.append("trusted_answered")
+            if (
+                not locked_operator_ext
+                and operator_phone
+                and _is_internal_extension(operator_phone)
+            ):
+                locked_operator_ext = operator_phone
+                event.operator_ext = locked_operator_ext
+                decision_reasons.append("operator_locked_on_answered")
             if answered_at is None or event_ts < answered_at:
                 answered_at = event_ts
             pending_inbound_completed_at = None
@@ -3045,7 +3255,11 @@ return 0
             event.direction if event.direction in {"inbound", "outbound"} else stable_direction
         )
         stable_client_phone = _normalize_phone(event.client_phone) or stable_client_phone
-        stable_operator_ext = _normalize_phone(event.operator_ext) or stable_operator_ext
+        stable_operator_ext = (
+            locked_operator_ext
+            or _normalize_phone(event.operator_ext)
+            or stable_operator_ext
+        )
         stable_from_phone = _normalize_phone(event.from_phone) or stable_from_phone
         stable_to_phone = _normalize_phone(event.to_phone) or stable_to_phone
         effective_rank = current_rank if finalize_defer_sec <= 0 else 0
@@ -3080,6 +3294,7 @@ return 0
                 "direction": stable_direction or "",
                 "client_phone": stable_client_phone or "",
                 "operator_ext": stable_operator_ext or "",
+                "locked_operator_ext": locked_operator_ext or "",
                 "from_phone": stable_from_phone or "",
                 "to_phone": stable_to_phone or "",
                 "posted_statuses": sorted(posted_statuses),
@@ -3686,13 +3901,18 @@ return 0
         ]
         normalized_phone = _normalize_phone(event.client_phone)
         if normalized_phone:
-            keys.append(
-                cls._mapping_by_phone_key(
-                    runtime.connected_integration_id,
-                    runtime.asterisk_hash,
-                    normalized_phone,
-                )
+            phone_key = cls._mapping_by_phone_key(
+                runtime.connected_integration_id,
+                runtime.asterisk_hash,
+                normalized_phone,
             )
+            payload = cls._parse_cached_json(await cls._redis_get(phone_key))
+            mapped_call_id = cls._normalize_call_id(
+                payload.get("external_call_id") if isinstance(payload, dict) else None
+            )
+            current_call_id = cls._normalize_call_id(event.external_call_id)
+            if not mapped_call_id or not current_call_id or mapped_call_id == current_call_id:
+                keys.append(phone_key)
         await cls._redis_delete(*keys)
 
     @classmethod
@@ -3701,30 +3921,45 @@ return 0
         runtime: RuntimeConfig,
         event: CallEvent,
     ) -> Optional[LeadContext]:
-        keys = [
-            cls._mapping_by_call_key(
-                runtime.connected_integration_id,
-                runtime.asterisk_hash,
-                event.external_call_id,
+        call_id = cls._normalize_call_id(event.external_call_id)
+        if call_id:
+            payload = cls._parse_cached_json(
+                await cls._redis_get(
+                    cls._mapping_by_call_key(
+                        runtime.connected_integration_id,
+                        runtime.asterisk_hash,
+                        call_id,
+                    )
+                )
             )
-        ]
+            if payload:
+                lead_id = _to_int(payload.get("lead_id"), None)
+                chat_id = str(payload.get("chat_id") or "").strip()
+                if lead_id and chat_id:
+                    return LeadContext(lead_id=lead_id, chat_id=chat_id)
+
         normalized_phone = _normalize_phone(event.client_phone)
-        if normalized_phone:
-            keys.append(
+        if not normalized_phone:
+            return None
+        payload = cls._parse_cached_json(
+            await cls._redis_get(
                 cls._mapping_by_phone_key(
                     runtime.connected_integration_id,
                     runtime.asterisk_hash,
                     normalized_phone,
                 )
             )
-        for key in keys:
-            payload = cls._parse_cached_json(await cls._redis_get(key))
-            if not payload:
-                continue
-            lead_id = _to_int(payload.get("lead_id"), None)
-            chat_id = str(payload.get("chat_id") or "").strip()
-            if lead_id and chat_id:
-                return LeadContext(lead_id=lead_id, chat_id=chat_id)
+        )
+        if not payload:
+            return None
+        mapped_call_id = cls._normalize_call_id(payload.get("external_call_id"))
+        if call_id and mapped_call_id and mapped_call_id != call_id:
+            # Protect against cross-call collisions when same client has parallel calls.
+            return None
+        lead_id = _to_int(payload.get("lead_id"), None)
+        chat_id = str(payload.get("chat_id") or "").strip()
+        if lead_id and chat_id:
+            return LeadContext(lead_id=lead_id, chat_id=chat_id)
         return None
 
     @classmethod

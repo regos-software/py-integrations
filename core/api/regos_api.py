@@ -1,5 +1,7 @@
 from __future__ import annotations
-from typing import Type, TypeVar, Any
+import asyncio
+from typing import Any, Dict, Optional, Type, TypeVar
+
 import httpx
 from tenacity import (
     retry,
@@ -18,9 +20,17 @@ T = TypeVar("T")
 
 
 class RegosAPI:
+    _shared_clients: Dict[str, APIClient] = {}
+    _shared_ref_counts: Dict[str, int] = {}
+    _shared_close_tasks: Dict[str, asyncio.Task] = {}
+    _shared_lock: Optional[asyncio.Lock] = None
+    _shared_idle_close_sec = 30
+
     def __init__(self, connected_integration_id: str):
         self.connected_integration_id = connected_integration_id
-        self._client = APIClient(connected_integration_id=connected_integration_id)
+        self._shared_key = str(connected_integration_id or "").strip()
+        self._client: Optional[APIClient] = None
+        self._closed = False
         self.batch = BatchService(self)
 
         self.docs: "RegosAPI.Docs" = self.Docs(self)
@@ -32,6 +42,57 @@ class RegosAPI:
         self.references: "RegosAPI.References" = self.References(self)
         self.rbac: "RegosAPI.Rbac" = self.Rbac(self)
 
+    async def _acquire_client(self) -> APIClient:
+        if self._client is not None:
+            return self._client
+
+        async with self._get_shared_lock():
+            close_task = self._shared_close_tasks.pop(self._shared_key, None)
+            if close_task and not close_task.done():
+                close_task.cancel()
+
+            client = self._shared_clients.get(self._shared_key)
+            if client is None:
+                client = APIClient(connected_integration_id=self.connected_integration_id)
+                self._shared_clients[self._shared_key] = client
+                self._shared_ref_counts[self._shared_key] = 0
+
+            self._shared_ref_counts[self._shared_key] = (
+                self._shared_ref_counts.get(self._shared_key, 0) + 1
+            )
+
+        self._client = client
+        self._closed = False
+        return client
+
+    @classmethod
+    def _get_shared_lock(cls) -> asyncio.Lock:
+        if cls._shared_lock is None:
+            cls._shared_lock = asyncio.Lock()
+        return cls._shared_lock
+
+    @classmethod
+    async def _close_shared_client_later(cls, shared_key: str) -> None:
+        try:
+            await asyncio.sleep(max(int(cls._shared_idle_close_sec), 1))
+        except asyncio.CancelledError:
+            return
+
+        client_to_close: Optional[APIClient] = None
+        async with cls._get_shared_lock():
+            if cls._shared_ref_counts.get(shared_key, 0) > 0:
+                return
+            client_to_close = cls._shared_clients.pop(shared_key, None)
+            cls._shared_ref_counts.pop(shared_key, None)
+            cls._shared_close_tasks.pop(shared_key, None)
+
+        if client_to_close is None:
+            return
+        try:
+            await client_to_close.close()
+        except Exception:
+            logger.exception("Failed to close shared API client: integration_id=%s", shared_key)
+
     @retry(
         wait=wait_exponential(min=0.2, max=5),
         stop=stop_after_attempt(3),
@@ -39,7 +100,8 @@ class RegosAPI:
         reraise=True,
     )
     async def call(self, path: str, body: Any, response_model: Type[T]) -> T:
-        return await self._client.post(
+        client = await self._acquire_client()
+        return await client.post(
             method_path=path, data=body, response_model=response_model
         )
 
@@ -56,7 +118,8 @@ class RegosAPI:
         files: dict[str, tuple[str, bytes] | tuple[str, bytes, str]],
         response_model: Type[T],
     ) -> T:
-        return await self._client.post_multipart(
+        client = await self._acquire_client()
+        return await client.post_multipart(
             method_path=path,
             data=data,
             files=files,
@@ -64,9 +127,28 @@ class RegosAPI:
         )
 
     async def close(self) -> None:
-        await self._client.close()
+        if self._closed:
+            return
+        self._closed = True
+        if self._client is None:
+            return
+
+        async with self._get_shared_lock():
+            current_refs = self._shared_ref_counts.get(self._shared_key, 0)
+            next_refs = max(current_refs - 1, 0)
+            self._shared_ref_counts[self._shared_key] = next_refs
+            if next_refs == 0:
+                close_task = self._shared_close_tasks.get(self._shared_key)
+                if close_task and not close_task.done():
+                    close_task.cancel()
+                self._shared_close_tasks[self._shared_key] = asyncio.create_task(
+                    self._close_shared_client_later(self._shared_key)
+                )
+
+        self._client = None
 
     async def __aenter__(self) -> "RegosAPI":
+        await self._acquire_client()
         return self
 
     async def __aexit__(self, *_):
