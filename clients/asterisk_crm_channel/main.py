@@ -2910,6 +2910,10 @@ return 0
             return
         if event.status not in {"answered", "completed"}:
             return
+        talked = (_to_int(event.talk_duration_sec, 0) or 0) > 0
+        should_move_to_in_progress = event.status == "answered" or (
+            event.status == "completed" and talked
+        )
         operator_ext = _normalize_phone(event.operator_ext) or cls._operator_phone_from_event(
             event
         )
@@ -2930,6 +2934,13 @@ return 0
         )
         already_bound = _to_int(await cls._redis_get(call_key), None)
         if already_bound and already_bound == target_user_id:
+            if should_move_to_in_progress:
+                await cls._set_lead_status_best_effort(
+                    connected_integration_id=runtime.connected_integration_id,
+                    lead_id=lead_ctx.lead_id,
+                    status=LeadStatusEnum.InProgress,
+                    reason="responsible_already_bound_by_operator_ext",
+                )
             return
         if already_bound and already_bound != target_user_id:
             return
@@ -2959,6 +2970,13 @@ return 0
                 runtime.state_ttl_sec,
                 min_ttl_sec=300,
             )
+            if should_move_to_in_progress:
+                await cls._set_lead_status_best_effort(
+                    connected_integration_id=runtime.connected_integration_id,
+                    lead_id=lead_ctx.lead_id,
+                    status=LeadStatusEnum.InProgress,
+                    reason="responsible_bound_by_operator_ext",
+                )
         except Exception as error:
             logger.warning(
                 "Failed to bind responsible by operator extension: ci=%s lead_id=%s operator_ext=%s user_id=%s error=%s",
