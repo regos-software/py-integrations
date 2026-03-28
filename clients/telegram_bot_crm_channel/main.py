@@ -1436,6 +1436,18 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             return bot
 
     @staticmethod
+    async def _close_bot(token: str) -> None:
+        bot: Optional[Bot] = None
+        async with _BOT_CLIENTS_LOCK:
+            bot = _BOT_CLIENTS.pop(token, None)
+        if bot is None:
+            return
+        try:
+            await bot.session.close()
+        except Exception:
+            logger.exception("Error while closing Telegram bot session for token hash=%s", _bot_hash(token))
+
+    @staticmethod
     async def _get_http_client() -> httpx.AsyncClient:
         global _HTTP_CLIENT
         if _HTTP_CLIENT is None:
@@ -1852,6 +1864,14 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 await redis_client.srem(
                     self._active_ci_ids_key(), self.connected_integration_id
                 )
+                if runtime:
+                    closed_tokens: set[str] = set()
+                    for bot_cfg in runtime.bots:
+                        token = str(bot_cfg.token or "")
+                        if not token or token in closed_tokens:
+                            continue
+                        await self._close_bot(token)
+                        closed_tokens.add(token)
             except Exception as rollback_error:
                 logger.warning(
                     "connect rollback failed: ci=%s error=%s",
@@ -1891,6 +1911,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
 
             await self._stop_pollers_for_ci(self.connected_integration_id)
             if runtime:
+                closed_tokens: set[str] = set()
                 for bot_cfg in runtime.bots:
                     try:
                         bot = await self._get_bot(bot_cfg.token)
@@ -1901,6 +1922,11 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                             bot_cfg.bot_hash,
                             error,
                         )
+                    finally:
+                        token = str(bot_cfg.token or "")
+                        if token and token not in closed_tokens:
+                            await self._close_bot(token)
+                            closed_tokens.add(token)
 
             await self._stop_stream_workers(self.connected_integration_id)
             await redis_client.srem(self._active_ci_ids_key(), self.connected_integration_id)

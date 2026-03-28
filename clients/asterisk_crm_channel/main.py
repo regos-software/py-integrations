@@ -64,6 +64,7 @@ class AsteriskCrmChannelConfig:
     STREAM_MIN_IDLE_MS = 60_000
     STREAM_MAX_RETRIES = 5
     STREAM_EVENT_REORDER_WINDOW_SEC = 3
+    STREAM_MAX_FUTURE_SKEW_SEC = 30
 
     LOCK_TTL_SEC = 30
     PROCESSING_LOCK_TTL_SEC = 120
@@ -214,6 +215,19 @@ def _to_bool(value: Any, default: bool = False) -> bool:
     if text in {"0", "false", "no", "n", "off"}:
         return False
     return bool(default)
+
+
+def _normalize_unix_ts_seconds(value: int) -> int:
+    ts = int(value)
+    abs_ts = abs(ts)
+    # 13 digits+ are almost always ms/us/ns in modern telephony events.
+    if abs_ts >= 10**18:  # ns
+        return int(ts / 1_000_000_000)
+    if abs_ts >= 10**15:  # us
+        return int(ts / 1_000_000)
+    if abs_ts >= 10**11:  # ms
+        return int(ts / 1_000)
+    return ts
 
 
 def _normalize_phone(value: Any) -> Optional[str]:
@@ -395,21 +409,21 @@ def _parse_event_ts(value: Any) -> int:
     if value is None:
         return _now_ts()
     if isinstance(value, (int, float)):
-        return int(value)
+        return _normalize_unix_ts_seconds(int(value))
     text = str(value).strip()
     if not text:
         return _now_ts()
     direct = _to_int(text, None)
     if direct is not None:
-        return int(direct)
+        return _normalize_unix_ts_seconds(int(direct))
     try:
-        return int(float(text))
+        return _normalize_unix_ts_seconds(int(float(text)))
     except (TypeError, ValueError):
         pass
     normalized = text.replace("Z", "+00:00")
     try:
         parsed = datetime.fromisoformat(normalized)
-        return int(parsed.timestamp())
+        return _normalize_unix_ts_seconds(int(parsed.timestamp()))
     except Exception:
         return _now_ts()
 
@@ -2440,7 +2454,7 @@ return 0
     def _stream_entry_event_ts(cls, fields: Dict[str, str]) -> Optional[int]:
         direct_ts = _to_int(fields.get("event_ts"), None)
         if direct_ts is not None:
-            return int(direct_ts)
+            return _normalize_unix_ts_seconds(int(direct_ts))
         raw_event = fields.get("event")
         if not raw_event:
             return None
@@ -2450,7 +2464,10 @@ return 0
             return None
         if not isinstance(payload, dict):
             return None
-        return _to_int(payload.get("event_ts"), None)
+        payload_ts = _to_int(payload.get("event_ts"), None)
+        if payload_ts is None:
+            return None
+        return _normalize_unix_ts_seconds(int(payload_ts))
 
     @staticmethod
     def _stream_entry_defer_until_ts(fields: Dict[str, str]) -> Optional[int]:
@@ -2463,6 +2480,7 @@ return 0
     ) -> Tuple[List[Tuple[str, Dict[str, str]]], List[Tuple[str, Dict[str, str]]]]:
         now_ts = _now_ts()
         reorder_window_sec = max(AsteriskCrmChannelConfig.STREAM_EVENT_REORDER_WINDOW_SEC, 0)
+        max_future_skew_sec = max(AsteriskCrmChannelConfig.STREAM_MAX_FUTURE_SKEW_SEC, 0)
         safe_event_ts = now_ts - reorder_window_sec
         sorted_entries = cls._sort_stream_entries_by_event_ts(entries)
         ready_entries: List[Tuple[str, Dict[str, str]]] = []
@@ -2474,6 +2492,10 @@ return 0
                 continue
             event_ts = cls._stream_entry_event_ts(fields)
             if event_ts is not None and reorder_window_sec > 0 and event_ts > safe_event_ts:
+                if max_future_skew_sec > 0 and event_ts > now_ts + max_future_skew_sec:
+                    # Guard against clock skew / wrong timestamp units.
+                    ready_entries.append((message_id, fields))
+                    continue
                 pending_entries.append((message_id, fields))
                 continue
             ready_entries.append((message_id, fields))
