@@ -63,6 +63,7 @@ class AsteriskCrmChannelConfig:
     STREAM_READ_BLOCK_MS = 5000
     STREAM_MIN_IDLE_MS = 60_000
     STREAM_MAX_RETRIES = 5
+    STREAM_EVENT_REORDER_WINDOW_SEC = 3
 
     LOCK_TTL_SEC = 30
     PROCESSING_LOCK_TTL_SEC = 120
@@ -74,6 +75,7 @@ class AsteriskCrmChannelConfig:
     AMI_OWNER_LOCK_TTL_SEC = 30
     AMI_OWNER_LOCK_REFRESH_SEC = 10
     AMI_OWNER_WAIT_SEC = 2
+    INBOUND_FINALIZE_DELAY_SEC = 7
 
     CHAT_MESSAGE_ADD_CLOSED_ENTITY_ERROR = 1220
 
@@ -148,6 +150,13 @@ class ChatMessageAddClosedEntityError(RuntimeError):
 
 class ConnectedIntegrationInactiveError(RuntimeError):
     pass
+
+
+class DeferredCallEvent(RuntimeError):
+    def __init__(self, reason: str, delay_sec: int = 1) -> None:
+        self.reason = str(reason or "").strip() or "deferred"
+        self.delay_sec = max(int(delay_sec), 1)
+        super().__init__(f"Deferred call event: {self.reason} (delay={self.delay_sec}s)")
 
 
 _MANAGER_LOCK = asyncio.Lock()
@@ -282,6 +291,25 @@ def _to_international_phone(value: Any, country_code: str) -> Optional[str]:
     return digits
 
 
+def _extract_internal_extension_candidate(value: Any) -> Optional[str]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for chunk in re.split(r"[,\s]+", text):
+        token = str(chunk or "").strip()
+        if not token:
+            continue
+        match = re.search(r"/(\d{2,6})(?:[@;:/\-]|$)", token)
+        if not match:
+            match = re.search(r"^(\d{2,6})(?:[@;:/\-]|$)", token)
+        if not match:
+            continue
+        candidate = _normalize_phone(match.group(1))
+        if candidate and _is_internal_extension(candidate):
+            return candidate
+    return None
+
+
 def _hash_scope_key(value: str) -> str:
     return hashlib.md5(str(value or "").encode("utf-8")).hexdigest()
 
@@ -320,11 +348,39 @@ def _phone_filter_candidates(
     return unique
 
 
-def _safe_subject(template: str, event: CallEvent) -> str:
+def _translate_direction(direction: str, language: str) -> str:
+    normalized_language = _normalize_message_language(language, "ru")
+    normalized_direction = str(direction or "").strip().lower()
+    translations: Dict[str, Dict[str, str]] = {
+        "ru": {
+            "inbound": "входящий",
+            "outbound": "исходящий",
+            "unknown": "звонок",
+        },
+        "uz": {
+            "inbound": "kiruvchi",
+            "outbound": "chiquvchi",
+            "unknown": "qo'ng'iroq",
+        },
+        "en": {
+            "inbound": "inbound",
+            "outbound": "outbound",
+            "unknown": "call",
+        },
+    }
+    language_map = translations.get(normalized_language, translations["ru"])
+    if not normalized_direction:
+        return language_map.get("unknown", "call")
+    return language_map.get(normalized_direction, normalized_direction)
+
+
+def _safe_subject(template: str, event: CallEvent, language: str = "ru") -> str:
     subject_template = str(template or "").strip() or "Call {direction} {from_phone}"
+    translated_direction = _translate_direction(event.direction, language)
     try:
         return subject_template.format(
-            direction=event.direction,
+            direction=translated_direction,
+            direction_raw=event.direction,
             from_phone=event.from_phone or "",
             to_phone=event.to_phone or "",
             client_phone=event.client_phone or "",
@@ -1462,6 +1518,12 @@ return 0
             return None
         if event_type in {"dialbegin", "dialstate"}:
             return "ringing"
+        if event_type == "agentcalled":
+            return "ringing"
+        if event_type == "agentconnect":
+            return "answered"
+        if event_type == "agentcomplete":
+            return "completed"
         if event_type == "newstate":
             normalized = cls._normalize_status(
                 cls._payload_pick(payload, "channelstatedesc", "state", "channelstate")
@@ -1727,10 +1789,24 @@ return 0
         if client_phone:
             normalized["client_phone"] = client_phone
 
+        queue_operator_ext = _extract_internal_extension_candidate(
+            cls._payload_pick(
+                source,
+                "interface",
+                "member",
+                "membername",
+                "destchannel",
+                "destinationchannel",
+                "peer",
+                "peerchannel",
+                "channel",
+            )
+        )
         operator_candidates = [
             _to_international_phone(
                 cls._payload_pick(source, "operator_ext", "agent_ext", "agent"), runtime.default_country_code
             ),
+            _to_international_phone(queue_operator_ext, runtime.default_country_code),
             _to_international_phone(
                 cls._payload_pick(
                     source,
@@ -1784,6 +1860,8 @@ return 0
                 "billsec",
                 "answered_duration_sec",
                 "conversation_duration_sec",
+                "talktime",
+                "talk_time",
             ),
             None,
         )
@@ -2231,23 +2309,28 @@ return 0
         consumer = f"{_INSTANCE_ID}:asterisk"
         await cls._ensure_consumer_group(stream_key)
         logger.info("Asterisk stream worker started: ci=%s", connected_integration_id)
+        pending_entries: List[Tuple[str, Dict[str, str]]] = []
 
         while True:
             try:
                 await cls._set_worker_heartbeat(connected_integration_id)
-                await cls._process_claimed_entries(
+                claimed_entries = await cls._process_claimed_entries(
                     stream_key=stream_key,
                     consumer=consumer,
-                    connected_integration_id=connected_integration_id,
                 )
+                if claimed_entries:
+                    pending_entries.extend(claimed_entries)
 
                 try:
+                    block_ms = AsteriskCrmChannelConfig.STREAM_READ_BLOCK_MS
+                    if pending_entries:
+                        block_ms = min(block_ms, 500)
                     records = await redis_client.xreadgroup(
                         groupname=AsteriskCrmChannelConfig.STREAM_GROUP,
                         consumername=consumer,
                         streams={stream_key: ">"},
                         count=AsteriskCrmChannelConfig.STREAM_BATCH_SIZE,
-                        block=AsteriskCrmChannelConfig.STREAM_READ_BLOCK_MS,
+                        block=block_ms,
                     )
                 except Exception as error:
                     if _is_redis_nogroup_error(error):
@@ -2256,14 +2339,18 @@ return 0
                         continue
                     raise
 
-                if not records:
+                if records:
+                    for _, entries in records:
+                        pending_entries.extend(entries)
+
+                if not pending_entries:
                     continue
 
-                batch_entries: List[Tuple[str, Dict[str, str]]] = []
-                for _, entries in records:
-                    batch_entries.extend(entries)
+                ready_entries, pending_entries = cls._select_ready_stream_entries(pending_entries)
+                if not ready_entries:
+                    continue
 
-                for message_id, fields in cls._sort_stream_entries_by_event_ts(batch_entries):
+                for message_id, fields in ready_entries:
                     await cls._process_stream_entry(
                         stream_key=stream_key,
                         message_id=message_id,
@@ -2285,8 +2372,7 @@ return 0
         cls,
         stream_key: str,
         consumer: str,
-        connected_integration_id: str,
-    ) -> None:
+    ) -> List[Tuple[str, Dict[str, str]]]:
         try:
             claimed_raw = await redis_client.xautoclaim(
                 stream_key,
@@ -2299,20 +2385,13 @@ return 0
         except Exception as error:
             if _is_redis_nogroup_error(error):
                 await cls._ensure_consumer_group(stream_key)
-                return
+                return []
             raise
 
         entries: List[Tuple[str, Dict[str, str]]] = []
         if isinstance(claimed_raw, (list, tuple)) and len(claimed_raw) >= 2:
             entries = claimed_raw[1] or []
-
-        for message_id, fields in cls._sort_stream_entries_by_event_ts(entries):
-            await cls._process_stream_entry(
-                stream_key=stream_key,
-                message_id=message_id,
-                fields=fields,
-                connected_integration_id=connected_integration_id,
-            )
+        return entries
 
     @classmethod
     def _sort_stream_entries_by_event_ts(
@@ -2347,6 +2426,40 @@ return 0
             return None
         return _to_int(payload.get("event_ts"), None)
 
+    @staticmethod
+    def _stream_entry_defer_until_ts(fields: Dict[str, str]) -> Optional[int]:
+        return _to_int(fields.get("defer_until_ts"), None)
+
+    @classmethod
+    def _select_ready_stream_entries(
+        cls,
+        entries: List[Tuple[str, Dict[str, str]]],
+    ) -> Tuple[List[Tuple[str, Dict[str, str]]], List[Tuple[str, Dict[str, str]]]]:
+        now_ts = _now_ts()
+        reorder_window_sec = max(AsteriskCrmChannelConfig.STREAM_EVENT_REORDER_WINDOW_SEC, 0)
+        safe_event_ts = now_ts - reorder_window_sec
+        sorted_entries = cls._sort_stream_entries_by_event_ts(entries)
+        ready_entries: List[Tuple[str, Dict[str, str]]] = []
+        pending_entries: List[Tuple[str, Dict[str, str]]] = []
+        for message_id, fields in sorted_entries:
+            defer_until_ts = cls._stream_entry_defer_until_ts(fields)
+            if defer_until_ts is not None and defer_until_ts > now_ts:
+                pending_entries.append((message_id, fields))
+                continue
+            event_ts = cls._stream_entry_event_ts(fields)
+            if event_ts is not None and reorder_window_sec > 0 and event_ts > safe_event_ts:
+                pending_entries.append((message_id, fields))
+                continue
+            ready_entries.append((message_id, fields))
+
+        if (
+            not ready_entries
+            and pending_entries
+            and len(pending_entries) >= AsteriskCrmChannelConfig.STREAM_BATCH_SIZE * 3
+        ):
+            ready_entries.append(pending_entries.pop(0))
+        return ready_entries, pending_entries
+
     @classmethod
     async def _process_stream_entry(
         cls,
@@ -2375,6 +2488,23 @@ return 0
                 AsteriskCrmChannelConfig.STREAM_GROUP,
                 message_id,
             )
+        except DeferredCallEvent as deferred:
+            defer_payload = dict(fields)
+            defer_payload["defer_until_ts"] = str(_now_ts() + deferred.delay_sec)
+            defer_payload["defer_reason"] = deferred.reason
+            defer_payload.pop("error", None)
+            defer_payload.pop("last_error", None)
+            await cls._enqueue(
+                stream_key,
+                defer_payload,
+                stream_ttl_sec=state_ttl_sec,
+            )
+            await redis_client.xack(
+                stream_key,
+                AsteriskCrmChannelConfig.STREAM_GROUP,
+                message_id,
+            )
+            return
         except ConnectedIntegrationInactiveError as error:
             await redis_client.xack(
                 stream_key,
@@ -2597,6 +2727,22 @@ return 0
         ):
             return True
 
+        # Per-leg dial/hangup events can report inbound missed even when another
+        # operator accepted the same call later (queue fan-out noise).
+        if event.direction == "inbound" and status in {"missed", "failed"} and talk_duration <= 0:
+            raw_event_type = str(
+                cls._payload_get(event.raw_payload or {}, "event") or ""
+            ).strip().lower()
+            if raw_event_type in {
+                "dialend",
+                "hangup",
+                "hanguprequest",
+                "softhanguprequest",
+                "unlink",
+                "bridgeleave",
+            }:
+                return True
+
         # Early per-leg hangup events may emit "completed" before CDR with billsec.
         # Suppress these interim zero-talk completions and wait for final call result.
         if status == "completed" and talk_duration <= 0:
@@ -2629,29 +2775,49 @@ return 0
             event.external_call_id,
         )
         cached = cls._parse_cached_json(await cls._redis_get(progress_key)) or {}
+        decision_reasons: List[str] = []
+        finalize_defer_sec = 0
+        converted_to_missed_by_timeout = False
+        pending_inbound_completed_at = _to_int(cached.get("pending_inbound_completed_at"), None)
 
         stable_direction = str(cached.get("direction") or "").strip().lower()
         if stable_direction in {"inbound", "outbound"}:
             event.direction = stable_direction
 
         stable_client_phone = _normalize_phone(cached.get("client_phone"))
-        if stable_client_phone:
+        if stable_client_phone and not _normalize_phone(event.client_phone):
             event.client_phone = stable_client_phone
         stable_operator_ext = _normalize_phone(cached.get("operator_ext"))
-        if stable_operator_ext:
+        if stable_operator_ext and not _normalize_phone(event.operator_ext):
             event.operator_ext = stable_operator_ext
         stable_from_phone = _normalize_phone(cached.get("from_phone"))
-        if stable_from_phone:
+        if stable_from_phone and not _normalize_phone(event.from_phone):
             event.from_phone = stable_from_phone
         stable_to_phone = _normalize_phone(cached.get("to_phone"))
-        if stable_to_phone:
+        if stable_to_phone and not _normalize_phone(event.to_phone):
             event.to_phone = stable_to_phone
         event_ts = _to_int(event.event_ts, _now_ts()) or _now_ts()
         event.event_ts = int(event_ts)
         answered_at = _to_int(cached.get("answered_at"), None)
-        if event.status == "answered":
+        operator_phone = cls._operator_phone_from_event(event) or _normalize_phone(
+            event.operator_ext
+        )
+        trusted_answered_event = (
+            event.status == "answered"
+            and (
+                event.direction == "outbound"
+                or (
+                    event.direction == "inbound"
+                    and bool(operator_phone)
+                    and _is_internal_extension(operator_phone)
+                )
+            )
+        )
+        if trusted_answered_event:
+            decision_reasons.append("trusted_answered")
             if answered_at is None or event_ts < answered_at:
                 answered_at = event_ts
+            pending_inbound_completed_at = None
         if event.status == "completed" and answered_at is not None and event_ts >= answered_at:
             duration_from_answer = max(event_ts - answered_at, 0)
             reported_duration = _to_int(event.talk_duration_sec, None)
@@ -2661,10 +2827,36 @@ return 0
                 # Keep only the segment after operator answer (exclude IVR/queue time).
                 event.talk_duration_sec = min(reported_duration, duration_from_answer)
         if event.status == "completed" and event.direction == "inbound" and answered_at is None:
-            # IVR/queue can answer the call before any operator picks it up.
-            # Treat such calls as missed from CRM perspective.
-            event.status = "missed"
-            event.talk_duration_sec = None
+            talk_duration = _to_int(event.talk_duration_sec, 0) or 0
+            if talk_duration > 0 and operator_phone and _is_internal_extension(operator_phone):
+                # Some PBX setups skip explicit "answered" event but provide final CDR
+                # with talk duration and operator endpoint. Treat as answered call.
+                answered_at = max(event_ts - talk_duration, 0)
+                pending_inbound_completed_at = None
+                decision_reasons.append("trusted_answered")
+                decision_reasons.append("inferred_answered_from_completed")
+            else:
+                # Wait a short grace window for out-of-order AMI events before
+                # converting inbound completed-without-operator into missed.
+                now_ts = _now_ts()
+                if pending_inbound_completed_at is None:
+                    pending_inbound_completed_at = now_ts
+                elapsed = max(now_ts - pending_inbound_completed_at, 0)
+                wait_sec = max(AsteriskCrmChannelConfig.INBOUND_FINALIZE_DELAY_SEC, 1)
+                if elapsed < wait_sec:
+                    finalize_defer_sec = min(2, max(wait_sec - elapsed, 1))
+                    decision_reasons.append("await_inbound_final_state")
+                else:
+                    # IVR/queue can answer the call before any operator picks it up.
+                    # Treat such calls as missed from CRM perspective.
+                    event.status = "missed"
+                    event.talk_duration_sec = None
+                    pending_inbound_completed_at = None
+                    converted_to_missed_by_timeout = True
+                    decision_reasons.append("converted_to_missed")
+
+        if event.status in {"answered", "missed", "failed", "recording_ready"}:
+            pending_inbound_completed_at = None
 
         posted_statuses = {
             str(item).strip().lower()
@@ -2676,7 +2868,12 @@ return 0
         current_rank = cls._status_rank(stage_code)
         status = stage_code
 
-        should_emit = not cls._should_suppress_noise_event(event)
+        suppressed_as_noise = (
+            False if converted_to_missed_by_timeout else cls._should_suppress_noise_event(event)
+        )
+        if suppressed_as_noise:
+            decision_reasons.append("suppressed_as_leg_noise")
+        should_emit = not suppressed_as_noise and finalize_defer_sec <= 0
         completed_with_talk = (
             status in {"inbound_completed", "outbound_completed"}
             and (_to_int(event.talk_duration_sec, 0) or 0) > 0
@@ -2684,18 +2881,24 @@ return 0
         if should_emit:
             if status == "recording_ready":
                 should_emit = not bool(cached.get("recording_posted"))
+                if not should_emit:
+                    decision_reasons.append("suppressed_recording_duplicate")
             else:
                 if status in posted_statuses:
                     should_emit = False
+                    decision_reasons.append("suppressed_duplicate_stage")
                 elif status == "inbound_missed" and (
                     "inbound_answered" in posted_statuses
                     or "inbound_completed" in posted_statuses
                 ):
                     should_emit = False
+                    decision_reasons.append("suppressed_missed_after_answered")
                 elif last_rank >= 40 and current_rank <= 40 and not completed_with_talk:
                     should_emit = False
+                    decision_reasons.append("suppressed_regression_by_rank")
                 elif current_rank and current_rank < last_rank and not completed_with_talk:
                     should_emit = False
+                    decision_reasons.append("suppressed_stage_rank_regression")
 
         stable_direction = (
             event.direction if event.direction in {"inbound", "outbound"} else stable_direction
@@ -2704,10 +2907,34 @@ return 0
         stable_operator_ext = _normalize_phone(event.operator_ext) or stable_operator_ext
         stable_from_phone = _normalize_phone(event.from_phone) or stable_from_phone
         stable_to_phone = _normalize_phone(event.to_phone) or stable_to_phone
-        next_last_rank = max(last_rank, current_rank)
+        effective_rank = current_rank if finalize_defer_sec <= 0 else 0
+        next_last_rank = max(last_rank, effective_rank)
         if should_emit and status and status != "recording_ready":
             posted_statuses.add(status)
         recording_posted = bool(cached.get("recording_posted")) or status == "recording_ready"
+        raw_event_type = str(
+            cls._payload_get(event.raw_payload or {}, "event") or ""
+        ).strip().lower()
+        cached_trace = cached.get("decision_trace")
+        decision_trace: List[Dict[str, Any]] = []
+        if isinstance(cached_trace, list):
+            for row in cached_trace[-19:]:
+                if isinstance(row, dict):
+                    decision_trace.append(dict(row))
+        if not decision_reasons:
+            decision_reasons.append("emitted" if should_emit else "suppressed")
+        trace_entry = {
+            "at": _now_ts(),
+            "event_ts": int(event.event_ts),
+            "status": str(event.status or "").strip().lower(),
+            "stage": status,
+            "emit": bool(should_emit),
+            "deferred": bool(finalize_defer_sec > 0),
+            "reasons": decision_reasons,
+            "raw_event_type": raw_event_type or None,
+        }
+        decision_trace.append(trace_entry)
+        decision_trace = decision_trace[-20:]
 
         await cls._redis_set_json_with_ttl(
             progress_key,
@@ -2721,12 +2948,21 @@ return 0
                 "last_rank": int(next_last_rank),
                 "recording_posted": recording_posted,
                 "answered_at": int(answered_at) if answered_at is not None else None,
+                "pending_inbound_completed_at": (
+                    int(pending_inbound_completed_at)
+                    if pending_inbound_completed_at is not None
+                    else None
+                ),
+                "last_decision": trace_entry,
+                "decision_trace": decision_trace,
                 "updated_at": _now_ts(),
             },
             runtime.state_ttl_sec,
             min_ttl_sec=300,
         )
 
+        if finalize_defer_sec > 0:
+            raise DeferredCallEvent("await_inbound_final_state", delay_sec=finalize_defer_sec)
         if not should_emit:
             return None
         return event
@@ -3444,11 +3680,16 @@ return 0
             channel_id=runtime.channel_id,
             pipeline_id=runtime.pipeline_id,
             responsible_user_id=runtime.default_responsible_user_id,
-            subject=_safe_subject(runtime.lead_subject_template, event),
+            subject=_safe_subject(
+                runtime.lead_subject_template,
+                event,
+                language=runtime.message_language,
+            ),
             external_id=_external_id(
                 runtime.asterisk_hash,
                 event.client_phone,
             ),
+            client_name=event.client_phone,
             client_phone=event.client_phone,
         )
         async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
