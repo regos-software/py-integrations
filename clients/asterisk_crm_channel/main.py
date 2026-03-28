@@ -2660,6 +2660,10 @@ return 0
             elif duration_from_answer > 0:
                 # Keep only the segment after operator answer (exclude IVR/queue time).
                 event.talk_duration_sec = min(reported_duration, duration_from_answer)
+        if event.status == "completed" and event.direction == "inbound" and answered_at is None:
+            # IVR/queue can answer the call before any operator picks it up.
+            # For inbound calls, show talk duration only after operator answer stage.
+            event.talk_duration_sec = None
 
         posted_statuses = {
             str(item).strip().lower()
