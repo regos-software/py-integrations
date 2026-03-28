@@ -1185,11 +1185,30 @@ return 0
         if not client_phone and status != "recording_ready":
             return None
 
+        did_filter_phone = _normalize_phone(
+            cls._payload_pick(source, "did_phone", "did", "dnid", "did_number")
+        )
+        if not did_filter_phone and runtime.allowed_did_set:
+            destination_candidate = _normalize_phone(
+                cls._payload_pick(
+                    source,
+                    "to",
+                    "dst",
+                    "destination",
+                    "exten",
+                    "destcalleridnum",
+                )
+            )
+            if destination_candidate and destination_candidate in runtime.allowed_did_set:
+                did_filter_phone = destination_candidate
+        if not did_filter_phone:
+            did_filter_phone = to_phone
+
         if (
             direction == "inbound"
             and runtime.allowed_did_set
             and status != "recording_ready"
-            and (not to_phone or to_phone not in runtime.allowed_did_set)
+            and (not did_filter_phone or did_filter_phone not in runtime.allowed_did_set)
         ):
             return None
 
@@ -1413,6 +1432,9 @@ return 0
                 "calleridnum",
                 "callerid",
                 "src",
+                "source",
+                "source_number",
+                "source_num",
                 "caller",
                 "channelcalleridnum",
             ),
@@ -1424,7 +1446,10 @@ return 0
                 "connectedlinenum",
                 "exten",
                 "destination",
+                "dst",
                 "dnid",
+                "did",
+                "did_number",
                 "dialstring",
                 "destcalleridnum",
                 "to",
@@ -1446,7 +1471,14 @@ return 0
                 return "outbound"
 
         context = str(
-            cls._payload_pick(payload, "context", "destinationcontext", "dialcontext") or ""
+            cls._payload_pick(
+                payload,
+                "context",
+                "destinationcontext",
+                "dialcontext",
+                "dcontext",
+            )
+            or ""
         ).strip().lower()
         if any(token in context for token in {"internal", "from-internal", "outbound"}):
             return "outbound"
@@ -1526,6 +1558,30 @@ return 0
         )
         from_is_ext = _is_internal_extension(from_phone)
         to_is_ext = _is_internal_extension(to_phone)
+
+        # Re-evaluate direction using resolved endpoints. This helps for CDR/Hangup
+        # packets where explicit direction fields are absent.
+        if from_phone and to_phone:
+            if from_is_ext and not to_is_ext:
+                direction = "outbound"
+            elif to_is_ext and not from_is_ext:
+                direction = "inbound"
+        normalized["direction"] = direction
+
+        did_phone = _to_international_phone(
+            cls._payload_pick(
+                source,
+                "did_phone",
+                "did",
+                "dnid",
+                "did_number",
+                "didnum",
+                "did_num",
+            ),
+            runtime.default_country_code,
+        )
+        if did_phone and not _is_internal_extension(did_phone):
+            normalized["did_phone"] = did_phone
 
         explicit_client_phone = _to_international_phone(
             cls._payload_pick(source, "client_phone", "customer_phone"),
