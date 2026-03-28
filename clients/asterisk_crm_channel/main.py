@@ -1723,6 +1723,7 @@ return 0
             cls._stream_key(runtime.connected_integration_id),
             {
                 "connected_integration_id": runtime.connected_integration_id,
+                "event_ts": str(_to_int(event.event_ts, _now_ts()) or _now_ts()),
                 "event": cls._event_to_dict(event),
                 "attempt": "0",
                 "enqueued_at": str(_now_ts()),
@@ -2217,6 +2218,9 @@ return 0
 
     @classmethod
     def _stream_entry_event_ts(cls, fields: Dict[str, str]) -> Optional[int]:
+        direct_ts = _to_int(fields.get("event_ts"), None)
+        if direct_ts is not None:
+            return int(direct_ts)
         raw_event = fields.get("event")
         if not raw_event:
             return None
