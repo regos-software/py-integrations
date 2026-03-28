@@ -52,8 +52,8 @@ class AsteriskCrmChannelConfig:
     DEFAULT_AMI_PORT = 5038
 
     SETTINGS_TTL = max(int(app_settings.redis_cache_ttl or 60), 60)
-    DEFAULT_DEDUPE_TTL_SEC = 24 * 60 * 60
-    DEFAULT_STATE_TTL_SEC = 24 * 60 * 60
+    DEFAULT_DEDUPE_TTL_SEC = 6 * 60 * 60
+    DEFAULT_STATE_TTL_SEC = 6 * 60 * 60
 
     STREAM_GROUP = "asterisk_crm_channel_workers"
     STREAM_MAXLEN = 10000

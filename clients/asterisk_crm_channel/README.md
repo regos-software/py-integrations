@@ -53,8 +53,8 @@
 | `asterisk_allowed_did_list` | Нет | String | `Список DID` / `DID ro'yxati` / `DID list` | `Фильтр входящих по DID, через запятую` / `Kiruvchi DID filtri, vergul bilan` / `Inbound DID filter, comma-separated` | `998712000001,998712000002` / `998712000001,998712000002` / `998712000001,998712000002` |
 | `asterisk_recording_base_url` | Нет | String | `Базовый URL записей` / `Yozuvlar bazaviy URL` / `Recording base URL` | `База ссылок для файлов записи` / `Yozuv fayllari uchun baza URL` / `Base URL for recording files` | `https://pbx.example.com/records/` / `https://pbx.example.com/records/` / `https://pbx.example.com/records/` |
 | `asterisk_default_country_code` | Нет | String | `Код страны` / `Mamlakat kodi` / `Country code` | `Код страны для нормализации номеров` / `Raqamlarni normallashtirish uchun kod` / `Country code for number normalization` | `998` / `998` / `998` |
-| `lead_dedupe_ttl_sec` | Нет | Integer | `TTL дедупликации` / `Deduplikatsiya TTL` / `Dedupe TTL` | `Срок защиты от дублей, сек` / `Dublikatdan himoya muddati, sek` / `Duplicate protection TTL, sec` | `86400` / `86400` / `86400` |
-| `state_ttl_sec` | Нет | Integer | `TTL состояния` / `Holat TTL` / `State TTL` | `Срок хранения служебного состояния, сек` / `Xizmat holati saqlash muddati, sek` / `Runtime state TTL, sec` | `86400` / `86400` / `86400` |
+| `lead_dedupe_ttl_sec` | Нет | Integer | `TTL дедупликации` / `Deduplikatsiya TTL` / `Dedupe TTL` | `Срок защиты от дублей, сек` / `Dublikatdan himoya muddati, sek` / `Duplicate protection TTL, sec` | `21600` / `21600` / `21600` |
+| `state_ttl_sec` | Нет | Integer | `TTL состояния` / `Holat TTL` / `State TTL` | `Срок хранения служебного состояния, сек` / `Xizmat holati saqlash muddati, sek` / `Runtime state TTL, sec` | `21600` / `21600` / `21600` |
 
 ### Как работает `asterisk_recording_base_url`
 

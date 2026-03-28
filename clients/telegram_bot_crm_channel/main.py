@@ -64,8 +64,8 @@ class TelegramBotCrmChannelConfig:
     ALERT_EXTERNAL_PREFIX = "tgsys"
 
     SETTINGS_TTL = max(int(app_settings.redis_cache_ttl or 60), 30)
-    DEFAULT_DEDUPE_TTL_SEC = 24 * 60 * 60
-    DEFAULT_STATE_TTL_SEC = 24 * 60 * 60
+    DEFAULT_DEDUPE_TTL_SEC = 6 * 60 * 60
+    DEFAULT_STATE_TTL_SEC = 6 * 60 * 60
     STREAM_MAXLEN = 10000
     STREAM_GROUP = "tg_crm_channel_workers"
     STREAM_MIN_IDLE_MS = 60_000
