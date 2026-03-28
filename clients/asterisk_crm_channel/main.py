@@ -558,49 +558,57 @@ class AsteriskCrmChannelIntegration(ClientBase):
             return text
 
     @staticmethod
+    def _redis_key(*parts: Any) -> str:
+        normalized_parts: List[str] = []
+        for part in parts:
+            if part is None:
+                continue
+            text = str(part).strip()
+            if not text:
+                continue
+            normalized_parts.append(text.strip(":"))
+        prefix = AsteriskCrmChannelConfig.REDIS_PREFIX.rstrip(":")
+        return f"{prefix}:{':'.join(normalized_parts)}" if normalized_parts else f"{prefix}:"
+
+    @staticmethod
     def _settings_cache_key(connected_integration_id: str) -> str:
-        return (
-            f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
-            f"settings:{connected_integration_id}"
-        )
+        return AsteriskCrmChannelIntegration._redis_key("settings", connected_integration_id)
 
     @staticmethod
     def _ci_active_cache_key(connected_integration_id: str) -> str:
-        return (
-            f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
-            f"ci_active:{connected_integration_id}"
-        )
+        return AsteriskCrmChannelIntegration._redis_key("ci_active", connected_integration_id)
 
     @staticmethod
     def _active_ci_ids_key() -> str:
-        return f"{AsteriskCrmChannelConfig.REDIS_PREFIX}active_ci_ids"
+        return AsteriskCrmChannelIntegration._redis_key("active_ci_ids")
 
     @staticmethod
     def _stream_key(connected_integration_id: str) -> str:
-        return (
-            f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
-            f"stream:asterisk_in:{connected_integration_id}"
+        return AsteriskCrmChannelIntegration._redis_key(
+            "stream",
+            "asterisk_in",
+            connected_integration_id,
         )
 
     @staticmethod
     def _dlq_stream_key(connected_integration_id: str) -> str:
-        return (
-            f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
-            f"stream:dlq:{connected_integration_id}"
-        )
+        return AsteriskCrmChannelIntegration._redis_key("stream", "dlq", connected_integration_id)
 
     @staticmethod
     def _worker_heartbeat_key(connected_integration_id: str) -> str:
-        return (
-            f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
-            f"worker:heartbeat:{connected_integration_id}:{_INSTANCE_ID}"
+        return AsteriskCrmChannelIntegration._redis_key(
+            "worker",
+            "heartbeat",
+            connected_integration_id,
+            _INSTANCE_ID,
         )
 
     @staticmethod
     def _ami_owner_lock_key(connected_integration_id: str) -> str:
-        return (
-            f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
-            f"lock:ami_owner:{connected_integration_id}"
+        return AsteriskCrmChannelIntegration._redis_key(
+            "lock",
+            "ami_owner",
+            connected_integration_id,
         )
 
     @staticmethod
@@ -609,16 +617,21 @@ class AsteriskCrmChannelIntegration(ClientBase):
         asterisk_hash: str,
         normalized_phone: str,
     ) -> str:
-        return (
-            f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
-            f"lock:create_lead:{connected_integration_id}:{asterisk_hash}:{normalized_phone}"
+        return AsteriskCrmChannelIntegration._redis_key(
+            "lock",
+            "create_lead",
+            connected_integration_id,
+            asterisk_hash,
+            normalized_phone,
         )
 
     @staticmethod
     def _dedupe_event_key(connected_integration_id: str, event_id: str) -> str:
-        return (
-            f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
-            f"dedupe:event:{connected_integration_id}:{event_id}"
+        return AsteriskCrmChannelIntegration._redis_key(
+            "dedupe",
+            "event",
+            connected_integration_id,
+            event_id,
         )
 
     @staticmethod
@@ -627,9 +640,12 @@ class AsteriskCrmChannelIntegration(ClientBase):
         asterisk_hash: str,
         normalized_phone: str,
     ) -> str:
-        return (
-            f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
-            f"mapping:by_phone:{connected_integration_id}:{asterisk_hash}:{normalized_phone}"
+        return AsteriskCrmChannelIntegration._redis_key(
+            "mapping",
+            "by_phone",
+            connected_integration_id,
+            asterisk_hash,
+            normalized_phone,
         )
 
     @staticmethod
@@ -638,9 +654,12 @@ class AsteriskCrmChannelIntegration(ClientBase):
         asterisk_hash: str,
         external_call_id: str,
     ) -> str:
-        return (
-            f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
-            f"mapping:by_call:{connected_integration_id}:{asterisk_hash}:{external_call_id}"
+        return AsteriskCrmChannelIntegration._redis_key(
+            "mapping",
+            "by_call",
+            connected_integration_id,
+            asterisk_hash,
+            external_call_id,
         )
 
     @staticmethod
@@ -649,9 +668,11 @@ class AsteriskCrmChannelIntegration(ClientBase):
         asterisk_hash: str,
         external_call_id: str,
     ) -> str:
-        return (
-            f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
-            f"late_recording:{connected_integration_id}:{asterisk_hash}:{external_call_id}"
+        return AsteriskCrmChannelIntegration._redis_key(
+            "late_recording",
+            connected_integration_id,
+            asterisk_hash,
+            external_call_id,
         )
 
     @staticmethod
@@ -660,9 +681,11 @@ class AsteriskCrmChannelIntegration(ClientBase):
         asterisk_hash: str,
         external_call_id: str,
     ) -> str:
-        return (
-            f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
-            f"call_progress:{connected_integration_id}:{asterisk_hash}:{external_call_id}"
+        return AsteriskCrmChannelIntegration._redis_key(
+            "call_progress",
+            connected_integration_id,
+            asterisk_hash,
+            external_call_id,
         )
 
     @staticmethod
@@ -671,9 +694,11 @@ class AsteriskCrmChannelIntegration(ClientBase):
         asterisk_hash: str,
         operator_ext: str,
     ) -> str:
-        return (
-            f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
-            f"operator_user:{connected_integration_id}:{asterisk_hash}:{operator_ext}"
+        return AsteriskCrmChannelIntegration._redis_key(
+            "operator_user",
+            connected_integration_id,
+            asterisk_hash,
+            operator_ext,
         )
 
     @staticmethod
@@ -682,9 +707,11 @@ class AsteriskCrmChannelIntegration(ClientBase):
         asterisk_hash: str,
         operator_ext: str,
     ) -> str:
-        return (
-            f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
-            f"operator_name:{connected_integration_id}:{asterisk_hash}:{operator_ext}"
+        return AsteriskCrmChannelIntegration._redis_key(
+            "operator_name",
+            connected_integration_id,
+            asterisk_hash,
+            operator_ext,
         )
 
     @staticmethod
@@ -693,9 +720,11 @@ class AsteriskCrmChannelIntegration(ClientBase):
         asterisk_hash: str,
         external_call_id: str,
     ) -> str:
-        return (
-            f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
-            f"call_responsible:{connected_integration_id}:{asterisk_hash}:{external_call_id}"
+        return AsteriskCrmChannelIntegration._redis_key(
+            "call_responsible",
+            connected_integration_id,
+            asterisk_hash,
+            external_call_id,
         )
 
     @staticmethod
@@ -703,9 +732,10 @@ class AsteriskCrmChannelIntegration(ClientBase):
         connected_integration_id: str,
         lead_id: int,
     ) -> str:
-        return (
-            f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
-            f"lead_state:{connected_integration_id}:{int(lead_id)}"
+        return AsteriskCrmChannelIntegration._redis_key(
+            "lead_state",
+            connected_integration_id,
+            int(lead_id),
         )
 
     @staticmethod
@@ -714,20 +744,12 @@ class AsteriskCrmChannelIntegration(ClientBase):
         asterisk_hash: str,
         normalized_phone: str,
     ) -> str:
-        return (
-            f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
-            f"lead_lookup_miss:phone:{connected_integration_id}:{asterisk_hash}:{normalized_phone}"
-        )
-
-    @staticmethod
-    def _lead_lookup_miss_external_key(
-        connected_integration_id: str,
-        asterisk_hash: str,
-        normalized_phone: str,
-    ) -> str:
-        return (
-            f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
-            f"lead_lookup_miss:external:{connected_integration_id}:{asterisk_hash}:{normalized_phone}"
+        return AsteriskCrmChannelIntegration._redis_key(
+            "lead_lookup_miss",
+            "phone",
+            connected_integration_id,
+            asterisk_hash,
+            normalized_phone,
         )
 
     @staticmethod
@@ -3559,19 +3581,11 @@ return 0
         return None
 
     @classmethod
-    async def _find_active_lead_by_external_id(
+    async def _find_active_lead_by_external(
         cls,
         runtime: RuntimeConfig,
         normalized_phone: str,
     ) -> Optional[Lead]:
-        miss_key = cls._lead_lookup_miss_external_key(
-            runtime.connected_integration_id,
-            runtime.asterisk_hash,
-            normalized_phone,
-        )
-        if str(await cls._redis_get(miss_key) or "").strip() == "1":
-            return None
-
         filters = [
             Filter(
                 field="external_id",
@@ -3589,23 +3603,10 @@ return 0
                 )
             )
         if not response.result:
-            await cls._redis_set_with_ttl(
-                miss_key,
-                "1",
-                AsteriskCrmChannelConfig.LEAD_LOOKUP_MISS_TTL_SEC,
-                min_ttl_sec=10,
-            )
             return None
         lead = response.result[0]
         if not lead or not lead.id or not lead.chat_id:
-            await cls._redis_set_with_ttl(
-                miss_key,
-                "1",
-                AsteriskCrmChannelConfig.LEAD_LOOKUP_MISS_TTL_SEC,
-                min_ttl_sec=10,
-            )
             return None
-        await cls._redis_delete(miss_key)
         await cls._cache_lead_snapshot(runtime.connected_integration_id, lead)
         return lead
 
@@ -3621,7 +3622,7 @@ return 0
         return max(valid, key=lambda row: int(row.id or 0))
 
     @classmethod
-    async def _find_active_lead_by_client_phone(
+    async def _find_active_lead_by_phone(
         cls,
         runtime: RuntimeConfig,
         normalized_phone: str,
@@ -3706,21 +3707,39 @@ return 0
             return None
         # For both inbound and outbound calls we first try to reuse an active lead
         # by customer phone (for example, an existing chat lead).
-        by_phone = await cls._find_active_lead_by_client_phone(
+        lead_by_phone = await cls._find_active_lead_by_phone(
             runtime,
             event.client_phone,
         )
-        if by_phone:
-            return by_phone
+        if lead_by_phone:
+            return lead_by_phone
 
-        by_external = await cls._find_active_lead_by_external_id(
+        lead_by_external = await cls._find_active_lead_by_external(
             runtime,
             event.client_phone,
         )
-        if by_external:
-            return by_external
+        if lead_by_external:
+            return lead_by_external
 
         return None
+
+    @classmethod
+    async def _resolve_existing_lead_context(
+        cls,
+        runtime: RuntimeConfig,
+        event: CallEvent,
+    ) -> Optional[LeadContext]:
+        mapped_ctx = await cls._resolve_mapping(runtime, event)
+        if mapped_ctx:
+            return mapped_ctx
+
+        active_lead = await cls._find_active_lead(runtime, event)
+        if not active_lead or not active_lead.id or not active_lead.chat_id:
+            return None
+
+        lead_ctx = LeadContext(lead_id=int(active_lead.id), chat_id=str(active_lead.chat_id))
+        await cls._save_mapping(runtime, event, lead_ctx)
+        return lead_ctx
 
     @classmethod
     async def _create_lead(cls, runtime: RuntimeConfig, event: CallEvent) -> Lead:
@@ -3762,20 +3781,15 @@ return 0
         runtime: RuntimeConfig,
         event: CallEvent,
     ) -> LeadContext:
-        mapped = await cls._resolve_mapping(runtime, event)
-        if mapped:
-            return mapped
-        normalized_phone = _normalize_phone(event.client_phone)
-        if not normalized_phone:
+        normalized_client_phone = _normalize_phone(event.client_phone)
+        if not normalized_client_phone:
             raise RuntimeError(
                 "Cannot resolve or create lead: client_phone is empty and mapping is missing"
             )
-        event.client_phone = normalized_phone
+        event.client_phone = normalized_client_phone
 
-        recovered = await cls._find_active_lead(runtime, event)
-        if recovered and recovered.id and recovered.chat_id:
-            lead_ctx = LeadContext(lead_id=int(recovered.id), chat_id=str(recovered.chat_id))
-            await cls._save_mapping(runtime, event, lead_ctx)
+        lead_ctx = await cls._resolve_existing_lead_context(runtime, event)
+        if lead_ctx:
             return lead_ctx
 
         lock_key = cls._lock_create_lead_key(
@@ -3786,25 +3800,14 @@ return 0
         lock_token = await cls._acquire_lock(lock_key, AsteriskCrmChannelConfig.LOCK_TTL_SEC)
         if not lock_token:
             await asyncio.sleep(0.25)
-            mapped = await cls._resolve_mapping(runtime, event)
-            if mapped:
-                return mapped
-            recovered = await cls._find_active_lead(runtime, event)
-            if recovered and recovered.id and recovered.chat_id:
-                lead_ctx = LeadContext(lead_id=int(recovered.id), chat_id=str(recovered.chat_id))
-                await cls._save_mapping(runtime, event, lead_ctx)
+            lead_ctx = await cls._resolve_existing_lead_context(runtime, event)
+            if lead_ctx:
                 return lead_ctx
             raise RuntimeError("Failed to acquire create-lead lock")
 
         try:
-            mapped = await cls._resolve_mapping(runtime, event)
-            if mapped:
-                return mapped
-
-            recovered = await cls._find_active_lead(runtime, event)
-            if recovered and recovered.id and recovered.chat_id:
-                lead_ctx = LeadContext(lead_id=int(recovered.id), chat_id=str(recovered.chat_id))
-                await cls._save_mapping(runtime, event, lead_ctx)
+            lead_ctx = await cls._resolve_existing_lead_context(runtime, event)
+            if lead_ctx:
                 return lead_ctx
 
             created = await cls._create_lead(runtime, event)
@@ -3818,10 +3821,6 @@ return 0
     def _event_external_message_id(cls, event: CallEvent) -> str:
         # Stable id makes ChatMessage/Add idempotent for repeated AMI events.
         return f"astmsg:{event.asterisk_hash}:{event.external_call_id}:{cls._chat_event_code(event)}"
-
-    @staticmethod
-    def _event_type(event: CallEvent) -> str:
-        return AsteriskCrmChannelIntegration._chat_event_code(event)
 
     @staticmethod
     def _operator_phone_from_event(event: CallEvent) -> Optional[str]:

@@ -6,7 +6,7 @@ import json
 import time
 import uuid
 import logging
-from typing import Any, Dict, Type, TypeVar
+from typing import Any, Dict, Optional, Type, TypeVar
 
 import httpx
 from pydantic import BaseModel
@@ -43,7 +43,8 @@ class APIClient:
 
     def __init__(self, connected_integration_id: str, timeout: int = 90) -> None:
         self.integration_id = connected_integration_id
-        self.client = httpx.AsyncClient(timeout=timeout)
+        self._timeout = timeout
+        self.client = self._build_http_client()
 
         self._limiter = get_shared_limiter(
             self.integration_id,
@@ -90,6 +91,24 @@ class APIClient:
                 return f"{n}{unit}"
             n //= 1024
         return f"{n}GB"
+
+    def _build_http_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(timeout=self._timeout)
+
+    async def _reset_http_client(self, reason: Optional[Exception] = None) -> None:
+        old_client = self.client
+        self.client = self._build_http_client()
+        self._oauth = RegosOAuthProvider(http_client=self.client)
+        try:
+            await old_client.aclose()
+        except Exception:
+            pass
+        if reason is not None:
+            logger.warning(
+                "Reset API HTTP client after transport error: integration_id=%s error=%s",
+                self.integration_id,
+                reason,
+            )
 
     @staticmethod
     def _serialize_payload(data: Any) -> Any:
@@ -162,15 +181,19 @@ class APIClient:
                 logger.debug("Request body (%dB, preview): %s", len(body_bytes), preview)
 
             # отправляем
-            t0 = time.perf_counter()
-            resp = await self.client.send(req)
-            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            try:
+                t0 = time.perf_counter()
+                resp = await self.client.send(req)
+                elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
-            # читаем тело
-            await resp.aread()
-            raw = resp.content or b""
-            raw_dec, gz = self._decompress_if_gzip(raw)
-            text = raw_dec.decode("utf-8", errors="replace")
+                # читаем тело
+                await resp.aread()
+                raw = resp.content or b""
+                raw_dec, gz = self._decompress_if_gzip(raw)
+                text = raw_dec.decode("utf-8", errors="replace")
+            except httpx.RequestError as error:
+                await self._reset_http_client(reason=error)
+                raise
 
             # INFO: кратко
             logger.info("← [trace:%s] %s -> %s in %.1fms | recv=%s | gz=%s",
@@ -193,6 +216,13 @@ class APIClient:
         if resp.status_code == 401:
             logger.warning("[trace:%s] 401 Unauthorized. Refreshing token and retrying...", trace_id)
             resp = await send_once(force_refresh=True)
+            if resp.status_code == 401:
+                logger.warning(
+                    "[trace:%s] 401 persists after token refresh. Resetting transport and retrying once more...",
+                    trace_id,
+                )
+                await self._reset_http_client()
+                resp = await send_once(force_refresh=True)
 
         # Ошибки статуса
         resp.raise_for_status()
@@ -270,14 +300,18 @@ class APIClient:
                 logger.debug("Multipart fields: %s", form_data)
                 logger.debug("Multipart files: %s", files_meta)
 
-            t0 = time.perf_counter()
-            resp = await self.client.send(req)
-            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            try:
+                t0 = time.perf_counter()
+                resp = await self.client.send(req)
+                elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
-            await resp.aread()
-            raw = resp.content or b""
-            raw_dec, gz = self._decompress_if_gzip(raw)
-            text = raw_dec.decode("utf-8", errors="replace")
+                await resp.aread()
+                raw = resp.content or b""
+                raw_dec, gz = self._decompress_if_gzip(raw)
+                text = raw_dec.decode("utf-8", errors="replace")
+            except httpx.RequestError as error:
+                await self._reset_http_client(reason=error)
+                raise
 
             logger.info(
                 "← [trace:%s] %s -> %s in %.1fms | recv=%s | gz=%s",
@@ -303,6 +337,13 @@ class APIClient:
                 "[trace:%s] 401 Unauthorized. Refreshing token and retrying...", trace_id
             )
             resp = await send_once(force_refresh=True)
+            if resp.status_code == 401:
+                logger.warning(
+                    "[trace:%s] 401 persists after token refresh. Resetting transport and retrying once more...",
+                    trace_id,
+                )
+                await self._reset_http_client()
+                resp = await send_once(force_refresh=True)
 
         resp.raise_for_status()
 
