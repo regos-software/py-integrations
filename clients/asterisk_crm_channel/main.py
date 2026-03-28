@@ -2001,6 +2001,32 @@ return 0
             )
 
     @classmethod
+    async def shutdown_all(cls) -> None:
+        async with _MANAGER_LOCK:
+            worker_tasks = list(_WORKER_TASKS.values())
+            _WORKER_TASKS.clear()
+            ami_tasks = list(_AMI_TASKS.values())
+            _AMI_TASKS.clear()
+
+        for task in worker_tasks + ami_tasks:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("Error while stopping Asterisk background task")
+
+        global _HTTP_CLIENT
+        http_client = _HTTP_CLIENT
+        _HTTP_CLIENT = None
+        if http_client is not None:
+            try:
+                await http_client.aclose()
+            except Exception:
+                logger.exception("Error while closing Asterisk shared http client")
+
+    @classmethod
     async def restore_active_connections(cls) -> Dict[str, int]:
         if not _redis_enabled():
             return {"total": 0, "restored": 0, "failed": 0}

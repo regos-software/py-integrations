@@ -27,6 +27,19 @@ def create_app() -> FastAPI:
         except Exception as error:
             logger.exception("Telegram auto-restore failed on startup: %s", error)
 
+    @app.on_event("shutdown")
+    async def _shutdown_integrations_on_shutdown() -> None:
+        try:
+            await TelegramBotCrmChannelIntegration.shutdown_all()
+            logger.info("Telegram integrations shutdown cleanup completed")
+        except Exception as error:
+            logger.exception("Telegram shutdown cleanup failed: %s", error)
+        try:
+            await AsteriskCrmChannelIntegration.shutdown_all()
+            logger.info("Asterisk integrations shutdown cleanup completed")
+        except Exception as error:
+            logger.exception("Asterisk shutdown cleanup failed: %s", error)
+
     app.add_middleware(GZipMiddleware, minimum_size=500)
 
     app.include_router(healthcheck)

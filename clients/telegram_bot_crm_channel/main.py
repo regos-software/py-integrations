@@ -1442,6 +1442,42 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             _HTTP_CLIENT = httpx.AsyncClient(timeout=90)
         return _HTTP_CLIENT
 
+    @classmethod
+    async def shutdown_all(cls) -> None:
+        async with _MANAGER_LOCK:
+            worker_tasks = list(_WORKER_TASKS.values())
+            _WORKER_TASKS.clear()
+            poller_tasks = list(_POLLER_TASKS.values())
+            _POLLER_TASKS.clear()
+
+        for task in worker_tasks + poller_tasks:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("Error while stopping Telegram background task")
+
+        async with _BOT_CLIENTS_LOCK:
+            bots = list(_BOT_CLIENTS.values())
+            _BOT_CLIENTS.clear()
+
+        for bot in bots:
+            try:
+                await bot.session.close()
+            except Exception:
+                logger.exception("Error while closing Telegram bot session")
+
+        global _HTTP_CLIENT
+        http_client = _HTTP_CLIENT
+        _HTTP_CLIENT = None
+        if http_client is not None:
+            try:
+                await http_client.aclose()
+            except Exception:
+                logger.exception("Error while closing Telegram shared http client")
+
     @staticmethod
     def _extract_ci_active_flag(payload: Any) -> Optional[bool]:
         if isinstance(payload, dict):
