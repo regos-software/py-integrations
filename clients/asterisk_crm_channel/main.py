@@ -114,6 +114,7 @@ class RuntimeConfig:
     state_ttl_sec: int
     default_country_code: str
     assign_responsible_by_operator_ext: bool
+    find_active_lead_by_phone: bool
     message_language: str
 
 
@@ -1189,6 +1190,11 @@ return 0
         )
         if default_responsible_user_id is not None and default_responsible_user_id <= 0:
             raise ValueError("asterisk_default_responsible_user_id must be > 0")
+        find_active_lead_by_phone_raw = settings_map.get("asterisk_find_active_lead_by_phone")
+        if find_active_lead_by_phone_raw is None:
+            find_active_lead_by_phone_raw = settings_map.get(
+                "asterisk_search_active_lead_by_phone"
+            )
 
         return RuntimeConfig(
             connected_integration_id=connected_integration_id,
@@ -1230,6 +1236,10 @@ return 0
             default_country_code=default_country_code,
             assign_responsible_by_operator_ext=_to_bool(
                 settings_map.get("asterisk_assign_responsible_by_operator_ext"),
+                True,
+            ),
+            find_active_lead_by_phone=_to_bool(
+                find_active_lead_by_phone_raw,
                 True,
             ),
             message_language=_normalize_message_language(
@@ -2657,6 +2667,7 @@ return 0
         if not locked:
             return
 
+        emitted_event: Optional[CallEvent] = None
         try:
             event = await cls._dedupe_and_stabilize_call_event(runtime, event)
             if not event:
@@ -2667,6 +2678,7 @@ return 0
                     min_ttl_sec=60,
                 )
                 return
+            emitted_event = event
             lead_ctx: Optional[LeadContext] = None
             if event.status == "recording_ready" and not _normalize_phone(event.client_phone):
                 lead_ctx = await cls._resolve_mapping(runtime, event)
@@ -2700,7 +2712,19 @@ return 0
                 runtime.lead_dedupe_ttl_sec,
                 min_ttl_sec=60,
             )
-        except Exception:
+        except Exception as error:
+            if emitted_event:
+                try:
+                    await cls._rollback_call_progress_after_failure(runtime, emitted_event)
+                except Exception as rollback_error:
+                    logger.warning(
+                        "Asterisk call_progress rollback failed: ci=%s call_id=%s event_id=%s error=%s rollback_error=%s",
+                        runtime.connected_integration_id,
+                        emitted_event.external_call_id,
+                        emitted_event.event_id,
+                        error,
+                        rollback_error,
+                    )
             await cls._redis_delete(dedupe_key)
             raise
 
@@ -3036,6 +3060,85 @@ return 0
         if not should_emit:
             return None
         return event
+
+    @classmethod
+    async def _rollback_call_progress_after_failure(
+        cls,
+        runtime: RuntimeConfig,
+        event: CallEvent,
+    ) -> None:
+        if not event.external_call_id:
+            return
+
+        progress_key = cls._call_progress_key(
+            runtime.connected_integration_id,
+            runtime.asterisk_hash,
+            event.external_call_id,
+        )
+        cached = cls._parse_cached_json(await cls._redis_get(progress_key)) or {}
+        if not isinstance(cached, dict) or not cached:
+            return
+
+        stage = cls._chat_event_code(event)
+        posted_statuses = {
+            str(item).strip().lower()
+            for item in (cached.get("posted_statuses") or [])
+            if str(item).strip()
+        }
+
+        changed = False
+        if stage == "recording_ready":
+            if bool(cached.get("recording_posted")):
+                cached["recording_posted"] = False
+                changed = True
+        elif stage and stage in posted_statuses:
+            posted_statuses.remove(stage)
+            changed = True
+
+        recalculated_rank = 0
+        for posted_stage in posted_statuses:
+            recalculated_rank = max(recalculated_rank, cls._status_rank(posted_stage))
+        current_rank = _to_int(cached.get("last_rank"), 0) or 0
+        if current_rank != recalculated_rank:
+            changed = True
+
+        if not changed:
+            return
+
+        raw_event_type = str(
+            cls._payload_get(event.raw_payload or {}, "event") or ""
+        ).strip().lower()
+        rollback_entry = {
+            "at": _now_ts(),
+            "event_ts": int(event.event_ts),
+            "status": str(event.status or "").strip().lower(),
+            "stage": stage,
+            "emit": False,
+            "deferred": False,
+            "reasons": ["rolled_back_after_processing_error"],
+            "raw_event_type": raw_event_type or None,
+        }
+
+        cached_trace = cached.get("decision_trace")
+        decision_trace: List[Dict[str, Any]] = []
+        if isinstance(cached_trace, list):
+            for row in cached_trace[-19:]:
+                if isinstance(row, dict):
+                    decision_trace.append(dict(row))
+        decision_trace.append(rollback_entry)
+        decision_trace = decision_trace[-20:]
+
+        cached["posted_statuses"] = sorted(posted_statuses)
+        cached["last_rank"] = int(recalculated_rank)
+        cached["last_decision"] = rollback_entry
+        cached["decision_trace"] = decision_trace
+        cached["updated_at"] = _now_ts()
+        await cls._redis_set_json_with_ttl(
+            progress_key,
+            cached,
+            runtime.state_ttl_sec,
+            min_ttl_sec=300,
+        )
 
     @staticmethod
     def _extract_digit_tokens(value: Any) -> set[str]:
@@ -3705,8 +3808,10 @@ return 0
     ) -> Optional[Lead]:
         if not _normalize_phone(event.client_phone):
             return None
+        if not runtime.find_active_lead_by_phone:
+            return None
         # For both inbound and outbound calls we first try to reuse an active lead
-        # by customer phone (for example, an existing chat lead).
+        # by customer phone/external id (for example, an existing chat lead).
         lead_by_phone = await cls._find_active_lead_by_phone(
             runtime,
             event.client_phone,
