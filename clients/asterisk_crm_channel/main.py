@@ -54,6 +54,8 @@ class AsteriskCrmChannelConfig:
     SETTINGS_TTL = max(int(app_settings.redis_cache_ttl or 60), 60)
     DEFAULT_DEDUPE_TTL_SEC = 6 * 60 * 60
     DEFAULT_STATE_TTL_SEC = 6 * 60 * 60
+    LEAD_STATE_CACHE_TTL_SEC = 5 * 60
+    LEAD_LOOKUP_MISS_TTL_SEC = 30
 
     STREAM_GROUP = "asterisk_crm_channel_workers"
     STREAM_MAXLEN = 10000
@@ -153,6 +155,7 @@ _WORKER_TASKS: Dict[str, asyncio.Task] = {}
 _AMI_TASKS: Dict[str, asyncio.Task] = {}
 _INSTANCE_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
 _HTTP_CLIENT: Optional[httpx.AsyncClient] = None
+_CACHE_UNSET = object()
 
 
 def _now_ts() -> int:
@@ -626,6 +629,38 @@ class AsteriskCrmChannelIntegration(ClientBase):
         )
 
     @staticmethod
+    def _lead_state_cache_key(
+        connected_integration_id: str,
+        lead_id: int,
+    ) -> str:
+        return (
+            f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
+            f"lead_state:{connected_integration_id}:{int(lead_id)}"
+        )
+
+    @staticmethod
+    def _lead_lookup_miss_phone_key(
+        connected_integration_id: str,
+        asterisk_hash: str,
+        normalized_phone: str,
+    ) -> str:
+        return (
+            f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
+            f"lead_lookup_miss:phone:{connected_integration_id}:{asterisk_hash}:{normalized_phone}"
+        )
+
+    @staticmethod
+    def _lead_lookup_miss_external_key(
+        connected_integration_id: str,
+        asterisk_hash: str,
+        normalized_phone: str,
+    ) -> str:
+        return (
+            f"{AsteriskCrmChannelConfig.REDIS_PREFIX}"
+            f"lead_lookup_miss:external:{connected_integration_id}:{asterisk_hash}:{normalized_phone}"
+        )
+
+    @staticmethod
     def _error_response(code: int, description: str) -> IntegrationErrorResponse:
         return IntegrationErrorResponse(
             result=IntegrationErrorModel(error=code, description=description)
@@ -777,6 +812,86 @@ return 0
         if isinstance(parsed, dict):
             return parsed
         return None
+
+    @staticmethod
+    def _normalize_lead_status(value: Any) -> Optional[LeadStatusEnum]:
+        if isinstance(value, LeadStatusEnum):
+            return value
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            return LeadStatusEnum(text)
+        except ValueError:
+            return None
+
+    @classmethod
+    async def _get_lead_state_cache(
+        cls,
+        connected_integration_id: str,
+        lead_id: Optional[int],
+    ) -> Dict[str, Any]:
+        resolved_lead_id = _to_int(lead_id, None)
+        if not resolved_lead_id:
+            return {}
+        payload = cls._parse_cached_json(
+            await cls._redis_get(
+                cls._lead_state_cache_key(connected_integration_id, int(resolved_lead_id))
+            )
+        )
+        return payload or {}
+
+    @classmethod
+    async def _update_lead_state_cache(
+        cls,
+        connected_integration_id: str,
+        lead_id: Optional[int],
+        *,
+        status: Any = _CACHE_UNSET,
+        responsible_user_id: Any = _CACHE_UNSET,
+    ) -> None:
+        resolved_lead_id = _to_int(lead_id, None)
+        if not resolved_lead_id:
+            return
+        key = cls._lead_state_cache_key(connected_integration_id, int(resolved_lead_id))
+        cached = cls._parse_cached_json(await cls._redis_get(key)) or {}
+
+        if status is not _CACHE_UNSET:
+            normalized_status = cls._normalize_lead_status(status)
+            if normalized_status is not None:
+                cached["status"] = normalized_status.value
+            else:
+                raw_status = str(status or "").strip()
+                cached["status"] = raw_status or None
+
+        if responsible_user_id is not _CACHE_UNSET:
+            resolved_user_id = _to_int(responsible_user_id, None)
+            cached["responsible_user_id"] = (
+                int(resolved_user_id) if resolved_user_id and resolved_user_id > 0 else None
+            )
+
+        cached["updated_at"] = _now_ts()
+        await cls._redis_set_json_with_ttl(
+            key,
+            cached,
+            AsteriskCrmChannelConfig.LEAD_STATE_CACHE_TTL_SEC,
+            min_ttl_sec=60,
+        )
+
+    @classmethod
+    async def _cache_lead_snapshot(
+        cls,
+        connected_integration_id: str,
+        lead: Optional[Lead],
+    ) -> None:
+        if not lead or not getattr(lead, "id", None):
+            return
+        await cls._update_lead_state_cache(
+            connected_integration_id=connected_integration_id,
+            lead_id=_to_int(getattr(lead, "id", None), None),
+            status=getattr(lead, "status", None),
+            responsible_user_id=getattr(lead, "responsible_user_id", None),
+        )
 
     @staticmethod
     async def _get_http_client() -> httpx.AsyncClient:
@@ -3001,6 +3116,11 @@ return 0
         )
         already_bound = _to_int(await cls._redis_get(call_key), None)
         if already_bound and already_bound == target_user_id:
+            await cls._update_lead_state_cache(
+                connected_integration_id=runtime.connected_integration_id,
+                lead_id=lead_ctx.lead_id,
+                responsible_user_id=target_user_id,
+            )
             if should_move_to_in_progress:
                 await cls._set_lead_status_best_effort(
                     connected_integration_id=runtime.connected_integration_id,
@@ -3036,6 +3156,11 @@ return 0
                 str(target_user_id),
                 runtime.state_ttl_sec,
                 min_ttl_sec=300,
+            )
+            await cls._update_lead_state_cache(
+                connected_integration_id=runtime.connected_integration_id,
+                lead_id=lead_ctx.lead_id,
+                responsible_user_id=target_user_id,
             )
             if should_move_to_in_progress:
                 await cls._set_lead_status_best_effort(
@@ -3150,6 +3275,14 @@ return 0
         runtime: RuntimeConfig,
         normalized_phone: str,
     ) -> Optional[Lead]:
+        miss_key = cls._lead_lookup_miss_external_key(
+            runtime.connected_integration_id,
+            runtime.asterisk_hash,
+            normalized_phone,
+        )
+        if str(await cls._redis_get(miss_key) or "").strip() == "1":
+            return None
+
         filters = [
             Filter(
                 field="external_id",
@@ -3167,10 +3300,24 @@ return 0
                 )
             )
         if not response.result:
+            await cls._redis_set_with_ttl(
+                miss_key,
+                "1",
+                AsteriskCrmChannelConfig.LEAD_LOOKUP_MISS_TTL_SEC,
+                min_ttl_sec=10,
+            )
             return None
         lead = response.result[0]
         if not lead or not lead.id or not lead.chat_id:
+            await cls._redis_set_with_ttl(
+                miss_key,
+                "1",
+                AsteriskCrmChannelConfig.LEAD_LOOKUP_MISS_TTL_SEC,
+                min_ttl_sec=10,
+            )
             return None
+        await cls._redis_delete(miss_key)
+        await cls._cache_lead_snapshot(runtime.connected_integration_id, lead)
         return lead
 
     @staticmethod
@@ -3198,6 +3345,13 @@ return 0
             return None
 
         for phone in candidates:
+            miss_key = cls._lead_lookup_miss_phone_key(
+                runtime.connected_integration_id,
+                runtime.asterisk_hash,
+                phone,
+            )
+            if str(await cls._redis_get(miss_key) or "").strip() == "1":
+                continue
             filters = [
                 Filter(
                     field="client_phone",
@@ -3228,7 +3382,15 @@ return 0
             rows = response.result or []
             lead = cls._pick_latest_active_lead(rows)
             if not lead:
+                await cls._redis_set_with_ttl(
+                    miss_key,
+                    "1",
+                    AsteriskCrmChannelConfig.LEAD_LOOKUP_MISS_TTL_SEC,
+                    min_ttl_sec=10,
+                )
                 continue
+            await cls._redis_delete(miss_key)
+            await cls._cache_lead_snapshot(runtime.connected_integration_id, lead)
             if len(rows) > 1:
                 lead_ids = sorted(
                     int(row.id)
@@ -3297,6 +3459,7 @@ return 0
             lead = await api.crm.lead.get_by_id(new_id)
             if not lead or not lead.id or not lead.chat_id:
                 raise RuntimeError("Lead/Get did not return lead/chat pair after Lead/Add")
+            await cls._cache_lead_snapshot(runtime.connected_integration_id, lead)
             return lead
 
     @classmethod
@@ -3702,43 +3865,92 @@ return 0
         *,
         reason: str,
     ) -> None:
-        if not lead_id:
+        resolved_lead_id = _to_int(lead_id, None)
+        if not resolved_lead_id:
             return
+        cached = await cls._get_lead_state_cache(connected_integration_id, resolved_lead_id)
+        cached_status = cls._normalize_lead_status(cached.get("status"))
+
+        if cached_status in {LeadStatusEnum.Closed, LeadStatusEnum.Converted}:
+            return
+        if cached_status == status:
+            return
+
+        if cached_status is not None:
+            try:
+                async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+                    response = await api.crm.lead.set_status(
+                        LeadSetStatusRequest(id=int(resolved_lead_id), status=status.value)
+                    )
+                if response.ok:
+                    await cls._update_lead_state_cache(
+                        connected_integration_id=connected_integration_id,
+                        lead_id=resolved_lead_id,
+                        status=status,
+                    )
+                    return
+                payload = response.result if isinstance(response.result, dict) else {}
+                logger.warning(
+                    "Lead/SetStatus rejected: ci=%s lead_id=%s status=%s reason=%s error=%s description=%s",
+                    connected_integration_id,
+                    resolved_lead_id,
+                    status,
+                    reason,
+                    payload.get("error"),
+                    payload.get("description"),
+                )
+                return
+            except Exception as error:
+                logger.warning(
+                    "Lead status update failed via cached state: ci=%s lead_id=%s status=%s reason=%s error=%s",
+                    connected_integration_id,
+                    resolved_lead_id,
+                    status,
+                    reason,
+                    error,
+                )
+                return
+
         try:
             async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-                lead = await api.crm.lead.get_by_id(int(lead_id))
+                lead = await api.crm.lead.get_by_id(int(resolved_lead_id))
                 if not lead:
                     return
 
-                current_status: Optional[LeadStatusEnum]
-                if isinstance(lead.status, LeadStatusEnum):
-                    current_status = lead.status
-                else:
-                    try:
-                        current_status = LeadStatusEnum(str(lead.status or "").strip())
-                    except ValueError:
-                        current_status = None
+                current_status = cls._normalize_lead_status(getattr(lead, "status", None))
+                current_responsible_user_id = _to_int(
+                    getattr(lead, "responsible_user_id", None),
+                    None,
+                )
+                await cls._update_lead_state_cache(
+                    connected_integration_id=connected_integration_id,
+                    lead_id=resolved_lead_id,
+                    status=current_status,
+                    responsible_user_id=current_responsible_user_id,
+                )
 
                 if current_status in {LeadStatusEnum.Closed, LeadStatusEnum.Converted}:
                     return
-                if (
-                    current_status == LeadStatusEnum.New
-                    and not getattr(lead, "responsible_user_id", None)
-                ):
+                if current_status == LeadStatusEnum.New and not current_responsible_user_id:
                     return
                 if current_status == status:
                     return
 
                 response = await api.crm.lead.set_status(
-                    LeadSetStatusRequest(id=int(lead_id), status=status.value)
+                    LeadSetStatusRequest(id=int(resolved_lead_id), status=status.value)
                 )
             if response.ok:
+                await cls._update_lead_state_cache(
+                    connected_integration_id=connected_integration_id,
+                    lead_id=resolved_lead_id,
+                    status=status,
+                )
                 return
             payload = response.result if isinstance(response.result, dict) else {}
             logger.warning(
                 "Lead/SetStatus rejected: ci=%s lead_id=%s status=%s reason=%s error=%s description=%s",
                 connected_integration_id,
-                lead_id,
+                resolved_lead_id,
                 status,
                 reason,
                 payload.get("error"),
@@ -3748,7 +3960,7 @@ return 0
             logger.warning(
                 "Lead status update failed: ci=%s lead_id=%s status=%s reason=%s error=%s",
                 connected_integration_id,
-                lead_id,
+                resolved_lead_id,
                 status,
                 reason,
                 error,
