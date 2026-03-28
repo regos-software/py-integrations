@@ -1321,11 +1321,16 @@ return 0
         if event_type in {"dialbegin", "dialstate"}:
             return "ringing"
         if event_type == "newstate":
-            return cls._normalize_status(
+            normalized = cls._normalize_status(
                 cls._payload_pick(payload, "channelstatedesc", "state", "channelstate")
             )
+            # "Up" in Newstate is frequently emitted by local/queue legs and can be noisy.
+            if normalized == "answered":
+                return None
+            return normalized
         if event_type in {"bridgeenter", "bridgecreate", "bridge", "link"}:
-            return "answered"
+            # Bridge lifecycle events are too noisy for reliable "answered" signal.
+            return None
         if event_type in {"mixmonitorstop", "monitorstop"}:
             return "recording_ready"
         if event_type == "dialend":
@@ -2369,6 +2374,21 @@ return 0
         ):
             return True
 
+        # Early per-leg hangup events may emit "completed" before CDR with billsec.
+        # Suppress these interim zero-talk completions and wait for final call result.
+        if status == "completed" and talk_duration <= 0:
+            raw_event_type = str(
+                cls._payload_get(event.raw_payload or {}, "event") or ""
+            ).strip().lower()
+            if raw_event_type in {
+                "hangup",
+                "hanguprequest",
+                "softhanguprequest",
+                "unlink",
+                "bridgeleave",
+            }:
+                return True
+
         return False
 
     @classmethod
@@ -2834,7 +2854,9 @@ return 0
             return
         if event.status not in {"answered", "completed"}:
             return
-        operator_ext = _normalize_phone(event.operator_ext)
+        operator_ext = _normalize_phone(event.operator_ext) or cls._operator_phone_from_event(
+            event
+        )
         if not operator_ext:
             return
 
@@ -3292,9 +3314,7 @@ return 0
                 "ChatMessage/Add",
                 ChatMessageAddRequest(
                     chat_id=lead_ctx.chat_id,
-                    author_entity_type="Lead",
-                    author_entity_id=lead_ctx.lead_id,
-                    message_type=ChatMessageTypeEnum.Regular,
+                    message_type=ChatMessageTypeEnum.System,
                     text=text,
                     file_ids=file_ids or None,
                     external_message_id=cls._event_external_message_id(event),
