@@ -1221,7 +1221,15 @@ return 0
         ).hexdigest()
 
         talk_duration_sec = _to_int(
-            cls._payload_pick(source, "talk_duration_sec", "billsec", "duration_sec", "duration"),
+            cls._payload_pick(
+                source,
+                "talk_duration_sec",
+                "billableseconds",
+                "billsec",
+                "answered_duration_sec",
+                "conversation_duration_sec",
+                "duration_sec",
+            ),
             None,
         )
         recording_url = _resolve_recording_url(
@@ -1654,7 +1662,14 @@ return 0
             normalized["to_phone"] = client_phone or to_phone or ""
 
         talk_duration_sec = _to_int(
-            cls._payload_pick(source, "talk_duration_sec", "billableseconds", "billsec", "duration"),
+            cls._payload_pick(
+                source,
+                "talk_duration_sec",
+                "billableseconds",
+                "billsec",
+                "answered_duration_sec",
+                "conversation_duration_sec",
+            ),
             None,
         )
         if talk_duration_sec is not None:
@@ -2128,14 +2143,17 @@ return 0
                 if not records:
                     continue
 
+                batch_entries: List[Tuple[str, Dict[str, str]]] = []
                 for _, entries in records:
-                    for message_id, fields in entries:
-                        await cls._process_stream_entry(
-                            stream_key=stream_key,
-                            message_id=message_id,
-                            fields=fields,
-                            connected_integration_id=connected_integration_id,
-                        )
+                    batch_entries.extend(entries)
+
+                for message_id, fields in cls._sort_stream_entries_by_event_ts(batch_entries):
+                    await cls._process_stream_entry(
+                        stream_key=stream_key,
+                        message_id=message_id,
+                        fields=fields,
+                        connected_integration_id=connected_integration_id,
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception as error:
@@ -2172,13 +2190,43 @@ return 0
         if isinstance(claimed_raw, (list, tuple)) and len(claimed_raw) >= 2:
             entries = claimed_raw[1] or []
 
-        for message_id, fields in entries:
+        for message_id, fields in cls._sort_stream_entries_by_event_ts(entries):
             await cls._process_stream_entry(
                 stream_key=stream_key,
                 message_id=message_id,
                 fields=fields,
                 connected_integration_id=connected_integration_id,
             )
+
+    @classmethod
+    def _sort_stream_entries_by_event_ts(
+        cls,
+        entries: List[Tuple[str, Dict[str, str]]],
+    ) -> List[Tuple[str, Dict[str, str]]]:
+        def _sort_key(item: Tuple[str, Dict[str, str]]) -> Tuple[int, int, str]:
+            message_id, fields = item
+            event_ts = cls._stream_entry_event_ts(fields)
+            if event_ts is not None:
+                return (0, int(event_ts), str(message_id))
+            fallback_ts = _to_int(fields.get("enqueued_at"), None)
+            if fallback_ts is not None:
+                return (1, int(fallback_ts), str(message_id))
+            return (2, 0, str(message_id))
+
+        return sorted(entries, key=_sort_key)
+
+    @classmethod
+    def _stream_entry_event_ts(cls, fields: Dict[str, str]) -> Optional[int]:
+        raw_event = fields.get("event")
+        if not raw_event:
+            return None
+        try:
+            payload = _json_loads(raw_event)
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return _to_int(payload.get("event_ts"), None)
 
     @classmethod
     async def _process_stream_entry(
@@ -2479,6 +2527,20 @@ return 0
         stable_to_phone = _normalize_phone(cached.get("to_phone"))
         if stable_to_phone:
             event.to_phone = stable_to_phone
+        event_ts = _to_int(event.event_ts, _now_ts()) or _now_ts()
+        event.event_ts = int(event_ts)
+        answered_at = _to_int(cached.get("answered_at"), None)
+        if event.status == "answered":
+            if answered_at is None or event_ts < answered_at:
+                answered_at = event_ts
+        if event.status == "completed" and answered_at is not None and event_ts >= answered_at:
+            duration_from_answer = max(event_ts - answered_at, 0)
+            reported_duration = _to_int(event.talk_duration_sec, None)
+            if reported_duration is None or reported_duration <= 0:
+                event.talk_duration_sec = duration_from_answer
+            elif duration_from_answer > 0:
+                # Keep only the segment after operator answer (exclude IVR/queue time).
+                event.talk_duration_sec = min(reported_duration, duration_from_answer)
 
         posted_statuses = {
             str(item).strip().lower()
@@ -2534,6 +2596,7 @@ return 0
                 "posted_statuses": sorted(posted_statuses),
                 "last_rank": int(next_last_rank),
                 "recording_posted": recording_posted,
+                "answered_at": int(answered_at) if answered_at is not None else None,
                 "updated_at": _now_ts(),
             },
             runtime.state_ttl_sec,
