@@ -263,6 +263,19 @@ def _auto_create_contact_mode_from_value(raw: Optional[str]) -> str:
     mode = str(raw or "").strip().lower()
     if not mode:
         return TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_NONE
+    aliases = {
+        "0": TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_NONE,
+        "false": TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_NONE,
+        "off": TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_NONE,
+        "disabled": TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_NONE,
+        "none": TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_NONE,
+        "1": TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_RETAIL_CUSTOMER,
+        "true": TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_RETAIL_CUSTOMER,
+        "on": TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_RETAIL_CUSTOMER,
+        "retail": TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_RETAIL_CUSTOMER,
+        "retail_customer": TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_RETAIL_CUSTOMER,
+    }
+    mode = aliases.get(mode, mode)
     if mode not in {
         TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_NONE,
         TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_RETAIL_CUSTOMER,
