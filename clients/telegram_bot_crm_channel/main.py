@@ -1247,12 +1247,26 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             except Exception as error:
                 logger.warning("Failed to read settings cache: %s", error)
 
-        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-            response = await api.integrations.connected_integration_setting.get(
-                ConnectedIntegrationSettingRequest(
-                    connected_integration_id=connected_integration_id,
+        try:
+            async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+                response = await api.integrations.connected_integration_setting.get(
+                    ConnectedIntegrationSettingRequest(
+                        connected_integration_id=connected_integration_id,
+                    )
                 )
-            )
+        except httpx.HTTPStatusError as error:
+            status_code = error.response.status_code if error.response is not None else None
+            if status_code in {401, 403, 404}:
+                is_active = await TelegramBotCrmChannelIntegration._is_connected_integration_active(
+                    connected_integration_id,
+                    force_refresh=True,
+                )
+                if not is_active or status_code in {401, 403}:
+                    raise ConnectedIntegrationInactiveError(
+                        f"ConnectedIntegration {connected_integration_id} is inactive "
+                        f"(settings unavailable, status={status_code})"
+                    ) from error
+            raise
         settings_map = {
             str(row.key).strip().lower(): row.value
             for row in (response.result or [])
