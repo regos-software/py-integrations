@@ -161,6 +161,10 @@ class DeferredCallEvent(RuntimeError):
         super().__init__(f"Deferred call event: {self.reason} (delay={self.delay_sec}s)")
 
 
+class NonRetryableCallEventError(RuntimeError):
+    pass
+
+
 _MANAGER_LOCK = asyncio.Lock()
 _WORKER_TASKS: Dict[str, asyncio.Task] = {}
 _AMI_TASKS: Dict[str, asyncio.Task] = {}
@@ -2598,6 +2602,29 @@ return 0
                 error,
             )
             return
+        except NonRetryableCallEventError as error:
+            dlq_payload = dict(fields)
+            dlq_payload["attempt"] = str(max(attempts, 0) + 1)
+            dlq_payload["error"] = str(error)
+            dlq_payload["source_stream"] = stream_key
+            dlq_payload["source_message_id"] = message_id
+            await cls._enqueue(
+                cls._dlq_stream_key(connected_integration_id),
+                dlq_payload,
+                stream_ttl_sec=state_ttl_sec,
+            )
+            await redis_client.xack(
+                stream_key,
+                AsteriskCrmChannelConfig.STREAM_GROUP,
+                message_id,
+            )
+            logger.error(
+                "Asterisk event moved to DLQ (non-retryable): ci=%s message_id=%s error=%s",
+                connected_integration_id,
+                message_id,
+                error,
+            )
+            return
         except Exception as error:
             attempts += 1
             if attempts >= AsteriskCrmChannelConfig.STREAM_MAX_RETRIES:
@@ -2893,6 +2920,9 @@ return 0
         event_ts = _to_int(event.event_ts, _now_ts()) or _now_ts()
         event.event_ts = int(event_ts)
         answered_at = _to_int(cached.get("answered_at"), None)
+        raw_event_type = str(
+            cls._payload_get(event.raw_payload or {}, "event") or ""
+        ).strip().lower()
         operator_phone = cls._operator_phone_from_event(event) or _normalize_phone(
             event.operator_ext
         )
@@ -2922,9 +2952,26 @@ return 0
                 event.talk_duration_sec = min(reported_duration, duration_from_answer)
         if event.status == "completed" and event.direction == "inbound" and answered_at is None:
             talk_duration = _to_int(event.talk_duration_sec, 0) or 0
-            if talk_duration > 0 and operator_phone and _is_internal_extension(operator_phone):
-                # Some PBX setups skip explicit "answered" event but provide final CDR
-                # with talk duration and operator endpoint. Treat as answered call.
+            can_infer_answered_from_completed = False
+            if (
+                talk_duration > 0
+                and operator_phone
+                and _is_internal_extension(operator_phone)
+                and raw_event_type in {"cdr", ""}
+            ):
+                resolved_operator_user_id = await cls._resolve_user_id_by_operator_ext_best_effort(
+                    runtime,
+                    operator_phone,
+                )
+                if resolved_operator_user_id:
+                    can_infer_answered_from_completed = True
+                    decision_reasons.append("operator_resolved_for_completed")
+                else:
+                    decision_reasons.append("operator_unresolved_for_completed")
+
+            if can_infer_answered_from_completed:
+                # Infer answered only when we can map endpoint to a real operator.
+                # This prevents IVR-only calls from being treated as operator-answered.
                 answered_at = max(event_ts - talk_duration, 0)
                 pending_inbound_completed_at = None
                 decision_reasons.append("trusted_answered")
@@ -3006,9 +3053,6 @@ return 0
         if should_emit and status and status != "recording_ready":
             posted_statuses.add(status)
         recording_posted = bool(cached.get("recording_posted")) or status == "recording_ready"
-        raw_event_type = str(
-            cls._payload_get(event.raw_payload or {}, "event") or ""
-        ).strip().lower()
         cached_trace = cached.get("decision_trace")
         decision_trace: List[Dict[str, Any]] = []
         if isinstance(cached_trace, list):
@@ -3865,12 +3909,19 @@ return 0
             client_phone=event.client_phone,
         )
         async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
-            add_response = await api.crm.lead.add(payload)
-            new_id = None
-            if isinstance(add_response.result, dict):
-                new_id = _to_int(add_response.result.get("new_id"), None)
-            else:
-                new_id = _to_int(getattr(add_response.result, "new_id", None), None)
+            add_response = await api.call(
+                "Lead/Add",
+                payload,
+                APIBaseResponse[Dict[str, Any]],
+            )
+            add_result = add_response.result if isinstance(add_response.result, dict) else {}
+            if not add_response.ok:
+                error_code = add_result.get("error")
+                description = add_result.get("description")
+                raise NonRetryableCallEventError(
+                    f"Lead/Add rejected: error={error_code} description={description}"
+                )
+            new_id = _to_int(add_result.get("new_id"), None)
             if not new_id:
                 raise RuntimeError("Lead/Add did not return new_id")
 
