@@ -485,7 +485,7 @@ def _status_from_direction_event(direction: str, status: str) -> Optional[LeadSt
     if direction == "inbound" and status in {"started", "ringing", "answered"}:
         return LeadStatusEnum.InProgress
     if direction == "outbound" and status in {"started", "ringing"}:
-        return LeadStatusEnum.WaitingClient
+        return LeadStatusEnum.InProgress
     if direction == "outbound" and status == "answered":
         return LeadStatusEnum.InProgress
     return None
