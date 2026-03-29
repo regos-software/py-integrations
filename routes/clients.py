@@ -3,6 +3,7 @@ import re
 import time
 from typing import Optional, Union, Any, Dict, Tuple
 
+import httpx
 from fastapi import APIRouter, Header, Request, Path, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.responses import JSONResponse
@@ -26,6 +27,8 @@ from clients.telegram_bot_quantity.main import TelegramBotMinQuantityIntegration
 from clients.telegram_bot_orders.main import TelegramBotOrdersIntegration
 from clients.telegram_bot_crm_channel.main import TelegramBotCrmChannelIntegration
 from clients.asterisk_crm_channel.main import AsteriskCrmChannelIntegration
+from clients.instagram_crm_channel.main import InstagramCrmChannelIntegration
+from clients.gpt_crm_chat_assistant.main import GptCrmChatAssistantIntegration
 from clients.tsd.main import TsdIntegration
 
 router = APIRouter()
@@ -41,6 +44,8 @@ INTEGRATION_CLASSES = {
     "telegram_bot_orders": TelegramBotOrdersIntegration,
     "telegram_bot_crm_channel": TelegramBotCrmChannelIntegration,
     "asterisk_crm_channel": AsteriskCrmChannelIntegration,
+    "instagram_crm_channel": InstagramCrmChannelIntegration,
+    "gpt_crm_chat_assistant": GptCrmChatAssistantIntegration,
     "tsd": TsdIntegration,
 }
 
@@ -126,6 +131,16 @@ async def _is_connected_integration_active(
                 continue
             detected = _extract_connected_integration_active_flag(response.result)
             if detected is not None:
+                break
+        except httpx.HTTPStatusError as error:
+            last_error = error
+            status_code = (
+                int(error.response.status_code)
+                if error.response is not None
+                else None
+            )
+            if status_code in {401, 403, 404}:
+                detected = False
                 break
         except Exception as error:
             last_error = error

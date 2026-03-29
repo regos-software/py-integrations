@@ -1548,6 +1548,16 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 detected = cls._extract_ci_active_flag(response.result)
                 if detected is not None:
                     break
+            except httpx.HTTPStatusError as error:
+                last_error = error
+                status_code = (
+                    int(error.response.status_code)
+                    if error.response is not None
+                    else None
+                )
+                if status_code in {401, 403, 404}:
+                    detected = False
+                    break
             except Exception as error:
                 last_error = error
 
