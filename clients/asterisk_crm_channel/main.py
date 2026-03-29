@@ -1508,33 +1508,6 @@ return 0
         if not client_phone and status != "recording_ready":
             return None
 
-        did_filter_phone = _normalize_phone(
-            cls._payload_pick(source, "did_phone", "did", "dnid", "did_number")
-        )
-        if not did_filter_phone and runtime.allowed_did_set:
-            destination_candidate = _normalize_phone(
-                cls._payload_pick(
-                    source,
-                    "to",
-                    "dst",
-                    "destination",
-                    "exten",
-                    "destcalleridnum",
-                )
-            )
-            if destination_candidate and destination_candidate in runtime.allowed_did_set:
-                did_filter_phone = destination_candidate
-        if not did_filter_phone:
-            did_filter_phone = to_phone
-
-        if (
-            direction == "inbound"
-            and runtime.allowed_did_set
-            and status != "recording_ready"
-            and (not did_filter_phone or did_filter_phone not in runtime.allowed_did_set)
-        ):
-            return None
-
         event_ts = _parse_event_ts(
             cls._payload_pick(source, "event_ts", "timestamp", "ts")
         )
