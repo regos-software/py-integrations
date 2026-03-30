@@ -21,6 +21,7 @@ from schemas.api.chat.chat_message import (
     ChatMessageGetRequest,
     ChatMessageTypeEnum,
 )
+from schemas.api.files.file import FileGetRequest
 from schemas.api.integrations.connected_integration_setting import (
     ConnectedIntegrationSettingRequest,
 )
@@ -39,6 +40,9 @@ class GptCrmChatAssistantConfig:
     OPENAI_TIMEOUT_SEC = 20
     OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions"
     MAX_CONTEXT_CHARS = 8000
+    MAX_CONTEXT_FILE_IDS = 50
+    MAX_FILES_PER_MESSAGE = 5
+    MAX_CONTEXT_IMAGE_URLS = 4
 
     DEFAULT_SUGGESTIONS_COUNT = 3
     DEFAULT_HISTORY_LIMIT = 20
@@ -698,7 +702,7 @@ class GptCrmChatAssistantIntegration(ClientBase):
         if not bot_id:
             return {"status": "ignored", "reason": "chatbot_not_available"}
 
-        context = await self._build_chat_context(
+        context, context_image_urls = await self._build_chat_context(
             runtime=runtime,
             chat_id=chat_id,
             source_message=message,
@@ -707,6 +711,7 @@ class GptCrmChatAssistantIntegration(ClientBase):
             runtime=runtime,
             source_message=message,
             context=context,
+            context_image_urls=context_image_urls,
         )
         suggestions = generation_result.get("suggestions") or []
         best_reply = _normalize_text(generation_result.get("best_reply"))
@@ -759,7 +764,9 @@ class GptCrmChatAssistantIntegration(ClientBase):
         author_entity_type = _normalize_entity_type(message.author_entity_type)
         if author_entity_type in {"user", "chatbot"}:
             return False
-        return bool(_normalize_text(message.text))
+        if _normalize_text(message.text):
+            return True
+        return bool(GptCrmChatAssistantIntegration._extract_message_file_ids(message))
 
     async def _get_chat_message(
         self,
@@ -794,12 +801,148 @@ class GptCrmChatAssistantIntegration(ClientBase):
             return "assistant"
         return "client"
 
+    @staticmethod
+    def _extract_message_file_ids(message: ChatMessage) -> List[int]:
+        file_ids_raw = getattr(message, "file_ids", None)
+        if not isinstance(file_ids_raw, list):
+            return []
+        resolved: List[int] = []
+        for item in file_ids_raw:
+            value = _parse_int(item, 0)
+            if value > 0:
+                resolved.append(int(value))
+        return resolved[: GptCrmChatAssistantConfig.MAX_FILES_PER_MESSAGE]
+
+    @staticmethod
+    def _format_file_size(size_bytes: Any) -> str:
+        size = _parse_int(size_bytes, 0)
+        if size <= 0:
+            return ""
+        units = ["B", "KB", "MB", "GB"]
+        value = float(size)
+        for unit in units:
+            if value < 1024 or unit == units[-1]:
+                if unit == "B":
+                    return f"{int(value)}{unit}"
+                return f"{value:.1f}{unit}"
+            value /= 1024
+        return ""
+
+    @staticmethod
+    def _normalize_public_url(value: Any) -> Optional[str]:
+        url = str(value or "").strip()
+        if not url:
+            return None
+        if url.startswith("http://") or url.startswith("https://"):
+            return url
+        return None
+
+    @staticmethod
+    def _is_image_file(file_row: Dict[str, Any]) -> bool:
+        mime = str(file_row.get("mime_type") or "").strip().lower()
+        if mime.startswith("image/"):
+            return True
+        ext = str(file_row.get("extension") or "").strip().lower()
+        return ext in {"jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff", "heic", "heif"}
+
+    async def _fetch_files_map(
+        self,
+        connected_integration_id: str,
+        file_ids: Sequence[int],
+    ) -> Dict[int, Dict[str, Any]]:
+        unique_ids = sorted({int(fid) for fid in file_ids if int(fid) > 0})
+        if not unique_ids:
+            return {}
+        unique_ids = unique_ids[: GptCrmChatAssistantConfig.MAX_CONTEXT_FILE_IDS]
+
+        try:
+            async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+                response = await api.files.file.get(
+                    FileGetRequest(
+                        ids=unique_ids,
+                        limit=len(unique_ids),
+                        offset=0,
+                    )
+                )
+        except Exception as error:
+            logger.warning(
+                "File/Get failed while building context: ci=%s ids=%s error=%s",
+                connected_integration_id,
+                unique_ids,
+                error,
+            )
+            return {}
+
+        files_map: Dict[int, Dict[str, Any]] = {}
+        if not response.ok or not isinstance(response.result, list):
+            return files_map
+
+        for row in response.result:
+            file_id = _parse_int(getattr(row, "id", 0), 0)
+            if file_id <= 0:
+                continue
+            files_map[int(file_id)] = {
+                "id": int(file_id),
+                "name": str(getattr(row, "name", "") or "").strip(),
+                "extension": str(getattr(row, "extension", "") or "").strip().lower(),
+                "mime_type": str(getattr(row, "mime_type", "") or "").strip().lower(),
+                "size": _parse_int(getattr(row, "size", 0), 0),
+                "url": str(getattr(row, "url", "") or "").strip(),
+            }
+        return files_map
+
+    def _render_message_context_line(
+        self,
+        role: str,
+        text: str,
+        file_ids: Sequence[int],
+        files_map: Dict[int, Dict[str, Any]],
+    ) -> Tuple[str, List[str]]:
+        normalized_text = _normalize_text(text)
+        file_descriptors: List[str] = []
+        image_urls: List[str] = []
+
+        for file_id in list(file_ids)[: GptCrmChatAssistantConfig.MAX_FILES_PER_MESSAGE]:
+            file_row = files_map.get(int(file_id))
+            if not file_row:
+                file_descriptors.append(f"file_id={int(file_id)}")
+                continue
+
+            file_name = str(file_row.get("name") or "").strip() or f"file_{int(file_id)}"
+            mime = str(file_row.get("mime_type") or "").strip().lower()
+            size_text = self._format_file_size(file_row.get("size"))
+
+            details: List[str] = []
+            if mime:
+                details.append(mime)
+            if size_text:
+                details.append(size_text)
+
+            if details:
+                file_descriptors.append(f"{file_name} ({', '.join(details)})")
+            else:
+                file_descriptors.append(file_name)
+
+            public_url = self._normalize_public_url(file_row.get("url"))
+            if public_url and self._is_image_file(file_row):
+                image_urls.append(public_url)
+
+        body = normalized_text or ("[сообщение без текста]" if file_descriptors else "")
+        if file_descriptors:
+            body = (
+                f"{body} [files: {', '.join(file_descriptors)}]"
+                if body
+                else f"[files: {', '.join(file_descriptors)}]"
+            )
+        body = body or "[empty]"
+        return f"{role}: {body}", image_urls
+
     async def _build_chat_context(
         self,
         runtime: RuntimeConfig,
         chat_id: str,
         source_message: ChatMessage,
-    ) -> str:
+    ) -> Tuple[str, List[str]]:
         rows: List[ChatMessage] = []
         try:
             async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
@@ -821,25 +964,63 @@ class GptCrmChatAssistantIntegration(ClientBase):
                 error,
             )
 
-        lines: List[Tuple[int, str]] = []
+        all_file_ids: List[int] = []
         for row in rows:
-            text = _normalize_text(getattr(row, "text", None))
-            if not text:
+            all_file_ids.extend(self._extract_message_file_ids(row))
+        if not rows:
+            all_file_ids.extend(self._extract_message_file_ids(source_message))
+        files_map = await self._fetch_files_map(
+            connected_integration_id=runtime.connected_integration_id,
+            file_ids=all_file_ids,
+        )
+
+        lines: List[Tuple[int, str]] = []
+        collected_image_urls: List[str] = []
+        seen_image_urls: Set[str] = set()
+        for row in rows:
+            text = str(getattr(row, "text", None) or "")
+            message_file_ids = self._extract_message_file_ids(row)
+            if not _normalize_text(text) and not message_file_ids:
                 continue
             role = self._author_role(
                 getattr(row, "author_entity_type", None),
                 getattr(row, "message_type", None),
             )
             created_date = _parse_int(getattr(row, "created_date", 0), 0)
-            lines.append((created_date, f"{role}: {text}"))
+            rendered_line, image_urls = self._render_message_context_line(
+                role=role,
+                text=text,
+                file_ids=message_file_ids,
+                files_map=files_map,
+            )
+            lines.append((created_date, rendered_line))
+
+            for url in image_urls:
+                if url in seen_image_urls:
+                    continue
+                seen_image_urls.add(url)
+                collected_image_urls.append(url)
+                if len(collected_image_urls) >= GptCrmChatAssistantConfig.MAX_CONTEXT_IMAGE_URLS:
+                    break
+            if len(collected_image_urls) >= GptCrmChatAssistantConfig.MAX_CONTEXT_IMAGE_URLS:
+                continue
 
         if not lines:
-            fallback = _normalize_text(source_message.text)
-            return f"client: {fallback}" if fallback else ""
+            fallback_line, fallback_images = self._render_message_context_line(
+                role="client",
+                text=str(source_message.text or ""),
+                file_ids=self._extract_message_file_ids(source_message),
+                files_map=files_map,
+            )
+            return fallback_line, fallback_images[: GptCrmChatAssistantConfig.MAX_CONTEXT_IMAGE_URLS]
 
         lines.sort(key=lambda item: item[0])
         raw_lines = [item[1] for item in lines]
-        return self._trim_context_lines(raw_lines, GptCrmChatAssistantConfig.MAX_CONTEXT_CHARS)
+        context = self._trim_context_lines(
+            raw_lines,
+            GptCrmChatAssistantConfig.MAX_CONTEXT_CHARS,
+        )
+        return context, collected_image_urls[: GptCrmChatAssistantConfig.MAX_CONTEXT_IMAGE_URLS]
 
     @staticmethod
     def _trim_context_lines(lines: Sequence[str], max_chars: int) -> str:
@@ -1053,8 +1234,11 @@ class GptCrmChatAssistantIntegration(ClientBase):
         runtime: RuntimeConfig,
         source_message: ChatMessage,
         context: str,
+        context_image_urls: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         source_text = _normalize_text(source_message.text)
+        if not source_text and self._extract_message_file_ids(source_message):
+            source_text = "[клиент отправил вложение без текста]"
         if not source_text:
             return {"suggestions": [], "best_reply": "", "confidence": 0.0}
 
@@ -1069,28 +1253,58 @@ class GptCrmChatAssistantIntegration(ClientBase):
             f"Последнее сообщение клиента: {source_text}\n\n"
             f"Контекст диалога:\n{context}"
         )
-        messages = [
-            {"role": "system", "content": runtime.assistant_prompt},
-            {"role": "system", "content": system_instruction},
-            {"role": "user", "content": user_payload},
-        ]
+        unique_image_urls: List[str] = []
+        seen_image_urls: Set[str] = set()
+        for value in context_image_urls or []:
+            normalized_url = self._normalize_public_url(value)
+            if not normalized_url or normalized_url in seen_image_urls:
+                continue
+            seen_image_urls.add(normalized_url)
+            unique_image_urls.append(normalized_url)
+            if len(unique_image_urls) >= GptCrmChatAssistantConfig.MAX_CONTEXT_IMAGE_URLS:
+                break
+
+        def build_messages(include_images: bool) -> List[Dict[str, Any]]:
+            user_content: Any = user_payload
+            if include_images and unique_image_urls:
+                user_parts: List[Dict[str, Any]] = [{"type": "text", "text": user_payload}]
+                for url in unique_image_urls:
+                    user_parts.append({"type": "image_url", "image_url": {"url": url}})
+                user_content = user_parts
+            return [
+                {"role": "system", "content": runtime.assistant_prompt},
+                {"role": "system", "content": system_instruction},
+                {"role": "user", "content": user_content},
+            ]
 
         headers = {
             "Authorization": f"Bearer {runtime.assistant_api_key}",
             "Content-Type": "application/json",
         }
-        payload = {
-            "model": runtime.assistant_model,
-            "temperature": runtime.assistant_temperature,
-            "messages": messages,
-        }
-
         try:
+            payload = {
+                "model": runtime.assistant_model,
+                "temperature": runtime.assistant_temperature,
+                "messages": build_messages(include_images=bool(unique_image_urls)),
+            }
             response = await self.http_client.post(
                 GptCrmChatAssistantConfig.OPENAI_ENDPOINT,
                 headers=headers,
                 json=payload,
             )
+            if response.status_code == 400 and unique_image_urls:
+                body_preview = response.text[:1000]
+                logger.warning(
+                    "OpenAI multimodal request failed, retrying text-only: status=%s body=%s",
+                    response.status_code,
+                    body_preview,
+                )
+                payload["messages"] = build_messages(include_images=False)
+                response = await self.http_client.post(
+                    GptCrmChatAssistantConfig.OPENAI_ENDPOINT,
+                    headers=headers,
+                    json=payload,
+                )
             if response.status_code >= 400:
                 body_preview = response.text[:1000]
                 logger.warning(
