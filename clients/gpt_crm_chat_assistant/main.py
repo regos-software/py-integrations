@@ -205,6 +205,34 @@ def _extract_text_from_openai_content(raw_content: Any) -> str:
     return ""
 
 
+def _extract_text_from_responses_output(output: Any) -> str:
+    if not isinstance(output, list):
+        return ""
+
+    chunks: List[str] = []
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+
+        direct_text = item.get("text")
+        if isinstance(direct_text, str) and direct_text.strip():
+            chunks.append(direct_text)
+
+        message = item.get("message")
+        if isinstance(message, dict):
+            message_content = message.get("content")
+            extracted = _extract_text_from_openai_content(message_content)
+            if extracted:
+                chunks.append(extracted)
+
+        content = item.get("content")
+        extracted = _extract_text_from_openai_content(content)
+        if extracted:
+            chunks.append(extracted)
+
+    return "\n".join(part for part in chunks if str(part).strip())
+
+
 def _parse_auto_join_entities(raw: Any) -> Set[str]:
     default_entities = set(GptCrmChatAssistantConfig.DEFAULT_AUTO_JOIN_ENTITY_TYPES)
     tokens: List[str] = []
@@ -1893,6 +1921,12 @@ class GptCrmChatAssistantIntegration(ClientBase):
             return {"suggestions": [], "best_reply": "", "confidence": 0.0}
 
         raw_text = self._extract_model_output(raw)
+        if not _normalize_text(raw_text):
+            logger.warning(
+                "OpenAI response parsed with empty text: keys=%s payload=%s",
+                sorted(list(raw.keys()))[:20] if isinstance(raw, dict) else [],
+                str(raw)[:1000],
+            )
         return self._normalize_generation_output(
             raw_text=raw_text,
             max_items=runtime.assistant_suggestions_count,
@@ -1903,6 +1937,11 @@ class GptCrmChatAssistantIntegration(ClientBase):
         output_text = payload.get("output_text")
         if isinstance(output_text, str) and output_text.strip():
             return output_text
+
+        responses_output = payload.get("output")
+        extracted_from_responses = _extract_text_from_responses_output(responses_output)
+        if extracted_from_responses:
+            return extracted_from_responses
 
         choices = payload.get("choices")
         if isinstance(choices, list) and choices:
