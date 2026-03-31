@@ -56,6 +56,7 @@ class GptCrmChatAssistantConfig:
     DEFAULT_AUTO_SEND_CONFIDENCE_THRESHOLD = 0.9
     DEFAULT_AUTO_SEND_MAX_PER_CHAT_HOUR = 3
     DEFAULT_AUTO_SEND_COOLDOWN_SEC = 60
+    FIELD_BOOTSTRAP_TTL_SEC = 10 * 60
 
     THREAD_FIELD_ENTITY_TYPES = ("Lead", "Deal", "Task")
     THREAD_FIELD_KEY = "gpt_thread_id"
@@ -264,6 +265,8 @@ class GptCrmChatAssistantIntegration(ClientBase):
 
     _LOCAL_BOT_CACHE: Dict[str, Tuple[int, float]] = {}
     _LOCAL_BOT_CACHE_LOCK = asyncio.Lock()
+    _LOCAL_FIELDS_READY: Dict[str, float] = {}
+    _LOCAL_FIELDS_READY_LOCK = asyncio.Lock()
     _LOCAL_AUTO_SEND_COOLDOWN: Dict[str, float] = {}
     _LOCAL_AUTO_SEND_HOURLY: Dict[str, int] = {}
     _LOCAL_AUTO_SEND_LOCK = asyncio.Lock()
@@ -304,6 +307,10 @@ class GptCrmChatAssistantIntegration(ClientBase):
     @classmethod
     def _dedupe_key(cls, connected_integration_id: str, event_key: str) -> str:
         return cls._redis_key("dedupe", connected_integration_id, event_key)
+
+    @classmethod
+    def _fields_ready_key(cls, connected_integration_id: str) -> str:
+        return cls._redis_key("fields_ready", connected_integration_id)
 
     @staticmethod
     async def _redis_get(key: str) -> Optional[str]:
@@ -544,11 +551,10 @@ class GptCrmChatAssistantIntegration(ClientBase):
         connected_integration_id: str,
         entity_type: str,
         full_key: str,
-        raw_key: str,
     ) -> bool:
         payload = {
             "entity_type": entity_type,
-            "keys": [full_key, raw_key],
+            "keys": [full_key],
         }
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
             response = await api.call(
@@ -562,12 +568,12 @@ class GptCrmChatAssistantIntegration(ClientBase):
                 f"Field/Get rejected: entity_type={entity_type} payload={response.result}"
             )
         rows = response.result if isinstance(response.result, list) else []
-        expected_keys = {full_key.strip().lower(), raw_key.strip().lower()}
+        expected_key = full_key.strip().lower()
         for row in rows:
             if not isinstance(row, dict):
                 continue
             row_key = str(row.get("key") or "").strip().lower()
-            if row_key in expected_keys:
+            if row_key == expected_key:
                 return True
         return False
 
@@ -584,7 +590,6 @@ class GptCrmChatAssistantIntegration(ClientBase):
             connected_integration_id=connected_integration_id,
             entity_type=entity_type,
             full_key=full_key,
-            raw_key=raw_key,
         ):
             return {
                 "entity_type": entity_type,
@@ -608,12 +613,23 @@ class GptCrmChatAssistantIntegration(ClientBase):
 
         if response.ok:
             result_payload = response.result if isinstance(response.result, dict) else {}
-            return {
-                "entity_type": entity_type,
-                "key": full_key,
-                "status": "created",
-                "new_id": _parse_int(result_payload.get("new_id"), 0),
-            }
+            for attempt in range(3):
+                if await cls._field_exists(
+                    connected_integration_id=connected_integration_id,
+                    entity_type=entity_type,
+                    full_key=full_key,
+                ):
+                    return {
+                        "entity_type": entity_type,
+                        "key": full_key,
+                        "status": "created",
+                        "new_id": _parse_int(result_payload.get("new_id"), 0),
+                    }
+                if attempt < 2:
+                    await asyncio.sleep(0.2)
+            raise RuntimeError(
+                f"Field/Add returned ok but field is not visible yet for key={full_key} entity_type={entity_type}"
+            )
 
         logger.warning(
             "Field/Add rejected while ensuring thread field: ci=%s entity_type=%s payload=%s",
@@ -626,7 +642,6 @@ class GptCrmChatAssistantIntegration(ClientBase):
             connected_integration_id=connected_integration_id,
             entity_type=entity_type,
             full_key=full_key,
-            raw_key=raw_key,
         ):
             return {
                 "entity_type": entity_type,
@@ -652,6 +667,58 @@ class GptCrmChatAssistantIntegration(ClientBase):
             rows.append(result)
         return rows
 
+    @classmethod
+    async def _is_fields_bootstrapped(cls, connected_integration_id: str) -> bool:
+        ci = str(connected_integration_id or "").strip()
+        if not ci:
+            return False
+
+        now = time.monotonic()
+        async with cls._LOCAL_FIELDS_READY_LOCK:
+            expires_at = cls._LOCAL_FIELDS_READY.get(ci)
+            if expires_at and expires_at > now:
+                return True
+            if expires_at:
+                cls._LOCAL_FIELDS_READY.pop(ci, None)
+
+        cached = await cls._redis_get(cls._fields_ready_key(ci))
+        if cached == "1":
+            async with cls._LOCAL_FIELDS_READY_LOCK:
+                cls._LOCAL_FIELDS_READY[ci] = now + GptCrmChatAssistantConfig.FIELD_BOOTSTRAP_TTL_SEC
+            return True
+        return False
+
+    @classmethod
+    async def _mark_fields_bootstrapped(cls, connected_integration_id: str) -> None:
+        ci = str(connected_integration_id or "").strip()
+        if not ci:
+            return
+        ttl = GptCrmChatAssistantConfig.FIELD_BOOTSTRAP_TTL_SEC
+        await cls._redis_set(cls._fields_ready_key(ci), "1", ttl)
+        async with cls._LOCAL_FIELDS_READY_LOCK:
+            cls._LOCAL_FIELDS_READY[ci] = time.monotonic() + ttl
+
+    @classmethod
+    async def _clear_fields_bootstrap_cache(cls, connected_integration_id: str) -> None:
+        ci = str(connected_integration_id or "").strip()
+        if not ci:
+            return
+        await cls._redis_delete(cls._fields_ready_key(ci))
+        async with cls._LOCAL_FIELDS_READY_LOCK:
+            cls._LOCAL_FIELDS_READY.pop(ci, None)
+
+    @classmethod
+    async def _ensure_thread_fields_ready(
+        cls,
+        connected_integration_id: str,
+        force: bool = False,
+    ) -> List[Dict[str, Any]]:
+        if not force and await cls._is_fields_bootstrapped(connected_integration_id):
+            return []
+        rows = await cls._ensure_thread_custom_fields(connected_integration_id)
+        await cls._mark_fields_bootstrapped(connected_integration_id)
+        return rows
+
     async def connect(self, **_: Any) -> Dict[str, Any]:
         if not self.connected_integration_id:
             return self._error_response(1000, "connected_integration_id is required").dict()
@@ -664,7 +731,7 @@ class GptCrmChatAssistantIntegration(ClientBase):
             }
 
         try:
-            field_ensure_result = await self._ensure_thread_custom_fields(ci)
+            field_ensure_result = await self._ensure_thread_fields_ready(ci, force=True)
         except Exception as error:
             logger.warning("Required CRM field ensure failed: ci=%s error=%s", ci, error)
             return self._error_response(1003, str(error)).dict()
@@ -690,7 +757,9 @@ class GptCrmChatAssistantIntegration(ClientBase):
     async def disconnect(self, **_: Any) -> Dict[str, Any]:
         if not self.connected_integration_id:
             return self._error_response(1000, "connected_integration_id is required").dict()
-        await self._clear_settings_cache(str(self.connected_integration_id))
+        ci = str(self.connected_integration_id)
+        await self._clear_settings_cache(ci)
+        await self._clear_fields_bootstrap_cache(ci)
         return {"status": "disconnected"}
 
     async def reconnect(self, **_: Any) -> Dict[str, Any]:
@@ -788,6 +857,12 @@ class GptCrmChatAssistantIntegration(ClientBase):
         ci = str(self.connected_integration_id).strip()
         if not await self._is_connected_integration_active(ci):
             return {"status": "ignored", "reason": "connected_integration_inactive"}
+
+        try:
+            await self._ensure_thread_fields_ready(ci, force=False)
+        except Exception as error:
+            logger.warning("Required CRM field ensure failed on webhook: ci=%s error=%s", ci, error)
+            return self._error_response(1003, str(error)).dict()
 
         normalized_action, payload, event_id = self._normalize_regos_webhook_payload(
             action=action,
@@ -1295,40 +1370,29 @@ class GptCrmChatAssistantIntegration(ClientBase):
         if not resource or entity_id <= 0 or not conversation_id:
             return False
 
-        async def send_edit(field_key: str) -> APIBaseResponse[Dict[str, Any]]:
-            payload = {
-                "id": int(entity_id),
-                "fields": [
-                    {
-                        "key": field_key,
-                        "value": conversation_id,
-                    }
-                ],
-            }
-            async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-                return await api.call(
-                    resource["edit_path"],
-                    payload,
-                    APIBaseResponse[Dict[str, Any]],
-                )
-
         full_key = GptCrmChatAssistantConfig.THREAD_FIELD_FULL_KEY
-        raw_key = GptCrmChatAssistantConfig.THREAD_FIELD_KEY
-
-        response = await send_edit(full_key)
+        payload = {
+            "id": int(entity_id),
+            "fields": [
+                {
+                    "key": full_key,
+                    "value": conversation_id,
+                }
+            ],
+        }
+        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+            response = await api.call(
+                resource["edit_path"],
+                payload,
+                APIBaseResponse[Dict[str, Any]],
+            )
         if response.ok:
-            return True
-
-        # Compatibility fallback: some entity handlers may expect key without `field_` prefix.
-        response_raw = await send_edit(raw_key)
-        if response_raw.ok:
             return True
 
         # Self-healing for integrations that started before field bootstrap/reconnect.
         field_entity_type = str(resource.get("field_entity_type") or "").strip()
         unknown_full = self._is_unknown_field_error(response.result, full_key)
-        unknown_raw = self._is_unknown_field_error(response_raw.result, raw_key)
-        if field_entity_type and (unknown_full or unknown_raw):
+        if field_entity_type and unknown_full:
             try:
                 await self._ensure_thread_custom_field(
                     connected_integration_id=connected_integration_id,
@@ -1343,33 +1407,32 @@ class GptCrmChatAssistantIntegration(ClientBase):
                     error,
                 )
 
-            retry_full = await send_edit(full_key)
+            async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+                retry_full = await api.call(
+                    resource["edit_path"],
+                    payload,
+                    APIBaseResponse[Dict[str, Any]],
+                )
             if retry_full.ok:
                 return True
 
-            retry_raw = await send_edit(raw_key)
-            if retry_raw.ok:
-                return True
-
             logger.warning(
-                "%s rejected after self-heal while persisting conversation id: ci=%s entity_type=%s entity_id=%s full=%s raw=%s",
+                "%s rejected after self-heal while persisting conversation id: ci=%s entity_type=%s entity_id=%s payload=%s",
                 resource["edit_path"],
                 connected_integration_id,
                 chat_entity_type,
                 entity_id,
                 retry_full.result,
-                retry_raw.result,
             )
             return False
 
         logger.warning(
-            "%s rejected while persisting conversation id: ci=%s entity_type=%s entity_id=%s full=%s raw=%s",
+            "%s rejected while persisting conversation id: ci=%s entity_type=%s entity_id=%s payload=%s",
             resource["edit_path"],
             connected_integration_id,
             chat_entity_type,
             entity_id,
             response.result,
-            response_raw.result,
         )
         return False
 
@@ -1476,10 +1539,6 @@ class GptCrmChatAssistantIntegration(ClientBase):
             self._extract_field_value(
                 entity_row.get("fields"),
                 GptCrmChatAssistantConfig.THREAD_FIELD_FULL_KEY,
-            )
-            or self._extract_field_value(
-                entity_row.get("fields"),
-                GptCrmChatAssistantConfig.THREAD_FIELD_KEY,
             )
         )
         if existing:
