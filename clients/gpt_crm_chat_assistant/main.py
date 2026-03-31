@@ -1232,6 +1232,20 @@ class GptCrmChatAssistantIntegration(ClientBase):
         return None
 
     @staticmethod
+    def _api_error_description(result: Any) -> str:
+        if isinstance(result, dict):
+            return str(result.get("description") or "").strip()
+        return str(result or "").strip()
+
+    @classmethod
+    def _is_unknown_field_error(cls, result: Any, field_key: str) -> bool:
+        description = cls._api_error_description(result).lower()
+        target_key = str(field_key or "").strip().lower()
+        if not description or not target_key:
+            return False
+        return "unknown fields" in description and target_key in description
+
+    @staticmethod
     def _normalize_conversation_id(value: Any) -> Optional[str]:
         text = str(value or "").strip()
         if not text:
@@ -1281,32 +1295,83 @@ class GptCrmChatAssistantIntegration(ClientBase):
         if not resource or entity_id <= 0 or not conversation_id:
             return False
 
-        payload = {
-            "id": int(entity_id),
-            "fields": [
-                {
-                    "key": GptCrmChatAssistantConfig.THREAD_FIELD_FULL_KEY,
-                    "value": conversation_id,
-                }
-            ],
-        }
-        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-            response = await api.call(
-                resource["edit_path"],
-                payload,
-                APIBaseResponse[Dict[str, Any]],
-            )
-        if not response.ok:
+        async def send_edit(field_key: str) -> APIBaseResponse[Dict[str, Any]]:
+            payload = {
+                "id": int(entity_id),
+                "fields": [
+                    {
+                        "key": field_key,
+                        "value": conversation_id,
+                    }
+                ],
+            }
+            async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+                return await api.call(
+                    resource["edit_path"],
+                    payload,
+                    APIBaseResponse[Dict[str, Any]],
+                )
+
+        full_key = GptCrmChatAssistantConfig.THREAD_FIELD_FULL_KEY
+        raw_key = GptCrmChatAssistantConfig.THREAD_FIELD_KEY
+
+        response = await send_edit(full_key)
+        if response.ok:
+            return True
+
+        # Compatibility fallback: some entity handlers may expect key without `field_` prefix.
+        response_raw = await send_edit(raw_key)
+        if response_raw.ok:
+            return True
+
+        # Self-healing for integrations that started before field bootstrap/reconnect.
+        field_entity_type = str(resource.get("field_entity_type") or "").strip()
+        unknown_full = self._is_unknown_field_error(response.result, full_key)
+        unknown_raw = self._is_unknown_field_error(response_raw.result, raw_key)
+        if field_entity_type and (unknown_full or unknown_raw):
+            try:
+                await self._ensure_thread_custom_field(
+                    connected_integration_id=connected_integration_id,
+                    entity_type=field_entity_type,
+                )
+            except Exception as error:
+                logger.warning(
+                    "Field self-heal failed while persisting conversation id: ci=%s entity_type=%s entity_id=%s error=%s",
+                    connected_integration_id,
+                    chat_entity_type,
+                    entity_id,
+                    error,
+                )
+
+            retry_full = await send_edit(full_key)
+            if retry_full.ok:
+                return True
+
+            retry_raw = await send_edit(raw_key)
+            if retry_raw.ok:
+                return True
+
             logger.warning(
-                "%s rejected while persisting conversation id: ci=%s entity_type=%s entity_id=%s payload=%s",
+                "%s rejected after self-heal while persisting conversation id: ci=%s entity_type=%s entity_id=%s full=%s raw=%s",
                 resource["edit_path"],
                 connected_integration_id,
                 chat_entity_type,
                 entity_id,
-                response.result,
+                retry_full.result,
+                retry_raw.result,
             )
             return False
-        return True
+
+        logger.warning(
+            "%s rejected while persisting conversation id: ci=%s entity_type=%s entity_id=%s full=%s raw=%s",
+            resource["edit_path"],
+            connected_integration_id,
+            chat_entity_type,
+            entity_id,
+            response.result,
+            response_raw.result,
+        )
+        return False
 
     async def _create_openai_conversation(
         self,
@@ -1411,6 +1476,10 @@ class GptCrmChatAssistantIntegration(ClientBase):
             self._extract_field_value(
                 entity_row.get("fields"),
                 GptCrmChatAssistantConfig.THREAD_FIELD_FULL_KEY,
+            )
+            or self._extract_field_value(
+                entity_row.get("fields"),
+                GptCrmChatAssistantConfig.THREAD_FIELD_KEY,
             )
         )
         if existing:
