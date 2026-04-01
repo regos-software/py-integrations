@@ -501,6 +501,27 @@ def _tg_external_message_id(bot_hash: str, tg_chat_id: str, tg_message_id: int) 
     return f"tgmsg:{bot_hash}:{tg_chat_id}:{tg_message_id}"
 
 
+def _parse_tg_external_message_id(
+    value: Optional[str],
+) -> Tuple[Optional[str], Optional[str], Optional[int]]:
+    text = str(value or "").strip()
+    if not text:
+        return None, None, None
+    if not text.lower().startswith("tgmsg:"):
+        return None, None, None
+    parts = text.split(":", 3)
+    if len(parts) != 4:
+        return None, None, None
+    bot_hash = str(parts[1] or "").strip()
+    tg_chat_id = str(parts[2] or "").strip()
+    tg_message_id = _parse_int(parts[3], None)
+    if not bot_hash or not tg_chat_id or not tg_message_id:
+        return None, None, None
+    if tg_message_id <= 0:
+        return None, None, None
+    return bot_hash, tg_chat_id, int(tg_message_id)
+
+
 def _is_telegram_internal_external_message(external_message_id: Optional[str]) -> bool:
     value = str(external_message_id or "").strip().lower()
     return value.startswith("tgmsg:") or value.startswith("tgsys:")
@@ -2626,12 +2647,17 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
 
     @classmethod
     def _telegram_message_to_crm_markdown(
-        cls, connected_integration_id: str, message: Dict[str, Any]
+        cls,
+        connected_integration_id: str,
+        message: Dict[str, Any],
+        include_reply_quote: bool = True,
     ) -> Optional[str]:
         body_text = cls._telegram_message_body_to_crm_markdown(
             connected_integration_id=connected_integration_id,
             message=message,
         )
+        if not include_reply_quote:
+            return body_text
 
         reply_message = message.get("reply_to_message")
         if not isinstance(reply_message, dict):
@@ -2650,6 +2676,28 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if body_text:
             return f"{reply_quote}\n\n{body_text}"
         return reply_quote
+
+    @classmethod
+    def _extract_telegram_reply_metadata(
+        cls,
+        connected_integration_id: str,
+        message: Dict[str, Any],
+    ) -> Tuple[Optional[int], Optional[str]]:
+        reply_message = message.get("reply_to_message")
+        if not isinstance(reply_message, dict):
+            return None, None
+
+        reply_tg_message_id = _parse_int(str(reply_message.get("message_id") or ""), None)
+        reply_text = cls._telegram_message_body_to_crm_markdown(
+            connected_integration_id=connected_integration_id,
+            message=reply_message,
+        )
+        if not reply_text:
+            reply_text = cls._reply_message_placeholder_text(reply_message)
+        normalized_reply_text = str(reply_text or "").strip() or None
+        if not reply_tg_message_id or reply_tg_message_id <= 0:
+            return None, normalized_reply_text
+        return int(reply_tg_message_id), normalized_reply_text
 
     @classmethod
     def _telegram_message_body_to_crm_markdown(
@@ -4426,17 +4474,29 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             chat_id=chat_id,
         )
 
+        tg_message_id = _parse_int(str(message.get("message_id") or ""))
+        if not tg_message_id:
+            return
+
+        reply_tg_message_id, reply_text = cls._extract_telegram_reply_metadata(
+            connected_integration_id=connected_integration_id,
+            message=message,
+        )
+        reply_regos_message_id = await cls._resolve_regos_reply_id_for_telegram(
+            connected_integration_id=connected_integration_id,
+            bot_hash=bot_hash,
+            tg_chat_id=tg_chat_id,
+            chat_id=chat_id,
+            reply_tg_message_id=reply_tg_message_id,
+        )
         text, file_ids = await cls._prepare_telegram_message_content(
             connected_integration_id=connected_integration_id,
             bot_cfg=bot_cfg,
             chat_id=chat_id,
             message=message,
+            include_reply_quote=not bool(reply_regos_message_id),
         )
         if not text and not file_ids:
-            return
-
-        tg_message_id = _parse_int(str(message.get("message_id") or ""))
-        if not tg_message_id:
             return
 
         try:
@@ -4449,6 +4509,8 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 chat_id=chat_id,
                 text=text,
                 file_ids=file_ids,
+                reply_id=reply_regos_message_id,
+                replay_text=reply_text if reply_regos_message_id else None,
             )
             return
         except ChatMessageAddClosedEntityError as error:
@@ -4493,11 +4555,19 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             chat_id=fresh_chat_id,
         )
 
+        fresh_reply_regos_message_id = await cls._resolve_regos_reply_id_for_telegram(
+            connected_integration_id=connected_integration_id,
+            bot_hash=bot_hash,
+            tg_chat_id=tg_chat_id,
+            chat_id=fresh_chat_id,
+            reply_tg_message_id=reply_tg_message_id,
+        )
         fresh_text, fresh_file_ids = await cls._prepare_telegram_message_content(
             connected_integration_id=connected_integration_id,
             bot_cfg=bot_cfg,
             chat_id=fresh_chat_id,
             message=message,
+            include_reply_quote=not bool(fresh_reply_regos_message_id),
         )
         if not fresh_text and not fresh_file_ids:
             return
@@ -4511,6 +4581,8 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             chat_id=fresh_chat_id,
             text=fresh_text,
             file_ids=fresh_file_ids,
+            reply_id=fresh_reply_regos_message_id,
+            replay_text=reply_text if fresh_reply_regos_message_id else None,
         )
 
     @classmethod
@@ -4565,21 +4637,34 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             chat_id=chat_id,
         )
 
-        text, file_ids = await cls._prepare_telegram_message_content(
-            connected_integration_id=connected_integration_id,
-            bot_cfg=bot_cfg,
-            chat_id=chat_id,
-            message=message,
-        )
-        if text is None and not file_ids:
-            return
-
         regos_message_id = await cls._resolve_regos_message_id_by_tg(
             connected_integration_id=connected_integration_id,
             bot_hash=bot_hash,
             tg_chat_id=tg_chat_id,
             tg_message_id=tg_message_id,
         )
+        reply_tg_message_id, reply_text = cls._extract_telegram_reply_metadata(
+            connected_integration_id=connected_integration_id,
+            message=message,
+        )
+        reply_regos_message_id = await cls._resolve_regos_reply_id_for_telegram(
+            connected_integration_id=connected_integration_id,
+            bot_hash=bot_hash,
+            tg_chat_id=tg_chat_id,
+            chat_id=chat_id,
+            reply_tg_message_id=reply_tg_message_id,
+        )
+        include_reply_quote = bool(regos_message_id) or not bool(reply_regos_message_id)
+        text, file_ids = await cls._prepare_telegram_message_content(
+            connected_integration_id=connected_integration_id,
+            bot_cfg=bot_cfg,
+            chat_id=chat_id,
+            message=message,
+            include_reply_quote=include_reply_quote,
+        )
+        if text is None and not file_ids:
+            return
+
         if not regos_message_id:
             regos_message_id = await cls._add_or_get_regos_message_by_telegram(
                 connected_integration_id=connected_integration_id,
@@ -4590,6 +4675,8 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 chat_id=chat_id,
                 text=text,
                 file_ids=file_ids,
+                reply_id=reply_regos_message_id,
+                replay_text=reply_text if reply_regos_message_id else None,
             )
             if not regos_message_id:
                 return
@@ -4669,10 +4756,12 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         bot_cfg: BotSlotConfig,
         chat_id: str,
         message: Dict[str, Any],
+        include_reply_quote: bool = True,
     ) -> Tuple[Optional[str], List[int]]:
         text = cls._telegram_message_to_crm_markdown(
             connected_integration_id=connected_integration_id,
             message=message,
+            include_reply_quote=include_reply_quote,
         )
         file_ids, oversized_files_count = await cls._upload_telegram_files(
             connected_integration_id=connected_integration_id,
@@ -4704,6 +4793,48 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         )
         resolved = str(message_id or "").strip()
         return resolved or None
+
+    @classmethod
+    async def _resolve_regos_reply_id_for_telegram(
+        cls,
+        connected_integration_id: str,
+        bot_hash: str,
+        tg_chat_id: str,
+        chat_id: str,
+        reply_tg_message_id: Optional[int],
+    ) -> Optional[str]:
+        if not reply_tg_message_id or reply_tg_message_id <= 0:
+            return None
+
+        resolved = await cls._resolve_regos_message_id_by_tg(
+            connected_integration_id=connected_integration_id,
+            bot_hash=bot_hash,
+            tg_chat_id=tg_chat_id,
+            tg_message_id=int(reply_tg_message_id),
+        )
+        if resolved:
+            return resolved
+
+        recovered = await cls._find_regos_message_id_by_external_id(
+            connected_integration_id=connected_integration_id,
+            chat_id=chat_id,
+            external_message_id=_tg_external_message_id(
+                bot_hash=bot_hash,
+                tg_chat_id=tg_chat_id,
+                tg_message_id=int(reply_tg_message_id),
+            ),
+        )
+        if recovered:
+            await cls._redis_set_mapping(
+                cls._msgmap_tg_to_regos_key(
+                    connected_integration_id,
+                    bot_hash,
+                    tg_chat_id,
+                    int(reply_tg_message_id),
+                ),
+                recovered,
+            )
+        return recovered
 
     @classmethod
     async def _find_regos_message_id_by_external_id(
@@ -4767,6 +4898,65 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         return None
 
     @classmethod
+    async def _resolve_tg_reply_message_id_for_regos(
+        cls,
+        connected_integration_id: str,
+        bot_hash: str,
+        tg_chat_id: str,
+        chat_id: str,
+        reply_id: Optional[str],
+    ) -> Optional[int]:
+        regos_reply_id = str(reply_id or "").strip()
+        if not regos_reply_id:
+            return None
+
+        mapped_reply_raw = await cls._redis_get(
+            cls._msgmap_regos_to_tg_key(connected_integration_id, regos_reply_id)
+        )
+        mapped_reply_id = _parse_int(mapped_reply_raw, None)
+        if mapped_reply_id and mapped_reply_id > 0:
+            return int(mapped_reply_id)
+
+        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+            response = await api.chat.chat_message.get(
+                ChatMessageGetRequest(
+                    chat_id=chat_id,
+                    ids=[regos_reply_id],
+                    limit=1,
+                    offset=0,
+                    include_staff_private=True,
+                )
+            )
+        if not response.ok:
+            logger.warning(
+                "ChatMessage/Get rejected while resolving reply mapping: ci=%s chat_id=%s reply_id=%s payload=%s",
+                connected_integration_id,
+                chat_id,
+                regos_reply_id,
+                response.result,
+            )
+            return None
+
+        rows = response.result or []
+        if not rows:
+            return None
+
+        reply_row = rows[0]
+        ext_bot_hash, ext_tg_chat_id, ext_tg_message_id = _parse_tg_external_message_id(
+            getattr(reply_row, "external_message_id", None)
+        )
+        if not ext_tg_message_id:
+            return None
+        if ext_bot_hash != bot_hash or ext_tg_chat_id != str(tg_chat_id):
+            return None
+
+        await cls._redis_set_mapping(
+            cls._msgmap_regos_to_tg_key(connected_integration_id, regos_reply_id),
+            str(ext_tg_message_id),
+        )
+        return int(ext_tg_message_id)
+
+    @classmethod
     async def _add_or_get_regos_message_by_telegram(
         cls,
         connected_integration_id: str,
@@ -4777,6 +4967,8 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         chat_id: str,
         text: Optional[str],
         file_ids: List[int],
+        reply_id: Optional[str] = None,
+        replay_text: Optional[str] = None,
     ) -> Optional[str]:
         ext_message_id = _tg_external_message_id(bot_hash, tg_chat_id, tg_message_id)
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
@@ -4784,6 +4976,8 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 "ChatMessage/Add",
                 ChatMessageAddRequest(
                     chat_id=chat_id,
+                    reply_id=reply_id,
+                    replay_text=replay_text,
                     author_entity_type="Lead",
                     author_entity_id=lead_id,
                     message_type=ChatMessageTypeEnum.Regular,
@@ -6042,12 +6236,20 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     chat_message.author_entity_type,
                 )
 
+            reply_to_tg_message_id = await cls._resolve_tg_reply_message_id_for_regos(
+                connected_integration_id=connected_integration_id,
+                bot_hash=bot_hash,
+                tg_chat_id=tg_chat_id,
+                chat_id=chat_id,
+                reply_id=getattr(chat_message, "reply_id", None),
+            )
             sent_tg_message_id = await cls._send_chat_message_to_telegram(
                 bot_cfg=bot_cfg,
                 tg_chat_id=tg_chat_id,
                 text=chat_message.text or "",
                 file_ids=chat_message.file_ids or [],
                 connected_integration_id=connected_integration_id,
+                reply_to_message_id=reply_to_tg_message_id,
             )
             if not sent_tg_message_id:
                 return
@@ -6058,6 +6260,42 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             )
 
     @classmethod
+    async def _telegram_send_with_optional_reply(
+        cls,
+        send_callable: Any,
+        *,
+        reply_to_message_id: Optional[int] = None,
+        **kwargs: Any,
+    ) -> Any:
+        if reply_to_message_id and reply_to_message_id > 0:
+            try:
+                return await send_callable(
+                    **kwargs,
+                    reply_to_message_id=int(reply_to_message_id),
+                    allow_sending_without_reply=True,
+                )
+            except Exception as error:
+                error_text = str(error or "").lower()
+                if not any(
+                    token in error_text
+                    for token in (
+                        "reply message not found",
+                        "replied message not found",
+                        "message to be replied not found",
+                        "reply_to_message_id",
+                        "allow_sending_without_reply",
+                        "unexpected keyword argument",
+                    )
+                ):
+                    raise
+                logger.debug(
+                    "Telegram send with reply failed, retrying without reply: reply_to=%s error=%s",
+                    reply_to_message_id,
+                    error,
+                )
+        return await send_callable(**kwargs)
+
+    @classmethod
     async def _send_chat_message_to_telegram(
         cls,
         bot_cfg: BotSlotConfig,
@@ -6065,6 +6303,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         text: str,
         file_ids: List[int],
         connected_integration_id: str,
+        reply_to_message_id: Optional[int] = None,
     ) -> Optional[int]:
         bot = await cls._get_bot(bot_cfg.token)
         target_chat = _tg_chat_id_cast(tg_chat_id)
@@ -6099,35 +6338,45 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 caption_used = True
 
             if _is_photo_extension(file_model.extension):
-                sent = await bot.send_photo(
+                sent = await cls._telegram_send_with_optional_reply(
+                    bot.send_photo,
+                    reply_to_message_id=reply_to_message_id,
                     chat_id=target_chat,
                     photo=input_file,
                     caption=caption,
                     parse_mode=parse_mode if caption and parse_mode else None,
                 )
             elif _is_video_extension(file_model.extension):
-                sent = await bot.send_video(
+                sent = await cls._telegram_send_with_optional_reply(
+                    bot.send_video,
+                    reply_to_message_id=reply_to_message_id,
                     chat_id=target_chat,
                     video=input_file,
                     caption=caption,
                     parse_mode=parse_mode if caption and parse_mode else None,
                 )
             elif _is_voice_extension(file_model.extension):
-                sent = await bot.send_voice(
+                sent = await cls._telegram_send_with_optional_reply(
+                    bot.send_voice,
+                    reply_to_message_id=reply_to_message_id,
                     chat_id=target_chat,
                     voice=input_file,
                     caption=caption,
                     parse_mode=parse_mode if caption and parse_mode else None,
                 )
             elif _is_audio_extension(file_model.extension):
-                sent = await bot.send_audio(
+                sent = await cls._telegram_send_with_optional_reply(
+                    bot.send_audio,
+                    reply_to_message_id=reply_to_message_id,
                     chat_id=target_chat,
                     audio=input_file,
                     caption=caption,
                     parse_mode=parse_mode if caption and parse_mode else None,
                 )
             else:
-                sent = await bot.send_document(
+                sent = await cls._telegram_send_with_optional_reply(
+                    bot.send_document,
+                    reply_to_message_id=reply_to_message_id,
                     chat_id=target_chat,
                     document=input_file,
                     caption=caption,
@@ -6137,7 +6386,9 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 first_sent_id = int(sent.message_id)
 
         if rendered_text and not caption_used:
-            sent = await bot.send_message(
+            sent = await cls._telegram_send_with_optional_reply(
+                bot.send_message,
+                reply_to_message_id=reply_to_message_id,
                 chat_id=target_chat,
                 text=rendered_text,
                 parse_mode=parse_mode,
@@ -6215,12 +6466,20 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 pass
 
         edited_text = f"(edited)\n{text}".strip()
+        reply_to_tg_message_id = await cls._resolve_tg_reply_message_id_for_regos(
+            connected_integration_id=connected_integration_id,
+            bot_hash=bot_hash,
+            tg_chat_id=tg_chat_id,
+            chat_id=chat_id,
+            reply_id=getattr(msg, "reply_id", None),
+        )
         sent_id = await cls._send_chat_message_to_telegram(
             bot_cfg=bot_cfg,
             tg_chat_id=tg_chat_id,
             text=edited_text,
             file_ids=msg.file_ids or [],
             connected_integration_id=connected_integration_id,
+            reply_to_message_id=reply_to_tg_message_id,
         )
         if sent_id:
             await cls._redis_set_mapping(

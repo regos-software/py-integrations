@@ -23,6 +23,12 @@ class ChatMessage(BaseSchema):
 
     id: Optional[str] = PydField(default=None, description="Message UUID.")
     chat_id: Optional[str] = PydField(default=None, description="Chat UUID.")
+    reply_id: Optional[str] = PydField(
+        default=None, description="Reply-to message UUID."
+    )
+    replay_text: Optional[str] = PydField(
+        default=None, description="Reply-to message text snapshot."
+    )
     author_entity_type: Optional[str] = PydField(
         default=None, description="Author entity type."
     )
@@ -77,6 +83,12 @@ class ChatMessageAddRequest(BaseSchema):
     model_config = ConfigDict(extra="forbid")
 
     chat_id: str = PydField(..., description="Chat UUID.")
+    reply_id: Optional[str] = PydField(
+        default=None, description="Reply-to message UUID."
+    )
+    replay_text: Optional[str] = PydField(
+        default=None, description="Reply-to message text snapshot."
+    )
     author_entity_type: Optional[str] = PydField(
         default=None, description="Optional explicit author entity type."
     )
