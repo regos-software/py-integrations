@@ -21,6 +21,7 @@ from schemas.api.chat.chat_message import (
     ChatMessageGetRequest,
     ChatMessageTypeEnum,
 )
+from schemas.api.chat.quick_reply import QuickReplyGetRequest
 from schemas.api.files.file import FileGetRequest
 from schemas.api.integrations.connected_integration_setting import (
     ConnectedIntegrationSettingRequest,
@@ -58,7 +59,6 @@ class GptCrmChatAssistantConfig:
     DEFAULT_AUTO_SEND_COOLDOWN_SEC = 60
     FIELD_BOOTSTRAP_TTL_SEC = 10 * 60
     QUICK_REPLY_CACHE_TTL_SEC = 5 * 60
-    QUICK_REPLY_GET_METHODS = ("QuickReply/Get",)
     MAX_QUICK_REPLIES_FETCH = 100
     MAX_QUICK_REPLIES_IN_PROMPT = 30
     MAX_QUICK_REPLY_TEXT_LEN = 200
@@ -850,37 +850,31 @@ class GptCrmChatAssistantIntegration(ClientBase):
         self,
         connected_integration_id: str,
     ) -> List[str]:
-        payload = {
-            "limit": GptCrmChatAssistantConfig.MAX_QUICK_REPLIES_FETCH,
-            "offset": 0,
-        }
-        last_error: Optional[str] = None
-
-        for method_path in GptCrmChatAssistantConfig.QUICK_REPLY_GET_METHODS:
-            try:
-                async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-                    response = await api.call(
-                        method_path,
-                        payload,
-                        APIBaseResponse[Any],
-                    )
-            except Exception as error:
-                last_error = f"{method_path}: {error}"
-                continue
-
-            if response.ok:
-                quick_replies = self._normalize_quick_reply_texts(response.result)
-                return quick_replies
-
-            description = self._api_error_description(response.result)
-            last_error = f"{method_path}: {description or response.result}"
-
-        if last_error:
+        request = QuickReplyGetRequest(
+            limit=GptCrmChatAssistantConfig.MAX_QUICK_REPLIES_FETCH,
+            offset=0,
+        )
+        try:
+            async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+                response = await api.chat.quick_reply.get(request)
+        except Exception as error:
             logger.warning(
                 "QuickReply/Get failed: ci=%s error=%s",
                 connected_integration_id,
-                last_error,
+                error,
             )
+
+            return []
+
+        if response.ok:
+            return self._normalize_quick_reply_texts(response.result)
+
+        description = self._api_error_description(response.result)
+        logger.warning(
+            "QuickReply/Get failed: ci=%s error=%s",
+            connected_integration_id,
+            description or response.result,
+        )
         return []
 
     async def _get_quick_replies(

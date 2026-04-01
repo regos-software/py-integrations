@@ -208,8 +208,10 @@ class RegosAPI:
     class Chat:
         def __init__(self, api: "RegosAPI"):
             from core.api.chat.chat_message import ChatMessageService
+            from core.api.chat.quick_reply import QuickReplyService
 
             self.chat_message = ChatMessageService(api)
+            self.quick_reply = QuickReplyService(api)
 
     class Files:
         def __init__(self, api: "RegosAPI"):
