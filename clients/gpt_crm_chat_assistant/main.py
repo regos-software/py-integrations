@@ -57,6 +57,11 @@ class GptCrmChatAssistantConfig:
     DEFAULT_AUTO_SEND_MAX_PER_CHAT_HOUR = 3
     DEFAULT_AUTO_SEND_COOLDOWN_SEC = 60
     FIELD_BOOTSTRAP_TTL_SEC = 10 * 60
+    QUICK_REPLY_CACHE_TTL_SEC = 5 * 60
+    QUICK_REPLY_GET_METHODS = ("QuickReply/Get", "QiuckReplies/Get")
+    MAX_QUICK_REPLIES_FETCH = 100
+    MAX_QUICK_REPLIES_IN_PROMPT = 30
+    MAX_QUICK_REPLY_TEXT_LEN = 200
 
     THREAD_FIELD_ENTITY_TYPES = ("Lead", "Deal", "Task")
     THREAD_FIELD_KEY = "gpt_thread_id"
@@ -295,6 +300,8 @@ class GptCrmChatAssistantIntegration(ClientBase):
     _LOCAL_BOT_CACHE_LOCK = asyncio.Lock()
     _LOCAL_FIELDS_READY: Dict[str, float] = {}
     _LOCAL_FIELDS_READY_LOCK = asyncio.Lock()
+    _LOCAL_QUICK_REPLIES_CACHE: Dict[str, Tuple[List[str], float]] = {}
+    _LOCAL_QUICK_REPLIES_LOCK = asyncio.Lock()
     _LOCAL_AUTO_SEND_COOLDOWN: Dict[str, float] = {}
     _LOCAL_AUTO_SEND_HOURLY: Dict[str, int] = {}
     _LOCAL_AUTO_SEND_LOCK = asyncio.Lock()
@@ -339,6 +346,10 @@ class GptCrmChatAssistantIntegration(ClientBase):
     @classmethod
     def _fields_ready_key(cls, connected_integration_id: str) -> str:
         return cls._redis_key("fields_ready", connected_integration_id)
+
+    @classmethod
+    def _quick_replies_cache_key(cls, connected_integration_id: str) -> str:
+        return cls._redis_key("quick_replies", connected_integration_id)
 
     @staticmethod
     async def _redis_get(key: str) -> Optional[str]:
@@ -736,6 +747,15 @@ class GptCrmChatAssistantIntegration(ClientBase):
             cls._LOCAL_FIELDS_READY.pop(ci, None)
 
     @classmethod
+    async def _clear_quick_replies_cache(cls, connected_integration_id: str) -> None:
+        ci = str(connected_integration_id or "").strip()
+        if not ci:
+            return
+        await cls._redis_delete(cls._quick_replies_cache_key(ci))
+        async with cls._LOCAL_QUICK_REPLIES_LOCK:
+            cls._LOCAL_QUICK_REPLIES_CACHE.pop(ci, None)
+
+    @classmethod
     async def _ensure_thread_fields_ready(
         cls,
         connected_integration_id: str,
@@ -745,6 +765,136 @@ class GptCrmChatAssistantIntegration(ClientBase):
             return []
         rows = await cls._ensure_thread_custom_fields(connected_integration_id)
         await cls._mark_fields_bootstrapped(connected_integration_id)
+        return rows
+
+    @staticmethod
+    def _normalize_quick_reply_texts(raw_rows: Any) -> List[str]:
+        if not isinstance(raw_rows, list):
+            return []
+
+        rows: List[str] = []
+        seen: Set[str] = set()
+        for row in raw_rows:
+            if isinstance(row, dict):
+                text_raw = row.get("text")
+            else:
+                text_raw = getattr(row, "text", None)
+            text = _normalize_text(text_raw)
+            if not text:
+                continue
+            if len(text) > GptCrmChatAssistantConfig.MAX_QUICK_REPLY_TEXT_LEN:
+                text = text[: GptCrmChatAssistantConfig.MAX_QUICK_REPLY_TEXT_LEN].rstrip()
+            key = text.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(text)
+            if len(rows) >= GptCrmChatAssistantConfig.MAX_QUICK_REPLIES_FETCH:
+                break
+        return rows
+
+    @classmethod
+    async def _set_quick_replies_cache(
+        cls,
+        connected_integration_id: str,
+        quick_replies: List[str],
+    ) -> None:
+        ci = str(connected_integration_id or "").strip()
+        if not ci:
+            return
+        normalized = cls._normalize_quick_reply_texts(
+            [{"text": text} for text in (quick_replies or [])]
+        )
+        ttl = GptCrmChatAssistantConfig.QUICK_REPLY_CACHE_TTL_SEC
+        await cls._redis_set(
+            cls._quick_replies_cache_key(ci),
+            json.dumps(normalized, ensure_ascii=False, separators=(",", ":")),
+            ttl,
+        )
+        async with cls._LOCAL_QUICK_REPLIES_LOCK:
+            cls._LOCAL_QUICK_REPLIES_CACHE[ci] = (normalized, time.monotonic() + ttl)
+
+    @classmethod
+    async def _get_quick_replies_cached(
+        cls,
+        connected_integration_id: str,
+    ) -> Optional[List[str]]:
+        ci = str(connected_integration_id or "").strip()
+        if not ci:
+            return None
+
+        now = time.monotonic()
+        async with cls._LOCAL_QUICK_REPLIES_LOCK:
+            row = cls._LOCAL_QUICK_REPLIES_CACHE.get(ci)
+            if row and row[1] > now:
+                return list(row[0])
+            if row:
+                cls._LOCAL_QUICK_REPLIES_CACHE.pop(ci, None)
+
+        cached = await cls._redis_get(cls._quick_replies_cache_key(ci))
+        if not cached:
+            return None
+        try:
+            parsed = json.loads(cached)
+        except Exception:
+            return None
+        normalized = cls._normalize_quick_reply_texts(
+            [{"text": item} for item in parsed] if isinstance(parsed, list) else []
+        )
+        ttl = GptCrmChatAssistantConfig.QUICK_REPLY_CACHE_TTL_SEC
+        async with cls._LOCAL_QUICK_REPLIES_LOCK:
+            cls._LOCAL_QUICK_REPLIES_CACHE[ci] = (normalized, time.monotonic() + ttl)
+        return normalized
+
+    async def _fetch_quick_replies_from_api(
+        self,
+        connected_integration_id: str,
+    ) -> List[str]:
+        payload = {
+            "limit": GptCrmChatAssistantConfig.MAX_QUICK_REPLIES_FETCH,
+            "offset": 0,
+        }
+        last_error: Optional[str] = None
+
+        for method_path in GptCrmChatAssistantConfig.QUICK_REPLY_GET_METHODS:
+            try:
+                async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+                    response = await api.call(
+                        method_path,
+                        payload,
+                        APIBaseResponse[Any],
+                    )
+            except Exception as error:
+                last_error = f"{method_path}: {error}"
+                continue
+
+            if response.ok:
+                quick_replies = self._normalize_quick_reply_texts(response.result)
+                return quick_replies
+
+            description = self._api_error_description(response.result)
+            last_error = f"{method_path}: {description or response.result}"
+
+        if last_error:
+            logger.warning(
+                "QuickReply/Get failed: ci=%s error=%s",
+                connected_integration_id,
+                last_error,
+            )
+        return []
+
+    async def _get_quick_replies(
+        self,
+        connected_integration_id: str,
+        force_refresh: bool = False,
+    ) -> List[str]:
+        if not force_refresh:
+            cached = await self._get_quick_replies_cached(connected_integration_id)
+            if cached is not None:
+                return cached
+
+        rows = await self._fetch_quick_replies_from_api(connected_integration_id)
+        await self._set_quick_replies_cache(connected_integration_id, rows)
         return rows
 
     async def connect(self, **_: Any) -> Dict[str, Any]:
@@ -788,6 +938,7 @@ class GptCrmChatAssistantIntegration(ClientBase):
         ci = str(self.connected_integration_id)
         await self._clear_settings_cache(ci)
         await self._clear_fields_bootstrap_cache(ci)
+        await self._clear_quick_replies_cache(ci)
         return {"status": "disconnected"}
 
     async def reconnect(self, **_: Any) -> Dict[str, Any]:
@@ -972,12 +1123,14 @@ class GptCrmChatAssistantIntegration(ClientBase):
             chat_id=chat_id,
             source_message=message,
         )
+        quick_replies = await self._get_quick_replies(runtime.connected_integration_id)
         generation_result = await self._generate_suggestions(
             runtime=runtime,
             source_message=message,
             context=context,
             context_image_urls=context_image_urls,
             conversation_id=conversation_id,
+            quick_replies=quick_replies,
         )
         suggestions = generation_result.get("suggestions") or []
         best_reply = _normalize_text(generation_result.get("best_reply"))
@@ -1808,6 +1961,7 @@ class GptCrmChatAssistantIntegration(ClientBase):
         context: str,
         context_image_urls: Optional[List[str]] = None,
         conversation_id: Optional[str] = None,
+        quick_replies: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         source_text = _normalize_text(source_message.text)
         if not source_text and self._extract_message_file_ids(source_message):
@@ -1826,6 +1980,20 @@ class GptCrmChatAssistantIntegration(ClientBase):
             f"Последнее сообщение клиента: {source_text}\n\n"
             f"Контекст диалога:\n{context}"
         )
+        normalized_quick_replies = self._normalize_quick_reply_texts(
+            [{"text": item} for item in (quick_replies or [])]
+        )
+        quick_replies_for_prompt = normalized_quick_replies[
+            : GptCrmChatAssistantConfig.MAX_QUICK_REPLIES_IN_PROMPT
+        ]
+        if quick_replies_for_prompt:
+            quick_reply_rows = "\n".join(f"- {text}" for text in quick_replies_for_prompt)
+            user_payload += (
+                "\n\nДоступные шаблоны быстрых ответов CRM (используй их, если релевантны):\n"
+                f"{quick_reply_rows}\n"
+                "Если подходит один из шаблонов, отдай предпочтение ему без изменений "
+                "или с минимальной правкой."
+            )
         unique_image_urls: List[str] = []
         seen_image_urls: Set[str] = set()
         for value in context_image_urls or []:
