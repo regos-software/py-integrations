@@ -46,10 +46,13 @@ class GptCrmChatAssistantConfig:
     MAX_CONTEXT_FILE_IDS = 50
     MAX_FILES_PER_MESSAGE = 5
     MAX_CONTEXT_IMAGE_URLS = 4
+    FILE_CACHE_TTL_SEC = 60 * 60
 
     DEFAULT_SUGGESTIONS_COUNT = 3
     DEFAULT_HISTORY_LIMIT = 20
     DEFAULT_TEMPERATURE = 0.3
+    DEFAULT_CONTEXT_SOURCE = "crm"
+    ALLOWED_CONTEXT_SOURCES = {"crm", "conversation"}
     DEFAULT_AUTO_JOIN_ENABLED = True
     DEFAULT_AUTO_JOIN_ENTITY_TYPES = {"lead", "deal", "task"}
     ALLOWED_AUTO_JOIN_ENTITY_TYPES = {"lead", "deal", "task"}
@@ -78,6 +81,7 @@ class RuntimeConfig:
     assistant_api_key: str
     assistant_model: str
     assistant_prompt: str
+    assistant_context_source: str
     assistant_auto_join_enabled: bool
     assistant_auto_join_entities: Set[str]
     assistant_suggestions_count: int
@@ -298,6 +302,8 @@ class GptCrmChatAssistantIntegration(ClientBase):
 
     _LOCAL_BOT_CACHE: Dict[str, Tuple[int, float]] = {}
     _LOCAL_BOT_CACHE_LOCK = asyncio.Lock()
+    _LOCAL_FILE_CACHE: Dict[str, Tuple[Dict[str, Any], float]] = {}
+    _LOCAL_FILE_CACHE_LOCK = asyncio.Lock()
     _LOCAL_FIELDS_READY: Dict[str, float] = {}
     _LOCAL_FIELDS_READY_LOCK = asyncio.Lock()
     _LOCAL_QUICK_REPLIES_CACHE: Dict[str, Tuple[List[str], float]] = {}
@@ -350,6 +356,10 @@ class GptCrmChatAssistantIntegration(ClientBase):
     @classmethod
     def _quick_replies_cache_key(cls, connected_integration_id: str) -> str:
         return cls._redis_key("quick_replies", connected_integration_id)
+
+    @classmethod
+    def _file_cache_key(cls, connected_integration_id: str, file_id: int) -> str:
+        return cls._redis_key("file", connected_integration_id, int(file_id))
 
     @staticmethod
     async def _redis_get(key: str) -> Optional[str]:
@@ -483,6 +493,10 @@ class GptCrmChatAssistantIntegration(ClientBase):
         if not prompt:
             raise ValueError("assistant_prompt is required")
 
+        context_source = str(settings_map.get("assistant_context_source") or "").strip().lower()
+        if context_source not in GptCrmChatAssistantConfig.ALLOWED_CONTEXT_SOURCES:
+            context_source = GptCrmChatAssistantConfig.DEFAULT_CONTEXT_SOURCE
+
         suggestions_count = _parse_int(
             settings_map.get("assistant_suggestions_count"),
             GptCrmChatAssistantConfig.DEFAULT_SUGGESTIONS_COUNT,
@@ -541,6 +555,7 @@ class GptCrmChatAssistantIntegration(ClientBase):
             assistant_api_key=api_key,
             assistant_model=model,
             assistant_prompt=prompt,
+            assistant_context_source=context_source,
             assistant_auto_join_enabled=auto_join_enabled,
             assistant_auto_join_entities=auto_join_entities,
             assistant_suggestions_count=suggestions_count,
@@ -903,21 +918,24 @@ class GptCrmChatAssistantIntegration(ClientBase):
             }
 
         try:
-            field_ensure_result = await self._ensure_thread_fields_ready(ci, force=True)
-        except Exception as error:
-            logger.warning("Required CRM field ensure failed: ci=%s error=%s", ci, error)
-            return self._error_response(1003, str(error)).dict()
-
-        try:
             runtime = await self._load_runtime(ci, force_refresh_settings=True)
         except Exception as error:
             return self._error_response(1001, str(error)).dict()
+
+        field_ensure_result: List[Dict[str, Any]] = []
+        if runtime.assistant_context_source == "conversation":
+            try:
+                field_ensure_result = await self._ensure_thread_fields_ready(ci, force=True)
+            except Exception as error:
+                logger.warning("Required CRM field ensure failed: ci=%s error=%s", ci, error)
+                return self._error_response(1003, str(error)).dict()
 
         subscribe_result = await self._subscribe_required_webhooks(ci)
         return {
             "status": "connected",
             "integration_key": GptCrmChatAssistantConfig.INTEGRATION_KEY,
             "model": runtime.assistant_model,
+            "context_source": runtime.assistant_context_source,
             "webhooks_subscription": subscribe_result,
             "required_fields": field_ensure_result,
             "auto_join_enabled": runtime.assistant_auto_join_enabled,
@@ -1031,12 +1049,6 @@ class GptCrmChatAssistantIntegration(ClientBase):
         if not await self._is_connected_integration_active(ci):
             return {"status": "ignored", "reason": "connected_integration_inactive"}
 
-        try:
-            await self._ensure_thread_fields_ready(ci, force=False)
-        except Exception as error:
-            logger.warning("Required CRM field ensure failed on webhook: ci=%s error=%s", ci, error)
-            return self._error_response(1003, str(error)).dict()
-
         normalized_action, payload, event_id = self._normalize_regos_webhook_payload(
             action=action,
             data=data,
@@ -1057,6 +1069,13 @@ class GptCrmChatAssistantIntegration(ClientBase):
             runtime = await self._load_runtime(ci)
         except Exception as error:
             return self._error_response(1001, str(error)).dict()
+
+        if runtime.assistant_context_source == "conversation":
+            try:
+                await self._ensure_thread_fields_ready(ci, force=False)
+            except Exception as error:
+                logger.warning("Required CRM field ensure failed on webhook: ci=%s error=%s", ci, error)
+                return self._error_response(1003, str(error)).dict()
 
         try:
             return await self._process_chat_message_added(
@@ -1090,20 +1109,26 @@ class GptCrmChatAssistantIntegration(ClientBase):
         if not self._should_generate_for_message(message):
             return {"status": "ignored", "reason": "message_filtered"}
 
-        conversation_state = await self._resolve_or_create_chat_conversation(
-            runtime=runtime,
-            chat_id=chat_id,
-        )
-        conversation_status = str(conversation_state.get("status") or "")
-        if conversation_status == "unsupported_entity_type":
-            reason = conversation_status or "unsupported_entity_type"
-            return {"status": "ignored", "reason": reason}
-
-        conversation_id = (
-            str(conversation_state.get("conversation_id") or "").strip()
-            if conversation_status == "ok"
-            else ""
-        ) or None
+        use_conversation_context = runtime.assistant_context_source == "conversation"
+        conversation_state: Dict[str, Any] = {}
+        conversation_status = "disabled"
+        conversation_id: Optional[str] = None
+        if use_conversation_context:
+            conversation_state = await self._resolve_or_create_chat_conversation(
+                runtime=runtime,
+                chat_id=chat_id,
+            )
+            conversation_status = str(conversation_state.get("status") or "")
+            if conversation_status != "ok":
+                reason = conversation_status or "conversation_unavailable"
+                return {"status": "ignored", "reason": reason}
+            conversation_id = (
+                str(conversation_state.get("conversation_id") or "").strip()
+                if conversation_status == "ok"
+                else ""
+            ) or None
+            if not conversation_id:
+                return {"status": "ignored", "reason": "conversation_id_missing"}
 
         bot_id = await self._resolve_or_join_chatbot(
             runtime=runtime,
@@ -1116,6 +1141,7 @@ class GptCrmChatAssistantIntegration(ClientBase):
             runtime=runtime,
             chat_id=chat_id,
             source_message=message,
+            include_history=runtime.assistant_context_source == "crm",
         )
         quick_replies = await self._get_quick_replies(runtime.connected_integration_id)
         generation_result = await self._generate_suggestions(
@@ -1264,6 +1290,33 @@ class GptCrmChatAssistantIntegration(ClientBase):
         ext = str(file_row.get("extension") or "").strip().lower()
         return ext in {"jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff", "heic", "heif"}
 
+    @staticmethod
+    def _normalize_file_meta_row(file_row: Any) -> Optional[Dict[str, Any]]:
+        if isinstance(file_row, dict):
+            file_id = _parse_int(file_row.get("id"), 0)
+            if file_id <= 0:
+                return None
+            return {
+                "id": int(file_id),
+                "name": str(file_row.get("name", "") or "").strip(),
+                "extension": str(file_row.get("extension", "") or "").strip().lower(),
+                "mime_type": str(file_row.get("mime_type", "") or "").strip().lower(),
+                "size": _parse_int(file_row.get("size"), 0),
+                "url": str(file_row.get("url", "") or "").strip(),
+            }
+
+        file_id = _parse_int(getattr(file_row, "id", 0), 0)
+        if file_id <= 0:
+            return None
+        return {
+            "id": int(file_id),
+            "name": str(getattr(file_row, "name", "") or "").strip(),
+            "extension": str(getattr(file_row, "extension", "") or "").strip().lower(),
+            "mime_type": str(getattr(file_row, "mime_type", "") or "").strip().lower(),
+            "size": _parse_int(getattr(file_row, "size", 0), 0),
+            "url": str(getattr(file_row, "url", "") or "").strip(),
+        }
+
     async def _fetch_files_map(
         self,
         connected_integration_id: str,
@@ -1274,12 +1327,60 @@ class GptCrmChatAssistantIntegration(ClientBase):
             return {}
         unique_ids = unique_ids[: GptCrmChatAssistantConfig.MAX_CONTEXT_FILE_IDS]
 
+        files_map: Dict[int, Dict[str, Any]] = {}
+        ttl = GptCrmChatAssistantConfig.FILE_CACHE_TTL_SEC
+        now = time.monotonic()
+
+        # 1) Resolve from local in-memory cache.
+        async with self._LOCAL_FILE_CACHE_LOCK:
+            for file_id in unique_ids:
+                cache_key = self._file_cache_key(connected_integration_id, file_id)
+                cached = self._LOCAL_FILE_CACHE.get(cache_key)
+                if cached and cached[1] > now:
+                    files_map[int(file_id)] = dict(cached[0])
+                    continue
+                if cached:
+                    self._LOCAL_FILE_CACHE.pop(cache_key, None)
+
+        # 2) Resolve remaining ids from Redis cache.
+        missing_ids = [int(file_id) for file_id in unique_ids if int(file_id) not in files_map]
+        if missing_ids:
+            local_promote: Dict[str, Dict[str, Any]] = {}
+            for file_id in missing_ids:
+                cache_key = self._file_cache_key(connected_integration_id, file_id)
+                cached_raw = await self._redis_get(cache_key)
+                if not cached_raw:
+                    continue
+                try:
+                    parsed = json.loads(cached_raw)
+                except Exception:
+                    continue
+                normalized = self._normalize_file_meta_row(parsed)
+                if not normalized:
+                    continue
+                normalized_id = _parse_int(normalized.get("id"), 0)
+                if normalized_id != int(file_id):
+                    continue
+                files_map[int(file_id)] = normalized
+                local_promote[cache_key] = normalized
+
+            if local_promote:
+                expires_at = time.monotonic() + ttl
+                async with self._LOCAL_FILE_CACHE_LOCK:
+                    for cache_key, file_row in local_promote.items():
+                        self._LOCAL_FILE_CACHE[cache_key] = (file_row, expires_at)
+
+        # 3) Fetch only cache misses from CRM API.
+        missing_ids = [int(file_id) for file_id in unique_ids if int(file_id) not in files_map]
+        if not missing_ids:
+            return files_map
+
         try:
             async with RegosAPI(connected_integration_id=connected_integration_id) as api:
                 response = await api.files.file.get(
                     FileGetRequest(
-                        ids=unique_ids,
-                        limit=len(unique_ids),
+                        ids=missing_ids,
+                        limit=len(missing_ids),
                         offset=0,
                     )
                 )
@@ -1287,27 +1388,37 @@ class GptCrmChatAssistantIntegration(ClientBase):
             logger.warning(
                 "File/Get failed while building context: ci=%s ids=%s error=%s",
                 connected_integration_id,
-                unique_ids,
+                missing_ids,
                 error,
             )
-            return {}
+            return files_map
 
-        files_map: Dict[int, Dict[str, Any]] = {}
         if not response.ok or not isinstance(response.result, list):
             return files_map
 
+        fetched_rows: Dict[int, Dict[str, Any]] = {}
         for row in response.result:
-            file_id = _parse_int(getattr(row, "id", 0), 0)
+            normalized = self._normalize_file_meta_row(row)
+            if not normalized:
+                continue
+            file_id = _parse_int(normalized.get("id"), 0)
             if file_id <= 0:
                 continue
-            files_map[int(file_id)] = {
-                "id": int(file_id),
-                "name": str(getattr(row, "name", "") or "").strip(),
-                "extension": str(getattr(row, "extension", "") or "").strip().lower(),
-                "mime_type": str(getattr(row, "mime_type", "") or "").strip().lower(),
-                "size": _parse_int(getattr(row, "size", 0), 0),
-                "url": str(getattr(row, "url", "") or "").strip(),
-            }
+            files_map[int(file_id)] = normalized
+            fetched_rows[int(file_id)] = normalized
+
+        if fetched_rows:
+            expires_at = time.monotonic() + ttl
+            async with self._LOCAL_FILE_CACHE_LOCK:
+                for file_id, file_row in fetched_rows.items():
+                    cache_key = self._file_cache_key(connected_integration_id, file_id)
+                    self._LOCAL_FILE_CACHE[cache_key] = (file_row, expires_at)
+            for file_id, file_row in fetched_rows.items():
+                await self._redis_set(
+                    self._file_cache_key(connected_integration_id, file_id),
+                    json.dumps(file_row, ensure_ascii=False, separators=(",", ":")),
+                    ttl,
+                )
         return files_map
 
     def _render_message_context_line(
@@ -1361,27 +1472,29 @@ class GptCrmChatAssistantIntegration(ClientBase):
         runtime: RuntimeConfig,
         chat_id: str,
         source_message: ChatMessage,
+        include_history: bool = True,
     ) -> Tuple[str, List[str]]:
         rows: List[ChatMessage] = []
-        try:
-            async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
-                response = await api.chat.chat_message.get(
-                    ChatMessageGetRequest(
-                        chat_id=chat_id,
-                        limit=runtime.assistant_history_limit,
-                        offset=0,
-                        include_staff_private=runtime.assistant_include_staff_private,
+        if include_history:
+            try:
+                async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
+                    response = await api.chat.chat_message.get(
+                        ChatMessageGetRequest(
+                            chat_id=chat_id,
+                            limit=runtime.assistant_history_limit,
+                            offset=0,
+                            include_staff_private=runtime.assistant_include_staff_private,
+                        )
                     )
+                if response.ok and isinstance(response.result, list):
+                    rows = response.result
+            except Exception as error:
+                logger.warning(
+                    "ChatMessage/Get failed while building context: ci=%s chat_id=%s error=%s",
+                    runtime.connected_integration_id,
+                    chat_id,
+                    error,
                 )
-            if response.ok and isinstance(response.result, list):
-                rows = response.result
-        except Exception as error:
-            logger.warning(
-                "ChatMessage/Get failed while building context: ci=%s chat_id=%s error=%s",
-                runtime.connected_integration_id,
-                chat_id,
-                error,
-            )
 
         all_file_ids: List[int] = []
         for row in rows:
@@ -2018,7 +2131,7 @@ class GptCrmChatAssistantIntegration(ClientBase):
                 "instructions": f"{runtime.assistant_prompt}\n\n{system_instruction}",
                 "input": build_input(use_images=use_images),
                 "temperature": runtime.assistant_temperature,
-                "store": True,
+                "store": bool(use_conversation),
             }
             if use_conversation and conversation_id:
                 if conversation_key_mode == "conversation_id":
@@ -2033,17 +2146,26 @@ class GptCrmChatAssistantIntegration(ClientBase):
         }
 
         try:
-            use_conversation = bool(self._normalize_conversation_id(conversation_id))
+            use_conversation = (
+                runtime.assistant_context_source == "conversation"
+                and bool(self._normalize_conversation_id(conversation_id))
+            )
             use_images = bool(unique_image_urls)
             attempts: List[Tuple[bool, bool, str]] = []
-            for flags in (
-                (use_conversation, use_images, "conversation"),
-                (use_conversation, use_images, "conversation_id"),
-                (use_conversation, False, "conversation"),
-                (use_conversation, False, "conversation_id"),
-                (False, use_images, "conversation"),
-                (False, False, "conversation"),
-            ):
+            attempt_variants = (
+                (
+                    (True, use_images, "conversation"),
+                    (True, use_images, "conversation_id"),
+                    (True, False, "conversation"),
+                    (True, False, "conversation_id"),
+                )
+                if use_conversation
+                else (
+                    (False, use_images, "conversation"),
+                    (False, False, "conversation"),
+                )
+            )
+            for flags in attempt_variants:
                 if flags in attempts:
                     continue
                 attempts.append(flags)
