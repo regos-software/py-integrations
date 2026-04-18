@@ -94,7 +94,10 @@ class TelegramBotOrdersConfig:
     ORDERS_PAGE_SIZE = 5
     ORDER_STATE_TTL = 86400
     INTEGRATION_KEY = "telegram_bot_orders"
-    WEBHOOK_BASE_URL = f"{app_settings.integration_url.rstrip('/')}/external"
+    WEBHOOK_BASE_URL = (
+        f"{(app_settings.proxy_integration_url or app_settings.integration_url).rstrip('/')}/external"
+    )
+    WEBHOOK_REFRESH_TTL = app_settings.telegram_webhook_refresh_ttl
 
 
 def _extract_chat_id(payload: dict) -> Optional[str]:
@@ -215,6 +218,71 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
 
     def _polling_key(self) -> str:
         return f"{TelegramBotOrdersConfig.INTEGRATION_KEY}:{self.connected_integration_id or 'unknown'}"
+
+    @staticmethod
+    def _resolve_webhook_base_url() -> str:
+        base_url = str(
+            app_settings.proxy_integration_url or app_settings.integration_url
+        ).strip()
+        if not base_url:
+            base_url = str(app_settings.integration_url).strip()
+        return f"{base_url.rstrip('/')}/external"
+
+    def _build_webhook_url(self) -> str:
+        return f"{self._resolve_webhook_base_url()}/{self.connected_integration_id}/external/"
+
+    def _webhook_refresh_cache_key(self) -> str:
+        return (
+            "clients:telegram:webhook-refresh:"
+            f"{TelegramBotOrdersConfig.INTEGRATION_KEY}:{self.connected_integration_id}"
+        )
+
+    async def _touch_webhook_refresh_cache(self) -> None:
+        if not (
+            app_settings.redis_enabled and redis_client and self.connected_integration_id
+        ):
+            return
+        try:
+            await redis_client.setex(
+                self._webhook_refresh_cache_key(),
+                TelegramBotOrdersConfig.WEBHOOK_REFRESH_TTL,
+                "1",
+            )
+        except Exception as error:
+            logger.warning("Failed to update webhook refresh cache: %s", error)
+
+    async def _clear_webhook_refresh_cache(self) -> None:
+        if not (
+            app_settings.redis_enabled and redis_client and self.connected_integration_id
+        ):
+            return
+        try:
+            await redis_client.delete(self._webhook_refresh_cache_key())
+        except Exception as error:
+            logger.warning("Failed to clear webhook refresh cache: %s", error)
+
+    async def _ensure_webhook_from_regos(self) -> None:
+        if self._is_longpolling_mode() or not self.bot or not self.connected_integration_id:
+            return
+
+        cache_key = self._webhook_refresh_cache_key()
+        if app_settings.redis_enabled and redis_client:
+            try:
+                if await redis_client.exists(cache_key):
+                    return
+            except Exception as error:
+                logger.warning("Failed to read webhook refresh cache: %s", error)
+
+        webhook_url = self._build_webhook_url()
+        try:
+            info = await self.bot.get_webhook_info()
+            current_url = (getattr(info, "url", "") or "").rstrip("/")
+            if current_url != webhook_url.rstrip("/"):
+                await self.bot.set_webhook(url=webhook_url)
+                logger.info("Webhook url updated from REGOS webhook: %s", webhook_url)
+            await self._touch_webhook_refresh_cache()
+        except Exception as error:
+            logger.warning("Failed to refresh webhook from REGOS webhook: %s", error)
 
     def _is_work_time(self, settings_map: Dict[str, str]) -> bool:
         enabled = self._parse_bool(
@@ -475,17 +543,19 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
 
         if self._is_longpolling_mode():
             await self.bot.delete_webhook(drop_pending_updates=True)
+            await self._clear_webhook_refresh_cache()
             await telegram_polling_manager.start(self._polling_key(), self.bot, self.dispatcher)
             logger.info("Webhook deleted (longpolling mode).")
             return {"status": "connected", "mode": "longpolling"}
 
         await telegram_polling_manager.stop(self._polling_key())
 
-        webhook_url = f"{app_settings.integration_url.rstrip('/')}/external/{self.connected_integration_id}/external/"
+        webhook_url = self._build_webhook_url()
         # Важно: сначала удалить старое состояние, потом поставить
         try:
             await self.bot.delete_webhook(drop_pending_updates=True)
             await self.bot.set_webhook(url=webhook_url)
+            await self._touch_webhook_refresh_cache()
             info = await self.bot.get_webhook_info()
             logger.info("Webhook set result url=%r", info.url)
             return {"status": "connected", "mode": "webhook", "webhook_url": info.url}
@@ -499,6 +569,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             return {"status": "disconnected", "message": "Bot not initialized"}
         try:
             await self.bot.delete_webhook(drop_pending_updates=True)
+            await self._clear_webhook_refresh_cache()
             await self.bot.close()
             self.bot = None
             self.dispatcher = None
@@ -522,8 +593,32 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                 await redis_client.delete(cache_key)
             except Exception as error:
                 logger.warning(f"Redis error while clearing settings cache: {error}")
+        await self._clear_webhook_refresh_cache()
         await self.connect()
         return IntegrationSuccessResponse(result={"status": "settings updated"})
+
+    async def handle_webhook(
+        self, action: Optional[str] = None, data: Optional[Dict] = None, **kwargs
+    ) -> Dict[str, Any]:
+        logger.info(
+            "Processing REGOS webhook for orders bot (ID=%s, action=%s)",
+            self.connected_integration_id,
+            action,
+        )
+
+        if self._is_longpolling_mode():
+            return {"status": "webhook processed", "mode": "longpolling"}
+
+        try:
+            await self._initialize_bot()
+        except Exception as error:
+            logger.error("Failed to initialize bot for webhook refresh: %s", error)
+            return self._error_response(
+                1002, f"No bot token in settings or bot init failed: {error}"
+            ).dict()
+
+        await self._ensure_webhook_from_regos()
+        return {"status": "webhook processed"}
 
     async def _setup_handlers(self) -> None:
         if not self.dispatcher:
