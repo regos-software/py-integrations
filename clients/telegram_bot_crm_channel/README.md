@@ -45,8 +45,6 @@
 | `bot_1_channel_id` | Да | Integer | `Канал общения` / `Muloqot kanali` / `Communication channel` | `Канал CRM для переписки` / `Yozishmalar uchun CRM kanali` / `CRM channel for conversation` | `Например: 5` / `Masalan: 5` / `Example: 5` |
 | `bot_1_lead_subject_template` | Нет | String | `Название обращения` / `Murojaat nomi` / `Lead title` | `Шаблон заголовка нового обращения` / `Yangi murojaat sarlavhasi shabloni` / `Template for new lead title` | `{display_name}` / `{display_name}` / `{display_name}` |
 | `bot_1_default_responsible_user_id` | Нет | Integer | `Ответственный по умолчанию` / `Standart mas'ul` / `Default owner` | `Кто назначается при создании обращения` / `Murojaat yaratilganda kim biriktiriladi` / `Who is assigned when a lead is created` | `Например: 101` / `Masalan: 101` / `Example: 101` |
-| `bot_1_auto_create_contact` | Нет | Enum | `Связывать с клиентской карточкой` / `Mijoz kartasiga bog'lash` / `Auto-link customer card` | `Автоматически связывать диалог с карточкой клиента` / `Suhbatni mijoz kartasi bilan avtomatik bog'lash` / `Automatically link chat with a customer card` | `none или retail_customer` / `none yoki retail_customer` / `none or retail_customer` |
-| `bot_1_retail_customer_group_id` | Условно | Integer | `Группа клиентов` / `Mijozlar guruhi` / `Customer group` | `Нужно, если включено автосоздание карточки` / `Karta auto-yaratish yoqilgan bo'lsa kerak` / `Required when auto customer card creation is enabled` | `Например: 3` / `Masalan: 3` / `Example: 3` |
 | `telegram_secret_token` | Нет | String | `Защита входящих событий` / `Kiruvchi hodisalar himoyasi` / `Inbound event protection` | `Дополнительная проверка подлинности запросов` / `So'rovlarni qo'shimcha tekshirish` / `Extra request authenticity check` | `Введите секрет` / `Maxfiy qiymatni kiriting` / `Enter secret` |
 | `lead_dedupe_ttl_sec` | Нет | Integer | `Защита от дублей` / `Dublikatdan himoya` / `Duplicate protection` | `Период подавления повторов в секундах` / `Takrorlarni bloklash muddati (sekund)` / `Duplicate suppression window in seconds` | `21600` / `21600` / `21600` |
 | `state_ttl_sec` | Нет | Integer | `Срок хранения состояния` / `Holat saqlash muddati` / `State retention` | `Как долго хранить служебное состояние диалога` / `Suhbat holatini qancha saqlash` / `How long dialog state is retained` | `21600` / `21600` / `21600` |
@@ -65,7 +63,7 @@
 1. Создайте бота в `@BotFather` и получите токен.
 2. Запустите бота (`/start`) от тестового аккаунта, чтобы бот мог отправлять ответы.
 3. В CRM заполните обязательные настройки: `bot_1_token`, `bot_1_pipeline_id`, `bot_1_channel_id`.
-4. При необходимости заполните дополнительные настройки (авто-связывание карточки, тексты, режимы пересылки).
+4. При необходимости заполните дополнительные настройки (тексты, режимы пересылки, защита входящих событий).
 5. Выполните подключение интеграции (`Connect`).
 6. Проверьте сценарий:
    - сообщение из Telegram появляется в CRM;

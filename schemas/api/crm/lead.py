@@ -1,4 +1,4 @@
-"""Schemas for CRM leads."""
+﻿"""Schemas for CRM leads."""
 
 from __future__ import annotations
 
@@ -9,10 +9,13 @@ from pydantic import ConfigDict, Field as PydField
 
 from schemas.api.base import APIBaseResponse, AddResult, ArrayResult, BaseSchema
 from schemas.api.common.filters import Filter
+from schemas.api.crm.client import Client
 from schemas.api.references.fields import FieldValue, FieldValueAdd, FieldValueEdit
 
 
 class LeadStatusEnum(str, Enum):
+    """Legacy lead statuses kept for backward compatibility in integrations."""
+
     New = "New"
     InProgress = "InProgress"
     WaitingClient = "WaitingClient"
@@ -21,6 +24,8 @@ class LeadStatusEnum(str, Enum):
 
 
 class LeadSetStatusEnum(str, Enum):
+    """Legacy Lead/SetStatus statuses (endpoint is deprecated)."""
+
     New = "New"
     InProgress = "InProgress"
     WaitingClient = "WaitingClient"
@@ -33,10 +38,10 @@ class Lead(BaseSchema):
     model_config = ConfigDict(extra="ignore")
 
     id: Optional[int] = PydField(default=None, description="Lead id.")
-    channel_id: Optional[int] = PydField(default=None, description="Channel id.")
+    client_id: Optional[int] = PydField(default=None, description="Client id.")
+    client: Optional[Client] = PydField(default=None, description="Client payload.")
     pipeline_id: Optional[int] = PydField(default=None, description="Pipeline id.")
     stage_id: Optional[int] = PydField(default=None, description="Stage id.")
-    status: Optional[LeadStatusEnum] = PydField(default=None, description="Status.")
     responsible_user_id: Optional[int] = PydField(
         default=None, description="Responsible user id."
     )
@@ -44,41 +49,18 @@ class Lead(BaseSchema):
         default=None, description="Participant user ids."
     )
     subject: Optional[str] = PydField(default=None, description="Subject.")
-    external_id: Optional[str] = PydField(default=None, description="External id.")
-    client_name: Optional[str] = PydField(default=None, description="Client name.")
-    client_phone: Optional[str] = PydField(default=None, description="Client phone.")
-    client_photo_url: Optional[str] = PydField(
-        default=None, description="Client photo URL."
-    )
-    first_response_date: Optional[int] = PydField(
-        default=None, description="First response unix time."
-    )
+    description: Optional[str] = PydField(default=None, description="Description.")
     start_date: Optional[int] = PydField(default=None, description="Start unix time.")
     end_date: Optional[int] = PydField(default=None, description="End unix time.")
-    close_reason_code: Optional[str] = PydField(
-        default=None, description="Close reason code."
-    )
-    rating: Optional[int] = PydField(default=None, description="Rating.")
-    rating_comment: Optional[str] = PydField(
-        default=None, description="Rating comment."
-    )
-    first_response_due_date: Optional[int] = PydField(
-        default=None, description="First response SLA unix time."
-    )
-    resolve_due_date: Optional[int] = PydField(
-        default=None, description="Resolve SLA unix time."
-    )
-    sla_breached: Optional[bool] = PydField(default=None, description="SLA breached.")
-    sla_breached_date: Optional[int] = PydField(
-        default=None, description="SLA breached unix time."
-    )
     converted_deal_id: Optional[int] = PydField(
         default=None, description="Converted deal id."
     )
     repeat_of_lead_id: Optional[int] = PydField(
         default=None, description="Repeat source lead id."
     )
-    deleted: Optional[bool] = PydField(default=None, description="Deleted.")
+    source_ticket_id: Optional[int] = PydField(
+        default=None, description="Source ticket id."
+    )
     created_user_id: Optional[int] = PydField(
         default=None, description="Created user id."
     )
@@ -90,6 +72,16 @@ class Lead(BaseSchema):
         default=None, description="Custom field values."
     )
 
+    # Legacy fields kept to avoid breaking old integrations during migration.
+    channel_id: Optional[int] = PydField(default=None, description="Legacy channel id.")
+    status: Optional[LeadStatusEnum] = PydField(default=None, description="Legacy status.")
+    external_id: Optional[str] = PydField(default=None, description="Legacy external id.")
+    client_name: Optional[str] = PydField(default=None, description="Legacy client name.")
+    client_phone: Optional[str] = PydField(default=None, description="Legacy client phone.")
+    client_photo_url: Optional[str] = PydField(
+        default=None, description="Legacy client photo URL."
+    )
+
 
 class LeadGetRequest(BaseSchema):
     """Request for Lead/Get."""
@@ -97,22 +89,25 @@ class LeadGetRequest(BaseSchema):
     model_config = ConfigDict(extra="forbid")
 
     ids: Optional[List[int]] = PydField(default=None, description="Lead ids.")
-    channel_ids: Optional[List[int]] = PydField(default=None, description="Channel ids.")
+    search: Optional[str] = PydField(default=None, description="Search string.")
     responsible_user_ids: Optional[List[int]] = PydField(
         default=None, description="Responsible ids."
     )
     stage_ids: Optional[List[int]] = PydField(default=None, description="Stage ids.")
-    statuses: Optional[List[LeadStatusEnum]] = PydField(
-        default=None, description="Lead statuses."
-    )
     from_date: Optional[int] = PydField(default=None, description="From unix time.")
     to_date: Optional[int] = PydField(default=None, description="To unix time.")
-    sla_breached: Optional[bool] = PydField(default=None, description="SLA breached.")
     filters: Optional[List[Filter]] = PydField(
         default=None, description="Additional filters."
     )
     limit: Optional[int] = PydField(default=None, ge=1, description="Page size.")
     offset: Optional[int] = PydField(default=None, ge=0, description="Page offset.")
+
+    # Legacy filters kept for transition.
+    channel_ids: Optional[List[int]] = PydField(default=None, description="Legacy channel ids.")
+    statuses: Optional[List[LeadStatusEnum]] = PydField(
+        default=None, description="Legacy statuses."
+    )
+    sla_breached: Optional[bool] = PydField(default=None, description="Legacy SLA flag.")
 
 
 class LeadAddRequest(BaseSchema):
@@ -120,7 +115,11 @@ class LeadAddRequest(BaseSchema):
 
     model_config = ConfigDict(extra="forbid")
 
-    channel_id: int = PydField(..., ge=1, description="Channel id.")
+    client_id: Optional[int] = PydField(default=None, ge=1, description="Client id.")
+    source_ticket_id: Optional[int] = PydField(
+        default=None, ge=1, description="Source ticket id."
+    )
+    chat_id: Optional[str] = PydField(default=None, description="Existing chat UUID.")
     pipeline_id: Optional[int] = PydField(default=None, ge=1, description="Pipeline id.")
     stage_id: Optional[int] = PydField(default=None, ge=1, description="Stage id.")
     responsible_user_id: Optional[int] = PydField(
@@ -130,14 +129,18 @@ class LeadAddRequest(BaseSchema):
         default=None, description="Participant user ids."
     )
     subject: Optional[str] = PydField(default=None, description="Lead subject.")
-    external_id: Optional[str] = PydField(default=None, description="External id.")
-    client_name: Optional[str] = PydField(default=None, description="Client name.")
-    client_phone: Optional[str] = PydField(default=None, description="Client phone.")
-    client_photo_url: Optional[str] = PydField(
-        default=None, description="Client photo URL."
-    )
+    description: Optional[str] = PydField(default=None, description="Lead description.")
     fields: Optional[List[FieldValueAdd]] = PydField(
         default=None, description="Custom field values."
+    )
+
+    # Legacy fields kept for transition (will be sanitized by service).
+    channel_id: Optional[int] = PydField(default=None, ge=1, description="Legacy channel id.")
+    external_id: Optional[str] = PydField(default=None, description="Legacy external id.")
+    client_name: Optional[str] = PydField(default=None, description="Legacy client name.")
+    client_phone: Optional[str] = PydField(default=None, description="Legacy client phone.")
+    client_photo_url: Optional[str] = PydField(
+        default=None, description="Legacy client photo URL."
     )
 
 
@@ -147,18 +150,21 @@ class LeadEditRequest(BaseSchema):
     model_config = ConfigDict(extra="forbid")
 
     id: int = PydField(..., ge=1, description="Lead id.")
-    channel_id: Optional[int] = PydField(default=None, ge=1, description="Channel id.")
-    pipeline_id: Optional[int] = PydField(default=None, ge=1, description="Pipeline id.")
     stage_id: Optional[int] = PydField(default=None, ge=1, description="Stage id.")
     subject: Optional[str] = PydField(default=None, description="Lead subject.")
-    external_id: Optional[str] = PydField(default=None, description="External id.")
-    client_name: Optional[str] = PydField(default=None, description="Client name.")
-    client_phone: Optional[str] = PydField(default=None, description="Client phone.")
-    client_photo_url: Optional[str] = PydField(
-        default=None, description="Client photo URL."
-    )
+    description: Optional[str] = PydField(default=None, description="Lead description.")
     fields: Optional[List[FieldValueEdit]] = PydField(
         default=None, description="Custom field changes."
+    )
+
+    # Legacy fields kept for transition (will be sanitized by service).
+    channel_id: Optional[int] = PydField(default=None, ge=1, description="Legacy channel id.")
+    pipeline_id: Optional[int] = PydField(default=None, ge=1, description="Legacy pipeline id.")
+    external_id: Optional[str] = PydField(default=None, description="Legacy external id.")
+    client_name: Optional[str] = PydField(default=None, description="Legacy client name.")
+    client_phone: Optional[str] = PydField(default=None, description="Legacy client phone.")
+    client_photo_url: Optional[str] = PydField(
+        default=None, description="Legacy client photo URL."
     )
 
 
@@ -181,16 +187,16 @@ class LeadEditResponse(APIBaseResponse[ArrayResult]):
 
 
 class LeadSetStatusRequest(BaseSchema):
-    """Request for Lead/SetStatus."""
+    """Legacy request for Lead/SetStatus (deprecated endpoint)."""
 
     model_config = ConfigDict(extra="forbid")
 
     id: int = PydField(..., ge=1, description="Lead id.")
-    status: LeadSetStatusEnum = PydField(..., description="Lead status.")
+    status: LeadSetStatusEnum = PydField(..., description="Legacy lead status.")
 
 
 class LeadSetStatusResponse(APIBaseResponse[ArrayResult]):
-    """Response for Lead/SetStatus."""
+    """Legacy response for Lead/SetStatus."""
 
     model_config = ConfigDict(extra="ignore")
 

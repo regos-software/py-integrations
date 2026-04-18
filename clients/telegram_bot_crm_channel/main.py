@@ -39,15 +39,25 @@ from schemas.api.chat.chat_message import (
     ChatMessageTypeEnum,
 )
 from schemas.api.common.filters import Filter, FilterOperator
+from schemas.api.crm.client import (
+    Client,
+    ClientAddRequest,
+    ClientEditRequest,
+    ClientGetRequest,
+)
 from schemas.api.crm.lead import (
     Lead,
-    LeadAddRequest,
-    LeadEditRequest,
     LeadGetRequest,
-    LeadSetStatusRequest,
     LeadStatusEnum,
 )
 from schemas.api.crm.pipeline import CrmEntityTypeEnum, PipelineGetRequest
+from schemas.api.crm.ticket import (
+    Ticket,
+    TicketAddRequest,
+    TicketDirectionEnum,
+    TicketGetRequest,
+    TicketStatusEnum,
+)
 from schemas.api.files.file import FileGetRequest
 from schemas.api.integrations.connected_integration_setting import (
     ConnectedIntegrationSettingRequest,
@@ -101,10 +111,9 @@ class TelegramBotCrmChannelConfig:
         "ChatMessageDeleted",
         "ChatWriting",
         "LeadClosed",
+        "TicketClosed",
     }
 
-    AUTO_CREATE_CONTACT_NONE = "none"
-    AUTO_CREATE_CONTACT_RETAIL_CUSTOMER = "retail_customer"
     CHAT_MESSAGE_ADD_CLOSED_ENTITY_ERROR = 1220
     PHONE_PROMPT_COOLDOWN_SEC = 24 * 60 * 60
     PHONE_SHARE_BUTTON_TEXT = "Поделиться номером / Raqamni ulashish"
@@ -122,8 +131,6 @@ class BotSlotConfig:
     channel_id: int
     lead_subject_template: Optional[str]
     default_responsible_user_id: Optional[int]
-    auto_create_contact_mode: str
-    retail_customer_group_id: Optional[int]
     bot_hash: str
 
 
@@ -259,35 +266,6 @@ def _update_mode_from_value(raw: Optional[str]) -> str:
     raise ValueError("telegram_update_mode must be one of: webhook, longpolling")
 
 
-def _auto_create_contact_mode_from_value(raw: Optional[str]) -> str:
-    mode = str(raw or "").strip().lower()
-    if not mode:
-        return TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_NONE
-    aliases = {
-        "0": TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_NONE,
-        "false": TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_NONE,
-        "off": TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_NONE,
-        "disabled": TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_NONE,
-        "none": TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_NONE,
-        "1": TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_RETAIL_CUSTOMER,
-        "true": TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_RETAIL_CUSTOMER,
-        "on": TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_RETAIL_CUSTOMER,
-        "retail": TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_RETAIL_CUSTOMER,
-        "retail_customer": TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_RETAIL_CUSTOMER,
-    }
-    mode = aliases.get(mode, mode)
-    if mode not in {
-        TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_NONE,
-        TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_RETAIL_CUSTOMER,
-    }:
-        raise ValueError(
-            "BOT_1_AUTO_CREATE_CONTACT must be one of: "
-            f"{TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_NONE}, "
-            f"{TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_RETAIL_CUSTOMER}"
-        )
-    return mode
-
-
 def _tg_chat_id_cast(chat_id: str) -> Any:
     value = str(chat_id).strip()
     if value.lstrip("-").isdigit():
@@ -311,6 +289,7 @@ def _normalize_phone(value: Any) -> Optional[str]:
 
 
 _PHONE_IN_TEXT_RE = re.compile(r"(?:\+?\d[\d\s\-()]{7,}\d)")
+_EMAIL_IN_TEXT_RE = re.compile(r"(?i)[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}")
 
 
 def _is_phone_candidate(
@@ -354,6 +333,27 @@ def _extract_phone_from_text(value: Any, *, allow_plain_nine_digit: bool = False
             raw_chunk=raw_chunk,
             allow_plain_nine_digit=allow_plain_nine_digit,
         ):
+            return candidate
+    return None
+
+
+def _normalize_email(value: Any) -> Optional[str]:
+    email = str(value or "").strip().lower()
+    if not email or "@" not in email:
+        return None
+    # Keep extraction tolerant but avoid obvious junk.
+    if " " in email or email.startswith("@") or email.endswith("@"):
+        return None
+    return email
+
+
+def _extract_email_from_text(value: Any) -> Optional[str]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for match in _EMAIL_IN_TEXT_RE.finditer(text):
+        candidate = _normalize_email(match.group(0))
+        if candidate:
             return candidate
     return None
 
@@ -530,6 +530,11 @@ def _is_telegram_internal_external_message(external_message_id: Optional[str]) -
 def _is_lead_entity_type(entity_type: Optional[str]) -> bool:
     value = str(entity_type or "").strip().lower()
     return value in {"lead", "2"}
+
+
+def _is_client_entity_type(entity_type: Optional[str]) -> bool:
+    value = str(entity_type or "").strip().lower()
+    return value in {"client", "3"}
 
 
 def _is_user_entity_type(entity_type: Optional[str]) -> bool:
@@ -1180,6 +1185,8 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         tg_chat_id: str,
         lead_id: int,
         chat_id: str,
+        *,
+        ticket_id: Optional[int] = None,
     ) -> None:
         mapping_by_tg_key = cls._mapping_by_tg_key(
             connected_integration_id, bot_hash, tg_chat_id
@@ -1192,6 +1199,8 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             "bot_hash": str(bot_hash),
             "tg_chat_id": str(tg_chat_id),
             "lead_id": int(lead_id),
+            "client_id": int(lead_id),
+            "ticket_id": int(ticket_id or 0) if ticket_id else None,
             "chat_id": str(chat_id),
         }
         if phone_state:
@@ -1347,24 +1356,6 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if not channel_id or channel_id <= 0:
             raise ValueError("BOT_1_CHANNEL_ID must be a positive integer")
 
-        auto_create_contact_mode = _auto_create_contact_mode_from_value(
-            settings_map.get("bot_1_auto_create_contact")
-        )
-        retail_customer_group_id = _parse_int(
-            settings_map.get("bot_1_retail_customer_group_id")
-        )
-        if retail_customer_group_id is not None and retail_customer_group_id <= 0:
-            raise ValueError("BOT_1_RETAIL_CUSTOMER_GROUP_ID must be a positive integer")
-        if (
-            auto_create_contact_mode
-            == TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_RETAIL_CUSTOMER
-            and not retail_customer_group_id
-        ):
-            raise ValueError(
-                "BOT_1_RETAIL_CUSTOMER_GROUP_ID is required when "
-                "BOT_1_AUTO_CREATE_CONTACT=retail_customer"
-            )
-
         lead_subject_template = (
             str(settings_map.get("bot_1_lead_subject_template") or "").strip()
             or "{display_name}"
@@ -1380,8 +1371,6 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 default_responsible_user_id=_parse_int(
                     settings_map.get("bot_1_default_responsible_user_id")
                 ),
-                auto_create_contact_mode=auto_create_contact_mode,
-                retail_customer_group_id=retail_customer_group_id,
                 bot_hash=_bot_hash(token),
             )
         ]
@@ -2213,6 +2202,14 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         return None
 
     @staticmethod
+    def _extract_client_email(message: Dict[str, Any]) -> Optional[str]:
+        for field_name in ("text", "caption"):
+            extracted = _extract_email_from_text(message.get(field_name))
+            if extracted:
+                return extracted
+        return None
+
+    @staticmethod
     def _is_private_chat_message(message: Dict[str, Any]) -> bool:
         chat = message.get("chat")
         if not isinstance(chat, dict):
@@ -2276,13 +2273,17 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
     ) -> Optional[bool]:
         try:
             async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-                lead = await api.crm.lead.get_by_id(lead_id)
-            if not lead:
+                response = await api.crm.client.get(
+                    ClientGetRequest(ids=[int(lead_id)], limit=1, offset=0)
+                )
+            rows = response.result if response.ok and isinstance(response.result, list) else []
+            client = rows[0] if rows else None
+            if not client:
                 return None
-            return bool(_normalize_phone(getattr(lead, "client_phone", None)))
+            return bool(_normalize_phone(getattr(client, "phone", None)))
         except Exception as error:
             logger.warning(
-                "Lead/Get failed while checking phone presence: ci=%s lead_id=%s error=%s",
+                "Client/Get failed while checking phone presence: ci=%s client_id=%s error=%s",
                 connected_integration_id,
                 lead_id,
                 error,
@@ -2346,18 +2347,26 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             return False
         try:
             async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-                lead = await api.crm.lead.get_by_id(lead_id)
-                if not lead:
+                get_response = await api.crm.client.get(
+                    ClientGetRequest(ids=[int(lead_id)], limit=1, offset=0)
+                )
+                rows = (
+                    get_response.result
+                    if get_response.ok and isinstance(get_response.result, list)
+                    else []
+                )
+                client = rows[0] if rows else None
+                if not client:
                     return False
-                current_phone = _normalize_phone(getattr(lead, "client_phone", None))
+                current_phone = _normalize_phone(getattr(client, "phone", None))
                 if current_phone:
                     return False
-                response = await api.crm.lead.edit(
-                    LeadEditRequest(id=lead_id, client_phone=normalized_phone)
+                response = await api.crm.client.edit(
+                    ClientEditRequest(id=lead_id, phone=normalized_phone)
                 )
             if not response.ok:
                 logger.warning(
-                    "Lead/Edit rejected while saving phone from text: ci=%s lead_id=%s payload=%s",
+                    "Client/Edit rejected while saving phone from text: ci=%s client_id=%s payload=%s",
                     connected_integration_id,
                     lead_id,
                     response.result,
@@ -2366,7 +2375,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             return True
         except Exception as error:
             logger.warning(
-                "Failed to save lead phone from text: ci=%s lead_id=%s error=%s",
+                "Failed to save client phone from text: ci=%s client_id=%s error=%s",
                 connected_integration_id,
                 lead_id,
                 error,
@@ -2455,8 +2464,6 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         chat_id: str,
         tg_chat_id: str,
         message: Dict[str, Any],
-        customer_id: Optional[int],
-        retail_has_phone_hint: Optional[bool],
     ) -> None:
         request_text = cls._normalize_text_value(runtime.phone_request_text)
         if not request_text or not cls._is_private_chat_message(message):
@@ -2479,31 +2486,18 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             allow_plain_nine_digit=allow_plain_nine_digit,
         )
         client_has_phone = bool(_normalize_phone(client_phone))
-        retail_required = (
-            bot_cfg.auto_create_contact_mode
-            == TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_RETAIL_CUSTOMER
-            and bool(bot_cfg.retail_customer_group_id)
-        )
 
-        state_has_both_phones = bool(
+        state_has_phone = bool(
             state
             and bool(state.get("lead_has_phone"))
-            and bool(state.get("retail_has_phone"))
             and not prompted_at_ts
         )
-        if client_has_phone and not state_has_both_phones:
+        if client_has_phone and not state_has_phone:
             await cls._set_lead_phone_if_missing_best_effort(
                 connected_integration_id=connected_integration_id,
                 lead_id=lead_id,
                 phone=client_phone,
             )
-            if retail_required:
-                await cls._set_retail_phone_if_missing_best_effort(
-                    connected_integration_id=connected_integration_id,
-                    tg_chat_id=tg_chat_id,
-                    customer_id=customer_id,
-                    phone=client_phone,
-                )
 
             message_id = _parse_int(str(message.get("message_id") or ""), None) or _now_ts()
             phone_text = cls._normalize_text_value(client_phone) or "не указан"
@@ -2524,35 +2518,20 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             if refreshed_lead_has_phone is None:
                 refreshed_lead_has_phone = bool(_normalize_phone(client_phone))
 
-            if retail_required:
-                refreshed_retail_has_phone = await cls._resolve_retail_has_phone_best_effort(
-                    connected_integration_id=connected_integration_id,
-                    tg_chat_id=tg_chat_id,
-                    customer_id=customer_id,
-                )
-                if refreshed_retail_has_phone is None:
-                    refreshed_retail_has_phone = bool(_normalize_phone(client_phone))
-            else:
-                refreshed_retail_has_phone = True
-
             await cls._save_phone_state(
                 connected_integration_id=connected_integration_id,
                 bot_hash=bot_cfg.bot_hash,
                 tg_chat_id=tg_chat_id,
                 lead_has_phone=bool(refreshed_lead_has_phone),
-                retail_has_phone=bool(refreshed_retail_has_phone),
-                prompted_at_ts=0
-                if bool(refreshed_lead_has_phone) and bool(refreshed_retail_has_phone)
-                else prompted_at_ts,
+                retail_has_phone=True,
+                prompted_at_ts=0 if bool(refreshed_lead_has_phone) else prompted_at_ts,
                 ttl_sec=runtime.state_ttl_sec,
             )
             return
 
         lead_has_phone: Optional[bool] = None
-        retail_has_phone: Optional[bool] = None
         if state:
             lead_has_phone = bool(state.get("lead_has_phone"))
-            retail_has_phone = bool(state.get("retail_has_phone"))
 
         if lead_has_phone is None or not state:
             lead_has_phone = await cls._resolve_lead_has_phone_best_effort(
@@ -2560,24 +2539,12 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 lead_id=lead_id,
             )
 
-        if retail_required:
-            if retail_has_phone_hint is not None:
-                retail_has_phone = bool(retail_has_phone_hint)
-            elif retail_has_phone is None or not state:
-                retail_has_phone = await cls._resolve_retail_has_phone_best_effort(
-                    connected_integration_id=connected_integration_id,
-                    tg_chat_id=tg_chat_id,
-                    customer_id=customer_id,
-                )
-        else:
-            retail_has_phone = True
-
-        if lead_has_phone is None or retail_has_phone is None:
+        if lead_has_phone is None:
             return
 
         cooldown_sec = max(TelegramBotCrmChannelConfig.PHONE_PROMPT_COOLDOWN_SEC, 60)
         now_ts = _now_ts()
-        need_prompt = not lead_has_phone or not retail_has_phone
+        need_prompt = not lead_has_phone
 
         # Before sending a repeated prompt, re-check CRM once to avoid stale cache.
         if need_prompt and prompted_at_ts and now_ts - prompted_at_ts >= cooldown_sec:
@@ -2587,15 +2554,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             )
             if refreshed_lead is not None:
                 lead_has_phone = refreshed_lead
-            if retail_required and retail_has_phone_hint is None:
-                refreshed_retail = await cls._resolve_retail_has_phone_best_effort(
-                    connected_integration_id=connected_integration_id,
-                    tg_chat_id=tg_chat_id,
-                    customer_id=customer_id,
-                )
-                if refreshed_retail is not None:
-                    retail_has_phone = refreshed_retail
-            need_prompt = not lead_has_phone or not retail_has_phone
+            need_prompt = not lead_has_phone
 
         if need_prompt and (not prompted_at_ts or now_ts - prompted_at_ts >= cooldown_sec):
             try:
@@ -2640,7 +2599,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             bot_hash=bot_cfg.bot_hash,
             tg_chat_id=tg_chat_id,
             lead_has_phone=bool(lead_has_phone),
-            retail_has_phone=bool(retail_has_phone),
+            retail_has_phone=True,
             prompted_at_ts=prompted_at_ts if need_prompt else 0,
             ttl_sec=runtime.state_ttl_sec,
         )
@@ -3139,7 +3098,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
 
         customer_payload = cls._build_retail_customer_payload(message, tg_chat_id)
         customer_name = cls._retail_customer_name(customer_payload, tg_chat_id)
-        group_id = bot_cfg.retail_customer_group_id
+        group_id = None
         if not group_id:
             logger.warning(
                 "Auto-contact create skipped: ci=%s bot_hash=%s tg_chat_id=%s reason=group_id_not_configured",
@@ -3256,28 +3215,8 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         tg_chat_id: str,
         message: Dict[str, Any],
     ) -> Tuple[Optional[int], str, Optional[str], Optional[bool]]:
-        if (
-            bot_cfg.auto_create_contact_mode
-            != TelegramBotCrmChannelConfig.AUTO_CREATE_CONTACT_RETAIL_CUSTOMER
-        ):
-            return None, TelegramBotCrmChannelConfig.RETAIL_CUSTOMER_ACTION_NONE, None, None
-
-        try:
-            return await cls._ensure_retail_customer_contact(
-                connected_integration_id=connected_integration_id,
-                bot_cfg=bot_cfg,
-                tg_chat_id=tg_chat_id,
-                message=message,
-            )
-        except Exception as error:
-            logger.warning(
-                "Auto-contact create failed: ci=%s bot_hash=%s tg_chat_id=%s error=%s",
-                connected_integration_id,
-                bot_cfg.bot_hash,
-                tg_chat_id,
-                error,
-            )
-            return None, TelegramBotCrmChannelConfig.RETAIL_CUSTOMER_ACTION_NONE, None, None
+        _ = (connected_integration_id, bot_cfg, tg_chat_id, message)
+        return None, TelegramBotCrmChannelConfig.RETAIL_CUSTOMER_ACTION_NONE, None, None
 
     @classmethod
     async def _send_retail_customer_system_message_best_effort(
@@ -3551,33 +3490,39 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         )
 
         client_phone = cls._normalize_text_value(cls._extract_client_phone(message))
+        client_email = _normalize_email(cls._extract_client_email(message))
 
         return {
             "subject": subject,
             "external_id": _lead_external_id(bot_cfg.bot_hash, tg_chat_id),
-            "client_name": client_name,
-            "client_phone": client_phone,
+            "telegram_id": tg_chat_id,
+            "name": client_name,
+            "phone": client_phone,
+            "email": client_email,
         }
 
     @classmethod
     def _build_lead_sync_patch(
         cls,
-        lead: Lead,
+        client: Client,
         desired_payload: Dict[str, Optional[str]],
     ) -> Dict[str, str]:
         patch: Dict[str, str] = {}
         field_names = [
-            "subject",
             "external_id",
-            "client_name",
-            "client_phone",
+            "telegram_id",
+            "name",
+            "phone",
+            "email",
         ]
         for field_name in field_names:
             desired_value = cls._normalize_text_value(desired_payload.get(field_name))
             if not desired_value:
                 continue
-            current_value = cls._normalize_text_value(getattr(lead, field_name, None))
-            if field_name == "client_phone" and current_value:
+            current_value = cls._normalize_text_value(getattr(client, field_name, None))
+            if field_name in {"phone", "email"} and current_value:
+                continue
+            if field_name in {"external_id", "telegram_id"} and current_value and current_value != desired_value:
                 continue
             if current_value != desired_value:
                 patch[field_name] = desired_value
@@ -3591,17 +3536,20 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
     ) -> Dict[str, str]:
         patch: Dict[str, str] = {}
         field_names = [
-            "subject",
             "external_id",
-            "client_name",
-            "client_phone",
+            "telegram_id",
+            "name",
+            "phone",
+            "email",
         ]
         for field_name in field_names:
             desired_value = cls._normalize_text_value(desired_payload.get(field_name))
             if not desired_value:
                 continue
             cached_value = cls._normalize_text_value(cached_payload.get(field_name))
-            if field_name == "client_phone" and cached_value:
+            if field_name in {"phone", "email"} and cached_value:
+                continue
+            if field_name in {"external_id", "telegram_id"} and cached_value and cached_value != desired_value:
                 continue
             if cached_value != desired_value:
                 patch[field_name] = desired_value
@@ -3630,17 +3578,18 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {}
         field_names = [
-            "subject",
             "external_id",
-            "client_name",
-            "client_phone",
+            "telegram_id",
+            "name",
+            "phone",
+            "email",
         ]
         for field_name in field_names:
             payload[field_name] = cls._normalize_text_value(desired_payload.get(field_name)) or ""
 
         normalized_avatar_state = str(avatar_state or "").strip().lower()
         payload["avatar_state"] = "present" if normalized_avatar_state == "present" else "missing"
-        payload["client_photo_url"] = cls._normalize_text_value(avatar_url) or ""
+        payload["photo_url"] = cls._normalize_text_value(avatar_url) or ""
         payload["avatar_check_after_ts"] = max(avatar_check_after_ts, 0)
         return payload
 
@@ -3657,177 +3606,38 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         desired_payload = cls._build_lead_contact_payload(bot_cfg, message, tg_chat_id)
         cache_key = cls._lead_sync_cache_key(connected_integration_id, lead_id)
         now_ts = _now_ts()
-        avatar_recheck_sec = max(
-            min(state_ttl_sec, TelegramBotCrmChannelConfig.LEAD_SYNC_AVATAR_RECHECK_SEC),
-            300,
+        avatar_url = cls._normalize_text_value(
+            await cls._resolve_client_photo_url(bot_cfg, message)
         )
-        avatar_fast_recheck_sec = min(avatar_recheck_sec, 300)
+        if avatar_url:
+            desired_payload["photo_url"] = avatar_url
 
-        cached_payload_raw = await cls._redis_get(cache_key)
-        cached_payload = cls._parse_lead_sync_cache(cached_payload_raw)
-        logger.debug(
-            "Lead sync started: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s cache_hit=%s",
-            connected_integration_id,
-            lead_id,
-            bot_cfg.bot_hash,
-            tg_chat_id,
-            bool(cached_payload),
-        )
-
+        cached_payload = cls._parse_lead_sync_cache(await cls._redis_get(cache_key))
         if cached_payload:
             patch = cls._build_lead_sync_patch_from_cached(desired_payload, cached_payload)
-
-            cached_avatar_state = str(cached_payload.get("avatar_state") or "").strip().lower()
-            cached_avatar_url = cls._normalize_text_value(cached_payload.get("client_photo_url"))
-            cached_avatar_check_after_ts = (
-                _parse_int(str(cached_payload.get("avatar_check_after_ts") or ""), 0) or 0
-            )
-            has_avatar_user_hint = _message_has_avatar_user_hint(message)
-            retry_in_sec = max(cached_avatar_check_after_ts - now_ts, 0)
-            early_retry = (
-                cached_avatar_state != "present"
-                and has_avatar_user_hint
-                and retry_in_sec > avatar_fast_recheck_sec
-            )
-            avatar_check_due = (
-                cached_avatar_state != "present"
-                and (now_ts >= cached_avatar_check_after_ts or early_retry)
-            )
-            logger.debug(
-                "Lead sync cache state: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s avatar_state=%s avatar_check_due=%s early_retry=%s has_avatar_user_hint=%s patch_keys=%s",
-                connected_integration_id,
-                lead_id,
-                bot_cfg.bot_hash,
-                tg_chat_id,
-                cached_avatar_state or "missing",
-                avatar_check_due,
-                early_retry,
-                has_avatar_user_hint,
-                sorted(patch.keys()),
-            )
-
-            avatar_state = "present" if cached_avatar_state == "present" else "missing"
-            avatar_url = cached_avatar_url
-            avatar_check_after_ts = (
-                now_ts + avatar_recheck_sec
-                if avatar_state != "present"
-                else now_ts + state_ttl_sec
-            )
-
-            if avatar_check_due:
-                resolved_avatar_url = await cls._resolve_client_photo_url(bot_cfg, message)
-                if resolved_avatar_url:
-                    normalized_resolved = cls._normalize_text_value(resolved_avatar_url)
-                    if normalized_resolved and normalized_resolved != cached_avatar_url:
-                        patch["client_photo_url"] = normalized_resolved
-                        logger.debug(
-                            "Lead sync avatar patch prepared: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s",
-                            connected_integration_id,
-                            lead_id,
-                            bot_cfg.bot_hash,
-                            tg_chat_id,
-                        )
-                    avatar_state = "present"
-                    avatar_url = normalized_resolved
-                    avatar_check_after_ts = now_ts + state_ttl_sec
-                    logger.debug(
-                        "Lead sync avatar recheck result: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s status=resolved",
-                        connected_integration_id,
-                        lead_id,
-                        bot_cfg.bot_hash,
-                        tg_chat_id,
-                    )
-                else:
-                    avatar_state = "missing"
-                    avatar_check_after_ts = (
-                        now_ts + avatar_fast_recheck_sec
-                        if has_avatar_user_hint
-                        else now_ts + avatar_recheck_sec
-                    )
-                    logger.debug(
-                        "Lead sync avatar recheck result: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s status=not_found",
-                        connected_integration_id,
-                        lead_id,
-                        bot_cfg.bot_hash,
-                        tg_chat_id,
-                    )
-
-            if not patch:
-                logger.debug(
-                    "Lead sync skipped (no changes): ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s",
-                    connected_integration_id,
-                    lead_id,
-                    bot_cfg.bot_hash,
-                    tg_chat_id,
-                )
-                if avatar_check_due:
-                    await cls._redis_set_with_ttl(
-                        cache_key,
-                        _json_dumps(
-                            cls._build_lead_sync_cache_payload(
-                                desired_payload,
-                                avatar_state=avatar_state,
-                                avatar_url=avatar_url,
-                                avatar_check_after_ts=avatar_check_after_ts,
-                            )
-                        ),
-                        state_ttl_sec,
-                    )
-                return
-
+            if avatar_url and cls._normalize_text_value(cached_payload.get("photo_url")) != avatar_url:
+                patch["photo_url"] = avatar_url
+        else:
+            patch = {}
             try:
-                logger.debug(
-                    "Lead sync editing from cache: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s patch_keys=%s has_avatar_patch=%s",
-                    connected_integration_id,
-                    lead_id,
-                    bot_cfg.bot_hash,
-                    tg_chat_id,
-                    sorted(patch.keys()),
-                    "client_photo_url" in patch,
-                )
                 async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-                    response = await api.crm.lead.edit(LeadEditRequest(id=lead_id, **patch))
-                if response.ok:
-                    if "client_photo_url" in patch:
-                        avatar_state = "present"
-                        avatar_url = cls._normalize_text_value(patch.get("client_photo_url"))
-                        avatar_check_after_ts = now_ts + state_ttl_sec
-                    await cls._redis_set_with_ttl(
-                        cache_key,
-                        _json_dumps(
-                            cls._build_lead_sync_cache_payload(
-                                desired_payload,
-                                avatar_state=avatar_state,
-                                avatar_url=avatar_url,
-                                avatar_check_after_ts=avatar_check_after_ts,
-                            )
-                        ),
-                        state_ttl_sec,
+                    client_response = await api.crm.client.get(
+                        ClientGetRequest(ids=[int(lead_id)], limit=1, offset=0)
                     )
-                    logger.debug(
-                        "Lead sync edit accepted: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s patch_keys=%s",
-                        connected_integration_id,
-                        lead_id,
-                        bot_cfg.bot_hash,
-                        tg_chat_id,
-                        sorted(patch.keys()),
-                    )
-                    return
-
-                payload = response.result if isinstance(response.result, dict) else {}
-                logger.warning(
-                    "Lead/Edit rejected while syncing Telegram profile: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s error=%s description=%s",
-                    connected_integration_id,
-                    lead_id,
-                    bot_cfg.bot_hash,
-                    tg_chat_id,
-                    payload.get("error"),
-                    payload.get("description"),
+                client_rows = (
+                    client_response.result
+                    if client_response.ok and isinstance(client_response.result, list)
+                    else []
                 )
-                return
+                client = client_rows[0] if client_rows else None
+                if not client:
+                    return
+                patch = cls._build_lead_sync_patch(client, desired_payload)
+                if avatar_url and not cls._normalize_text_value(client.photo_url):
+                    patch["photo_url"] = avatar_url
             except Exception as error:
                 logger.warning(
-                    "Lead sync from Telegram failed: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s error=%s",
+                    "Client sync prefetch failed: ci=%s client_id=%s bot_hash=%s tg_chat_id=%s error=%s",
                     connected_integration_id,
                     lead_id,
                     bot_cfg.bot_hash,
@@ -3836,142 +3646,47 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 )
                 return
 
-        try:
-            logger.debug(
-                "Lead sync cache miss -> loading lead: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s",
-                connected_integration_id,
-                lead_id,
-                bot_cfg.bot_hash,
-                tg_chat_id,
-            )
-            async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-                lead = await api.crm.lead.get_by_id(lead_id)
-                if not lead:
-                    logger.debug(
-                        "Lead sync stopped: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s reason=lead_not_found",
+        if patch:
+            try:
+                async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+                    response = await api.crm.client.edit(
+                        ClientEditRequest(id=lead_id, **patch)
+                    )
+                if not response.ok:
+                    payload = response.result if isinstance(response.result, dict) else {}
+                    logger.warning(
+                        "Client/Edit rejected while syncing Telegram profile: ci=%s client_id=%s bot_hash=%s tg_chat_id=%s error=%s description=%s",
                         connected_integration_id,
                         lead_id,
                         bot_cfg.bot_hash,
                         tg_chat_id,
+                        payload.get("error"),
+                        payload.get("description"),
                     )
                     return
-
-                patch = cls._build_lead_sync_patch(lead, desired_payload)
-                avatar_url = cls._normalize_text_value(lead.client_photo_url)
-                avatar_state = "present" if avatar_url else "missing"
-                avatar_check_after_ts = (
-                    now_ts + state_ttl_sec
-                    if avatar_state == "present"
-                    else now_ts + avatar_recheck_sec
-                )
-
-                if avatar_state != "present":
-                    logger.debug(
-                        "Lead sync avatar missing in lead: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s",
-                        connected_integration_id,
-                        lead_id,
-                        bot_cfg.bot_hash,
-                        tg_chat_id,
-                    )
-                    avatar_url = await cls._resolve_client_photo_url(bot_cfg, message)
-                    if avatar_url:
-                        patch["client_photo_url"] = avatar_url
-                        avatar_state = "present"
-                        avatar_check_after_ts = now_ts + state_ttl_sec
-                        logger.debug(
-                            "Lead sync avatar patch prepared from fresh lead: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s",
-                            connected_integration_id,
-                            lead_id,
-                            bot_cfg.bot_hash,
-                            tg_chat_id,
-                        )
-                    else:
-                        logger.debug(
-                            "Lead sync avatar still missing after Telegram lookup: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s",
-                            connected_integration_id,
-                            lead_id,
-                            bot_cfg.bot_hash,
-                            tg_chat_id,
-                        )
-
-                if not patch:
-                    logger.debug(
-                        "Lead sync skipped after fresh lead load (no changes): ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s",
-                        connected_integration_id,
-                        lead_id,
-                        bot_cfg.bot_hash,
-                        tg_chat_id,
-                    )
-                    await cls._redis_set_with_ttl(
-                        cache_key,
-                        _json_dumps(
-                            cls._build_lead_sync_cache_payload(
-                                desired_payload,
-                                avatar_state=avatar_state,
-                                avatar_url=avatar_url,
-                                avatar_check_after_ts=avatar_check_after_ts,
-                            )
-                        ),
-                        state_ttl_sec,
-                    )
-                    return
-
-                logger.debug(
-                    "Lead sync editing after fresh lead load: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s patch_keys=%s has_avatar_patch=%s",
-                    connected_integration_id,
-                    lead_id,
-                    bot_cfg.bot_hash,
-                    tg_chat_id,
-                    sorted(patch.keys()),
-                    "client_photo_url" in patch,
-                )
-                response = await api.crm.lead.edit(LeadEditRequest(id=lead_id, **patch))
-                if response.ok:
-                    if "client_photo_url" in patch:
-                        avatar_state = "present"
-                        avatar_url = cls._normalize_text_value(patch.get("client_photo_url"))
-                        avatar_check_after_ts = now_ts + state_ttl_sec
-                    await cls._redis_set_with_ttl(
-                        cache_key,
-                        _json_dumps(
-                            cls._build_lead_sync_cache_payload(
-                                desired_payload,
-                                avatar_state=avatar_state,
-                                avatar_url=avatar_url,
-                                avatar_check_after_ts=avatar_check_after_ts,
-                            )
-                        ),
-                        state_ttl_sec,
-                    )
-                    logger.debug(
-                        "Lead sync edit accepted: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s patch_keys=%s",
-                        connected_integration_id,
-                        lead_id,
-                        bot_cfg.bot_hash,
-                        tg_chat_id,
-                        sorted(patch.keys()),
-                    )
-                    return
-
-                payload = response.result if isinstance(response.result, dict) else {}
+            except Exception as error:
                 logger.warning(
-                    "Lead/Edit rejected while syncing Telegram profile: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s error=%s description=%s",
+                    "Client sync from Telegram failed: ci=%s client_id=%s bot_hash=%s tg_chat_id=%s error=%s",
                     connected_integration_id,
                     lead_id,
                     bot_cfg.bot_hash,
                     tg_chat_id,
-                    payload.get("error"),
-                    payload.get("description"),
+                    error,
                 )
-        except Exception as error:
-            logger.warning(
-                "Lead sync from Telegram failed: ci=%s lead_id=%s bot_hash=%s tg_chat_id=%s error=%s",
-                connected_integration_id,
-                lead_id,
-                bot_cfg.bot_hash,
-                tg_chat_id,
-                error,
-            )
+                return
+
+        await cls._redis_set_with_ttl(
+            cache_key,
+            _json_dumps(
+                cls._build_lead_sync_cache_payload(
+                    desired_payload,
+                    avatar_state="present" if avatar_url else "missing",
+                    avatar_url=avatar_url,
+                    avatar_check_after_ts=now_ts + state_ttl_sec,
+                )
+            ),
+            state_ttl_sec,
+        )
 
     @classmethod
     async def _set_worker_heartbeat(cls, connected_integration_id: str) -> None:
@@ -4404,33 +4119,6 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if not lead_id or not chat_id:
             return
 
-        # Contact creation is executed after lead resolution, so the same path
-        # works for both newly created and already existing leads.
-        (
-            customer_id,
-            customer_action,
-            customer_name,
-            retail_has_phone_hint,
-        ) = await cls._ensure_auto_contact_best_effort(
-            connected_integration_id=connected_integration_id,
-            bot_cfg=bot_cfg,
-            tg_chat_id=tg_chat_id,
-            message=message,
-        )
-        if customer_id and customer_action in {
-            TelegramBotCrmChannelConfig.RETAIL_CUSTOMER_ACTION_CREATED,
-            TelegramBotCrmChannelConfig.RETAIL_CUSTOMER_ACTION_UPDATED,
-        }:
-            await cls._send_retail_customer_system_message_best_effort(
-                connected_integration_id=connected_integration_id,
-                chat_id=chat_id,
-                bot_hash=bot_hash,
-                tg_chat_id=tg_chat_id,
-                customer_id=customer_id,
-                action=customer_action,
-                customer_name=customer_name,
-            )
-
         await cls._sync_lead_from_telegram_best_effort(
             connected_integration_id=connected_integration_id,
             state_ttl_sec=runtime.state_ttl_sec,
@@ -4449,8 +4137,6 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 chat_id=chat_id,
                 tg_chat_id=tg_chat_id,
                 message=message,
-                customer_id=customer_id,
-                retail_has_phone_hint=retail_has_phone_hint,
             )
         except Exception as error:
             logger.warning(
@@ -4978,7 +4664,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     chat_id=chat_id,
                     reply_id=reply_id,
                     replay_text=replay_text,
-                    author_entity_type="Lead",
+                    author_entity_type="Client",
                     author_entity_id=lead_id,
                     message_type=ChatMessageTypeEnum.Regular,
                     text=text,
@@ -5131,105 +4817,9 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         *,
         reason: str,
     ) -> None:
-        if not lead_id:
-            logger.debug(
-                "Skip Lead/SetStatus: ci=%s lead_id=%s to_status=%s reason=%s skip_reason=empty_lead_id",
-                connected_integration_id,
-                lead_id,
-                status,
-                reason,
-            )
-            return
-
-        try:
-            async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-                lead = await api.crm.lead.get_by_id(lead_id)
-                if not lead:
-                    logger.debug(
-                        "Skip Lead/SetStatus: ci=%s lead_id=%s to_status=%s reason=%s skip_reason=lead_not_found",
-                        connected_integration_id,
-                        lead_id,
-                        status,
-                        reason,
-                    )
-                    return
-
-                current_status: Optional[LeadStatusEnum]
-                if isinstance(lead.status, LeadStatusEnum):
-                    current_status = lead.status
-                else:
-                    try:
-                        current_status = LeadStatusEnum(str(lead.status or "").strip())
-                    except ValueError:
-                        current_status = None
-                if current_status in {LeadStatusEnum.Closed, LeadStatusEnum.Converted}:
-                    logger.debug(
-                        "Skip Lead/SetStatus: ci=%s lead_id=%s from_status=%s to_status=%s reason=%s skip_reason=terminal_status",
-                        connected_integration_id,
-                        lead_id,
-                        current_status,
-                        status,
-                        reason,
-                    )
-                    return
-                if (
-                    current_status == LeadStatusEnum.New
-                    and not getattr(lead, "responsible_user_id", None)
-                ):
-                    logger.debug(
-                        "Skip Lead/SetStatus: ci=%s lead_id=%s from_status=%s to_status=%s reason=%s skip_reason=new_without_responsible",
-                        connected_integration_id,
-                        lead_id,
-                        current_status,
-                        status,
-                        reason,
-                    )
-                    return
-                if current_status == status:
-                    logger.debug(
-                        "Skip Lead/SetStatus: ci=%s lead_id=%s from_status=%s to_status=%s reason=%s skip_reason=already_target_status",
-                        connected_integration_id,
-                        lead_id,
-                        current_status,
-                        status,
-                        reason,
-                    )
-                    return
-
-                response = await api.crm.lead.set_status(
-                    LeadSetStatusRequest(id=lead_id, status=status.value)
-                )
-            if response.ok:
-                logger.debug(
-                    "Lead/SetStatus applied: ci=%s lead_id=%s from_status=%s to_status=%s reason=%s",
-                    connected_integration_id,
-                    lead_id,
-                    current_status,
-                    status,
-                    reason,
-                )
-                return
-
-            payload = response.result if isinstance(response.result, dict) else {}
-            logger.warning(
-                "Lead/SetStatus rejected: ci=%s lead_id=%s from_status=%s to_status=%s reason=%s error=%s description=%s",
-                connected_integration_id,
-                lead_id,
-                current_status,
-                status,
-                reason,
-                payload.get("error"),
-                payload.get("description"),
-            )
-        except Exception as error:
-            logger.warning(
-                "Lead status update failed: ci=%s lead_id=%s to_status=%s reason=%s error=%s",
-                connected_integration_id,
-                lead_id,
-                status,
-                reason,
-                error,
-            )
+        _ = (connected_integration_id, lead_id, status, reason)
+        # New flow uses Client + Ticket. Lead status endpoint is deprecated.
+        return
 
     @classmethod
     async def _set_lead_status_by_chat_best_effort(
@@ -5240,25 +4830,9 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         *,
         reason: str,
     ) -> None:
-        lead_id = await cls._resolve_lead_id_by_chat(
-            connected_integration_id=connected_integration_id,
-            chat_id=chat_id,
-        )
-        if not lead_id:
-            logger.debug(
-                "Skip Lead/SetStatus by chat: ci=%s chat_id=%s to_status=%s reason=%s skip_reason=lead_not_resolved_by_chat",
-                connected_integration_id,
-                chat_id,
-                status,
-                reason,
-            )
-            return
-        await cls._set_lead_status_best_effort(
-            connected_integration_id=connected_integration_id,
-            lead_id=lead_id,
-            status=status,
-            reason=reason,
-        )
+        _ = (connected_integration_id, chat_id, status, reason)
+        # New flow uses Client + Ticket. Lead status endpoint is deprecated.
+        return
 
     @classmethod
     async def _clear_cached_target_mapping(
@@ -5275,7 +4849,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         cached_payload = cls._parse_cached_mapping(await cls._redis_get(mapping_by_tg_key))
         if cached_payload:
             if lead_id is None:
-                lead_id = _parse_int(str(cached_payload.get("lead_id") or ""))
+                lead_id = _parse_int(str(cached_payload.get("client_id") or ""))
             if chat_id is None:
                 chat_id = str(cached_payload.get("chat_id") or "").strip() or None
 
@@ -5305,13 +4879,130 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if not cached_payload:
             return None, None
 
-        lead_id = _parse_int(str(cached_payload.get("lead_id") or ""))
+        lead_id = _parse_int(str(cached_payload.get("client_id") or ""))
         chat_id = str(cached_payload.get("chat_id") or "").strip()
         if not lead_id:
             return None, None
         if not chat_id:
             return None, None
         return lead_id, chat_id
+
+    @classmethod
+    def _select_best_client_candidate(
+        cls,
+        rows: List[Client],
+        *,
+        telegram_id: Optional[str],
+        external_id: Optional[str],
+        phone: Optional[str],
+        email: Optional[str],
+    ) -> Optional[Client]:
+        best_client: Optional[Client] = None
+        best_key: Optional[Tuple[int, int]] = None
+
+        normalized_telegram_id = cls._normalize_text_value(telegram_id)
+        normalized_external_id = cls._normalize_text_value(external_id)
+        normalized_phone = _normalize_phone(phone)
+        normalized_email = _normalize_email(email)
+
+        for row in rows or []:
+            client_id = _parse_int(str(getattr(row, "id", None) or ""), None)
+            if not client_id:
+                continue
+
+            score = 0
+            if (
+                normalized_telegram_id
+                and cls._normalize_text_value(getattr(row, "telegram_id", None))
+                == normalized_telegram_id
+            ):
+                score += 100
+            if (
+                normalized_external_id
+                and cls._normalize_text_value(getattr(row, "external_id", None))
+                == normalized_external_id
+            ):
+                score += 80
+            if normalized_phone and _normalize_phone(getattr(row, "phone", None)) == normalized_phone:
+                score += 40
+            if normalized_email and _normalize_email(getattr(row, "email", None)) == normalized_email:
+                score += 30
+
+            key = (score, int(client_id))
+            if best_key is None or key > best_key:
+                best_client = row
+                best_key = key
+
+        return best_client
+
+    @classmethod
+    async def _find_client_for_telegram_dialog(
+        cls,
+        api: RegosAPI,
+        bot_cfg: BotSlotConfig,
+        tg_chat_id: str,
+        *,
+        client_phone: Optional[str] = None,
+        client_email: Optional[str] = None,
+    ) -> Optional[Client]:
+        telegram_id = cls._normalize_text_value(tg_chat_id)
+        external_id = _lead_external_id(bot_cfg.bot_hash, tg_chat_id)
+        normalized_phone = _normalize_phone(client_phone)
+        normalized_email = _normalize_email(client_email)
+
+        lookup_requests: List[Tuple[str, ClientGetRequest]] = []
+        if telegram_id:
+            lookup_requests.append(
+                (
+                    "telegram_id",
+                    ClientGetRequest(telegram_ids=[telegram_id], limit=20, offset=0),
+                )
+            )
+        if normalized_phone:
+            lookup_requests.append(
+                (
+                    "phone",
+                    ClientGetRequest(phones=[normalized_phone], limit=20, offset=0),
+                )
+            )
+        if normalized_email:
+            lookup_requests.append(
+                (
+                    "email",
+                    ClientGetRequest(emails=[normalized_email], limit=20, offset=0),
+                )
+            )
+        lookup_requests.append(
+            (
+                "external_id",
+                ClientGetRequest(external_ids=[external_id], limit=20, offset=0),
+            )
+        )
+
+        for lookup_source, request in lookup_requests:
+            response = await api.crm.client.get(request)
+            rows = (
+                response.result if response.ok and isinstance(response.result, list) else []
+            )
+            candidate = cls._select_best_client_candidate(
+                rows,
+                telegram_id=telegram_id,
+                external_id=external_id,
+                phone=normalized_phone,
+                email=normalized_email,
+            )
+            if candidate and candidate.id:
+                return candidate
+            if not response.ok:
+                logger.warning(
+                    "Client/Get rejected while resolving Telegram client: ci=%s lookup=%s tg_chat_id=%s payload=%s",
+                    api.connected_integration_id,
+                    lookup_source,
+                    tg_chat_id,
+                    response.result,
+                )
+
+        return None
 
     @classmethod
     async def _resolve_or_create_lead(
@@ -5330,19 +5021,23 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if cached_lead_id and cached_chat_id:
             return cached_lead_id, cached_chat_id
 
-        recovered = await cls._recover_lead_by_external_chat(
+        recovered = await cls._recover_client_ticket_by_external_chat(
             connected_integration_id=connected_integration_id,
+            bot_cfg=bot_cfg,
             bot_hash=bot_cfg.bot_hash,
             tg_chat_id=tg_chat_id,
         )
         if recovered:
+            client_id, ticket_id, recovered_chat_id = recovered
             await cls._save_lead_mapping(
                 connected_integration_id=connected_integration_id,
                 bot_hash=bot_cfg.bot_hash,
                 tg_chat_id=tg_chat_id,
-                lead=recovered,
+                client_id=client_id,
+                ticket_id=ticket_id,
+                chat_id=recovered_chat_id,
             )
-            return recovered.id, recovered.chat_id
+            return client_id, recovered_chat_id
 
         lock_key = cls._lock_create_lead_key(connected_integration_id, bot_cfg.bot_hash, tg_chat_id)
         lock_token = await cls._acquire_lock(lock_key, runtime.state_ttl_sec)
@@ -5368,61 +5063,152 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             if cached_lead_id and cached_chat_id:
                 return cached_lead_id, cached_chat_id
 
-            lead_subject = cls._build_subject(
+            subject = cls._build_subject(
                 bot_cfg.lead_subject_template, message, tg_chat_id
             )
             contact_payload = cls._extract_contact_payload(message, tg_chat_id)
-            client_name = contact_payload["display_name"] or None
-
-            client_phone = cls._normalize_text_value(cls._extract_client_phone(message))
-            client_photo_url = await cls._resolve_client_photo_url(bot_cfg, message)
-            logger.debug(
-                "Lead create payload prepared: ci=%s bot_hash=%s tg_chat_id=%s has_avatar=%s has_phone=%s",
-                connected_integration_id,
-                bot_cfg.bot_hash,
-                tg_chat_id,
-                bool(client_photo_url),
-                bool(client_phone),
+            client_name = cls._normalize_text_value(contact_payload.get("display_name"))
+            client_phone = _normalize_phone(cls._extract_client_phone(message))
+            client_email = _normalize_email(cls._extract_client_email(message))
+            client_photo_url = cls._normalize_text_value(
+                await cls._resolve_client_photo_url(bot_cfg, message)
             )
+            external_id = _lead_external_id(bot_cfg.bot_hash, tg_chat_id)
 
             async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-                add_resp = await api.crm.lead.add(
-                    LeadAddRequest(
-                        channel_id=bot_cfg.channel_id,
-                        pipeline_id=bot_cfg.pipeline_id,
-                        responsible_user_id=bot_cfg.default_responsible_user_id,
-                        subject=lead_subject,
-                        external_id=_lead_external_id(bot_cfg.bot_hash, tg_chat_id),
-                        client_name=client_name,
-                        client_phone=client_phone,
-                        client_photo_url=client_photo_url,
-                    )
+                client = await cls._find_client_for_telegram_dialog(
+                    api,
+                    bot_cfg,
+                    tg_chat_id,
+                    client_phone=client_phone,
+                    client_email=client_email,
                 )
-                new_id = None
-                if add_resp.result:
-                    new_id = _parse_int(str(add_resp.result.new_id))
-                if not new_id:
-                    raise RuntimeError("Lead/Add did not return new_id")
+                if not client or not client.id:
+                    add_resp = await api.crm.client.add(
+                        ClientAddRequest(
+                            external_id=external_id,
+                            telegram_id=tg_chat_id,
+                            name=client_name,
+                            phone=client_phone,
+                            email=client_email,
+                            photo_url=client_photo_url,
+                        )
+                    )
+                    add_payload = add_resp.result if isinstance(add_resp.result, dict) else {}
+                    if not add_resp.ok:
+                        # In race conditions another worker can create the client first.
+                        client = await cls._find_client_for_telegram_dialog(
+                            api,
+                            bot_cfg,
+                            tg_chat_id,
+                            client_phone=client_phone,
+                            client_email=client_email,
+                        )
+                        if not client or not client.id:
+                            raise RuntimeError(
+                                "Client/Add rejected: "
+                                f"error={add_payload.get('error')} description={add_payload.get('description')}"
+                            )
+                    if not client or not client.id:
+                        new_client_id = _parse_int(str(add_payload.get("new_id") or ""), None)
+                        if not new_client_id:
+                            raise RuntimeError("Client/Add did not return new_id")
+                        client_get = await api.crm.client.get(
+                            ClientGetRequest(ids=[int(new_client_id)], limit=1, offset=0)
+                        )
+                        client_rows = (
+                            client_get.result
+                            if client_get.ok and isinstance(client_get.result, list)
+                            else []
+                        )
+                        client = client_rows[0] if client_rows else None
 
-                lead = await api.crm.lead.get_by_id(new_id)
-                if not lead or not lead.chat_id:
-                    raise RuntimeError("Lead/Get did not return chat_id")
+                if not client or not client.id:
+                    raise RuntimeError("Client/Get did not return client for Telegram chat")
+
+                # Keep client profile in sync after lookup/create.
+                client_patch: Dict[str, Any] = {}
+                if client_name and cls._normalize_text_value(client.name) != client_name:
+                    client_patch["name"] = client_name
+                if client_phone and not _normalize_phone(client.phone):
+                    client_patch["phone"] = client_phone
+                if client_email and not _normalize_email(client.email):
+                    client_patch["email"] = client_email
+                if client_photo_url and not cls._normalize_text_value(client.photo_url):
+                    client_patch["photo_url"] = client_photo_url
+                if tg_chat_id and not cls._normalize_text_value(client.telegram_id):
+                    client_patch["telegram_id"] = tg_chat_id
+                if external_id and not cls._normalize_text_value(client.external_id):
+                    client_patch["external_id"] = external_id
+                if client_patch:
+                    await api.crm.client.edit(
+                        ClientEditRequest(id=int(client.id), **client_patch)
+                    )
+
+                ticket = await cls._find_open_ticket_by_external_dialog(
+                    connected_integration_id=connected_integration_id,
+                    bot_cfg=bot_cfg,
+                    client_id=int(client.id),
+                    external_dialog_id=tg_chat_id,
+                )
+                if not ticket:
+                    add_ticket_resp = await api.crm.ticket.add(
+                        TicketAddRequest(
+                            client_id=int(client.id),
+                            channel_id=bot_cfg.channel_id,
+                            direction=TicketDirectionEnum.Inbound,
+                            external_dialog_id=tg_chat_id,
+                            subject=subject,
+                            responsible_user_id=bot_cfg.default_responsible_user_id,
+                        )
+                    )
+                    add_ticket_payload = (
+                        add_ticket_resp.result
+                        if isinstance(add_ticket_resp.result, dict)
+                        else {}
+                    )
+                    if not add_ticket_resp.ok:
+                        raise RuntimeError(
+                            "Ticket/Add rejected: "
+                            f"error={add_ticket_payload.get('error')} description={add_ticket_payload.get('description')}"
+                        )
+                    new_ticket_id = _parse_int(
+                        str(add_ticket_payload.get("new_id") or ""),
+                        None,
+                    )
+                    if not new_ticket_id:
+                        raise RuntimeError("Ticket/Add did not return new_id")
+                    ticket_get = await api.crm.ticket.get(
+                        TicketGetRequest(ids=[int(new_ticket_id)], limit=1, offset=0)
+                    )
+                    ticket_rows = (
+                        ticket_get.result
+                        if ticket_get.ok and isinstance(ticket_get.result, list)
+                        else []
+                    )
+                    ticket = ticket_rows[0] if ticket_rows else None
+
+                if not ticket or not ticket.id or not ticket.chat_id:
+                    raise RuntimeError("Ticket/Get did not return chat_id")
+
                 logger.debug(
-                    "Lead created/reused by Lead/Add: ci=%s bot_hash=%s tg_chat_id=%s lead_id=%s lead_has_avatar=%s",
+                    "Client/Ticket resolved for Telegram chat: ci=%s bot_hash=%s tg_chat_id=%s client_id=%s ticket_id=%s",
                     connected_integration_id,
                     bot_cfg.bot_hash,
                     tg_chat_id,
-                    lead.id,
-                    bool(cls._normalize_text_value(getattr(lead, "client_photo_url", None))),
+                    client.id,
+                    ticket.id,
                 )
 
             await cls._save_lead_mapping(
                 connected_integration_id=connected_integration_id,
                 bot_hash=bot_cfg.bot_hash,
                 tg_chat_id=tg_chat_id,
-                lead=lead,
+                client_id=int(client.id),
+                ticket_id=int(ticket.id),
+                chat_id=str(ticket.chat_id),
             )
-            return lead.id, lead.chat_id
+            return int(client.id), str(ticket.chat_id)
         finally:
             await cls._release_lock(lock_key, lock_token)
 
@@ -5441,56 +5227,133 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if cached_lead_id and cached_chat_id:
             return cached_lead_id, cached_chat_id
 
-        recovered = await cls._recover_lead_by_external_chat(
+        recovered = await cls._recover_client_ticket_by_external_chat(
             connected_integration_id=connected_integration_id,
+            bot_cfg=bot_cfg,
             bot_hash=bot_cfg.bot_hash,
             tg_chat_id=tg_chat_id,
         )
         if not recovered:
             return None, None
 
+        client_id, ticket_id, recovered_chat_id = recovered
         await cls._save_lead_mapping(
             connected_integration_id=connected_integration_id,
             bot_hash=bot_cfg.bot_hash,
             tg_chat_id=tg_chat_id,
-            lead=recovered,
+            client_id=client_id,
+            ticket_id=ticket_id,
+            chat_id=recovered_chat_id,
         )
-        return recovered.id, recovered.chat_id
+        return client_id, recovered_chat_id
 
     @classmethod
-    async def _recover_lead_by_external_chat(
+    async def _find_open_ticket_by_external_dialog(
         cls,
         connected_integration_id: str,
-        bot_hash: str,
-        tg_chat_id: str,
-    ) -> Optional[Lead]:
+        bot_cfg: BotSlotConfig,
+        client_id: int,
+        external_dialog_id: str,
+    ) -> Optional[Ticket]:
         filters = [
             Filter(
-                field="external_id",
+                field="external_dialog_id",
                 operator=FilterOperator.Equal,
-                value=_lead_external_id(bot_hash, tg_chat_id),
-            ),
-        ]
-        statuses = [
-            LeadStatusEnum.New,
-            LeadStatusEnum.InProgress,
-            LeadStatusEnum.WaitingClient,
+                value=external_dialog_id,
+            )
         ]
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-            response = await api.crm.lead.get(
-                LeadGetRequest(
+            response = await api.crm.ticket.get(
+                TicketGetRequest(
+                    client_ids=[int(client_id)],
+                    channel_ids=[int(bot_cfg.channel_id)],
+                    statuses=[TicketStatusEnum.Open],
                     filters=filters,
-                    statuses=statuses,
+                    limit=20,
+                    offset=0,
+                )
+            )
+        rows = response.result if response.ok and isinstance(response.result, list) else []
+        valid = [row for row in rows if row and row.id and row.chat_id]
+        if not valid:
+            return None
+        return max(valid, key=lambda row: int(row.id or 0))
+
+    @classmethod
+    async def _find_open_ticket_by_external_dialog_any_client(
+        cls,
+        connected_integration_id: str,
+        bot_cfg: BotSlotConfig,
+        external_dialog_id: str,
+    ) -> Optional[Ticket]:
+        filters = [
+            Filter(
+                field="external_dialog_id",
+                operator=FilterOperator.Equal,
+                value=external_dialog_id,
+            )
+        ]
+        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+            response = await api.crm.ticket.get(
+                TicketGetRequest(
+                    channel_ids=[int(bot_cfg.channel_id)],
+                    statuses=[TicketStatusEnum.Open],
+                    filters=filters,
+                    limit=20,
+                    offset=0,
+                )
+            )
+        rows = response.result if response.ok and isinstance(response.result, list) else []
+        valid = [
+            row
+            for row in rows
+            if row and row.id and row.chat_id and _parse_int(str(getattr(row, "client_id", None) or ""))
+        ]
+        if not valid:
+            return None
+        return max(valid, key=lambda row: int(row.id or 0))
+
+    @classmethod
+    async def _recover_client_ticket_by_external_chat(
+        cls,
+        connected_integration_id: str,
+        bot_cfg: BotSlotConfig,
+        bot_hash: str,
+        tg_chat_id: str,
+    ) -> Optional[Tuple[int, int, str]]:
+        ticket = await cls._find_open_ticket_by_external_dialog_any_client(
+            connected_integration_id=connected_integration_id,
+            bot_cfg=bot_cfg,
+            external_dialog_id=tg_chat_id,
+        )
+        if ticket and ticket.id and ticket.chat_id and ticket.client_id:
+            return int(ticket.client_id), int(ticket.id), str(ticket.chat_id)
+
+        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+            client_response = await api.crm.client.get(
+                ClientGetRequest(
+                    external_ids=[_lead_external_id(bot_hash, tg_chat_id)],
                     limit=1,
                     offset=0,
                 )
             )
-        if not response.result:
+        client_rows = (
+            client_response.result
+            if client_response.ok and isinstance(client_response.result, list)
+            else []
+        )
+        client = client_rows[0] if client_rows else None
+        if not client or not client.id:
             return None
-        lead = response.result[0]
-        if not lead or not lead.id or not lead.chat_id:
+        ticket = await cls._find_open_ticket_by_external_dialog(
+            connected_integration_id=connected_integration_id,
+            bot_cfg=bot_cfg,
+            client_id=int(client.id),
+            external_dialog_id=tg_chat_id,
+        )
+        if not ticket or not ticket.id or not ticket.chat_id:
             return None
-        return lead
+        return int(client.id), int(ticket.id), str(ticket.chat_id)
 
     @classmethod
     async def _save_lead_mapping(
@@ -5498,16 +5361,19 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         connected_integration_id: str,
         bot_hash: str,
         tg_chat_id: str,
-        lead: Lead,
+        client_id: int,
+        ticket_id: int,
+        chat_id: str,
     ) -> None:
-        if not (lead.id and lead.chat_id):
+        if not (client_id and chat_id):
             return
         await cls._save_cached_mapping(
             connected_integration_id=connected_integration_id,
             bot_hash=bot_hash,
             tg_chat_id=tg_chat_id,
-            lead_id=int(lead.id),
-            chat_id=str(lead.chat_id),
+            lead_id=int(client_id),
+            chat_id=str(chat_id),
+            ticket_id=int(ticket_id),
         )
 
     @classmethod
@@ -5763,6 +5629,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 "ChatMessageDeleted": cls._handle_chat_message_deleted,
                 "ChatWriting": cls._handle_chat_writing,
                 "LeadClosed": cls._handle_lead_closed,
+                "TicketClosed": cls._handle_ticket_closed,
             }
             handler = handlers.get(action)
             if handler:
@@ -5789,6 +5656,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
     @staticmethod
     def _delivery_action_label(action: str) -> str:
         labels = {
+            "TicketClosed": "ticket close notification",
             "ChatMessageAdded": "отправка сообщения",
             "ChatMessageEdited": "редактирование сообщения",
             "ChatMessageDeleted": "удаление сообщения",
@@ -5888,19 +5756,35 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         chat_id = str(payload.get("chat_id") or "").strip()
         if chat_id:
             return chat_id
-        if action != "LeadClosed":
-            return None
-
-        lead_id = _parse_int(str(payload.get("id") or ""))
-        if not lead_id:
-            return None
-
-        try:
-            async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-                lead = await api.crm.lead.get_by_id(lead_id)
-            return str(getattr(lead, "chat_id", "") or "").strip() or None
-        except Exception:
-            return None
+        if action == "LeadClosed":
+            lead_id = _parse_int(str(payload.get("id") or ""))
+            if not lead_id:
+                return None
+            try:
+                async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+                    lead = await api.crm.lead.get_by_id(lead_id)
+                return str(getattr(lead, "chat_id", "") or "").strip() or None
+            except Exception:
+                return None
+        if action == "TicketClosed":
+            ticket_id = _parse_int(str(payload.get("id") or ""))
+            if not ticket_id:
+                return None
+            try:
+                async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+                    ticket_response = await api.crm.ticket.get(
+                        TicketGetRequest(ids=[int(ticket_id)], limit=1, offset=0)
+                    )
+                ticket_rows = (
+                    ticket_response.result
+                    if ticket_response.ok and isinstance(ticket_response.result, list)
+                    else []
+                )
+                ticket = ticket_rows[0] if ticket_rows else None
+                return str(getattr(ticket, "chat_id", "") or "").strip() or None
+            except Exception:
+                return None
+        return None
 
     @classmethod
     async def _notify_telegram_delivery_issue_best_effort(
@@ -5910,7 +5794,13 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         error_text: str,
     ) -> None:
         action = str(fields.get("action") or "").strip()
-        if action not in {"ChatMessageAdded", "ChatMessageEdited", "ChatMessageDeleted", "LeadClosed"}:
+        if action not in {
+            "ChatMessageAdded",
+            "ChatMessageEdited",
+            "ChatMessageDeleted",
+            "LeadClosed",
+            "TicketClosed",
+        }:
             return
 
         payload_raw = fields.get("payload")
@@ -6071,16 +5961,23 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
 
     @classmethod
     async def _resolve_target_by_chat(
-        cls, connected_integration_id: str, chat_id: str
+        cls,
+        connected_integration_id: str,
+        runtime: RuntimeConfig,
+        chat_id: str,
     ) -> Optional[Tuple[str, str]]:
+        mapping_by_chat_key = cls._mapping_by_chat_key(connected_integration_id, chat_id)
         cached_payload = cls._parse_cached_mapping(
-            await cls._redis_get(cls._mapping_by_chat_key(connected_integration_id, chat_id))
+            await cls._redis_get(mapping_by_chat_key)
         )
         if cached_payload:
             bot_hash = str(cached_payload.get("bot_hash") or "").strip()
             tg_chat_id = str(cached_payload.get("tg_chat_id") or "").strip()
-            if bot_hash and tg_chat_id:
+            if bot_hash and tg_chat_id and bot_hash in runtime.bots_by_hash:
                 return bot_hash, tg_chat_id
+
+        ticket: Optional[Ticket] = None
+        client_id: Optional[int] = None
 
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
             chat_response = await api.call(
@@ -6101,42 +5998,154 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             if not chat_rows:
                 return None
 
-            lead_id = cls._extract_lead_id_from_chat_payload(chat_rows[0])
-            if not lead_id:
+            chat_row = chat_rows[0] if isinstance(chat_rows[0], dict) else {}
+            ticket_id = cls._extract_ticket_id_from_chat_payload(chat_row)
+            if ticket_id:
+                ticket_response = await api.crm.ticket.get(
+                    TicketGetRequest(ids=[int(ticket_id)], limit=1, offset=0)
+                )
+                ticket_rows = (
+                    ticket_response.result
+                    if ticket_response.ok and isinstance(ticket_response.result, list)
+                    else []
+                )
+                ticket = ticket_rows[0] if ticket_rows else None
+                client_id = (
+                    _parse_int(str(getattr(ticket, "client_id", None) or ""), None)
+                    if ticket
+                    else None
+                )
+
+            # Primary routing source for Ticket-based CRM flow.
+            if ticket:
+                ticket_channel_id = _parse_int(str(getattr(ticket, "channel_id", None) or ""))
+                ticket_dialog_id = str(getattr(ticket, "external_dialog_id", None) or "").strip()
+                if ticket_channel_id and ticket_dialog_id:
+                    bot_hash = next(
+                        (
+                            bot.bot_hash
+                            for bot in runtime.bots
+                            if int(bot.channel_id) == int(ticket_channel_id)
+                        ),
+                        "",
+                    )
+                    if bot_hash:
+                        resolved_client_id = (
+                            _parse_int(str(getattr(ticket, "client_id", None) or ""), None)
+                            or cls._extract_client_id_from_chat_payload(chat_row)
+                        )
+                        if resolved_client_id:
+                            await cls._save_cached_mapping(
+                                connected_integration_id=connected_integration_id,
+                                bot_hash=bot_hash,
+                                tg_chat_id=ticket_dialog_id,
+                                lead_id=int(resolved_client_id),
+                                chat_id=chat_id,
+                                ticket_id=_parse_int(str(getattr(ticket, "id", None) or ""), None),
+                            )
+                        else:
+                            await cls._redis_set_mapping(
+                                mapping_by_chat_key,
+                                _json_dumps(
+                                    {
+                                        "bot_hash": str(bot_hash),
+                                        "tg_chat_id": str(ticket_dialog_id),
+                                        "chat_id": str(chat_id),
+                                    }
+                                ),
+                            )
+                        return str(bot_hash), str(ticket_dialog_id)
+
+            if not client_id:
+                client_id = cls._extract_client_id_from_chat_payload(chat_row)
+            if not client_id:
                 return None
 
-            lead_response = await api.call(
-                "Lead/Get",
-                LeadGetRequest(ids=[lead_id], limit=1, offset=0),
-                APIBaseResponse[List[Dict[str, Any]]],
+            client_response = await api.crm.client.get(
+                ClientGetRequest(ids=[int(client_id)], limit=1, offset=0)
             )
-            if not lead_response.ok:
+            if not client_response.ok:
                 logger.warning(
-                    "Lead/Get rejected while resolving target: ci=%s chat_id=%s lead_id=%s payload=%s",
+                    "Client/Get rejected while resolving target: ci=%s chat_id=%s client_id=%s payload=%s",
                     connected_integration_id,
                     chat_id,
-                    lead_id,
-                    lead_response.result,
+                    client_id,
+                    client_response.result,
                 )
                 return None
 
-        lead_rows = lead_response.result or []
-        if not lead_rows:
+        client_rows = client_response.result or []
+        if not client_rows:
             return None
-        lead = Lead.model_validate(lead_rows[0])
-        if not (lead and lead.id):
+        client = client_rows[0]
+        if not (client and client.id):
             return None
-        bot_hash, tg_chat_id = _parse_tg_lead_external_id(getattr(lead, "external_id", None))
-        if not bot_hash or not tg_chat_id:
+        bot_hash, tg_chat_id = _parse_tg_lead_external_id(
+            getattr(client, "external_id", None)
+        )
+        if not bot_hash or not tg_chat_id or bot_hash not in runtime.bots_by_hash:
             return None
         await cls._save_cached_mapping(
             connected_integration_id=connected_integration_id,
             bot_hash=str(bot_hash),
             tg_chat_id=str(tg_chat_id),
-            lead_id=int(lead.id),
+            lead_id=int(client.id),
             chat_id=chat_id,
         )
         return str(bot_hash), str(tg_chat_id)
+
+    @staticmethod
+    def _extract_client_id_from_chat_payload(chat_payload: Any) -> Optional[int]:
+        client_ids = TelegramBotCrmChannelIntegration._extract_client_ids_from_chat_payload(
+            chat_payload
+        )
+        if not client_ids:
+            return None
+        return client_ids[0]
+
+    @staticmethod
+    def _extract_client_ids_from_chat_payload(chat_payload: Any) -> List[int]:
+        if not isinstance(chat_payload, dict):
+            return []
+        participants = chat_payload.get("participants")
+        if not isinstance(participants, list):
+            return []
+        client_ids: List[int] = []
+        seen_ids = set()
+        for participant in participants:
+            if not isinstance(participant, dict):
+                continue
+            entity_type_raw = str(participant.get("entity_type") or "").strip().lower()
+            if not _is_client_entity_type(entity_type_raw):
+                continue
+            entity_id = _parse_int(str(participant.get("entity_id") or ""))
+            if not entity_id or entity_id <= 0 or entity_id in seen_ids:
+                continue
+            seen_ids.add(entity_id)
+            client_ids.append(int(entity_id))
+        return client_ids
+
+    @staticmethod
+    def _extract_ticket_id_from_chat_payload(chat_payload: Any) -> Optional[int]:
+        if not isinstance(chat_payload, dict):
+            return None
+        linked_entity_type = str(chat_payload.get("entity_type") or "").strip().lower()
+        linked_entity_id = _parse_int(str(chat_payload.get("entity_id") or ""))
+        if linked_entity_type == "ticket" and linked_entity_id and linked_entity_id > 0:
+            return int(linked_entity_id)
+        participants = chat_payload.get("participants")
+        if not isinstance(participants, list):
+            return None
+        for participant in participants:
+            if not isinstance(participant, dict):
+                continue
+            entity_type_raw = str(participant.get("entity_type") or "").strip().lower()
+            if entity_type_raw not in {"ticket"}:
+                continue
+            entity_id = _parse_int(str(participant.get("entity_id") or ""))
+            if entity_id and entity_id > 0:
+                return int(entity_id)
+        return None
 
     @staticmethod
     def _extract_lead_id_from_chat_payload(chat_payload: Any) -> Optional[int]:
@@ -6151,11 +6160,18 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
     def _extract_lead_ids_from_chat_payload(chat_payload: Any) -> List[int]:
         if not isinstance(chat_payload, dict):
             return []
-        participants = chat_payload.get("participants")
-        if not isinstance(participants, list):
-            return []
         lead_ids: List[int] = []
         seen_ids = set()
+
+        linked_entity_type = str(chat_payload.get("entity_type") or "").strip().lower()
+        linked_entity_id = _parse_int(str(chat_payload.get("entity_id") or ""))
+        if _is_lead_entity_type(linked_entity_type) and linked_entity_id and linked_entity_id > 0:
+            seen_ids.add(int(linked_entity_id))
+            lead_ids.append(int(linked_entity_id))
+
+        participants = chat_payload.get("participants")
+        if not isinstance(participants, list):
+            return lead_ids
         for participant in participants:
             if not isinstance(participant, dict):
                 continue
@@ -6180,7 +6196,11 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if not chat_id or not message_id:
             return
 
-        telegram_target = await cls._resolve_target_by_chat(connected_integration_id, chat_id)
+        telegram_target = await cls._resolve_target_by_chat(
+            connected_integration_id,
+            runtime,
+            chat_id,
+        )
         if not telegram_target:
             return
         bot_hash, tg_chat_id = telegram_target
@@ -6417,7 +6437,11 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if not chat_id or not message_id:
             return
 
-        target = await cls._resolve_target_by_chat(connected_integration_id, chat_id)
+        target = await cls._resolve_target_by_chat(
+            connected_integration_id,
+            runtime,
+            chat_id,
+        )
         if not target:
             return
         bot_hash, tg_chat_id = target
@@ -6495,7 +6519,11 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         message_id = str(payload.get("id") or "").strip()
         if not chat_id or not message_id:
             return
-        target = await cls._resolve_target_by_chat(connected_integration_id, chat_id)
+        target = await cls._resolve_target_by_chat(
+            connected_integration_id,
+            runtime,
+            chat_id,
+        )
         if not target:
             return
         bot_hash, tg_chat_id = target
@@ -6526,16 +6554,23 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
 
         author_entity_type = str(payload.get("author_entity_type") or "").strip().lower()
         author_entity_id = _parse_int(str(payload.get("author_entity_id") or ""))
-        if _is_lead_entity_type(author_entity_type):
+        if _is_lead_entity_type(author_entity_type) or _is_client_entity_type(
+            author_entity_type
+        ):
             logger.debug(
-                "Skip ChatWriting relay for lead author: ci=%s chat_id=%s author_entity_id=%s",
+                "Skip ChatWriting relay for client-side author: ci=%s chat_id=%s author_entity_id=%s author_entity_type=%s",
                 connected_integration_id,
                 chat_id,
                 author_entity_id,
+                author_entity_type,
             )
             return
 
-        target = await cls._resolve_target_by_chat(connected_integration_id, chat_id)
+        target = await cls._resolve_target_by_chat(
+            connected_integration_id,
+            runtime,
+            chat_id,
+        )
         if not target:
             return
         bot_hash, tg_chat_id = target
@@ -6581,11 +6616,63 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         tg_chat_id = str(tg_chat_id or "").strip()
         if not bot_hash or not tg_chat_id:
             if lead.chat_id:
-                target = await cls._resolve_target_by_chat(connected_integration_id, str(lead.chat_id))
+                target = await cls._resolve_target_by_chat(
+                    connected_integration_id,
+                    runtime,
+                    str(lead.chat_id),
+                )
                 if target:
                     bot_hash, tg_chat_id = target
         if not bot_hash or not tg_chat_id:
             return
+
+        bot_cfg = runtime.bots_by_hash.get(bot_hash)
+        if not bot_cfg:
+            return
+        bot = await cls._get_bot(bot_cfg.token)
+        await bot.send_message(chat_id=_tg_chat_id_cast(tg_chat_id), text=text)
+
+    @classmethod
+    async def _handle_ticket_closed(
+        cls, connected_integration_id: str, runtime: RuntimeConfig, payload: Dict[str, Any]
+    ) -> None:
+        ticket_id = _parse_int(str(payload.get("id") or ""))
+        if not ticket_id:
+            return
+
+        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+            ticket_response = await api.crm.ticket.get(
+                TicketGetRequest(ids=[int(ticket_id)], limit=1, offset=0)
+            )
+        ticket_rows = (
+            ticket_response.result
+            if ticket_response.ok and isinstance(ticket_response.result, list)
+            else []
+        )
+        ticket = ticket_rows[0] if ticket_rows else None
+        if not ticket:
+            return
+
+        chat_id = str(getattr(ticket, "chat_id", "") or "").strip()
+        if not chat_id:
+            return
+
+        text = (
+            runtime.lead_closed_message_template
+            or "\u041e\u0431\u0440\u0430\u0449\u0435\u043d\u0438\u0435 \u0437\u0430\u043a\u0440\u044b\u0442\u043e. "
+            "\u0421\u043f\u0430\u0441\u0438\u0431\u043e \u0437\u0430 \u043e\u0431\u0440\u0430\u0449\u0435\u043d\u0438\u0435."
+        )
+        if not text.strip():
+            return
+
+        target = await cls._resolve_target_by_chat(
+            connected_integration_id,
+            runtime,
+            chat_id,
+        )
+        if not target:
+            return
+        bot_hash, tg_chat_id = target
 
         bot_cfg = runtime.bots_by_hash.get(bot_hash)
         if not bot_cfg:

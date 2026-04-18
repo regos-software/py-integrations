@@ -30,13 +30,18 @@ from schemas.api.chat.chat_message import (
     ChatMessageTypeEnum,
 )
 from schemas.api.common.filters import Filter, FilterOperator
+from schemas.api.crm.client import ClientAddRequest, ClientGetRequest
 from schemas.api.crm.lead import (
     Lead,
-    LeadAddRequest,
     LeadGetRequest,
     LeadSetResponsibleRequest,
-    LeadSetStatusRequest,
     LeadStatusEnum,
+)
+from schemas.api.crm.ticket import (
+    TicketAddRequest,
+    TicketDirectionEnum,
+    TicketGetRequest,
+    TicketSetResponsibleRequest,
 )
 from schemas.api.integrations.connected_integration_setting import (
     ConnectedIntegrationSettingRequest,
@@ -140,6 +145,8 @@ class CallEvent:
 class LeadContext:
     lead_id: int
     chat_id: str
+    client_id: Optional[int] = None
+    ticket_id: Optional[int] = None
 
 
 class ChatMessageAddClosedEntityError(RuntimeError):
@@ -2908,7 +2915,7 @@ return 0
             )
             lead_ctx = await cls._write_event_with_1220_policy(runtime, event, lead_ctx)
             await cls._save_mapping(runtime, event, lead_ctx)
-            await cls._apply_status_policy_best_effort(runtime, event, lead_ctx.lead_id)
+            await cls._apply_status_policy_best_effort(runtime, event, lead_ctx)
             await cls._redis_set_with_ttl(
                 dedupe_key,
                 "1",
@@ -3772,40 +3779,62 @@ return 0
         )
         already_bound = _to_int(await cls._redis_get(call_key), None)
         if already_bound and already_bound == target_user_id:
-            await cls._update_lead_state_cache(
-                connected_integration_id=runtime.connected_integration_id,
-                lead_id=lead_ctx.lead_id,
-                responsible_user_id=target_user_id,
-            )
-            if should_move_to_in_progress:
-                await cls._set_lead_status_best_effort(
+            if not lead_ctx.ticket_id:
+                await cls._update_lead_state_cache(
                     connected_integration_id=runtime.connected_integration_id,
                     lead_id=lead_ctx.lead_id,
-                    status=LeadStatusEnum.InProgress,
-                    reason="responsible_already_bound_by_operator_ext",
+                    responsible_user_id=target_user_id,
                 )
+                if should_move_to_in_progress:
+                    await cls._set_lead_status_best_effort(
+                        connected_integration_id=runtime.connected_integration_id,
+                        lead_id=lead_ctx.lead_id,
+                        status=LeadStatusEnum.InProgress,
+                        reason="responsible_already_bound_by_operator_ext",
+                    )
             return
         if already_bound and already_bound != target_user_id:
             return
 
         try:
-            async with RegosAPI(
-                connected_integration_id=runtime.connected_integration_id
-            ) as api:
-                response = await api.crm.lead.set_responsible(
-                    LeadSetResponsibleRequest(
-                        id=lead_ctx.lead_id, responsible_user_id=target_user_id
+            if lead_ctx.ticket_id:
+                async with RegosAPI(
+                    connected_integration_id=runtime.connected_integration_id
+                ) as api:
+                    response = await api.crm.ticket.set_responsible(
+                        TicketSetResponsibleRequest(
+                            id=int(lead_ctx.ticket_id),
+                            responsible_user_id=target_user_id,
+                        )
                     )
-                )
+            else:
+                async with RegosAPI(
+                    connected_integration_id=runtime.connected_integration_id
+                ) as api:
+                    response = await api.crm.lead.set_responsible(
+                        LeadSetResponsibleRequest(
+                            id=lead_ctx.lead_id, responsible_user_id=target_user_id
+                        )
+                    )
             if not response.ok:
-                logger.warning(
-                    "Lead/SetResponsible rejected while binding responsible by operator extension: ci=%s lead_id=%s operator_ext=%s user_id=%s payload=%s",
-                    runtime.connected_integration_id,
-                    lead_ctx.lead_id,
-                    operator_ext,
-                    target_user_id,
-                    response.result,
-                )
+                if lead_ctx.ticket_id:
+                    logger.warning(
+                        "Ticket/SetResponsible rejected while binding responsible by operator extension: ci=%s ticket_id=%s operator_ext=%s user_id=%s payload=%s",
+                        runtime.connected_integration_id,
+                        lead_ctx.ticket_id,
+                        operator_ext,
+                        target_user_id,
+                        response.result,
+                    )
+                else:
+                    logger.warning(
+                        "Lead/SetResponsible rejected while binding responsible by operator extension: ci=%s lead_id=%s operator_ext=%s user_id=%s payload=%s",
+                        runtime.connected_integration_id,
+                        lead_ctx.lead_id,
+                        operator_ext,
+                        target_user_id,
+                        response.result,
+                    )
                 return
             await cls._redis_set_with_ttl(
                 call_key,
@@ -3813,27 +3842,38 @@ return 0
                 runtime.state_ttl_sec,
                 min_ttl_sec=300,
             )
-            await cls._update_lead_state_cache(
-                connected_integration_id=runtime.connected_integration_id,
-                lead_id=lead_ctx.lead_id,
-                responsible_user_id=target_user_id,
-            )
-            if should_move_to_in_progress:
-                await cls._set_lead_status_best_effort(
+            if not lead_ctx.ticket_id:
+                await cls._update_lead_state_cache(
                     connected_integration_id=runtime.connected_integration_id,
                     lead_id=lead_ctx.lead_id,
-                    status=LeadStatusEnum.InProgress,
-                    reason="responsible_bound_by_operator_ext",
+                    responsible_user_id=target_user_id,
                 )
+                if should_move_to_in_progress:
+                    await cls._set_lead_status_best_effort(
+                        connected_integration_id=runtime.connected_integration_id,
+                        lead_id=lead_ctx.lead_id,
+                        status=LeadStatusEnum.InProgress,
+                        reason="responsible_bound_by_operator_ext",
+                    )
         except Exception as error:
-            logger.warning(
-                "Failed to bind responsible by operator extension: ci=%s lead_id=%s operator_ext=%s user_id=%s error=%s",
-                runtime.connected_integration_id,
-                lead_ctx.lead_id,
-                operator_ext,
-                target_user_id,
-                error,
-            )
+            if lead_ctx.ticket_id:
+                logger.warning(
+                    "Failed to bind responsible by operator extension: ci=%s ticket_id=%s operator_ext=%s user_id=%s error=%s",
+                    runtime.connected_integration_id,
+                    lead_ctx.ticket_id,
+                    operator_ext,
+                    target_user_id,
+                    error,
+                )
+            else:
+                logger.warning(
+                    "Failed to bind responsible by operator extension: ci=%s lead_id=%s operator_ext=%s user_id=%s error=%s",
+                    runtime.connected_integration_id,
+                    lead_ctx.lead_id,
+                    operator_ext,
+                    target_user_id,
+                    error,
+                )
 
     @classmethod
     async def _save_mapping(
@@ -3845,6 +3885,8 @@ return 0
         normalized_phone = _normalize_phone(event.client_phone) or ""
         payload = {
             "lead_id": int(lead_ctx.lead_id),
+            "ticket_id": int(lead_ctx.ticket_id or lead_ctx.lead_id),
+            "client_id": _to_int(lead_ctx.client_id, None),
             "chat_id": str(lead_ctx.chat_id),
             "asterisk_hash": runtime.asterisk_hash,
             "normalized_phone": normalized_phone,
@@ -3917,9 +3959,16 @@ return 0
             )
             if payload:
                 lead_id = _to_int(payload.get("lead_id"), None)
+                ticket_id = _to_int(payload.get("ticket_id"), None)
+                client_id = _to_int(payload.get("client_id"), None)
                 chat_id = str(payload.get("chat_id") or "").strip()
                 if lead_id and chat_id:
-                    return LeadContext(lead_id=lead_id, chat_id=chat_id)
+                    return LeadContext(
+                        lead_id=lead_id,
+                        chat_id=chat_id,
+                        client_id=client_id,
+                        ticket_id=ticket_id,
+                    )
 
         normalized_phone = _normalize_phone(event.client_phone)
         if not normalized_phone:
@@ -3940,9 +3989,16 @@ return 0
             # Protect against cross-call collisions when same client has parallel calls.
             return None
         lead_id = _to_int(payload.get("lead_id"), None)
+        ticket_id = _to_int(payload.get("ticket_id"), None)
+        client_id = _to_int(payload.get("client_id"), None)
         chat_id = str(payload.get("chat_id") or "").strip()
         if lead_id and chat_id:
-            return LeadContext(lead_id=lead_id, chat_id=chat_id)
+            return LeadContext(
+                lead_id=lead_id,
+                chat_id=chat_id,
+                client_id=client_id,
+                ticket_id=ticket_id,
+            )
         return None
 
     @classmethod
@@ -4109,45 +4165,152 @@ return 0
         return lead_ctx
 
     @classmethod
-    async def _create_lead(cls, runtime: RuntimeConfig, event: CallEvent) -> Lead:
-        payload = LeadAddRequest(
+    async def _resolve_or_create_client_by_phone(
+        cls,
+        runtime: RuntimeConfig,
+        phone: str,
+    ) -> int:
+        candidates = _phone_filter_candidates(phone, runtime.default_country_code)
+        if not candidates:
+            candidates = [phone]
+
+        async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
+            for candidate in candidates:
+                response = await api.crm.client.get(
+                    ClientGetRequest(phones=[candidate], limit=1, offset=0)
+                )
+                rows = response.result if response.ok and isinstance(response.result, list) else []
+                if rows and rows[0] and rows[0].id:
+                    return int(rows[0].id)
+
+            add_response = await api.crm.client.add(
+                ClientAddRequest(
+                    phone=phone,
+                    name=phone,
+                    external_id=_external_id(runtime.asterisk_hash, phone),
+                )
+            )
+            add_result = add_response.result if isinstance(add_response.result, dict) else {}
+            if not add_response.ok:
+                # In race conditions client can be created concurrently: retry lookup.
+                for candidate in candidates:
+                    response = await api.crm.client.get(
+                        ClientGetRequest(phones=[candidate], limit=1, offset=0)
+                    )
+                    rows = (
+                        response.result
+                        if response.ok and isinstance(response.result, list)
+                        else []
+                    )
+                    if rows and rows[0] and rows[0].id:
+                        return int(rows[0].id)
+                error_code = add_result.get("error")
+                description = add_result.get("description")
+                raise NonRetryableCallEventError(
+                    f"Client/Add rejected: error={error_code} description={description}"
+                )
+            new_id = _to_int(add_result.get("new_id"), None)
+            if not new_id:
+                raise RuntimeError("Client/Add did not return new_id")
+            return int(new_id)
+
+    @classmethod
+    async def _find_open_ticket_by_external_call(
+        cls,
+        runtime: RuntimeConfig,
+        external_call_id: str,
+    ) -> Optional[LeadContext]:
+        filters = [
+            Filter(
+                field="external_dialog_id",
+                operator=FilterOperator.Equal,
+                value=external_call_id,
+            ),
+        ]
+        async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
+            response = await api.crm.ticket.get(
+                TicketGetRequest(
+                    channel_ids=[runtime.channel_id],
+                    filters=filters,
+                    limit=10,
+                    offset=0,
+                )
+            )
+        rows = response.result if response.ok and isinstance(response.result, list) else []
+        valid = [
+            row
+            for row in rows
+            if row and row.id and row.chat_id and _to_int(row.client_id, None)
+        ]
+        if not valid:
+            return None
+        ticket = max(valid, key=lambda row: int(row.id or 0))
+        return LeadContext(
+            lead_id=int(ticket.id),
+            chat_id=str(ticket.chat_id),
+            client_id=int(ticket.client_id),
+            ticket_id=int(ticket.id),
+        )
+
+    @classmethod
+    async def _create_lead(cls, runtime: RuntimeConfig, event: CallEvent) -> LeadContext:
+        reused = await cls._find_open_ticket_by_external_call(
+            runtime,
+            event.external_call_id,
+        )
+        if reused:
+            return reused
+
+        client_id = await cls._resolve_or_create_client_by_phone(runtime, event.client_phone)
+        payload = TicketAddRequest(
+            client_id=client_id,
             channel_id=runtime.channel_id,
-            pipeline_id=runtime.pipeline_id,
+            direction=(
+                TicketDirectionEnum.Outbound
+                if event.direction == "outbound"
+                else TicketDirectionEnum.Inbound
+            ),
+            external_dialog_id=event.external_call_id,
             responsible_user_id=runtime.default_responsible_user_id,
             subject=_safe_subject(
                 runtime.lead_subject_template,
                 event,
                 language=runtime.message_language,
             ),
-            external_id=_external_id(
-                runtime.asterisk_hash,
-                event.client_phone,
-            ),
-            client_name=event.client_phone,
-            client_phone=event.client_phone,
+            description=None,
         )
         async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
-            add_response = await api.call(
-                "Lead/Add",
-                payload,
-                APIBaseResponse[Dict[str, Any]],
-            )
+            add_response = await api.crm.ticket.add(payload)
             add_result = add_response.result if isinstance(add_response.result, dict) else {}
             if not add_response.ok:
                 error_code = add_result.get("error")
                 description = add_result.get("description")
                 raise NonRetryableCallEventError(
-                    f"Lead/Add rejected: error={error_code} description={description}"
+                    f"Ticket/Add rejected: error={error_code} description={description}"
                 )
             new_id = _to_int(add_result.get("new_id"), None)
             if not new_id:
-                raise RuntimeError("Lead/Add did not return new_id")
+                raise RuntimeError("Ticket/Add did not return new_id")
 
-            lead = await api.crm.lead.get_by_id(new_id)
-            if not lead or not lead.id or not lead.chat_id:
-                raise RuntimeError("Lead/Get did not return lead/chat pair after Lead/Add")
-            await cls._cache_lead_snapshot(runtime.connected_integration_id, lead)
-            return lead
+            ticket_response = await api.crm.ticket.get(
+                TicketGetRequest(ids=[int(new_id)], limit=1, offset=0)
+            )
+            ticket_rows = (
+                ticket_response.result
+                if ticket_response.ok and isinstance(ticket_response.result, list)
+                else []
+            )
+            ticket = ticket_rows[0] if ticket_rows else None
+            if not ticket or not ticket.id or not ticket.chat_id:
+                raise RuntimeError("Ticket/Get did not return ticket/chat pair after Ticket/Add")
+
+            resolved_client_id = _to_int(ticket.client_id, client_id) or client_id
+            return LeadContext(
+                lead_id=int(ticket.id),
+                chat_id=str(ticket.chat_id),
+                client_id=int(resolved_client_id),
+                ticket_id=int(ticket.id),
+            )
 
     @classmethod
     async def _resolve_or_create_active_lead(
@@ -4184,8 +4347,7 @@ return 0
             if lead_ctx:
                 return lead_ctx
 
-            created = await cls._create_lead(runtime, event)
-            lead_ctx = LeadContext(lead_id=int(created.id), chat_id=str(created.chat_id))
+            lead_ctx = await cls._create_lead(runtime, event)
             await cls._save_mapping(runtime, event, lead_ctx)
             return lead_ctx
         finally:
@@ -4514,8 +4676,13 @@ return 0
         cls,
         runtime: RuntimeConfig,
         event: CallEvent,
-        lead_id: int,
+        lead_ctx: LeadContext,
     ) -> None:
+        # New CRM flow is Client + Ticket; telephony does not transition ticket status here.
+        # Leave ticket open and avoid legacy Lead/SetStatus for ticket ids.
+        if lead_ctx.ticket_id:
+            return
+
         target_status = _status_from_direction_event(event.direction, event.status)
         if not target_status:
             return
@@ -4523,7 +4690,7 @@ return 0
         reason = f"call_{event.direction}_{event.status}"
         await cls._set_lead_status_best_effort(
             connected_integration_id=runtime.connected_integration_id,
-            lead_id=lead_id,
+            lead_id=lead_ctx.lead_id,
             status=target_status,
             reason=reason,
         )
@@ -4537,106 +4704,9 @@ return 0
         *,
         reason: str,
     ) -> None:
-        resolved_lead_id = _to_int(lead_id, None)
-        if not resolved_lead_id:
-            return
-        cached = await cls._get_lead_state_cache(connected_integration_id, resolved_lead_id)
-        cached_status = cls._normalize_lead_status(cached.get("status"))
-
-        if cached_status in {LeadStatusEnum.Closed, LeadStatusEnum.Converted}:
-            return
-        if cached_status == status:
-            return
-
-        if cached_status is not None:
-            try:
-                async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-                    response = await api.crm.lead.set_status(
-                        LeadSetStatusRequest(id=int(resolved_lead_id), status=status.value)
-                    )
-                if response.ok:
-                    await cls._update_lead_state_cache(
-                        connected_integration_id=connected_integration_id,
-                        lead_id=resolved_lead_id,
-                        status=status,
-                    )
-                    return
-                payload = response.result if isinstance(response.result, dict) else {}
-                logger.warning(
-                    "Lead/SetStatus rejected: ci=%s lead_id=%s status=%s reason=%s error=%s description=%s",
-                    connected_integration_id,
-                    resolved_lead_id,
-                    status,
-                    reason,
-                    payload.get("error"),
-                    payload.get("description"),
-                )
-                return
-            except Exception as error:
-                logger.warning(
-                    "Lead status update failed via cached state: ci=%s lead_id=%s status=%s reason=%s error=%s",
-                    connected_integration_id,
-                    resolved_lead_id,
-                    status,
-                    reason,
-                    error,
-                )
-                return
-
-        try:
-            async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-                lead = await api.crm.lead.get_by_id(int(resolved_lead_id))
-                if not lead:
-                    return
-
-                current_status = cls._normalize_lead_status(getattr(lead, "status", None))
-                current_responsible_user_id = _to_int(
-                    getattr(lead, "responsible_user_id", None),
-                    None,
-                )
-                await cls._update_lead_state_cache(
-                    connected_integration_id=connected_integration_id,
-                    lead_id=resolved_lead_id,
-                    status=current_status,
-                    responsible_user_id=current_responsible_user_id,
-                )
-
-                if current_status in {LeadStatusEnum.Closed, LeadStatusEnum.Converted}:
-                    return
-                if current_status == LeadStatusEnum.New and not current_responsible_user_id:
-                    return
-                if current_status == status:
-                    return
-
-                response = await api.crm.lead.set_status(
-                    LeadSetStatusRequest(id=int(resolved_lead_id), status=status.value)
-                )
-            if response.ok:
-                await cls._update_lead_state_cache(
-                    connected_integration_id=connected_integration_id,
-                    lead_id=resolved_lead_id,
-                    status=status,
-                )
-                return
-            payload = response.result if isinstance(response.result, dict) else {}
-            logger.warning(
-                "Lead/SetStatus rejected: ci=%s lead_id=%s status=%s reason=%s error=%s description=%s",
-                connected_integration_id,
-                resolved_lead_id,
-                status,
-                reason,
-                payload.get("error"),
-                payload.get("description"),
-            )
-        except Exception as error:
-            logger.warning(
-                "Lead status update failed: ci=%s lead_id=%s status=%s reason=%s error=%s",
-                connected_integration_id,
-                resolved_lead_id,
-                status,
-                reason,
-                error,
-            )
+        _ = (connected_integration_id, lead_id, status, reason)
+        # Lead/SetStatus is deprecated in the new CRM API flow.
+        return
 
     @staticmethod
     def _extract_events_from_body(body: Any) -> List[Dict[str, Any]]:

@@ -199,11 +199,17 @@ class RegosAPI:
 
     class Crm:
         def __init__(self, api: "RegosAPI"):
+            from core.api.crm.client import ClientService
+            from core.api.crm.deal import DealService
             from core.api.crm.lead import LeadService
             from core.api.crm.pipeline import PipelineService
+            from core.api.crm.ticket import TicketService
 
+            self.client = ClientService(api)
+            self.deal = DealService(api)
             self.lead = LeadService(api)
             self.pipeline = PipelineService(api)
+            self.ticket = TicketService(api)
 
     class Chat:
         def __init__(self, api: "RegosAPI"):

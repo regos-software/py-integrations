@@ -35,6 +35,15 @@ class ChatMessage(BaseSchema):
     author_entity_id: Optional[int] = PydField(
         default=None, description="Author entity id."
     )
+    author_role: Optional[str] = PydField(
+        default=None, description="Author role in chat."
+    )
+    author_entity_name: Optional[str] = PydField(
+        default=None, description="Author display name."
+    )
+    author_entity_photo: Optional[str] = PydField(
+        default=None, description="Author photo URL."
+    )
     message_type: Optional[ChatMessageTypeEnum] = PydField(
         default=None, description="Message type."
     )

@@ -28,7 +28,14 @@ from schemas.api.chat.chat_message import (
     ChatMessageTypeEnum,
 )
 from schemas.api.common.filters import Filter, FilterOperator
-from schemas.api.crm.lead import Lead, LeadAddRequest, LeadGetRequest, LeadStatusEnum
+from schemas.api.crm.client import Client, ClientAddRequest, ClientEditRequest, ClientGetRequest
+from schemas.api.crm.ticket import (
+    Ticket,
+    TicketAddRequest,
+    TicketDirectionEnum,
+    TicketGetRequest,
+    TicketStatusEnum,
+)
 from schemas.api.integrations.connected_integration_setting import (
     ConnectedIntegrationSettingEditItem,
     ConnectedIntegrationSettingEditRequest,
@@ -63,11 +70,7 @@ class InstagramCrmChannelConfig:
         "pages_messaging",
     )
 
-    ACTIVE_LEAD_STATUSES = (
-        LeadStatusEnum.New,
-        LeadStatusEnum.InProgress,
-        LeadStatusEnum.WaitingClient,
-    )
+    ACTIVE_TICKET_STATUSES = (TicketStatusEnum.Open,)
 
     SUPPORTED_INBOUND_WEBHOOKS = {"ChatMessageAdded"}
 
@@ -91,7 +94,8 @@ class RuntimeConfig:
 
 @dataclass
 class LeadContext:
-    lead_id: int
+    client_id: int
+    ticket_id: int
     chat_id: str
 
 
@@ -400,11 +404,13 @@ class InstagramCrmChannelIntegration(ClientBase):
         return str(value or "").strip() or None
 
     @staticmethod
-    def _lead_external_id(runtime: RuntimeConfig, external_user_id: str) -> str:
+    def _client_external_id(runtime: RuntimeConfig, external_user_id: str) -> str:
         return f"ig:{runtime.instagram_business_account_id}:{external_user_id}"
 
     @classmethod
-    def _extract_external_user_from_lead_external_id(cls, runtime: RuntimeConfig, external_id: Optional[str]) -> Optional[str]:
+    def _extract_external_user_from_client_external_id(
+        cls, runtime: RuntimeConfig, external_id: Optional[str]
+    ) -> Optional[str]:
         value = str(external_id or "").strip()
         prefix = f"ig:{runtime.instagram_business_account_id}:"
         if not value.startswith(prefix):
@@ -413,51 +419,219 @@ class InstagramCrmChannelIntegration(ClientBase):
         return tail or None
 
     @classmethod
-    async def _get_lead_by_id(cls, runtime: RuntimeConfig, lead_id: int) -> Optional[Lead]:
+    async def _get_client_by_id(
+        cls, runtime: RuntimeConfig, client_id: int
+    ) -> Optional[Client]:
         async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
-            response = await api.call(
-                "Lead/Get",
-                LeadGetRequest(ids=[int(lead_id)], limit=1, offset=0),
-                APIBaseResponse[Any],
+            response = await api.crm.client.get(
+                ClientGetRequest(ids=[int(client_id)], limit=1, offset=0),
             )
-        if not response.ok or not isinstance(response.result, list) or not response.result:
+        rows = response.result if response.ok and isinstance(response.result, list) else []
+        if not rows:
             return None
-        try:
-            return Lead.model_validate(response.result[0])
-        except Exception:
-            return None
+        return rows[0]
 
     @classmethod
-    async def _find_active_lead_by_external_id(cls, runtime: RuntimeConfig, external_user_id: str) -> Optional[Lead]:
+    async def _find_client_by_instagram_id(
+        cls, runtime: RuntimeConfig, external_user_id: str
+    ) -> Optional[Client]:
         async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
-            response = await api.call(
-                "Lead/Get",
-                LeadGetRequest(
-                    statuses=list(InstagramCrmChannelConfig.ACTIVE_LEAD_STATUSES),
-                    filters=[Filter(field="external_id", operator=FilterOperator.Equal, value=cls._lead_external_id(runtime, external_user_id))],
-                    limit=10,
+            response = await api.crm.client.get(
+                ClientGetRequest(
+                    instagram_ids=[str(external_user_id or "").strip()],
+                    limit=20,
                     offset=0,
-                ),
-                APIBaseResponse[Any],
+                )
             )
-        if not response.ok or not isinstance(response.result, list):
+        rows = response.result if response.ok and isinstance(response.result, list) else []
+        valid = [row for row in rows if row and row.id]
+        if not valid:
             return None
-
-        winner: Optional[Lead] = None
-        for row in response.result:
-            try:
-                lead = Lead.model_validate(row)
-            except Exception:
-                continue
-            if not lead.id:
-                continue
-            if winner is None or int(lead.id) > int(winner.id or 0):
-                winner = lead
-        return winner
+        return max(valid, key=lambda row: int(row.id or 0))
 
     @classmethod
-    async def _save_mapping(cls, runtime: RuntimeConfig, external_user_id: str, lead_id: int, chat_id: str) -> None:
-        payload = _json_dumps({"external_user_id": external_user_id, "lead_id": int(lead_id), "chat_id": str(chat_id)})
+    async def _find_client_by_external_id(
+        cls, runtime: RuntimeConfig, external_user_id: str
+    ) -> Optional[Client]:
+        async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
+            response = await api.crm.client.get(
+                ClientGetRequest(
+                    external_ids=[cls._client_external_id(runtime, external_user_id)],
+                    limit=1,
+                    offset=0,
+                )
+            )
+        rows = response.result if response.ok and isinstance(response.result, list) else []
+        if not rows:
+            return None
+        return rows[0]
+
+    @classmethod
+    async def _sync_instagram_client_identifiers(
+        cls,
+        runtime: RuntimeConfig,
+        client: Client,
+        external_user_id: str,
+    ) -> Client:
+        if not client or not client.id:
+            return client
+
+        instagram_id = str(external_user_id or "").strip() or None
+        external_id = cls._client_external_id(runtime, external_user_id)
+        patch: Dict[str, Any] = {}
+        if instagram_id and not str(client.instagram_id or "").strip():
+            patch["instagram_id"] = instagram_id
+        if external_id and not str(client.external_id or "").strip():
+            patch["external_id"] = external_id
+        if not patch:
+            return client
+
+        async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
+            response = await api.crm.client.edit(
+                ClientEditRequest(id=int(client.id), **patch)
+            )
+        if not response.ok:
+            payload = response.result if isinstance(response.result, dict) else {}
+            logger.warning(
+                "Client/Edit rejected while syncing Instagram identifiers: ci=%s client_id=%s payload=%s",
+                runtime.connected_integration_id,
+                client.id,
+                payload,
+            )
+            return client
+        refreshed = await cls._get_client_by_id(runtime, int(client.id))
+        return refreshed or client
+
+    @classmethod
+    async def _resolve_or_create_client(
+        cls, runtime: RuntimeConfig, external_user_id: str
+    ) -> Client:
+        existing = await cls._find_client_by_instagram_id(runtime, external_user_id)
+        if existing and existing.id:
+            return await cls._sync_instagram_client_identifiers(
+                runtime,
+                existing,
+                external_user_id,
+            )
+
+        existing = await cls._find_client_by_external_id(runtime, external_user_id)
+        if existing and existing.id:
+            return await cls._sync_instagram_client_identifiers(
+                runtime,
+                existing,
+                external_user_id,
+            )
+
+        async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
+            add_response = await api.crm.client.add(
+                ClientAddRequest(
+                    external_id=cls._client_external_id(runtime, external_user_id),
+                    instagram_id=external_user_id,
+                    name=external_user_id,
+                )
+            )
+        if not add_response.ok:
+            payload = add_response.result if isinstance(add_response.result, dict) else {}
+            # Allow concurrent create and duplicate handling without explicit merge.
+            existing = await cls._find_client_by_instagram_id(runtime, external_user_id)
+            if existing and existing.id:
+                return await cls._sync_instagram_client_identifiers(
+                    runtime,
+                    existing,
+                    external_user_id,
+                )
+            existing = await cls._find_client_by_external_id(runtime, external_user_id)
+            if existing and existing.id:
+                return await cls._sync_instagram_client_identifiers(
+                    runtime,
+                    existing,
+                    external_user_id,
+                )
+            raise RuntimeError(
+                "Client/Add rejected: "
+                f"error={payload.get('error')} description={payload.get('description')}"
+            )
+
+        new_id = (
+            _to_int((add_response.result or {}).get("new_id"), None)
+            if isinstance(add_response.result, dict)
+            else None
+        )
+        if not new_id:
+            raise RuntimeError("Client/Add did not return new_id")
+
+        created = await cls._get_client_by_id(runtime, int(new_id))
+        if not created or not created.id:
+            raise RuntimeError(f"Client/Get did not return client after Client/Add: {new_id}")
+        return await cls._sync_instagram_client_identifiers(
+            runtime,
+            created,
+            external_user_id,
+        )
+
+    @classmethod
+    async def _get_ticket_by_id(
+        cls, runtime: RuntimeConfig, ticket_id: int
+    ) -> Optional[Ticket]:
+        async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
+            response = await api.crm.ticket.get(
+                TicketGetRequest(ids=[int(ticket_id)], limit=1, offset=0),
+            )
+        rows = response.result if response.ok and isinstance(response.result, list) else []
+        if not rows:
+            return None
+        return rows[0]
+
+    @classmethod
+    async def _find_open_ticket_for_client(
+        cls,
+        runtime: RuntimeConfig,
+        client_id: int,
+        external_user_id: str,
+    ) -> Optional[Ticket]:
+        filters = [
+            Filter(
+                field="external_dialog_id",
+                operator=FilterOperator.Equal,
+                value=external_user_id,
+            )
+        ]
+        async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
+            response = await api.crm.ticket.get(
+                TicketGetRequest(
+                    client_ids=[int(client_id)],
+                    channel_ids=[int(runtime.channel_id)],
+                    statuses=list(InstagramCrmChannelConfig.ACTIVE_TICKET_STATUSES),
+                    filters=filters,
+                    limit=20,
+                    offset=0,
+                )
+            )
+        rows = response.result if response.ok and isinstance(response.result, list) else []
+        valid = [row for row in rows if row and row.id and row.chat_id]
+        if not valid:
+            return None
+        return max(valid, key=lambda row: int(row.id or 0))
+
+    @classmethod
+    async def _save_mapping(
+        cls,
+        runtime: RuntimeConfig,
+        external_user_id: str,
+        client_id: int,
+        ticket_id: int,
+        chat_id: str,
+    ) -> None:
+        payload = _json_dumps(
+            {
+                "external_user_id": external_user_id,
+                "client_id": int(client_id),
+                "ticket_id": int(ticket_id),
+                # Legacy key for backward compatibility with old cache entries.
+                "lead_id": int(ticket_id),
+                "chat_id": str(chat_id),
+            }
+        )
         await cls._redis_set(cls._redis_key("map", "by_user", runtime.connected_integration_id, external_user_id), payload, InstagramCrmChannelConfig.MAP_TTL_SEC)
         await cls._redis_set(cls._redis_key("map", "by_chat", runtime.connected_integration_id, chat_id), payload, InstagramCrmChannelConfig.MAP_TTL_SEC)
 
@@ -469,18 +643,44 @@ class InstagramCrmChannelIntegration(ClientBase):
                 data = _json_loads(raw)
             except Exception:
                 data = {}
-            lead_id = _to_int(data.get("lead_id"), None) if isinstance(data, dict) else None
+            client_id = _to_int(data.get("client_id"), None) if isinstance(data, dict) else None
+            ticket_id = _to_int(data.get("ticket_id"), None) if isinstance(data, dict) else None
+            if not ticket_id:
+                ticket_id = _to_int(data.get("lead_id"), None) if isinstance(data, dict) else None
             chat_id = str(data.get("chat_id") or "").strip() if isinstance(data, dict) else ""
-            if lead_id and chat_id:
-                lead = await cls._get_lead_by_id(runtime, int(lead_id))
-                if lead and lead.status in InstagramCrmChannelConfig.ACTIVE_LEAD_STATUSES and str(lead.chat_id or "") == chat_id:
-                    return LeadContext(lead_id=int(lead_id), chat_id=chat_id)
+            if ticket_id and chat_id:
+                ticket = await cls._get_ticket_by_id(runtime, int(ticket_id))
+                if ticket and ticket.status in InstagramCrmChannelConfig.ACTIVE_TICKET_STATUSES and str(ticket.chat_id or "") == chat_id:
+                    resolved_client_id = _to_int(client_id, None) or _to_int(ticket.client_id, None)
+                    if resolved_client_id:
+                        return LeadContext(
+                            client_id=int(resolved_client_id),
+                            ticket_id=int(ticket_id),
+                            chat_id=chat_id,
+                        )
 
-        if runtime.find_active_lead_by_external_id:
-            lead = await cls._find_active_lead_by_external_id(runtime, external_user_id)
-            if lead and lead.id and lead.chat_id:
-                await cls._save_mapping(runtime, external_user_id, int(lead.id), str(lead.chat_id))
-                return LeadContext(lead_id=int(lead.id), chat_id=str(lead.chat_id))
+        client = await cls._find_client_by_instagram_id(runtime, external_user_id)
+        if (not client or not client.id) and runtime.find_active_lead_by_external_id:
+            client = await cls._find_client_by_external_id(runtime, external_user_id)
+        if client and client.id:
+            ticket = await cls._find_open_ticket_for_client(
+                runtime,
+                int(client.id),
+                external_user_id,
+            )
+            if ticket and ticket.id and ticket.chat_id:
+                await cls._save_mapping(
+                    runtime,
+                    external_user_id,
+                    int(client.id),
+                    int(ticket.id),
+                    str(ticket.chat_id),
+                )
+                return LeadContext(
+                    client_id=int(client.id),
+                    ticket_id=int(ticket.id),
+                    chat_id=str(ticket.chat_id),
+                )
         return None
 
     @classmethod
@@ -503,26 +703,76 @@ class InstagramCrmChannelIntegration(ClientBase):
 
         row = chat_response.result[0] if isinstance(chat_response.result[0], dict) else {}
         participants = row.get("participants") if isinstance(row, dict) else None
-        lead_id: Optional[int] = None
+        client_id: Optional[int] = None
+        ticket_id: Optional[int] = None
+        ticket: Optional[Ticket] = None
+        linked_entity_type = str(row.get("entity_type") or "").strip().lower()
+        linked_entity_id = _to_int(row.get("entity_id"), None)
+        if linked_entity_type in {"ticket"} and linked_entity_id:
+            ticket_id = int(linked_entity_id)
         if isinstance(participants, list):
             for part in participants:
                 if not isinstance(part, dict):
                     continue
                 entity_type = str(part.get("entity_type") or "").strip().lower()
-                if entity_type not in {"lead", "2"}:
+                entity_id = _to_int(part.get("entity_id"), None)
+                if not entity_id:
                     continue
-                lead_id = _to_int(part.get("entity_id"), None)
-                if lead_id:
-                    break
-        if not lead_id:
+                if entity_type in {"client", "3"}:
+                    client_id = entity_id
+                elif entity_type in {"ticket"}:
+                    ticket_id = entity_id
+        if ticket_id:
+            ticket = await cls._get_ticket_by_id(runtime, int(ticket_id))
+
+        if ticket:
+            ticket_channel_id = _to_int(ticket.channel_id, None)
+            external_user_id_from_ticket = str(ticket.external_dialog_id or "").strip()
+            if (
+                ticket_channel_id
+                and int(ticket_channel_id) == int(runtime.channel_id)
+                and external_user_id_from_ticket
+            ):
+                resolved_client_id = _to_int(ticket.client_id, None) or _to_int(client_id, None)
+                if resolved_client_id and ticket.id:
+                    await cls._save_mapping(
+                        runtime,
+                        external_user_id_from_ticket,
+                        int(resolved_client_id),
+                        int(ticket.id),
+                        chat_id,
+                    )
+                return external_user_id_from_ticket
+
+        if not client_id and ticket and ticket.client_id:
+            client_id = _to_int(ticket.client_id, None)
+        if not client_id:
             return None
 
-        lead = await cls._get_lead_by_id(runtime, int(lead_id))
-        if not lead:
+        client = await cls._get_client_by_id(runtime, int(client_id))
+        if not client:
             return None
-        external_user_id = cls._extract_external_user_from_lead_external_id(runtime, lead.external_id)
-        if external_user_id and lead.chat_id:
-            await cls._save_mapping(runtime, external_user_id, int(lead.id), str(lead.chat_id))
+        external_user_id = cls._extract_external_user_from_client_external_id(
+            runtime,
+            client.external_id,
+        )
+        if external_user_id:
+            resolved_ticket_id = ticket_id
+            if not resolved_ticket_id:
+                maybe_ticket = await cls._find_open_ticket_for_client(
+                    runtime,
+                    int(client_id),
+                    external_user_id,
+                )
+                resolved_ticket_id = _to_int(maybe_ticket.id if maybe_ticket else None, None)
+            if resolved_ticket_id:
+                await cls._save_mapping(
+                    runtime,
+                    external_user_id,
+                    int(client.id),
+                    int(resolved_ticket_id),
+                    chat_id,
+                )
         return external_user_id
 
     @classmethod
@@ -535,32 +785,46 @@ class InstagramCrmChannelIntegration(ClientBase):
         return str(subject or "").strip() or f"Instagram {external_user_id}"
 
     @classmethod
-    async def _create_lead(cls, runtime: RuntimeConfig, external_user_id: str) -> LeadContext:
+    async def _create_ticket_context(
+        cls, runtime: RuntimeConfig, external_user_id: str
+    ) -> LeadContext:
+        client = await cls._resolve_or_create_client(runtime, external_user_id)
+        if not client.id:
+            raise RuntimeError("Client id is empty after resolve/create")
         async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
-            response = await api.call(
-                "Lead/Add",
-                LeadAddRequest(
+            response = await api.crm.ticket.add(
+                TicketAddRequest(
+                    client_id=int(client.id),
                     channel_id=int(runtime.channel_id),
-                    pipeline_id=int(runtime.pipeline_id),
+                    direction=TicketDirectionEnum.Inbound,
+                    external_dialog_id=external_user_id,
                     responsible_user_id=runtime.default_responsible_user_id,
                     subject=cls._render_lead_subject(runtime, external_user_id),
-                    external_id=cls._lead_external_id(runtime, external_user_id),
-                    client_name=external_user_id,
-                ),
-                APIBaseResponse[Dict[str, Any]],
+                )
             )
         if not response.ok:
             payload = response.result if isinstance(response.result, dict) else {}
-            raise RuntimeError(f"Lead/Add rejected: error={payload.get('error')} description={payload.get('description')}")
+            raise RuntimeError(
+                "Ticket/Add rejected: "
+                f"error={payload.get('error')} description={payload.get('description')}"
+            )
 
-        lead_id = _to_int((response.result or {}).get("new_id"), None) if isinstance(response.result, dict) else None
-        if not lead_id:
-            raise RuntimeError("Lead/Add did not return new_id")
+        ticket_id = (
+            _to_int((response.result or {}).get("new_id"), None)
+            if isinstance(response.result, dict)
+            else None
+        )
+        if not ticket_id:
+            raise RuntimeError("Ticket/Add did not return new_id")
 
-        lead = await cls._get_lead_by_id(runtime, int(lead_id))
-        if not lead or not lead.chat_id:
-            raise RuntimeError(f"Lead {lead_id} has no chat_id")
-        return LeadContext(lead_id=int(lead_id), chat_id=str(lead.chat_id))
+        ticket = await cls._get_ticket_by_id(runtime, int(ticket_id))
+        if not ticket or not ticket.chat_id:
+            raise RuntimeError(f"Ticket {ticket_id} has no chat_id")
+        return LeadContext(
+            client_id=int(client.id),
+            ticket_id=int(ticket_id),
+            chat_id=str(ticket.chat_id),
+        )
 
     @classmethod
     async def _resolve_or_create_lead(cls, runtime: RuntimeConfig, external_user_id: str) -> LeadContext:
@@ -568,7 +832,7 @@ class InstagramCrmChannelIntegration(ClientBase):
         if cached:
             return cached
 
-        lock_key = cls._redis_key("lock", "lead_create", runtime.connected_integration_id, external_user_id)
+        lock_key = cls._redis_key("lock", "ticket_create", runtime.connected_integration_id, external_user_id)
         lock_token = None
         if _redis_enabled():
             token = uuid.uuid4().hex
@@ -589,8 +853,14 @@ class InstagramCrmChannelIntegration(ClientBase):
             cached = await cls._resolve_mapping_by_user(runtime, external_user_id)
             if cached:
                 return cached
-            context = await cls._create_lead(runtime, external_user_id)
-            await cls._save_mapping(runtime, external_user_id, context.lead_id, context.chat_id)
+            context = await cls._create_ticket_context(runtime, external_user_id)
+            await cls._save_mapping(
+                runtime,
+                external_user_id,
+                context.client_id,
+                context.ticket_id,
+                context.chat_id,
+            )
             return context
         finally:
             if lock_token:
@@ -634,8 +904,8 @@ class InstagramCrmChannelIntegration(ClientBase):
                 "ChatMessage/Add",
                 ChatMessageAddRequest(
                     chat_id=lead_ctx.chat_id,
-                    author_entity_type="Lead",
-                    author_entity_id=lead_ctx.lead_id,
+                    author_entity_type="Client",
+                    author_entity_id=lead_ctx.client_id,
                     message_type=ChatMessageTypeEnum.Regular,
                     text=text,
                     external_message_id=external_message_id,

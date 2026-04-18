@@ -54,8 +54,8 @@ class GptCrmChatAssistantConfig:
     DEFAULT_CONTEXT_SOURCE = "crm"
     ALLOWED_CONTEXT_SOURCES = {"crm", "conversation"}
     DEFAULT_AUTO_JOIN_ENABLED = True
-    DEFAULT_AUTO_JOIN_ENTITY_TYPES = {"lead", "deal", "task"}
-    ALLOWED_AUTO_JOIN_ENTITY_TYPES = {"lead", "deal", "task"}
+    DEFAULT_AUTO_JOIN_ENTITY_TYPES = {"lead", "deal", "task", "ticket"}
+    ALLOWED_AUTO_JOIN_ENTITY_TYPES = {"lead", "deal", "task", "ticket"}
     DEFAULT_AUTO_SEND_ENABLED = False
     DEFAULT_AUTO_SEND_CONFIDENCE_THRESHOLD = 0.9
     DEFAULT_AUTO_SEND_MAX_PER_CHAT_HOUR = 3
@@ -66,7 +66,7 @@ class GptCrmChatAssistantConfig:
     MAX_QUICK_REPLIES_IN_PROMPT = 30
     MAX_QUICK_REPLY_TEXT_LEN = 200
 
-    THREAD_FIELD_ENTITY_TYPES = ("Lead", "Deal", "Task")
+    THREAD_FIELD_ENTITY_TYPES = ("Lead", "Deal", "Task", "Client", "Ticket")
     THREAD_FIELD_KEY = "gpt_thread_id"
     THREAD_FIELD_FULL_KEY = "field_gpt_thread_id"
     THREAD_FIELD_NAME = "GPT Thread ID"
@@ -291,6 +291,16 @@ class GptCrmChatAssistantIntegration(ClientBase):
             "field_entity_type": "Task",
             "get_path": "ProjectTask/Get",
             "edit_path": "ProjectTask/Edit",
+        },
+        "client": {
+            "field_entity_type": "Client",
+            "get_path": "Client/Get",
+            "edit_path": "Client/Edit",
+        },
+        "ticket": {
+            "field_entity_type": "Ticket",
+            "get_path": "Ticket/Get",
+            "edit_path": "Ticket/Edit",
         },
     }
 
