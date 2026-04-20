@@ -1,114 +1,69 @@
-# asterisk_crm_channel
+﻿# asterisk_crm_channel
 
-## Наименование интеграции
+## Назначение
+Интеграция синхронизирует события звонков Asterisk с CRM-чатом обращения (ticket).
 
-- Русский: `Звонки клиентов в CRM под полным контролем`
-- O'zbekcha: `Mijoz qo'ng'iroqlari CRMda to'liq nazoratda`
-- English: `Keep Customer Calls Fully Controlled in CRM`
+Ключевая модель работы: **1 звонок = 1 обращение**.
 
-## Краткое описание
+## Текущая логика (ticket-only)
+1. Для каждого события обязателен `external_call_id`.
+2. `external_call_id` используется как `external_dialog_id` в CRM ticket.
+3. При обработке события интеграция:
+   - ищет ticket по `external_dialog_id`;
+   - если ticket не найден, создает новый ticket;
+   - сохраняет mapping только по `external_call_id`.
+4. Повторные события того же звонка всегда пишутся в тот же ticket.
+5. Если ticket уже закрыт и `ChatMessage/Add` возвращает ошибку 1220, интеграция **не** создает новый ticket и **не** переоткрывает старый.
 
-- Русский: `Вся история звонка, ключевые этапы и результат общения фиксируются в CRM, чтобы команда быстрее доводила обращения до сделки.`
-- O'zbekcha: `Qo'ng'iroq tarixi, muhim bosqichlar va natijalar CRMda saqlanadi, jamoa murojaatlarni tezroq natijaga olib chiqadi.`
-- English: `Call history, key stages, and outcomes are recorded in CRM so your team can move requests to results faster.`
 
-## Полное описание
+## Обрабатываемые события
+События звонков от Asterisk (через AMI и/или `/external`):
+- `started`
+- `ringing`
+- `answered`
+- `missed`
+- `completed`
+- `failed`
+- `recording_ready`
 
-- Русский:
-  `<p>Решение помогает превратить телефонные обращения в управляемый процесс продаж и сервиса.</p><ul><li>Каждый звонок отражается в CRM с понятной историей общения.</li><li>Команда видит ключевые этапы звонка и не теряет контекст разговора.</li><li>Записи разговоров сохраняются в карточке обращения для контроля качества.</li><li>Ответственный сотрудник и текущий этап работы всегда под рукой.</li><li>Руководитель получает прозрачную картину по скорости и качеству обработки обращений.</li></ul><p>Подходит для компаний, где важны дисциплина коммуникаций, контроль клиентского опыта и рост конверсии по входящим и исходящим звонкам.</p>`
-- O'zbekcha:
-  `<p>Yechim telefon orqali kelgan murojaatlarni savdo va servis jarayonida tartibli boshqarishga yordam beradi.</p><ul><li>Har bir qo'ng'iroq CRMda aniq tarix bilan ko'rinadi.</li><li>Jamoa qo'ng'iroqning asosiy bosqichlarini ko'radi va suhbat kontekstini yo'qotmaydi.</li><li>Qo'ng'iroq yozuvlari sifat nazorati uchun murojaat kartasida saqlanadi.</li><li>Mas'ul xodim va joriy ish bosqichi doim ko'z oldida bo'ladi.</li><li>Rahbar murojaatlarni ko'rib chiqish tezligi va sifatini shaffof kuzata oladi.</li></ul><p>Kiruvchi va chiquvchi qo'ng'iroqlar bo'yicha kommunikatsiya intizomi, mijoz tajribasi va konversiyani oshirishni istagan kompaniyalar uchun mos.</p>`
-- English:
-  `<p>This solution turns phone conversations into a clear and manageable workflow inside CRM.</p><ul><li>Every call appears in CRM with an easy-to-follow interaction history.</li><li>Your team sees key call stages and keeps full conversation context.</li><li>Call recordings are stored in the request card for quality control.</li><li>The responsible employee and current stage stay visible at all times.</li><li>Managers get transparent oversight of response speed and service quality.</li></ul><p>Ideal for companies that want stronger communication discipline, better customer experience, and higher conversion from inbound and outbound calls.</p>`
-
-## Список обрабатываемых вебхуков
-
-- События звонков от Asterisk (через AMI или `/external`):
-  - `started`
-  - `ringing`
-  - `answered`
-  - `missed`
-  - `completed`
-  - `failed`
-  - `recording_ready`
-- CRM webhook endpoint (`handle_webhook`) для этой интеграции не используется и возвращает `ignored`.
+`handle_webhook` для этой интеграции не используется и возвращает `ignored`.
 
 ## Настройки интеграции
+Совместимость алиасов:
+- `asterisk_ami_username` -> `asterisk_ami_user`
+- `asterisk_ami_secret` -> `asterisk_ami_password`
 
-Примечание по совместимости:
-- Для пользователя AMI также поддерживается ключ `asterisk_ami_username` (алиас к `asterisk_ami_user`).
-- Для пароля AMI также поддерживается ключ `asterisk_ami_secret` (алиас к `asterisk_ami_password`).
+| Ключ | Обяз. | Тип | Описание |
+|---|---|---|---|
+| `asterisk_ami_host` | Да | String | Хост Asterisk AMI |
+| `asterisk_ami_port` | Нет | Integer | Порт AMI (по умолчанию `5038`) |
+| `asterisk_ami_user` | Да | String | Логин AMI |
+| `asterisk_ami_password` | Да | String | Пароль AMI |
+| `asterisk_channel_id` | Да | Integer | ID CRM-канала для ticket |
+| `asterisk_default_responsible_user_id` | Нет | Integer | Ответственный по умолчанию при создании ticket |
+| `asterisk_assign_responsible_by_operator_ext` | Нет | Boolean | Назначать ответственного по внутреннему номеру оператора |
+| `asterisk_lead_subject_template` | Нет | String | Шаблон темы ticket (историческое имя ключа сохранено) |
+| `asterisk_allowed_did_list` | Нет | String | Список trunk/DID через запятую для определения направления |
+| `asterisk_recording_base_url` | Нет | String | Базовый URL для относительных ссылок на записи |
+| `asterisk_default_country_code` | Нет | String | Код страны для нормализации номеров |
+| `lead_dedupe_ttl_sec` | Нет | Integer | TTL дедупликации событий |
+| `state_ttl_sec` | Нет | Integer | TTL служебного state/mapping |
+| `asterisk_message_language` | Нет | String | Язык системных сообщений (`ru`, `uz`, `en`) |
 
-| Ключ | Обяз. | Тип данных | Наименование (RU / UZ / EN) | Описание (RU / UZ / EN) | Placeholder (RU / UZ / EN) |
-|---|---|---|---|---|---|
-| `asterisk_ami_host` | Да | String | `Хост AMI` / `AMI host` / `AMI host` | `Адрес Asterisk AMI` / `Asterisk AMI manzili` / `Asterisk AMI address` | `pbx.example.com` / `pbx.example.com` / `pbx.example.com` |
-| `asterisk_ami_port` | Нет | Integer | `Порт AMI` / `AMI port` / `AMI port` | `Порт подключения AMI` / `AMI ulanish porti` / `AMI connection port` | `5038` / `5038` / `5038` |
-| `asterisk_ami_user` | Да | String | `Пользователь AMI` / `AMI foydalanuvchisi` / `AMI username` | `Логин AMI пользователя` / `AMI foydalanuvchi logini` / `AMI login username` | `crm_integration` / `crm_integration` / `crm_integration` |
-| `asterisk_ami_password` | Да | String | `Пароль AMI` / `AMI paroli` / `AMI password` | `Пароль AMI пользователя` / `AMI foydalanuvchi paroli` / `AMI user password` | `password_here` / `password_here` / `password_here` |
-| `asterisk_pipeline_id` | Да | Integer | `ID воронки` / `Voronka ID` / `Pipeline ID` | `ID воронки для лидов` / `Lidlar uchun voronka ID` / `Pipeline id for leads` | `12` / `12` / `12` |
-| `asterisk_channel_id` | Да | Integer | `ID канала` / `Kanal ID` / `Channel ID` | `ID канала CRM` / `CRM kanal ID` / `CRM channel id` | `5` / `5` / `5` |
-| `asterisk_default_responsible_user_id` | Нет | Integer | `Ответственный по умолчанию` / `Standart mas'ul` / `Default responsible` | `ID ответственного, если не найден оператор` / `Operator topilmasa mas'ul ID` / `Responsible user id fallback` | `101` / `101` / `101` |
-| `asterisk_assign_responsible_by_operator_ext` | Нет | Boolean | `Назначать по внутреннему номеру` / `Ichki raqam bo'yicha tayinlash` / `Assign by extension` | `Назначать лида по внутреннему номеру оператора` / `Lidni operator ichki raqami bo'yicha tayinlash` / `Assign lead by operator extension` | `true` / `true` / `true` |
-| `asterisk_find_active_lead_by_phone` | Нет | Boolean | `Искать активный лид по номеру` / `Faol lidni raqam bo'yicha qidirish` / `Find active lead by phone` | `Переиспользовать активный лид по номеру клиента (поиск по client_phone и external_id)` / `Mijoz raqami bo'yicha faol lidni qayta ishlatish (client_phone va external_id bo'yicha)` / `Reuse active lead by customer phone (lookup by client_phone and external_id)` | `true` / `true` / `true` |
-| `asterisk_lead_subject_template` | Нет | String | `Шаблон темы лида` / `Lid sarlavha shabloni` / `Lead subject template` | `Шаблон названия лида` / `Lid nomi shabloni` / `Lead title template` | `Call {direction} {from_phone}` / `Call {direction} {from_phone}` / `Call {direction} {from_phone}` |
-| `asterisk_allowed_did_list` | Нет | String | `Номера trunk для определения направления` / `Yo'nalishni aniqlash uchun trunk raqamlari` / `Trunk numbers for direction detection` | `Список внешних trunk/DID номеров через запятую. Используется для определения входящего/исходящего звонка.` / `Tashqi trunk/DID raqamlarini vergul bilan kiriting. Kiruvchi/chiquvchi yo'nalishni aniqlash uchun ishlatiladi.` / `Comma-separated external trunk/DID numbers used to detect inbound/outbound direction.` | `998712000001,998712000002` / `998712000001,998712000002` / `998712000001,998712000002` |
-| `asterisk_recording_base_url` | Нет | String | `Базовый URL записей` / `Yozuvlar bazaviy URL` / `Recording base URL` | `База ссылок для файлов записи` / `Yozuv fayllari uchun baza URL` / `Base URL for recording files` | `https://pbx.example.com/records/` / `https://pbx.example.com/records/` / `https://pbx.example.com/records/` |
-| `asterisk_default_country_code` | Нет | String | `Код страны` / `Mamlakat kodi` / `Country code` | `Код страны для нормализации номеров` / `Raqamlarni normallashtirish uchun kod` / `Country code for number normalization` | `998` / `998` / `998` |
 
-### Как работает `asterisk_recording_base_url`
+## Поведение записи разговора (`asterisk_recording_base_url`)
+- Если в событии уже полный URL (`http://` или `https://`) — используется он.
+- Если приходит относительный путь, формируется URL через `urljoin(base_url, recording_file)`.
+- Если `base_url` не задан и путь относительный — вложение может не скачаться, в чат уйдет текст без файла.
 
-- Если событие уже содержит полный URL записи (`https://...`), параметр `asterisk_recording_base_url` не используется.
-- Если в событии приходит только имя/путь файла (например `2026/03/27/call-123.wav` или `records/call-123.wav`), интеграция делает `urljoin(base_url, recording_file)`.
-- В `asterisk_recording_base_url` указывайте публичный HTTP(S)-префикс, доступный серверу интеграции, например `https://pbx.example.com/records/`.
-- Если `base_url` не указан и приходит относительный путь, файл не сможет скачаться и в чат уйдет только текстовое сообщение без вложения.
+## Проверка активности интеграции
+- Интеграция учитывает `ConnectedIntegration.is_active`.
+- При `is_active = false` воркеры AMI/stream не поднимаются, `/external` события игнорируются.
 
-### Учет `ConnectedIntegration.is_active`
-
-- Интеграция проверяет `ConnectedIntegration/Get` и учитывает `is_active`.
-- При `is_active = false` интеграция не поднимает/восстанавливает AMI-обработчики и игнорирует `/external` события.
-
-## Порядок настройки внешней системы (Asterisk / FreePBX)
-
-### 1. Включить AMI
-
-- Asterisk:
-  - В `manager.conf` в секции `[general]` включите AMI и укажите порт (обычно `5038`).
-- FreePBX:
-  - Включите AMI в настройках Asterisk Manager (путь может отличаться по версии FreePBX).
-
-### 2. Создать отдельного AMI-пользователя для интеграции
-
-- Рекомендуется отдельный пользователь, например `crm_integration`.
-- Рекомендуемые права:
-  - `read = call,cdr,reporting`
-  - `write = system`
-- Не выдавайте лишние права без необходимости.
-
-### 3. Ограничить сетевой доступ к AMI
-
-- Разрешите доступ к порту AMI только с IP сервера интеграции.
-- Если интеграция и Asterisk на одном сервере, ограничьте доступ `127.0.0.1`.
-
-### 4. Применить изменения на стороне Asterisk
-
-- Перезагрузите manager-конфигурацию (`manager reload`) или примените изменения через интерфейс FreePBX.
-- Убедитесь, что AMI-пользователь активен.
-
-### 5. Заполнить настройки интеграции в CRM
-
-- Обязательные:
-  - `asterisk_ami_host`
-  - `asterisk_ami_user`
-  - `asterisk_ami_password`
-  - `asterisk_pipeline_id`
-  - `asterisk_channel_id`
-- Необязательные: остальные ключи из таблицы выше.
-
-### 6. Проверить рабочий сценарий
-
-- Выполните входящий и исходящий тестовый звонок.
-- Проверьте в CRM:
-  - лид создается или переиспользуется;
-  - этапы звонка приходят в чат;
-  - запись разговора прикладывается при наличии;
-  - статус и ответственный обновляются по логике настройки.
+## Быстрый запуск
+1. Включить AMI на стороне Asterisk/FreePBX.
+2. Создать отдельного AMI-пользователя с минимально необходимыми правами.
+3. Ограничить доступ к AMI по IP сервера интеграции.
+4. Заполнить настройки интеграции в CRM (обязательные: `asterisk_ami_host`, `asterisk_ami_user`, `asterisk_ami_password`, `asterisk_channel_id`).
+5. Выполнить тестовый входящий и исходящий звонок.
+6. Проверить, что события одного `external_call_id` попадают в один и тот же ticket.

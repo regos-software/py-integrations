@@ -31,12 +31,6 @@ from schemas.api.chat.chat_message import (
 )
 from schemas.api.common.filters import Filter, FilterOperator
 from schemas.api.crm.client import ClientAddRequest, ClientGetRequest
-from schemas.api.crm.lead import (
-    Lead,
-    LeadGetRequest,
-    LeadSetResponsibleRequest,
-    LeadStatusEnum,
-)
 from schemas.api.crm.ticket import (
     TicketAddRequest,
     TicketDirectionEnum,
@@ -60,8 +54,6 @@ class AsteriskCrmChannelConfig:
     CI_ACTIVE_MEMORY_TTL_SEC = 5
     DEFAULT_DEDUPE_TTL_SEC = 6 * 60 * 60
     DEFAULT_STATE_TTL_SEC = 6 * 60 * 60
-    LEAD_STATE_CACHE_TTL_SEC = 5 * 60
-    LEAD_LOOKUP_MISS_TTL_SEC = 30
 
     STREAM_GROUP = "asterisk_crm_channel_workers"
     STREAM_MAXLEN = 10000
@@ -86,11 +78,6 @@ class AsteriskCrmChannelConfig:
 
     CHAT_MESSAGE_ADD_CLOSED_ENTITY_ERROR = 1220
 
-    ACTIVE_LEAD_STATUSES = (
-        LeadStatusEnum.New,
-        LeadStatusEnum.InProgress,
-        LeadStatusEnum.WaitingClient,
-    )
     CALL_STATE_STATUSES = {
         "started",
         "ringing",
@@ -110,17 +97,15 @@ class RuntimeConfig:
     ami_port: int
     ami_user: str
     ami_password: str
-    pipeline_id: int
     channel_id: int
     default_responsible_user_id: Optional[int]
-    lead_subject_template: str
+    subject_template: str
     allowed_did_set: set[str]
     recording_base_url: Optional[str]
-    lead_dedupe_ttl_sec: int
+    dedupe_ttl_sec: int
     state_ttl_sec: int
     default_country_code: str
     assign_responsible_by_operator_ext: bool
-    find_active_lead_by_phone: bool
     message_language: str
 
 
@@ -143,10 +128,14 @@ class CallEvent:
 
 @dataclass
 class LeadContext:
-    lead_id: int
+    ticket_id: int
     chat_id: str
     client_id: Optional[int] = None
-    ticket_id: Optional[int] = None
+
+    @property
+    def lead_id(self) -> int:
+        # Keep backward-compatible attribute name for legacy logs/telemetry payloads.
+        return int(self.ticket_id)
 
 
 class ChatMessageAddClosedEntityError(RuntimeError):
@@ -178,7 +167,6 @@ _WORKER_TASKS: Dict[str, asyncio.Task] = {}
 _AMI_TASKS: Dict[str, asyncio.Task] = {}
 _INSTANCE_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
 _HTTP_CLIENT: Optional[httpx.AsyncClient] = None
-_CACHE_UNSET = object()
 _CI_ACTIVE_MEMORY_CACHE: Dict[str, Tuple[bool, int]] = {}
 _CI_ACTIVE_LOCKS: Dict[str, asyncio.Lock] = {}
 
@@ -488,15 +476,6 @@ def _parse_ami_host_port(raw_host: Any, raw_port: Any) -> Tuple[str, int]:
         raise ValueError("asterisk_ami_port must be in range 1..65535")
     return host, int(port)
 
-def _status_from_direction_event(direction: str, status: str) -> Optional[LeadStatusEnum]:
-    if direction == "inbound" and status in {"started", "ringing", "answered"}:
-        return LeadStatusEnum.InProgress
-    if direction == "outbound" and status in {"started", "ringing"}:
-        return LeadStatusEnum.InProgress
-    if direction == "outbound" and status == "answered":
-        return LeadStatusEnum.InProgress
-    return None
-
 
 class AsteriskCrmChannelIntegration(ClientBase):
     MESSAGE_TEXTS: Dict[str, Dict[str, str]] = {
@@ -662,17 +641,17 @@ class AsteriskCrmChannelIntegration(ClientBase):
         )
 
     @staticmethod
-    def _lock_create_lead_key(
+    def _lock_create_ticket_key(
         connected_integration_id: str,
         asterisk_hash: str,
-        normalized_phone: str,
+        external_call_id: str,
     ) -> str:
         return AsteriskCrmChannelIntegration._redis_key(
             "lock",
-            "create_lead",
+            "create_ticket",
             connected_integration_id,
             asterisk_hash,
-            normalized_phone,
+            external_call_id,
         )
 
     @staticmethod
@@ -682,20 +661,6 @@ class AsteriskCrmChannelIntegration(ClientBase):
             "event",
             connected_integration_id,
             event_id,
-        )
-
-    @staticmethod
-    def _mapping_by_phone_key(
-        connected_integration_id: str,
-        asterisk_hash: str,
-        normalized_phone: str,
-    ) -> str:
-        return AsteriskCrmChannelIntegration._redis_key(
-            "mapping",
-            "by_phone",
-            connected_integration_id,
-            asterisk_hash,
-            normalized_phone,
         )
 
     @staticmethod
@@ -740,13 +705,13 @@ class AsteriskCrmChannelIntegration(ClientBase):
         )
 
     @staticmethod
-    def _late_recording_state_key(
+    def _late_closed_event_state_key(
         connected_integration_id: str,
         asterisk_hash: str,
         external_call_id: str,
     ) -> str:
         return AsteriskCrmChannelIntegration._redis_key(
-            "late_recording",
+            "late_closed_event",
             connected_integration_id,
             asterisk_hash,
             external_call_id,
@@ -802,31 +767,6 @@ class AsteriskCrmChannelIntegration(ClientBase):
             connected_integration_id,
             asterisk_hash,
             external_call_id,
-        )
-
-    @staticmethod
-    def _lead_state_cache_key(
-        connected_integration_id: str,
-        lead_id: int,
-    ) -> str:
-        return AsteriskCrmChannelIntegration._redis_key(
-            "lead_state",
-            connected_integration_id,
-            int(lead_id),
-        )
-
-    @staticmethod
-    def _lead_lookup_miss_phone_key(
-        connected_integration_id: str,
-        asterisk_hash: str,
-        normalized_phone: str,
-    ) -> str:
-        return AsteriskCrmChannelIntegration._redis_key(
-            "lead_lookup_miss",
-            "phone",
-            connected_integration_id,
-            asterisk_hash,
-            normalized_phone,
         )
 
     @staticmethod
@@ -981,86 +921,6 @@ return 0
         if isinstance(parsed, dict):
             return parsed
         return None
-
-    @staticmethod
-    def _normalize_lead_status(value: Any) -> Optional[LeadStatusEnum]:
-        if isinstance(value, LeadStatusEnum):
-            return value
-        text = str(value or "").strip()
-        if not text:
-            return None
-        try:
-            return LeadStatusEnum(text)
-        except ValueError:
-            return None
-
-    @classmethod
-    async def _get_lead_state_cache(
-        cls,
-        connected_integration_id: str,
-        lead_id: Optional[int],
-    ) -> Dict[str, Any]:
-        resolved_lead_id = _to_int(lead_id, None)
-        if not resolved_lead_id:
-            return {}
-        payload = cls._parse_cached_json(
-            await cls._redis_get(
-                cls._lead_state_cache_key(connected_integration_id, int(resolved_lead_id))
-            )
-        )
-        return payload or {}
-
-    @classmethod
-    async def _update_lead_state_cache(
-        cls,
-        connected_integration_id: str,
-        lead_id: Optional[int],
-        *,
-        status: Any = _CACHE_UNSET,
-        responsible_user_id: Any = _CACHE_UNSET,
-    ) -> None:
-        resolved_lead_id = _to_int(lead_id, None)
-        if not resolved_lead_id:
-            return
-        key = cls._lead_state_cache_key(connected_integration_id, int(resolved_lead_id))
-        cached = cls._parse_cached_json(await cls._redis_get(key)) or {}
-
-        if status is not _CACHE_UNSET:
-            normalized_status = cls._normalize_lead_status(status)
-            if normalized_status is not None:
-                cached["status"] = normalized_status.value
-            else:
-                raw_status = str(status or "").strip()
-                cached["status"] = raw_status or None
-
-        if responsible_user_id is not _CACHE_UNSET:
-            resolved_user_id = _to_int(responsible_user_id, None)
-            cached["responsible_user_id"] = (
-                int(resolved_user_id) if resolved_user_id and resolved_user_id > 0 else None
-            )
-
-        cached["updated_at"] = _now_ts()
-        await cls._redis_set_json_with_ttl(
-            key,
-            cached,
-            AsteriskCrmChannelConfig.LEAD_STATE_CACHE_TTL_SEC,
-            min_ttl_sec=60,
-        )
-
-    @classmethod
-    async def _cache_lead_snapshot(
-        cls,
-        connected_integration_id: str,
-        lead: Optional[Lead],
-    ) -> None:
-        if not lead or not getattr(lead, "id", None):
-            return
-        await cls._update_lead_state_cache(
-            connected_integration_id=connected_integration_id,
-            lead_id=_to_int(getattr(lead, "id", None), None),
-            status=getattr(lead, "status", None),
-            responsible_user_id=getattr(lead, "responsible_user_id", None),
-        )
 
     @staticmethod
     async def _get_http_client() -> httpx.AsyncClient:
@@ -1279,14 +1139,11 @@ return 0
             settings_map.get("asterisk_default_country_code"), "998"
         )
 
-        pipeline_id = _to_int(settings_map.get("asterisk_pipeline_id"), None)
         channel_id = _to_int(settings_map.get("asterisk_channel_id"), None)
         if not ami_user:
             raise ValueError("asterisk_ami_user is required")
         if not ami_password:
             raise ValueError("asterisk_ami_password is required")
-        if not pipeline_id or pipeline_id <= 0:
-            raise ValueError("asterisk_pipeline_id must be > 0")
         if not channel_id or channel_id <= 0:
             raise ValueError("asterisk_channel_id must be > 0")
 
@@ -1296,11 +1153,6 @@ return 0
         )
         if default_responsible_user_id is not None and default_responsible_user_id <= 0:
             raise ValueError("asterisk_default_responsible_user_id must be > 0")
-        find_active_lead_by_phone_raw = settings_map.get("asterisk_find_active_lead_by_phone")
-        if find_active_lead_by_phone_raw is None:
-            find_active_lead_by_phone_raw = settings_map.get(
-                "asterisk_search_active_lead_by_phone"
-            )
 
         return RuntimeConfig(
             connected_integration_id=connected_integration_id,
@@ -1309,10 +1161,9 @@ return 0
             ami_port=ami_port,
             ami_user=ami_user,
             ami_password=ami_password,
-            pipeline_id=pipeline_id,
             channel_id=channel_id,
             default_responsible_user_id=default_responsible_user_id,
-            lead_subject_template=(
+            subject_template=(
                 str(settings_map.get("asterisk_lead_subject_template") or "").strip()
                 or "Call {direction} {from_phone}"
             ),
@@ -1323,7 +1174,7 @@ return 0
             recording_base_url=(
                 str(settings_map.get("asterisk_recording_base_url") or "").strip() or None
             ),
-            lead_dedupe_ttl_sec=max(
+            dedupe_ttl_sec=max(
                 _to_int(
                     settings_map.get("lead_dedupe_ttl_sec"),
                     AsteriskCrmChannelConfig.DEFAULT_DEDUPE_TTL_SEC,
@@ -1342,10 +1193,6 @@ return 0
             default_country_code=default_country_code,
             assign_responsible_by_operator_ext=_to_bool(
                 settings_map.get("asterisk_assign_responsible_by_operator_ext"),
-                True,
-            ),
-            find_active_lead_by_phone=_to_bool(
-                find_active_lead_by_phone_raw,
                 True,
             ),
             message_language=_normalize_message_language(
@@ -2884,7 +2731,7 @@ return 0
                 await cls._redis_set_with_ttl(
                     dedupe_key,
                     "1",
-                    runtime.lead_dedupe_ttl_sec,
+                    runtime.dedupe_ttl_sec,
                     min_ttl_sec=60,
                 )
                 return
@@ -2902,12 +2749,12 @@ return 0
                     await cls._redis_set_with_ttl(
                         dedupe_key,
                         "1",
-                        runtime.lead_dedupe_ttl_sec,
+                        runtime.dedupe_ttl_sec,
                         min_ttl_sec=60,
                     )
                     return
             if not lead_ctx:
-                lead_ctx = await cls._resolve_or_create_active_lead(runtime, event)
+                lead_ctx = await cls._resolve_or_create_active_ticket(runtime, event)
             await cls._maybe_assign_responsible_from_operator_best_effort(
                 runtime=runtime,
                 event=event,
@@ -2919,7 +2766,7 @@ return 0
             await cls._redis_set_with_ttl(
                 dedupe_key,
                 "1",
-                runtime.lead_dedupe_ttl_sec,
+                runtime.dedupe_ttl_sec,
                 min_ttl_sec=60,
             )
         except Exception as error:
@@ -3755,10 +3602,6 @@ return 0
             return
         if event.status not in {"answered", "completed"}:
             return
-        talked = (_to_int(event.talk_duration_sec, 0) or 0) > 0
-        should_move_to_in_progress = event.status == "answered" or (
-            event.status == "completed" and talked
-        )
         operator_ext = _normalize_phone(event.operator_ext) or cls._operator_phone_from_event(
             event
         )
@@ -3779,62 +3622,29 @@ return 0
         )
         already_bound = _to_int(await cls._redis_get(call_key), None)
         if already_bound and already_bound == target_user_id:
-            if not lead_ctx.ticket_id:
-                await cls._update_lead_state_cache(
-                    connected_integration_id=runtime.connected_integration_id,
-                    lead_id=lead_ctx.lead_id,
-                    responsible_user_id=target_user_id,
-                )
-                if should_move_to_in_progress:
-                    await cls._set_lead_status_best_effort(
-                        connected_integration_id=runtime.connected_integration_id,
-                        lead_id=lead_ctx.lead_id,
-                        status=LeadStatusEnum.InProgress,
-                        reason="responsible_already_bound_by_operator_ext",
-                    )
             return
         if already_bound and already_bound != target_user_id:
             return
 
         try:
-            if lead_ctx.ticket_id:
-                async with RegosAPI(
-                    connected_integration_id=runtime.connected_integration_id
-                ) as api:
-                    response = await api.crm.ticket.set_responsible(
-                        TicketSetResponsibleRequest(
-                            id=int(lead_ctx.ticket_id),
-                            responsible_user_id=target_user_id,
-                        )
+            async with RegosAPI(
+                connected_integration_id=runtime.connected_integration_id
+            ) as api:
+                response = await api.crm.ticket.set_responsible(
+                    TicketSetResponsibleRequest(
+                        id=int(lead_ctx.ticket_id),
+                        responsible_user_id=target_user_id,
                     )
-            else:
-                async with RegosAPI(
-                    connected_integration_id=runtime.connected_integration_id
-                ) as api:
-                    response = await api.crm.lead.set_responsible(
-                        LeadSetResponsibleRequest(
-                            id=lead_ctx.lead_id, responsible_user_id=target_user_id
-                        )
-                    )
+                )
             if not response.ok:
-                if lead_ctx.ticket_id:
-                    logger.warning(
-                        "Ticket/SetResponsible rejected while binding responsible by operator extension: ci=%s ticket_id=%s operator_ext=%s user_id=%s payload=%s",
-                        runtime.connected_integration_id,
-                        lead_ctx.ticket_id,
-                        operator_ext,
-                        target_user_id,
-                        response.result,
-                    )
-                else:
-                    logger.warning(
-                        "Lead/SetResponsible rejected while binding responsible by operator extension: ci=%s lead_id=%s operator_ext=%s user_id=%s payload=%s",
-                        runtime.connected_integration_id,
-                        lead_ctx.lead_id,
-                        operator_ext,
-                        target_user_id,
-                        response.result,
-                    )
+                logger.warning(
+                    "Ticket/SetResponsible rejected while binding responsible by operator extension: ci=%s ticket_id=%s operator_ext=%s user_id=%s payload=%s",
+                    runtime.connected_integration_id,
+                    lead_ctx.ticket_id,
+                    operator_ext,
+                    target_user_id,
+                    response.result,
+                )
                 return
             await cls._redis_set_with_ttl(
                 call_key,
@@ -3842,38 +3652,15 @@ return 0
                 runtime.state_ttl_sec,
                 min_ttl_sec=300,
             )
-            if not lead_ctx.ticket_id:
-                await cls._update_lead_state_cache(
-                    connected_integration_id=runtime.connected_integration_id,
-                    lead_id=lead_ctx.lead_id,
-                    responsible_user_id=target_user_id,
-                )
-                if should_move_to_in_progress:
-                    await cls._set_lead_status_best_effort(
-                        connected_integration_id=runtime.connected_integration_id,
-                        lead_id=lead_ctx.lead_id,
-                        status=LeadStatusEnum.InProgress,
-                        reason="responsible_bound_by_operator_ext",
-                    )
         except Exception as error:
-            if lead_ctx.ticket_id:
-                logger.warning(
-                    "Failed to bind responsible by operator extension: ci=%s ticket_id=%s operator_ext=%s user_id=%s error=%s",
-                    runtime.connected_integration_id,
-                    lead_ctx.ticket_id,
-                    operator_ext,
-                    target_user_id,
-                    error,
-                )
-            else:
-                logger.warning(
-                    "Failed to bind responsible by operator extension: ci=%s lead_id=%s operator_ext=%s user_id=%s error=%s",
-                    runtime.connected_integration_id,
-                    lead_ctx.lead_id,
-                    operator_ext,
-                    target_user_id,
-                    error,
-                )
+            logger.warning(
+                "Failed to bind responsible by operator extension: ci=%s ticket_id=%s operator_ext=%s user_id=%s error=%s",
+                runtime.connected_integration_id,
+                lead_ctx.ticket_id,
+                operator_ext,
+                target_user_id,
+                error,
+            )
 
     @classmethod
     async def _save_mapping(
@@ -3882,28 +3669,17 @@ return 0
         event: CallEvent,
         lead_ctx: LeadContext,
     ) -> None:
-        normalized_phone = _normalize_phone(event.client_phone) or ""
+        ticket_id = _to_int(lead_ctx.ticket_id, None)
+        if not ticket_id:
+            raise RuntimeError("Cannot save mapping without ticket_id")
         payload = {
-            "lead_id": int(lead_ctx.lead_id),
-            "ticket_id": int(lead_ctx.ticket_id or lead_ctx.lead_id),
+            "ticket_id": int(ticket_id),
             "client_id": _to_int(lead_ctx.client_id, None),
             "chat_id": str(lead_ctx.chat_id),
             "asterisk_hash": runtime.asterisk_hash,
-            "normalized_phone": normalized_phone,
             "external_call_id": event.external_call_id,
             "last_event_ts": int(event.event_ts),
         }
-        if normalized_phone:
-            await cls._redis_set_json_with_ttl(
-                cls._mapping_by_phone_key(
-                    runtime.connected_integration_id,
-                    runtime.asterisk_hash,
-                    normalized_phone,
-                ),
-                payload,
-                runtime.state_ttl_sec,
-                min_ttl_sec=60,
-            )
         await cls._redis_set_json_with_ttl(
             cls._mapping_by_call_key(
                 runtime.connected_integration_id,
@@ -3916,238 +3692,40 @@ return 0
         )
 
     @classmethod
-    async def _clear_mapping(cls, runtime: RuntimeConfig, event: CallEvent) -> None:
-        keys = [
-            cls._mapping_by_call_key(
-                runtime.connected_integration_id,
-                runtime.asterisk_hash,
-                event.external_call_id,
-            )
-        ]
-        normalized_phone = _normalize_phone(event.client_phone)
-        if normalized_phone:
-            phone_key = cls._mapping_by_phone_key(
-                runtime.connected_integration_id,
-                runtime.asterisk_hash,
-                normalized_phone,
-            )
-            payload = cls._parse_cached_json(await cls._redis_get(phone_key))
-            mapped_call_id = cls._normalize_call_id(
-                payload.get("external_call_id") if isinstance(payload, dict) else None
-            )
-            current_call_id = cls._normalize_call_id(event.external_call_id)
-            if not mapped_call_id or not current_call_id or mapped_call_id == current_call_id:
-                keys.append(phone_key)
-        await cls._redis_delete(*keys)
-
-    @classmethod
     async def _resolve_mapping(
         cls,
         runtime: RuntimeConfig,
         event: CallEvent,
     ) -> Optional[LeadContext]:
         call_id = cls._normalize_call_id(event.external_call_id)
-        if call_id:
-            payload = cls._parse_cached_json(
-                await cls._redis_get(
-                    cls._mapping_by_call_key(
-                        runtime.connected_integration_id,
-                        runtime.asterisk_hash,
-                        call_id,
-                    )
-                )
-            )
-            if payload:
-                lead_id = _to_int(payload.get("lead_id"), None)
-                ticket_id = _to_int(payload.get("ticket_id"), None)
-                client_id = _to_int(payload.get("client_id"), None)
-                chat_id = str(payload.get("chat_id") or "").strip()
-                if lead_id and chat_id:
-                    return LeadContext(
-                        lead_id=lead_id,
-                        chat_id=chat_id,
-                        client_id=client_id,
-                        ticket_id=ticket_id,
-                    )
-
-        normalized_phone = _normalize_phone(event.client_phone)
-        if not normalized_phone:
+        if not call_id:
             return None
         payload = cls._parse_cached_json(
             await cls._redis_get(
-                cls._mapping_by_phone_key(
+                cls._mapping_by_call_key(
                     runtime.connected_integration_id,
                     runtime.asterisk_hash,
-                    normalized_phone,
+                    call_id,
                 )
             )
         )
         if not payload:
             return None
-        mapped_call_id = cls._normalize_call_id(payload.get("external_call_id"))
-        if call_id and mapped_call_id and mapped_call_id != call_id:
-            # Protect against cross-call collisions when same client has parallel calls.
-            return None
-        lead_id = _to_int(payload.get("lead_id"), None)
         ticket_id = _to_int(payload.get("ticket_id"), None)
+        if not ticket_id:
+            return None
         client_id = _to_int(payload.get("client_id"), None)
         chat_id = str(payload.get("chat_id") or "").strip()
-        if lead_id and chat_id:
-            return LeadContext(
-                lead_id=lead_id,
-                chat_id=chat_id,
-                client_id=client_id,
-                ticket_id=ticket_id,
-            )
-        return None
-
-    @classmethod
-    async def _find_active_lead_by_external(
-        cls,
-        runtime: RuntimeConfig,
-        normalized_phone: str,
-    ) -> Optional[Lead]:
-        filters = [
-            Filter(
-                field="external_id",
-                operator=FilterOperator.Equal,
-                value=_external_id(runtime.asterisk_hash, normalized_phone),
-            ),
-        ]
-        async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
-            response = await api.crm.lead.get(
-                LeadGetRequest(
-                    filters=filters,
-                    statuses=list(AsteriskCrmChannelConfig.ACTIVE_LEAD_STATUSES),
-                    limit=1,
-                    offset=0,
-                )
-            )
-        if not response.result:
+        if not chat_id:
             return None
-        lead = response.result[0]
-        if not lead or not lead.id or not lead.chat_id:
-            return None
-        await cls._cache_lead_snapshot(runtime.connected_integration_id, lead)
-        return lead
-
-    @staticmethod
-    def _pick_latest_active_lead(leads: List[Lead]) -> Optional[Lead]:
-        valid = [
-            row
-            for row in (leads or [])
-            if row and getattr(row, "id", None) and getattr(row, "chat_id", None)
-        ]
-        if not valid:
-            return None
-        return max(valid, key=lambda row: int(row.id or 0))
-
-    @classmethod
-    async def _find_active_lead_by_phone(
-        cls,
-        runtime: RuntimeConfig,
-        normalized_phone: str,
-    ) -> Optional[Lead]:
-        candidates = _phone_filter_candidates(
-            normalized_phone,
-            runtime.default_country_code,
+        return LeadContext(
+            ticket_id=int(ticket_id),
+            chat_id=chat_id,
+            client_id=client_id,
         )
-        if not candidates:
-            return None
-
-        for phone in candidates:
-            miss_key = cls._lead_lookup_miss_phone_key(
-                runtime.connected_integration_id,
-                runtime.asterisk_hash,
-                phone,
-            )
-            if str(await cls._redis_get(miss_key) or "").strip() == "1":
-                continue
-            filters = [
-                Filter(
-                    field="client_phone",
-                    operator=FilterOperator.Equal,
-                    value=phone,
-                ),
-            ]
-            try:
-                async with RegosAPI(
-                    connected_integration_id=runtime.connected_integration_id
-                ) as api:
-                    response = await api.crm.lead.get(
-                        LeadGetRequest(
-                            filters=filters,
-                            statuses=list(AsteriskCrmChannelConfig.ACTIVE_LEAD_STATUSES),
-                            limit=50,
-                            offset=0,
-                        )
-                    )
-            except Exception as error:
-                logger.warning(
-                    "Lead/Get by client_phone failed: ci=%s phone=%s error=%s",
-                    runtime.connected_integration_id,
-                    phone,
-                    error,
-                )
-                return None
-            rows = response.result or []
-            lead = cls._pick_latest_active_lead(rows)
-            if not lead:
-                await cls._redis_set_with_ttl(
-                    miss_key,
-                    "1",
-                    AsteriskCrmChannelConfig.LEAD_LOOKUP_MISS_TTL_SEC,
-                    min_ttl_sec=10,
-                )
-                continue
-            await cls._redis_delete(miss_key)
-            await cls._cache_lead_snapshot(runtime.connected_integration_id, lead)
-            if len(rows) > 1:
-                lead_ids = sorted(
-                    int(row.id)
-                    for row in rows
-                    if row and getattr(row, "id", None)
-                )
-                logger.info(
-                    "Multiple active leads matched by client_phone, picked latest: ci=%s phone=%s lead_ids=%s selected=%s",
-                    runtime.connected_integration_id,
-                    phone,
-                    lead_ids,
-                    lead.id,
-                )
-            return lead
-        return None
 
     @classmethod
-    async def _find_active_lead(
-        cls,
-        runtime: RuntimeConfig,
-        event: CallEvent,
-    ) -> Optional[Lead]:
-        if not _normalize_phone(event.client_phone):
-            return None
-        if not runtime.find_active_lead_by_phone:
-            return None
-        # For both inbound and outbound calls we first try to reuse an active lead
-        # by customer phone/external id (for example, an existing chat lead).
-        lead_by_phone = await cls._find_active_lead_by_phone(
-            runtime,
-            event.client_phone,
-        )
-        if lead_by_phone:
-            return lead_by_phone
-
-        lead_by_external = await cls._find_active_lead_by_external(
-            runtime,
-            event.client_phone,
-        )
-        if lead_by_external:
-            return lead_by_external
-
-        return None
-
-    @classmethod
-    async def _resolve_existing_lead_context(
+    async def _resolve_existing_ticket_context(
         cls,
         runtime: RuntimeConfig,
         event: CallEvent,
@@ -4156,13 +3734,16 @@ return 0
         if mapped_ctx:
             return mapped_ctx
 
-        active_lead = await cls._find_active_lead(runtime, event)
-        if not active_lead or not active_lead.id or not active_lead.chat_id:
-            return None
-
-        lead_ctx = LeadContext(lead_id=int(active_lead.id), chat_id=str(active_lead.chat_id))
-        await cls._save_mapping(runtime, event, lead_ctx)
-        return lead_ctx
+        normalized_call_id = cls._normalize_call_id(event.external_call_id)
+        if normalized_call_id:
+            by_external_call = await cls._find_ticket_by_external_call(
+                runtime,
+                normalized_call_id,
+            )
+            if by_external_call:
+                await cls._save_mapping(runtime, event, by_external_call)
+                return by_external_call
+        return None
 
     @classmethod
     async def _resolve_or_create_client_by_phone(
@@ -4170,40 +3751,31 @@ return 0
         runtime: RuntimeConfig,
         phone: str,
     ) -> int:
-        candidates = _phone_filter_candidates(phone, runtime.default_country_code)
-        if not candidates:
-            candidates = [phone]
+        normalized_phone = _normalize_phone(phone)
+        if not normalized_phone:
+            raise NonRetryableCallEventError("Client phone is required for Ticket/Add")
 
         async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
-            for candidate in candidates:
-                response = await api.crm.client.get(
-                    ClientGetRequest(phones=[candidate], limit=1, offset=0)
-                )
-                rows = response.result if response.ok and isinstance(response.result, list) else []
-                if rows and rows[0] and rows[0].id:
-                    return int(rows[0].id)
+            get_response = await api.crm.client.get(
+                ClientGetRequest(phones=[normalized_phone], limit=1, offset=0)
+            )
+            rows = (
+                get_response.result
+                if get_response.ok and isinstance(get_response.result, list)
+                else []
+            )
+            if rows and rows[0] and rows[0].id:
+                return int(rows[0].id)
 
             add_response = await api.crm.client.add(
                 ClientAddRequest(
-                    phone=phone,
-                    name=phone,
-                    external_id=_external_id(runtime.asterisk_hash, phone),
+                    phone=normalized_phone,
+                    name=normalized_phone,
+                    external_id=_external_id(runtime.asterisk_hash, normalized_phone),
                 )
             )
             add_result = add_response.result if isinstance(add_response.result, dict) else {}
             if not add_response.ok:
-                # In race conditions client can be created concurrently: retry lookup.
-                for candidate in candidates:
-                    response = await api.crm.client.get(
-                        ClientGetRequest(phones=[candidate], limit=1, offset=0)
-                    )
-                    rows = (
-                        response.result
-                        if response.ok and isinstance(response.result, list)
-                        else []
-                    )
-                    if rows and rows[0] and rows[0].id:
-                        return int(rows[0].id)
                 error_code = add_result.get("error")
                 description = add_result.get("description")
                 raise NonRetryableCallEventError(
@@ -4215,16 +3787,19 @@ return 0
             return int(new_id)
 
     @classmethod
-    async def _find_open_ticket_by_external_call(
+    async def _find_ticket_by_external_call(
         cls,
         runtime: RuntimeConfig,
         external_call_id: str,
     ) -> Optional[LeadContext]:
+        normalized_call_id = cls._normalize_call_id(external_call_id)
+        if not normalized_call_id:
+            return None
         filters = [
             Filter(
                 field="external_dialog_id",
                 operator=FilterOperator.Equal,
-                value=external_call_id,
+                value=normalized_call_id,
             ),
         ]
         async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
@@ -4232,7 +3807,7 @@ return 0
                 TicketGetRequest(
                     channel_ids=[runtime.channel_id],
                     filters=filters,
-                    limit=10,
+                    limit=20,
                     offset=0,
                 )
             )
@@ -4246,22 +3821,25 @@ return 0
             return None
         ticket = max(valid, key=lambda row: int(row.id or 0))
         return LeadContext(
-            lead_id=int(ticket.id),
+            ticket_id=int(ticket.id),
             chat_id=str(ticket.chat_id),
             client_id=int(ticket.client_id),
-            ticket_id=int(ticket.id),
         )
 
     @classmethod
-    async def _create_lead(cls, runtime: RuntimeConfig, event: CallEvent) -> LeadContext:
-        reused = await cls._find_open_ticket_by_external_call(
+    async def _create_ticket(cls, runtime: RuntimeConfig, event: CallEvent) -> LeadContext:
+        normalized_call_id = cls._normalize_call_id(event.external_call_id)
+        if not normalized_call_id:
+            raise NonRetryableCallEventError("external_call_id is required for Ticket flow")
+        reused = await cls._find_ticket_by_external_call(
             runtime,
-            event.external_call_id,
+            normalized_call_id,
         )
         if reused:
             return reused
 
         client_id = await cls._resolve_or_create_client_by_phone(runtime, event.client_phone)
+
         payload = TicketAddRequest(
             client_id=client_id,
             channel_id=runtime.channel_id,
@@ -4270,10 +3848,10 @@ return 0
                 if event.direction == "outbound"
                 else TicketDirectionEnum.Inbound
             ),
-            external_dialog_id=event.external_call_id,
+            external_dialog_id=normalized_call_id,
             responsible_user_id=runtime.default_responsible_user_id,
             subject=_safe_subject(
-                runtime.lead_subject_template,
+                runtime.subject_template,
                 event,
                 language=runtime.message_language,
             ),
@@ -4306,48 +3884,52 @@ return 0
 
             resolved_client_id = _to_int(ticket.client_id, client_id) or client_id
             return LeadContext(
-                lead_id=int(ticket.id),
+                ticket_id=int(ticket.id),
                 chat_id=str(ticket.chat_id),
                 client_id=int(resolved_client_id),
-                ticket_id=int(ticket.id),
             )
 
     @classmethod
-    async def _resolve_or_create_active_lead(
+    async def _resolve_or_create_active_ticket(
         cls,
         runtime: RuntimeConfig,
         event: CallEvent,
     ) -> LeadContext:
+        normalized_call_id = cls._normalize_call_id(event.external_call_id)
+        if not normalized_call_id:
+            raise RuntimeError("Cannot resolve or create ticket: external_call_id is empty")
+        event.external_call_id = normalized_call_id
+
         normalized_client_phone = _normalize_phone(event.client_phone)
         if not normalized_client_phone:
             raise RuntimeError(
-                "Cannot resolve or create lead: client_phone is empty and mapping is missing"
+                "Cannot resolve or create ticket: client_phone is empty and mapping is missing"
             )
         event.client_phone = normalized_client_phone
 
-        lead_ctx = await cls._resolve_existing_lead_context(runtime, event)
+        lead_ctx = await cls._resolve_existing_ticket_context(runtime, event)
         if lead_ctx:
             return lead_ctx
 
-        lock_key = cls._lock_create_lead_key(
+        lock_key = cls._lock_create_ticket_key(
             runtime.connected_integration_id,
             runtime.asterisk_hash,
-            event.client_phone,
+            event.external_call_id,
         )
         lock_token = await cls._acquire_lock(lock_key, AsteriskCrmChannelConfig.LOCK_TTL_SEC)
         if not lock_token:
             await asyncio.sleep(0.25)
-            lead_ctx = await cls._resolve_existing_lead_context(runtime, event)
+            lead_ctx = await cls._resolve_existing_ticket_context(runtime, event)
             if lead_ctx:
                 return lead_ctx
-            raise RuntimeError("Failed to acquire create-lead lock")
+            raise RuntimeError("Failed to acquire create-ticket lock")
 
         try:
-            lead_ctx = await cls._resolve_existing_lead_context(runtime, event)
+            lead_ctx = await cls._resolve_existing_ticket_context(runtime, event)
             if lead_ctx:
                 return lead_ctx
 
-            lead_ctx = await cls._create_lead(runtime, event)
+            lead_ctx = await cls._create_ticket(runtime, event)
             await cls._save_mapping(runtime, event, lead_ctx)
             return lead_ctx
         finally:
@@ -4579,7 +4161,7 @@ return 0
         )
 
     @classmethod
-    async def _store_late_recording_state(
+    async def _store_late_closed_event_state(
         cls,
         runtime: RuntimeConfig,
         event: CallEvent,
@@ -4587,11 +4169,12 @@ return 0
         reason: Optional[str],
     ) -> None:
         payload = {
-            "status": "late_recording_closed_lead",
+            "status": "late_event_closed_ticket",
             "connected_integration_id": runtime.connected_integration_id,
             "asterisk_hash": runtime.asterisk_hash,
             "external_call_id": event.external_call_id,
             "event_id": event.event_id,
+            "event_status": event.status,
             "recording_url": event.recording_url,
             "event_ts": event.event_ts,
             "lead_id": lead_ctx.lead_id,
@@ -4601,7 +4184,7 @@ return 0
             "raw_payload": event.raw_payload,
         }
         await cls._redis_set_json_with_ttl(
-            cls._late_recording_state_key(
+            cls._late_closed_event_state_key(
                 runtime.connected_integration_id,
                 runtime.asterisk_hash,
                 event.external_call_id,
@@ -4640,36 +4223,14 @@ return 0
                 )
             return lead_ctx
         except ChatMessageAddClosedEntityError as error:
-            if event.status == "recording_ready":
-                # Recording arrived after close/convert: keep audit state, do not reopen.
-                await cls._store_late_recording_state(
-                    runtime=runtime,
-                    event=event,
-                    lead_ctx=lead_ctx,
-                    reason=error.description,
-                )
-                return lead_ctx
-
-            # Call-state event for closed lead: rebuild mapping and retry once.
-            await cls._clear_mapping(runtime, event)
-            fresh = await cls._resolve_or_create_active_lead(runtime, event)
-            operator_name: Optional[str] = None
-            if cls._chat_event_code(event) == "inbound_answered":
-                operator_name = await cls._resolve_operator_display_name_best_effort(
-                    runtime,
-                    event,
-                )
-            await cls._chat_message_add(
+            # Keep 1 call = 1 ticket. If ticket is already closed, never reopen/create new.
+            await cls._store_late_closed_event_state(
                 runtime=runtime,
-                lead_ctx=fresh,
                 event=event,
-                text=cls._render_call_text(
-                    event,
-                    runtime.message_language,
-                    operator_name=operator_name,
-                ),
+                lead_ctx=lead_ctx,
+                reason=error.description,
             )
-            return fresh
+            return lead_ctx
 
     @classmethod
     async def _apply_status_policy_best_effort(
@@ -4678,34 +4239,8 @@ return 0
         event: CallEvent,
         lead_ctx: LeadContext,
     ) -> None:
-        # New CRM flow is Client + Ticket; telephony does not transition ticket status here.
-        # Leave ticket open and avoid legacy Lead/SetStatus for ticket ids.
-        if lead_ctx.ticket_id:
-            return
-
-        target_status = _status_from_direction_event(event.direction, event.status)
-        if not target_status:
-            return
-
-        reason = f"call_{event.direction}_{event.status}"
-        await cls._set_lead_status_best_effort(
-            connected_integration_id=runtime.connected_integration_id,
-            lead_id=lead_ctx.lead_id,
-            status=target_status,
-            reason=reason,
-        )
-
-    @classmethod
-    async def _set_lead_status_best_effort(
-        cls,
-        connected_integration_id: str,
-        lead_id: Optional[int],
-        status: LeadStatusEnum,
-        *,
-        reason: str,
-    ) -> None:
-        _ = (connected_integration_id, lead_id, status, reason)
-        # Lead/SetStatus is deprecated in the new CRM API flow.
+        _ = (runtime, event, lead_ctx)
+        # Ticket-only flow: telephony does not transition ticket status automatically.
         return
 
     @staticmethod
