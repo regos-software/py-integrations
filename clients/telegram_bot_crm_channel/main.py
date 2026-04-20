@@ -120,6 +120,7 @@ class TelegramBotCrmChannelConfig:
     PHONE_REQUEST_SENT_SYSTEM_TEXT = "Запросили у клиента номер телефона."
     PHONE_RECEIVED_SYSTEM_TEXT = "Клиент отправил номер телефона: {phone}"
     PHONE_STATE_FIELD = "phone_state"
+    CLIENT_TELEGRAM_FIELD_KEY = "field_telegram_id"
     UNKNOWN_CLIENT_NAME = "Unknown"
 
 
@@ -2994,11 +2995,17 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if not isinstance(fields, list):
             return None
         for row in fields:
-            if not isinstance(row, dict):
+            if isinstance(row, dict):
+                row_key = row.get("key")
+                row_value = row.get("value")
+            else:
+                row_key = getattr(row, "key", None)
+                row_value = getattr(row, "value", None)
+            if str(row_key or "") != key:
                 continue
-            if str(row.get("key") or "") != key:
-                continue
-            return str(row.get("value") or "")
+            if row_value is None:
+                return ""
+            return str(row_value)
         return None
 
     @classmethod
@@ -3476,6 +3483,50 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         text = str(value or "").strip()
         return text or None
 
+    @staticmethod
+    def _normalize_telegram_chat_id_value(value: Any) -> Optional[str]:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        parsed = _parse_int(raw, None)
+        if parsed is None:
+            return None
+        return str(parsed)
+
+    @classmethod
+    def _extract_client_telegram_field_value(cls, client: Optional[Client]) -> Optional[str]:
+        if not client:
+            return None
+
+        direct_value = cls._normalize_telegram_chat_id_value(
+            getattr(client, TelegramBotCrmChannelConfig.CLIENT_TELEGRAM_FIELD_KEY, None)
+        )
+        if direct_value:
+            return direct_value
+
+        from_fields = cls._normalize_text_value(
+            cls._extract_field_value(
+                getattr(client, "fields", None),
+                TelegramBotCrmChannelConfig.CLIENT_TELEGRAM_FIELD_KEY,
+            )
+        )
+        if not from_fields:
+            return None
+        normalized = cls._normalize_telegram_chat_id_value(from_fields)
+        return normalized or from_fields
+
+    @classmethod
+    def _build_client_telegram_fields(cls, tg_chat_id: str) -> Optional[List[Dict[str, str]]]:
+        telegram_field_value = cls._normalize_telegram_chat_id_value(tg_chat_id)
+        if not telegram_field_value:
+            return None
+        return [
+            {
+                "key": TelegramBotCrmChannelConfig.CLIENT_TELEGRAM_FIELD_KEY,
+                "value": telegram_field_value,
+            }
+        ]
+
     @classmethod
     def _build_lead_contact_payload(
         cls,
@@ -3495,7 +3546,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         return {
             "subject": subject,
             "external_id": _lead_external_id(bot_cfg.bot_hash, tg_chat_id),
-            "telegram_id": tg_chat_id,
+            "field_telegram_id": cls._normalize_telegram_chat_id_value(tg_chat_id),
             "name": client_name,
             "phone": client_phone,
             "email": client_email,
@@ -3510,7 +3561,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         patch: Dict[str, str] = {}
         field_names = [
             "external_id",
-            "telegram_id",
+            "field_telegram_id",
             "name",
             "phone",
             "email",
@@ -3519,10 +3570,13 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             desired_value = cls._normalize_text_value(desired_payload.get(field_name))
             if not desired_value:
                 continue
-            current_value = cls._normalize_text_value(getattr(client, field_name, None))
+            if field_name == "field_telegram_id":
+                current_value = cls._extract_client_telegram_field_value(client)
+            else:
+                current_value = cls._normalize_text_value(getattr(client, field_name, None))
             if field_name in {"phone", "email"} and current_value:
                 continue
-            if field_name in {"external_id", "telegram_id"} and current_value and current_value != desired_value:
+            if field_name in {"external_id", "field_telegram_id"} and current_value and current_value != desired_value:
                 continue
             if current_value != desired_value:
                 patch[field_name] = desired_value
@@ -3537,7 +3591,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         patch: Dict[str, str] = {}
         field_names = [
             "external_id",
-            "telegram_id",
+            "field_telegram_id",
             "name",
             "phone",
             "email",
@@ -3549,7 +3603,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             cached_value = cls._normalize_text_value(cached_payload.get(field_name))
             if field_name in {"phone", "email"} and cached_value:
                 continue
-            if field_name in {"external_id", "telegram_id"} and cached_value and cached_value != desired_value:
+            if field_name in {"external_id", "field_telegram_id"} and cached_value and cached_value != desired_value:
                 continue
             if cached_value != desired_value:
                 patch[field_name] = desired_value
@@ -3579,7 +3633,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         payload: Dict[str, Any] = {}
         field_names = [
             "external_id",
-            "telegram_id",
+            "field_telegram_id",
             "name",
             "phone",
             "email",
@@ -3648,9 +3702,20 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
 
         if patch:
             try:
+                edit_payload: Dict[str, Any] = dict(patch)
+                telegram_field_value = cls._normalize_text_value(
+                    edit_payload.pop("field_telegram_id", None)
+                )
+                if telegram_field_value:
+                    edit_payload["fields"] = [
+                        {
+                            "key": TelegramBotCrmChannelConfig.CLIENT_TELEGRAM_FIELD_KEY,
+                            "value": telegram_field_value,
+                        }
+                    ]
                 async with RegosAPI(connected_integration_id=connected_integration_id) as api:
                     response = await api.crm.client.edit(
-                        ClientEditRequest(id=lead_id, **patch)
+                        ClientEditRequest(id=lead_id, **edit_payload)
                     )
                 if not response.ok:
                     payload = response.result if isinstance(response.result, dict) else {}
@@ -4892,7 +4957,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         cls,
         rows: List[Client],
         *,
-        telegram_id: Optional[str],
+        telegram_field_id: Optional[str],
         external_id: Optional[str],
         phone: Optional[str],
         email: Optional[str],
@@ -4900,7 +4965,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         best_client: Optional[Client] = None
         best_key: Optional[Tuple[int, int]] = None
 
-        normalized_telegram_id = cls._normalize_text_value(telegram_id)
+        normalized_telegram_field_id = cls._normalize_text_value(telegram_field_id)
         normalized_external_id = cls._normalize_text_value(external_id)
         normalized_phone = _normalize_phone(phone)
         normalized_email = _normalize_email(email)
@@ -4912,9 +4977,9 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
 
             score = 0
             if (
-                normalized_telegram_id
-                and cls._normalize_text_value(getattr(row, "telegram_id", None))
-                == normalized_telegram_id
+                normalized_telegram_field_id
+                and cls._extract_client_telegram_field_value(row)
+                == normalized_telegram_field_id
             ):
                 score += 100
             if (
@@ -4945,17 +5010,27 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         client_phone: Optional[str] = None,
         client_email: Optional[str] = None,
     ) -> Optional[Client]:
-        telegram_id = cls._normalize_text_value(tg_chat_id)
+        telegram_field_id = cls._normalize_telegram_chat_id_value(tg_chat_id)
         external_id = _lead_external_id(bot_cfg.bot_hash, tg_chat_id)
         normalized_phone = _normalize_phone(client_phone)
         normalized_email = _normalize_email(client_email)
 
         lookup_requests: List[Tuple[str, ClientGetRequest]] = []
-        if telegram_id:
+        if telegram_field_id:
             lookup_requests.append(
                 (
-                    "telegram_id",
-                    ClientGetRequest(telegram_ids=[telegram_id], limit=20, offset=0),
+                    TelegramBotCrmChannelConfig.CLIENT_TELEGRAM_FIELD_KEY,
+                    ClientGetRequest(
+                        filters=[
+                            Filter(
+                                field=TelegramBotCrmChannelConfig.CLIENT_TELEGRAM_FIELD_KEY,
+                                operator=FilterOperator.Equal,
+                                value=telegram_field_id,
+                            )
+                        ],
+                        limit=20,
+                        offset=0,
+                    ),
                 )
             )
         if normalized_phone:
@@ -4986,7 +5061,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             )
             candidate = cls._select_best_client_candidate(
                 rows,
-                telegram_id=telegram_id,
+                telegram_field_id=telegram_field_id,
                 external_id=external_id,
                 phone=normalized_phone,
                 email=normalized_email,
@@ -5074,6 +5149,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 await cls._resolve_client_photo_url(bot_cfg, message)
             )
             external_id = _lead_external_id(bot_cfg.bot_hash, tg_chat_id)
+            client_telegram_fields = cls._build_client_telegram_fields(tg_chat_id)
 
             async with RegosAPI(connected_integration_id=connected_integration_id) as api:
                 client = await cls._find_client_for_telegram_dialog(
@@ -5087,11 +5163,11 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     add_resp = await api.crm.client.add(
                         ClientAddRequest(
                             external_id=external_id,
-                            telegram_id=tg_chat_id,
                             name=client_name,
                             phone=client_phone,
                             email=client_email,
                             photo_url=client_photo_url,
+                            fields=client_telegram_fields,
                         )
                     )
                     add_payload = add_resp.result if isinstance(add_resp.result, dict) else {}
@@ -5136,8 +5212,8 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     client_patch["email"] = client_email
                 if client_photo_url and not cls._normalize_text_value(client.photo_url):
                     client_patch["photo_url"] = client_photo_url
-                if tg_chat_id and not cls._normalize_text_value(client.telegram_id):
-                    client_patch["telegram_id"] = tg_chat_id
+                if client_telegram_fields and not cls._extract_client_telegram_field_value(client):
+                    client_patch["fields"] = client_telegram_fields
                 if external_id and not cls._normalize_text_value(client.external_id):
                     client_patch["external_id"] = external_id
                 if client_patch:
