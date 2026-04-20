@@ -5341,7 +5341,14 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     client_ids=[int(client_id)],
                     channel_ids=[int(bot_cfg.channel_id)],
                     statuses=[TicketStatusEnum.Open],
-                    limit=200,
+                    filters=[
+                        Filter(
+                            field="external_dialog_id",
+                            operator=FilterOperator.Equal,
+                            value=target_dialog_id,
+                        )
+                    ],
+                    limit=20,
                     offset=0,
                 )
             )
@@ -5374,7 +5381,14 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 TicketGetRequest(
                     channel_ids=[int(bot_cfg.channel_id)],
                     statuses=[TicketStatusEnum.Open],
-                    limit=500,
+                    filters=[
+                        Filter(
+                            field="external_dialog_id",
+                            operator=FilterOperator.Equal,
+                            value=target_dialog_id,
+                        )
+                    ],
+                    limit=20,
                     offset=0,
                 )
             )
