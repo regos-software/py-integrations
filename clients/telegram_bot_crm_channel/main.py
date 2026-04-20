@@ -2586,6 +2586,15 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                         text=TelegramBotCrmChannelConfig.PHONE_RECEIVED_TELEGRAM_TEXT,
                         reply_markup=ReplyKeyboardRemove(),
                     )
+                    message_id = _parse_int(str(message.get("message_id") or ""), None) or _now_ts()
+                    await cls._send_phone_system_message_best_effort(
+                        connected_integration_id=connected_integration_id,
+                        chat_id=chat_id,
+                        external_message_id=(
+                            f"tgsys:phone_received_confirm:{bot_cfg.bot_hash}:{tg_chat_id}:{message_id}"
+                        ),
+                        text=TelegramBotCrmChannelConfig.PHONE_RECEIVED_TELEGRAM_TEXT,
+                    )
                 except Exception as error:
                     logger.warning(
                         "Failed to remove phone request keyboard: ci=%s bot_hash=%s tg_chat_id=%s error=%s",
@@ -2650,7 +2659,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     external_message_id=(
                         f"tgsys:phone_request_prompt:{bot_cfg.bot_hash}:{tg_chat_id}:{message_id}"
                     ),
-                    text=TelegramBotCrmChannelConfig.PHONE_REQUEST_SENT_SYSTEM_TEXT,
+                    text=request_text,
                 )
             except Exception as error:
                 logger.warning(
@@ -2905,17 +2914,17 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         bot_cfg: BotSlotConfig,
         tg_chat_id: str,
         text: Optional[str],
-    ) -> bool:
+    ) -> Optional[str]:
         rendered_text, parse_mode = cls._channel_message_to_telegram_payload(text)
         if not rendered_text.strip():
-            return False
+            return None
         bot = await cls._get_bot(bot_cfg.token)
         await bot.send_message(
             chat_id=_tg_chat_id_cast(tg_chat_id),
             text=rendered_text,
             parse_mode=parse_mode,
         )
-        return True
+        return rendered_text
 
     @classmethod
     def _is_ticket_created_now(
@@ -2942,6 +2951,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         connected_integration_id: str,
         bot_cfg: BotSlotConfig,
         tg_chat_id: str,
+        chat_id: str,
     ) -> None:
         start_message, _ = await cls._get_channel_start_end_messages(
             connected_integration_id=connected_integration_id,
@@ -2950,11 +2960,20 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if not start_message:
             return
         try:
-            await cls._send_channel_message_to_telegram(
+            sent_text = await cls._send_channel_message_to_telegram(
                 bot_cfg=bot_cfg,
                 tg_chat_id=tg_chat_id,
                 text=start_message,
             )
+            if sent_text and chat_id:
+                await cls._send_phone_system_message_best_effort(
+                    connected_integration_id=connected_integration_id,
+                    chat_id=chat_id,
+                    external_message_id=(
+                        f"tgsys:channel_start_sent:{bot_cfg.bot_hash}:{tg_chat_id}:{chat_id}"
+                    ),
+                    text=sent_text,
+                )
         except Exception as error:
             logger.warning(
                 "Failed to send channel start message: ci=%s channel_id=%s tg_chat_id=%s error=%s",
@@ -4346,6 +4365,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 connected_integration_id=connected_integration_id,
                 bot_cfg=bot_cfg,
                 tg_chat_id=tg_chat_id,
+                chat_id=chat_id,
             )
 
         await cls._sync_lead_from_telegram_best_effort(
@@ -4448,6 +4468,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 connected_integration_id=connected_integration_id,
                 bot_cfg=bot_cfg,
                 tg_chat_id=tg_chat_id,
+                chat_id=fresh_chat_id,
             )
 
         await cls._sync_lead_from_telegram_best_effort(
@@ -6513,11 +6534,20 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if not bot_cfg:
             return
         try:
-            await cls._send_channel_message_to_telegram(
+            sent_text = await cls._send_channel_message_to_telegram(
                 bot_cfg=bot_cfg,
                 tg_chat_id=tg_chat_id,
                 text=end_message,
             )
+            if sent_text:
+                await cls._send_phone_system_message_best_effort(
+                    connected_integration_id=connected_integration_id,
+                    chat_id=chat_id,
+                    external_message_id=(
+                        f"tgsys:channel_end_sent:{bot_cfg.bot_hash}:{tg_chat_id}:{chat_id}"
+                    ),
+                    text=sent_text,
+                )
         except Exception as error:
             logger.warning(
                 "Failed to send channel end message: ci=%s ticket_id=%s channel_id=%s tg_chat_id=%s error=%s",
