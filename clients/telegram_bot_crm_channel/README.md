@@ -36,7 +36,6 @@ Optional settings:
 - `state_ttl_sec` (int): cache/state TTL.
 - `send_private_messages` (bool): forward CRM private messages to Telegram.
 - `forward_system_messages` (bool): forward CRM system messages to Telegram.
-- `lead_closed_message_template` (string): text sent to Telegram user on `TicketClosed`.
 - `phone_request_text` (string): prompt text for phone request flow.
 - `phone_share_button_text` (string): Telegram contact-share button label.
 
@@ -47,14 +46,18 @@ Global setting (service-level, not integration setting):
 ## Routing model (ticket-only)
 
 - Telegram client id is stored in CRM client field `field_telegram_id`.
-- Open ticket lookup uses `Ticket/Get` with filter `external_dialog_id = <telegram_chat_id>`.
-- If no open ticket exists for that dialog and channel, a new ticket is created.
+- Ticket creation relies on the server invariant: one open ticket per `client_id + channel_id`.
+- `Ticket/Add` is treated as idempotent: repeated calls reuse the existing open ticket/chat.
+- `external_dialog_id` stores pinned routing metadata in format `ci:<connected_integration_id>:tg:<telegram_chat_id>`.
+- For multiple `ConnectedIntegration` with the same CRM channel, outbound CRM replies are sent only by the pinned `connected_integration_id` from `external_dialog_id`.
+- Channel messages are used directly:
+  - `start_message` is sent to client when a new chat starts.
+  - `end_message` is sent to client on `TicketClosed`.
+- Message formatting supports CRM markdown plus BBCode-like tags (`[B]...[/B]`, `[I]...[/I]`, `[U]...[/U]`, `[S]...[/S]`, `[BR]`).
 - Outbound CRM events are routed to the exact bot by:
   1. `Chat/Get` -> resolve linked `ticket_id`
-  2. `Ticket/Get` -> read `channel_id` and `external_dialog_id`
-  3. route by `channel_id` to the configured bot slot
-
-This prevents sending one CRM message to all Telegram bots when multiple integrations are active.
+  2. `Ticket/Get` -> read `channel_id` and parse `external_dialog_id`
+  3. send only when parsed `connected_integration_id` matches current integration
 
 ## Setup
 

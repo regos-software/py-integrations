@@ -39,6 +39,7 @@ from schemas.api.chat.chat_message import (
     ChatMessageTypeEnum,
 )
 from schemas.api.common.filters import Filter, FilterOperator
+from schemas.api.crm.channel import Channel, ChannelGetRequest
 from schemas.api.crm.client import (
     Client,
     ClientAddRequest,
@@ -50,7 +51,6 @@ from schemas.api.crm.ticket import (
     TicketAddRequest,
     TicketDirectionEnum,
     TicketGetRequest,
-    TicketStatusEnum,
 )
 from schemas.api.files.file import FileGetRequest
 from schemas.api.integrations.connected_integration_setting import (
@@ -138,7 +138,6 @@ class RuntimeConfig:
     state_ttl_sec: int
     send_private_messages: bool
     forward_system_messages: bool
-    lead_closed_message_template: Optional[str]
     phone_request_text: Optional[str]
     phone_share_button_text: str
 
@@ -248,6 +247,32 @@ def _tg_chat_id_cast(chat_id: str) -> Any:
         except ValueError:
             return value
     return value
+
+
+def _build_ticket_external_dialog_id(
+    connected_integration_id: str,
+    tg_chat_id: str,
+) -> Optional[str]:
+    ci = str(connected_integration_id or "").strip()
+    dialog = str(tg_chat_id or "").strip()
+    if not ci or not dialog:
+        return None
+    return f"ci:{ci}:tg:{dialog}"
+
+
+def _parse_ticket_external_dialog_id(value: Any) -> Tuple[Optional[str], Optional[str]]:
+    text = str(value or "").strip()
+    if not text:
+        return None, None
+    if text.startswith("ci:") and ":tg:" in text:
+        _, _, tail = text.partition("ci:")
+        route_ci, _, route_tg = tail.partition(":tg:")
+        route_ci = str(route_ci or "").strip()
+        route_tg = str(route_tg or "").strip()
+        if route_ci and route_tg:
+            return route_ci, route_tg
+        return None, None
+    return None, None
 
 
 def _sanitize_file_name(name: str) -> str:
@@ -1017,6 +1042,14 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         )
 
     @staticmethod
+    def _channel_cache_key(connected_integration_id: str, channel_id: int) -> str:
+        return TelegramBotCrmChannelIntegration._redis_key(
+            "channel",
+            connected_integration_id,
+            channel_id,
+        )
+
+    @staticmethod
     def _stream_key(kind: str, connected_integration_id: str) -> str:
         return TelegramBotCrmChannelIntegration._redis_key(
             "stream", kind, connected_integration_id
@@ -1309,6 +1342,67 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             logger.warning("Failed to clear settings cache: %s", error)
 
     @staticmethod
+    def _parse_channel_messages_cache(
+        raw: Optional[str],
+    ) -> Optional[Tuple[Optional[str], Optional[str]]]:
+        if not raw:
+            return None
+        try:
+            payload = _json_loads(raw)
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        start_message = str(payload.get("start_message") or "").strip() or None
+        end_message = str(payload.get("end_message") or "").strip() or None
+        return start_message, end_message
+
+    @classmethod
+    async def _get_channel_start_end_messages(
+        cls,
+        connected_integration_id: str,
+        channel_id: Any,
+    ) -> Tuple[Optional[str], Optional[str]]:
+        resolved_channel_id = _parse_int(str(channel_id or ""), None)
+        if not resolved_channel_id:
+            return None, None
+
+        cache_key = cls._channel_cache_key(
+            connected_integration_id,
+            int(resolved_channel_id),
+        )
+        cached = cls._parse_channel_messages_cache(await cls._redis_get(cache_key))
+        if cached is not None:
+            return cached
+
+        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+            response = await api.crm.channel.get(
+                ChannelGetRequest(ids=[int(resolved_channel_id)], limit=1, offset=0)
+            )
+        if not response.ok:
+            logger.warning(
+                "Channel/Get rejected while loading channel messages: ci=%s channel_id=%s payload=%s",
+                connected_integration_id,
+                resolved_channel_id,
+                response.result,
+            )
+            return None, None
+        rows = response.result if response.ok and isinstance(response.result, list) else []
+        channel: Optional[Channel] = rows[0] if rows else None
+
+        start_message = str(getattr(channel, "start_message", "") or "").strip() or None
+        end_message = str(getattr(channel, "end_message", "") or "").strip() or None
+        payload = _json_dumps(
+            {"start_message": start_message or "", "end_message": end_message or ""}
+        )
+        await cls._redis_set_with_ttl(
+            cache_key,
+            payload,
+            TelegramBotCrmChannelConfig.SETTINGS_TTL,
+        )
+        return start_message, end_message
+
+    @staticmethod
     def _parse_bots(settings_map: Dict[str, str]) -> List[BotSlotConfig]:
         token = str(settings_map.get("bot_1_token") or "").strip()
         channel_id = _parse_int(settings_map.get("bot_1_channel_id"))
@@ -1378,10 +1472,6 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             forward_system_messages=_parse_bool(
                 settings_map.get("forward_system_messages"), False
             ),
-            lead_closed_message_template=str(
-                settings_map.get("lead_closed_message_template") or ""
-            ).strip()
-            or None,
             phone_request_text=str(settings_map.get("phone_request_text") or "").strip()
             or None,
             phone_share_button_text=(
@@ -2742,6 +2832,111 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             return _crm_markdown_to_telegram_html(source), "HTML"
         except Exception:
             return source, None
+
+    @staticmethod
+    def _normalize_channel_message_markup(text: Optional[str]) -> str:
+        normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not normalized:
+            return ""
+        normalized = re.sub(r"(?is)\[br\s*/?\]", "\n", normalized)
+        tag_replacements: Tuple[Tuple[str, str], ...] = (
+            (r"(?is)\[b\]", "**"),
+            (r"(?is)\[/b\]", "**"),
+            (r"(?is)\[i\]", "_"),
+            (r"(?is)\[/i\]", "_"),
+            (r"(?is)\[u\]", "++"),
+            (r"(?is)\[/u\]", "++"),
+            (r"(?is)\[s\]", "~~"),
+            (r"(?is)\[/s\]", "~~"),
+        )
+        for pattern, replacement in tag_replacements:
+            normalized = re.sub(pattern, replacement, normalized)
+        return normalized.strip()
+
+    @classmethod
+    def _channel_message_to_telegram_payload(
+        cls, text: Optional[str]
+    ) -> Tuple[str, Optional[str]]:
+        normalized = cls._normalize_channel_message_markup(text)
+        if not normalized:
+            return "", None
+        return cls._crm_markdown_to_telegram_payload(normalized)
+
+    @classmethod
+    async def _send_channel_message_to_telegram(
+        cls,
+        *,
+        bot_cfg: BotSlotConfig,
+        tg_chat_id: str,
+        text: Optional[str],
+    ) -> bool:
+        rendered_text, parse_mode = cls._channel_message_to_telegram_payload(text)
+        if not rendered_text.strip():
+            return False
+        bot = await cls._get_bot(bot_cfg.token)
+        await bot.send_message(
+            chat_id=_tg_chat_id_cast(tg_chat_id),
+            text=rendered_text,
+            parse_mode=parse_mode,
+        )
+        return True
+
+    @classmethod
+    async def _is_chat_empty(
+        cls,
+        connected_integration_id: str,
+        chat_id: str,
+    ) -> bool:
+        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+            response = await api.chat.chat_message.get(
+                ChatMessageGetRequest(
+                    chat_id=chat_id,
+                    limit=1,
+                    offset=0,
+                    include_staff_private=True,
+                )
+            )
+        if not response.ok:
+            logger.warning(
+                "ChatMessage/Get rejected while checking chat emptiness: ci=%s chat_id=%s payload=%s",
+                connected_integration_id,
+                chat_id,
+                response.result,
+            )
+            return False
+        return len(response.result or []) == 0
+
+    @classmethod
+    async def _send_channel_start_message_if_needed(
+        cls,
+        *,
+        connected_integration_id: str,
+        bot_cfg: BotSlotConfig,
+        tg_chat_id: str,
+        chat_id: str,
+    ) -> None:
+        if not await cls._is_chat_empty(connected_integration_id, chat_id):
+            return
+        start_message, _ = await cls._get_channel_start_end_messages(
+            connected_integration_id=connected_integration_id,
+            channel_id=bot_cfg.channel_id,
+        )
+        if not start_message:
+            return
+        try:
+            await cls._send_channel_message_to_telegram(
+                bot_cfg=bot_cfg,
+                tg_chat_id=tg_chat_id,
+                text=start_message,
+            )
+        except Exception as error:
+            logger.warning(
+                "Failed to send channel start message: ci=%s channel_id=%s tg_chat_id=%s error=%s",
+                connected_integration_id,
+                bot_cfg.channel_id,
+                tg_chat_id,
+                error,
+            )
 
     @staticmethod
     def _extract_contact_payload(message: Dict[str, Any], tg_chat_id: str) -> Dict[str, str]:
@@ -4120,6 +4315,13 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if not lead_id or not chat_id:
             return
 
+        await cls._send_channel_start_message_if_needed(
+            connected_integration_id=connected_integration_id,
+            bot_cfg=bot_cfg,
+            tg_chat_id=tg_chat_id,
+            chat_id=chat_id,
+        )
+
         await cls._sync_lead_from_telegram_best_effort(
             connected_integration_id=connected_integration_id,
             state_ttl_sec=runtime.state_ttl_sec,
@@ -4214,6 +4416,13 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             raise RuntimeError(
                 "Failed to resolve fresh lead after ChatMessage/Add rejected for closed linked entity"
             )
+
+        await cls._send_channel_start_message_if_needed(
+            connected_integration_id=connected_integration_id,
+            bot_cfg=bot_cfg,
+            tg_chat_id=tg_chat_id,
+            chat_id=fresh_chat_id,
+        )
 
         await cls._sync_lead_from_telegram_best_effort(
             connected_integration_id=connected_integration_id,
@@ -4975,23 +5184,6 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if cached_lead_id and cached_chat_id:
             return cached_lead_id, cached_chat_id
 
-        recovered = await cls._recover_client_ticket_by_external_chat(
-            connected_integration_id=connected_integration_id,
-            bot_cfg=bot_cfg,
-            tg_chat_id=tg_chat_id,
-        )
-        if recovered:
-            client_id, ticket_id, recovered_chat_id = recovered
-            await cls._save_lead_mapping(
-                connected_integration_id=connected_integration_id,
-                bot_hash=bot_cfg.bot_hash,
-                tg_chat_id=tg_chat_id,
-                client_id=client_id,
-                ticket_id=ticket_id,
-                chat_id=recovered_chat_id,
-            )
-            return client_id, recovered_chat_id
-
         lock_key = cls._lock_create_lead_key(connected_integration_id, bot_cfg.bot_hash, tg_chat_id)
         lock_token = await cls._acquire_lock(lock_key, runtime.state_ttl_sec)
         if not lock_token:
@@ -5093,48 +5285,43 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                         ClientEditRequest(id=int(client.id), **client_patch)
                     )
 
-                ticket = await cls._find_open_ticket_by_external_dialog(
+                route_external_dialog_id = _build_ticket_external_dialog_id(
                     connected_integration_id=connected_integration_id,
-                    bot_cfg=bot_cfg,
-                    client_id=int(client.id),
-                    external_dialog_id=tg_chat_id,
+                    tg_chat_id=tg_chat_id,
                 )
-                if not ticket:
-                    add_ticket_resp = await api.crm.ticket.add(
-                        TicketAddRequest(
-                            client_id=int(client.id),
-                            channel_id=bot_cfg.channel_id,
-                            direction=TicketDirectionEnum.Inbound,
-                            external_dialog_id=tg_chat_id,
-                            subject=subject,
-                            responsible_user_id=bot_cfg.default_responsible_user_id,
-                        )
+                add_ticket_resp = await api.crm.ticket.add(
+                    TicketAddRequest(
+                        client_id=int(client.id),
+                        channel_id=bot_cfg.channel_id,
+                        direction=TicketDirectionEnum.Inbound,
+                        external_dialog_id=route_external_dialog_id,
+                        subject=subject,
+                        responsible_user_id=bot_cfg.default_responsible_user_id,
                     )
-                    add_ticket_payload = (
-                        add_ticket_resp.result
-                        if isinstance(add_ticket_resp.result, dict)
-                        else {}
+                )
+                add_ticket_payload = (
+                    add_ticket_resp.result if isinstance(add_ticket_resp.result, dict) else {}
+                )
+                if not add_ticket_resp.ok:
+                    raise RuntimeError(
+                        "Ticket/Add rejected: "
+                        f"error={add_ticket_payload.get('error')} description={add_ticket_payload.get('description')}"
                     )
-                    if not add_ticket_resp.ok:
-                        raise RuntimeError(
-                            "Ticket/Add rejected: "
-                            f"error={add_ticket_payload.get('error')} description={add_ticket_payload.get('description')}"
-                        )
-                    new_ticket_id = _parse_int(
-                        str(add_ticket_payload.get("new_id") or ""),
-                        None,
-                    )
-                    if not new_ticket_id:
-                        raise RuntimeError("Ticket/Add did not return new_id")
-                    ticket_get = await api.crm.ticket.get(
-                        TicketGetRequest(ids=[int(new_ticket_id)], limit=1, offset=0)
-                    )
-                    ticket_rows = (
-                        ticket_get.result
-                        if ticket_get.ok and isinstance(ticket_get.result, list)
-                        else []
-                    )
-                    ticket = ticket_rows[0] if ticket_rows else None
+                ticket_id_from_add = _parse_int(
+                    str(add_ticket_payload.get("new_id") or ""),
+                    None,
+                )
+                if not ticket_id_from_add:
+                    raise RuntimeError("Ticket/Add did not return new_id")
+                ticket_get = await api.crm.ticket.get(
+                    TicketGetRequest(ids=[int(ticket_id_from_add)], limit=1, offset=0)
+                )
+                ticket_rows = (
+                    ticket_get.result
+                    if ticket_get.ok and isinstance(ticket_get.result, list)
+                    else []
+                )
+                ticket = ticket_rows[0] if ticket_rows else None
 
                 if not ticket or not ticket.id or not ticket.chat_id:
                     raise RuntimeError("Ticket/Get did not return chat_id")
@@ -5175,123 +5362,62 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if cached_lead_id and cached_chat_id:
             return cached_lead_id, cached_chat_id
 
-        recovered = await cls._recover_client_ticket_by_external_chat(
-            connected_integration_id=connected_integration_id,
-            bot_cfg=bot_cfg,
-            tg_chat_id=tg_chat_id,
-        )
-        if not recovered:
+        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+            client = await cls._find_client_for_telegram_dialog(
+                api,
+                tg_chat_id,
+            )
+            if not client or not client.id:
+                return None, None
+            route_external_dialog_id = _build_ticket_external_dialog_id(
+                connected_integration_id=connected_integration_id,
+                tg_chat_id=tg_chat_id,
+            )
+            add_ticket_resp = await api.crm.ticket.add(
+                TicketAddRequest(
+                    client_id=int(client.id),
+                    channel_id=bot_cfg.channel_id,
+                    direction=TicketDirectionEnum.Inbound,
+                    external_dialog_id=route_external_dialog_id,
+                    responsible_user_id=bot_cfg.default_responsible_user_id,
+                )
+            )
+            add_ticket_payload = (
+                add_ticket_resp.result if isinstance(add_ticket_resp.result, dict) else {}
+            )
+            if not add_ticket_resp.ok:
+                raise RuntimeError(
+                    "Ticket/Add rejected: "
+                    f"error={add_ticket_payload.get('error')} description={add_ticket_payload.get('description')}"
+                )
+            ticket_id_from_add = _parse_int(
+                str(add_ticket_payload.get("new_id") or ""),
+                None,
+            )
+            if not ticket_id_from_add:
+                raise RuntimeError("Ticket/Add did not return new_id")
+            ticket_get = await api.crm.ticket.get(
+                TicketGetRequest(ids=[int(ticket_id_from_add)], limit=1, offset=0)
+            )
+            ticket_rows = (
+                ticket_get.result
+                if ticket_get.ok and isinstance(ticket_get.result, list)
+                else []
+            )
+            ticket = ticket_rows[0] if ticket_rows else None
+
+        if not client or not client.id or not ticket or not ticket.id or not ticket.chat_id:
             return None, None
 
-        client_id, ticket_id, recovered_chat_id = recovered
         await cls._save_lead_mapping(
             connected_integration_id=connected_integration_id,
             bot_hash=bot_cfg.bot_hash,
             tg_chat_id=tg_chat_id,
-            client_id=client_id,
-            ticket_id=ticket_id,
-            chat_id=recovered_chat_id,
+            client_id=int(client.id),
+            ticket_id=int(ticket.id),
+            chat_id=str(ticket.chat_id),
         )
-        return client_id, recovered_chat_id
-
-    @classmethod
-    async def _find_open_ticket_by_external_dialog(
-        cls,
-        connected_integration_id: str,
-        bot_cfg: BotSlotConfig,
-        client_id: int,
-        external_dialog_id: str,
-    ) -> Optional[Ticket]:
-        target_dialog_id = str(external_dialog_id or "").strip()
-        if not target_dialog_id:
-            return None
-
-        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-            response = await api.crm.ticket.get(
-                TicketGetRequest(
-                    client_ids=[int(client_id)],
-                    channel_ids=[int(bot_cfg.channel_id)],
-                    statuses=[TicketStatusEnum.Open],
-                    filters=[
-                        Filter(
-                            field="external_dialog_id",
-                            operator=FilterOperator.Equal,
-                            value=target_dialog_id,
-                        )
-                    ],
-                    limit=20,
-                    offset=0,
-                )
-            )
-        rows = response.result if response.ok and isinstance(response.result, list) else []
-        valid = [
-            row
-            for row in rows
-            if row
-            and row.id
-            and row.chat_id
-            and str(getattr(row, "external_dialog_id", "") or "").strip() == target_dialog_id
-        ]
-        if not valid:
-            return None
-        return max(valid, key=lambda row: int(row.id or 0))
-
-    @classmethod
-    async def _find_open_ticket_by_external_dialog_any_client(
-        cls,
-        connected_integration_id: str,
-        bot_cfg: BotSlotConfig,
-        external_dialog_id: str,
-    ) -> Optional[Ticket]:
-        target_dialog_id = str(external_dialog_id or "").strip()
-        if not target_dialog_id:
-            return None
-
-        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-            response = await api.crm.ticket.get(
-                TicketGetRequest(
-                    channel_ids=[int(bot_cfg.channel_id)],
-                    statuses=[TicketStatusEnum.Open],
-                    filters=[
-                        Filter(
-                            field="external_dialog_id",
-                            operator=FilterOperator.Equal,
-                            value=target_dialog_id,
-                        )
-                    ],
-                    limit=20,
-                    offset=0,
-                )
-            )
-        rows = response.result if response.ok and isinstance(response.result, list) else []
-        valid = [
-            row
-            for row in rows
-            if row
-            and row.id
-            and row.chat_id
-            and _parse_int(str(getattr(row, "client_id", None) or ""))
-            and str(getattr(row, "external_dialog_id", "") or "").strip() == target_dialog_id
-        ]
-        if not valid:
-            return None
-        return max(valid, key=lambda row: int(row.id or 0))
-
-    @classmethod
-    async def _recover_client_ticket_by_external_chat(
-        cls,
-        connected_integration_id: str,
-        bot_cfg: BotSlotConfig,
-        tg_chat_id: str,
-    ) -> Optional[Tuple[int, int, str]]:
-        ticket = await cls._find_open_ticket_by_external_dialog_any_client(
-            connected_integration_id=connected_integration_id,
-            bot_cfg=bot_cfg,
-            external_dialog_id=tg_chat_id,
-        )
-        if ticket and ticket.id and ticket.chat_id and ticket.client_id:
-            return int(ticket.client_id), int(ticket.id), str(ticket.chat_id)
-        return None
+        return int(client.id), str(ticket.chat_id)
 
     @classmethod
     async def _save_lead_mapping(
@@ -5864,12 +5990,33 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             return None
         ticket_id = _parse_int(str(getattr(ticket, "id", None) or ""), None)
         client_id = _parse_int(str(getattr(ticket, "client_id", None) or ""), None)
-        tg_chat_id = str(getattr(ticket, "external_dialog_id", None) or "").strip()
-        if not ticket_id or not client_id or not tg_chat_id:
+        route_ci, tg_chat_id = _parse_ticket_external_dialog_id(
+            getattr(ticket, "external_dialog_id", None)
+        )
+        ticket_channel_id = _parse_int(str(getattr(ticket, "channel_id", None) or ""), None)
+        if not ticket_id or not client_id or not ticket_channel_id:
+            return None
+        if not route_ci or not tg_chat_id:
+            logger.debug(
+                "Skip outbound relay: ticket has no pinned route ci: ci=%s chat_id=%s ticket_id=%s external_dialog_id=%s",
+                connected_integration_id,
+                chat_id,
+                ticket_id,
+                getattr(ticket, "external_dialog_id", None),
+            )
+            return None
+        if route_ci != connected_integration_id:
+            logger.debug(
+                "Skip outbound relay by pinned route ci: ci=%s chat_id=%s ticket_id=%s route_ci=%s",
+                connected_integration_id,
+                chat_id,
+                ticket_id,
+                route_ci,
+            )
             return None
         bot_hash = cls._resolve_bot_hash_by_channel(
             runtime,
-            getattr(ticket, "channel_id", None),
+            ticket_channel_id,
         )
         if not bot_hash:
             logger.debug(
@@ -5877,7 +6024,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 connected_integration_id,
                 chat_id,
                 ticket_id,
-                getattr(ticket, "channel_id", None),
+                ticket_channel_id,
             )
             return None
         await cls._save_cached_mapping(
@@ -6323,12 +6470,11 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if not chat_id:
             return
 
-        text = (
-            runtime.lead_closed_message_template
-            or "\u041e\u0431\u0440\u0430\u0449\u0435\u043d\u0438\u0435 \u0437\u0430\u043a\u0440\u044b\u0442\u043e. "
-            "\u0421\u043f\u0430\u0441\u0438\u0431\u043e \u0437\u0430 \u043e\u0431\u0440\u0430\u0449\u0435\u043d\u0438\u0435."
+        _, end_message = await cls._get_channel_start_end_messages(
+            connected_integration_id=connected_integration_id,
+            channel_id=getattr(ticket, "channel_id", None),
         )
-        if not text.strip():
+        if not end_message:
             return
 
         target = await cls._resolve_target_by_chat(
@@ -6343,7 +6489,18 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         bot_cfg = runtime.bots_by_hash.get(bot_hash)
         if not bot_cfg:
             return
-        bot = await cls._get_bot(bot_cfg.token)
-        await bot.send_message(chat_id=_tg_chat_id_cast(tg_chat_id), text=text)
-
-
+        try:
+            await cls._send_channel_message_to_telegram(
+                bot_cfg=bot_cfg,
+                tg_chat_id=tg_chat_id,
+                text=end_message,
+            )
+        except Exception as error:
+            logger.warning(
+                "Failed to send channel end message: ci=%s ticket_id=%s channel_id=%s tg_chat_id=%s error=%s",
+                connected_integration_id,
+                ticket_id,
+                getattr(ticket, "channel_id", None),
+                tg_chat_id,
+                error,
+            )
