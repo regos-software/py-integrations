@@ -21,6 +21,7 @@ from aiogram.types import (
     KeyboardButton,
     Message,
     ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
 )
 from redis.exceptions import ResponseError
 from starlette.responses import JSONResponse
@@ -113,6 +114,7 @@ class TelegramBotCrmChannelConfig:
     PHONE_SHARE_BUTTON_TEXT = "РџРѕРґРµР»РёС‚СЊСЃСЏ РЅРѕРјРµСЂРѕРј / Raqamni ulashish"
     PHONE_REQUEST_SENT_SYSTEM_TEXT = "Р—Р°РїСЂРѕСЃРёР»Рё Сѓ РєР»РёРµРЅС‚Р° РЅРѕРјРµСЂ С‚РµР»РµС„РѕРЅР°."
     PHONE_RECEIVED_SYSTEM_TEXT = "РљР»РёРµРЅС‚ РѕС‚РїСЂР°РІРёР» РЅРѕРјРµСЂ С‚РµР»РµС„РѕРЅР°: {phone}"
+    PHONE_RECEIVED_TELEGRAM_TEXT = "Thank you, we received your phone number."
     PHONE_STATE_FIELD = "phone_state"
     CLIENT_TELEGRAM_FIELD_KEY = "field_telegram_id"
     UNKNOWN_CLIENT_NAME = "Unknown"
@@ -225,6 +227,23 @@ def _parse_int(value: Optional[str], default: Optional[int] = None) -> Optional[
         return int(s)
     except (TypeError, ValueError):
         return default
+
+
+def _result_get(result: Any, key: str) -> Any:
+    if isinstance(result, dict):
+        return result.get(key)
+    return getattr(result, key, None)
+
+
+def _extract_add_new_id(result: Any) -> Optional[int]:
+    direct_id = _parse_int(str(result), None)
+    if direct_id and direct_id > 0:
+        return int(direct_id)
+    for key in ("new_id", "id", "ticket_id", "client_id"):
+        candidate_id = _parse_int(str(_result_get(result, key) or ""), None)
+        if candidate_id and candidate_id > 0:
+            return int(candidate_id)
+    return None
 
 
 def _bot_hash(token: str) -> str:
@@ -2559,6 +2578,22 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 prompted_at_ts=0 if bool(refreshed_lead_has_phone) else prompted_at_ts,
                 ttl_sec=runtime.state_ttl_sec,
             )
+            if prompted_at_ts > 0 or bool(cls._extract_own_contact_phone(message)):
+                try:
+                    bot = await cls._get_bot(bot_cfg.token)
+                    await bot.send_message(
+                        chat_id=_tg_chat_id_cast(tg_chat_id),
+                        text=TelegramBotCrmChannelConfig.PHONE_RECEIVED_TELEGRAM_TEXT,
+                        reply_markup=ReplyKeyboardRemove(),
+                    )
+                except Exception as error:
+                    logger.warning(
+                        "Failed to remove phone request keyboard: ci=%s bot_hash=%s tg_chat_id=%s error=%s",
+                        connected_integration_id,
+                        bot_cfg.bot_hash,
+                        tg_chat_id,
+                        error,
+                    )
             return
 
         lead_has_phone: Optional[bool] = None
@@ -5243,7 +5278,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                                 f"error={add_payload.get('error')} description={add_payload.get('description')}"
                             )
                     if not client or not client.id:
-                        new_client_id = _parse_int(str(add_payload.get("new_id") or ""), None)
+                        new_client_id = _extract_add_new_id(add_resp.result)
                         if not new_client_id:
                             raise RuntimeError("Client/Add did not return new_id")
                         client_get = await api.crm.client.get(
@@ -5298,10 +5333,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                         "Ticket/Add rejected: "
                         f"error={add_ticket_payload.get('error')} description={add_ticket_payload.get('description')}"
                     )
-                ticket_id_from_add = _parse_int(
-                    str(add_ticket_payload.get("new_id") or ""),
-                    None,
-                )
+                ticket_id_from_add = _extract_add_new_id(add_ticket_resp.result)
                 if not ticket_id_from_add:
                     raise RuntimeError("Ticket/Add did not return new_id")
                 ticket_get = await api.crm.ticket.get(
@@ -5383,10 +5415,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     "Ticket/Add rejected: "
                     f"error={add_ticket_payload.get('error')} description={add_ticket_payload.get('description')}"
                 )
-            ticket_id_from_add = _parse_int(
-                str(add_ticket_payload.get("new_id") or ""),
-                None,
-            )
+            ticket_id_from_add = _extract_add_new_id(add_ticket_resp.result)
             if not ticket_id_from_add:
                 raise RuntimeError("Ticket/Add did not return new_id")
             ticket_get = await api.crm.ticket.get(
@@ -6526,3 +6555,4 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 channel_id,
                 error,
             )
+
