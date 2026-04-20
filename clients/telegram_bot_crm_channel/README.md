@@ -11,6 +11,7 @@ CRM webhooks consumed by this integration:
 - `ChatMessageDeleted`
 - `ChatWriting`
 - `TicketClosed`
+- `ChannelEdited`
 
 Telegram update types consumed by this integration:
 
@@ -51,7 +52,7 @@ Global setting (service-level, not integration setting):
 - `external_dialog_id` stores pinned routing metadata in format `ci:<connected_integration_id>:tg:<telegram_chat_id>`.
 - For multiple `ConnectedIntegration` with the same CRM channel, outbound CRM replies are sent only by the pinned `connected_integration_id` from `external_dialog_id`.
 - Channel messages are used directly:
-  - `start_message` is sent to client when a new chat starts.
+  - `start_message` is sent to client each time a new ticket is created.
   - `end_message` is sent to client on `TicketClosed`.
 - Message formatting supports CRM markdown plus BBCode-like tags (`[B]...[/B]`, `[I]...[/I]`, `[U]...[/U]`, `[S]...[/S]`, `[BR]`).
 - Outbound CRM events are routed to the exact bot by:

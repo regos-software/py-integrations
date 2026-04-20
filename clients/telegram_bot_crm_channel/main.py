@@ -105,6 +105,7 @@ class TelegramBotCrmChannelConfig:
         "ChatMessageDeleted",
         "ChatWriting",
         "TicketClosed",
+        "ChannelEdited",
     }
 
     CHAT_MESSAGE_ADD_CLOSED_ENTITY_ERROR = 1220
@@ -2882,41 +2883,31 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         return True
 
     @classmethod
-    async def _is_chat_empty(
+    def _is_ticket_created_now(
         cls,
-        connected_integration_id: str,
-        chat_id: str,
+        ticket: Optional[Ticket],
+        *,
+        now_ts: Optional[int] = None,
+        max_age_sec: int = 20,
     ) -> bool:
-        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-            response = await api.chat.chat_message.get(
-                ChatMessageGetRequest(
-                    chat_id=chat_id,
-                    limit=1,
-                    offset=0,
-                    include_staff_private=True,
-                )
-            )
-        if not response.ok:
-            logger.warning(
-                "ChatMessage/Get rejected while checking chat emptiness: ci=%s chat_id=%s payload=%s",
-                connected_integration_id,
-                chat_id,
-                response.result,
-            )
+        if not ticket:
             return False
-        return len(response.result or []) == 0
+        created_date = _parse_int(str(getattr(ticket, "created_date", None) or ""), None)
+        if not created_date or created_date <= 0:
+            return False
+        current_ts = int(now_ts or _now_ts())
+        if created_date > current_ts + 5:
+            return False
+        return (current_ts - created_date) <= max(int(max_age_sec), 1)
 
     @classmethod
-    async def _send_channel_start_message_if_needed(
+    async def _send_channel_start_message(
         cls,
         *,
         connected_integration_id: str,
         bot_cfg: BotSlotConfig,
         tg_chat_id: str,
-        chat_id: str,
     ) -> None:
-        if not await cls._is_chat_empty(connected_integration_id, chat_id):
-            return
         start_message, _ = await cls._get_channel_start_end_messages(
             connected_integration_id=connected_integration_id,
             channel_id=bot_cfg.channel_id,
@@ -4305,7 +4296,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if not tg_chat_id:
             return
 
-        lead_id, chat_id = await cls._resolve_or_create_lead(
+        lead_id, chat_id, ticket_created_now = await cls._resolve_or_create_lead(
             connected_integration_id=connected_integration_id,
             runtime=runtime,
             bot_cfg=bot_cfg,
@@ -4315,12 +4306,12 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if not lead_id or not chat_id:
             return
 
-        await cls._send_channel_start_message_if_needed(
-            connected_integration_id=connected_integration_id,
-            bot_cfg=bot_cfg,
-            tg_chat_id=tg_chat_id,
-            chat_id=chat_id,
-        )
+        if ticket_created_now:
+            await cls._send_channel_start_message(
+                connected_integration_id=connected_integration_id,
+                bot_cfg=bot_cfg,
+                tg_chat_id=tg_chat_id,
+            )
 
         await cls._sync_lead_from_telegram_best_effort(
             connected_integration_id=connected_integration_id,
@@ -4405,7 +4396,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 error,
             )
 
-        fresh_lead_id, fresh_chat_id = await cls._resolve_or_create_lead(
+        fresh_lead_id, fresh_chat_id, fresh_ticket_created_now = await cls._resolve_or_create_lead(
             connected_integration_id=connected_integration_id,
             runtime=runtime,
             bot_cfg=bot_cfg,
@@ -4417,12 +4408,12 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 "Failed to resolve fresh lead after ChatMessage/Add rejected for closed linked entity"
             )
 
-        await cls._send_channel_start_message_if_needed(
-            connected_integration_id=connected_integration_id,
-            bot_cfg=bot_cfg,
-            tg_chat_id=tg_chat_id,
-            chat_id=fresh_chat_id,
-        )
+        if fresh_ticket_created_now:
+            await cls._send_channel_start_message(
+                connected_integration_id=connected_integration_id,
+                bot_cfg=bot_cfg,
+                tg_chat_id=tg_chat_id,
+            )
 
         await cls._sync_lead_from_telegram_best_effort(
             connected_integration_id=connected_integration_id,
@@ -5175,14 +5166,14 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         bot_cfg: BotSlotConfig,
         tg_chat_id: str,
         message: Dict[str, Any],
-    ) -> Tuple[Optional[int], Optional[str]]:
+    ) -> Tuple[Optional[int], Optional[str], bool]:
         cached_lead_id, cached_chat_id = await cls._resolve_cached_lead_mapping(
             connected_integration_id=connected_integration_id,
             bot_hash=bot_cfg.bot_hash,
             tg_chat_id=tg_chat_id,
         )
         if cached_lead_id and cached_chat_id:
-            return cached_lead_id, cached_chat_id
+            return cached_lead_id, cached_chat_id, False
 
         lock_key = cls._lock_create_lead_key(connected_integration_id, bot_cfg.bot_hash, tg_chat_id)
         lock_token = await cls._acquire_lock(lock_key, runtime.state_ttl_sec)
@@ -5195,8 +5186,8 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 tg_chat_id=tg_chat_id,
             )
             if cached_lead_id and cached_chat_id:
-                return cached_lead_id, cached_chat_id
-            return None, None
+                return cached_lead_id, cached_chat_id, False
+            return None, None, False
 
         try:
             # Double-check mapping under lock to avoid duplicate lead creation.
@@ -5206,7 +5197,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 tg_chat_id=tg_chat_id,
             )
             if cached_lead_id and cached_chat_id:
-                return cached_lead_id, cached_chat_id
+                return cached_lead_id, cached_chat_id, False
 
             subject = cls._build_subject(
                 bot_cfg.lead_subject_template, message, tg_chat_id
@@ -5325,14 +5316,16 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
 
                 if not ticket or not ticket.id or not ticket.chat_id:
                     raise RuntimeError("Ticket/Get did not return chat_id")
+                ticket_created_now = cls._is_ticket_created_now(ticket)
 
                 logger.debug(
-                    "Client/Ticket resolved for Telegram chat: ci=%s bot_hash=%s tg_chat_id=%s client_id=%s ticket_id=%s",
+                    "Client/Ticket resolved for Telegram chat: ci=%s bot_hash=%s tg_chat_id=%s client_id=%s ticket_id=%s ticket_created_now=%s",
                     connected_integration_id,
                     bot_cfg.bot_hash,
                     tg_chat_id,
                     client.id,
                     ticket.id,
+                    ticket_created_now,
                 )
 
             await cls._save_lead_mapping(
@@ -5343,7 +5336,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 ticket_id=int(ticket.id),
                 chat_id=str(ticket.chat_id),
             )
-            return int(client.id), str(ticket.chat_id)
+            return int(client.id), str(ticket.chat_id), ticket_created_now
         finally:
             await cls._release_lock(lock_key, lock_token)
 
@@ -5693,6 +5686,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 "ChatMessageDeleted": cls._handle_chat_message_deleted,
                 "ChatWriting": cls._handle_chat_writing,
                 "TicketClosed": cls._handle_ticket_closed,
+                "ChannelEdited": cls._handle_channel_edited,
             }
             handler = handlers.get(action)
             if handler:
@@ -6502,5 +6496,33 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 ticket_id,
                 getattr(ticket, "channel_id", None),
                 tg_chat_id,
+                error,
+            )
+
+    @classmethod
+    async def _handle_channel_edited(
+        cls, connected_integration_id: str, runtime: RuntimeConfig, payload: Dict[str, Any]
+    ) -> None:
+        _ = runtime
+        channel_id = _parse_int(
+            str(
+                payload.get("id")
+                or payload.get("channel_id")
+                or payload.get("channelId")
+                or ""
+            ),
+            None,
+        )
+        if not channel_id:
+            return
+        try:
+            await cls._redis_delete(
+                cls._channel_cache_key(connected_integration_id, int(channel_id))
+            )
+        except Exception as error:
+            logger.warning(
+                "Failed to clear channel message cache on ChannelEdited: ci=%s channel_id=%s error=%s",
+                connected_integration_id,
+                channel_id,
                 error,
             )
