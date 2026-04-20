@@ -111,9 +111,9 @@ class TelegramBotCrmChannelConfig:
 
     CHAT_MESSAGE_ADD_CLOSED_ENTITY_ERROR = 1220
     PHONE_PROMPT_COOLDOWN_SEC = 24 * 60 * 60
-    PHONE_SHARE_BUTTON_TEXT = "РџРѕРґРµР»РёС‚СЊСЃСЏ РЅРѕРјРµСЂРѕРј / Raqamni ulashish"
-    PHONE_REQUEST_SENT_SYSTEM_TEXT = "Р—Р°РїСЂРѕСЃРёР»Рё Сѓ РєР»РёРµРЅС‚Р° РЅРѕРјРµСЂ С‚РµР»РµС„РѕРЅР°."
-    PHONE_RECEIVED_SYSTEM_TEXT = "РљР»РёРµРЅС‚ РѕС‚РїСЂР°РІРёР» РЅРѕРјРµСЂ С‚РµР»РµС„РѕРЅР°: {phone}"
+    PHONE_SHARE_BUTTON_TEXT = "Отправить номер / Raqamni ulashish"
+    PHONE_REQUEST_SENT_SYSTEM_TEXT = "Запросили у клиента номер телефона."
+    PHONE_RECEIVED_SYSTEM_TEXT = "Клиент отправил номер телефона: {phone}"
     PHONE_RECEIVED_TELEGRAM_TEXT = "Thank you, we received your phone number."
     PHONE_STATE_FIELD = "phone_state"
     CLIENT_TELEGRAM_FIELD_KEY = "field_telegram_id"
