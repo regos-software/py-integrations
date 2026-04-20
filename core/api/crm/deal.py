@@ -1,4 +1,6 @@
-﻿"""CRM deal service."""
+"""CRM deal service."""
+
+from __future__ import annotations
 
 from typing import Optional
 
@@ -40,7 +42,30 @@ class DealService:
         return await self.api.call(self.PATH_GET, req, DealGetResponse)
 
     async def add(self, req: DealAddRequest) -> DealAddResponse:
-        return await self.api.call(self.PATH_ADD, req, DealAddResponse)
+        payload = req.model_dump(exclude_none=True)
+        ticket_id = payload.get("ticket_id") or payload.get("source_ticket_id")
+
+        sanitized = {
+            "source_lead_id": payload.get("source_lead_id"),
+            "ticket_id": ticket_id,
+            "source_deal_id": payload.get("source_deal_id"),
+            "client_id": payload.get("client_id"),
+            "task_id": payload.get("task_id"),
+            "chat_id": payload.get("chat_id"),
+            "lead_id": payload.get("lead_id"),
+            "deal_type_id": payload.get("deal_type_id"),
+            "pipeline_id": payload.get("pipeline_id"),
+            "stage_id": payload.get("stage_id"),
+            "title": payload.get("title"),
+            "description": payload.get("description"),
+            "amount": payload.get("amount"),
+            "currency_id": payload.get("currency_id"),
+            "responsible_user_id": payload.get("responsible_user_id"),
+            "participant_user_ids": payload.get("participant_user_ids"),
+            "fields": payload.get("fields"),
+        }
+        sanitized = {key: value for key, value in sanitized.items() if value is not None}
+        return await self.api.call(self.PATH_ADD, sanitized, DealAddResponse)
 
     async def edit(self, req: DealEditRequest) -> DealEditResponse:
         return await self.api.call(self.PATH_EDIT, req, DealEditResponse)

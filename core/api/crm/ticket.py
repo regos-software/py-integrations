@@ -1,4 +1,4 @@
-﻿"""CRM ticket service."""
+"""CRM ticket service."""
 
 from schemas.api.crm.ticket import (
     TicketAddRequest,
@@ -11,10 +11,10 @@ from schemas.api.crm.ticket import (
     TicketEditResponse,
     TicketGetRequest,
     TicketGetResponse,
+    TicketSetParticipantsRequest,
+    TicketSetParticipantsResponse,
     TicketSetResponsibleRequest,
     TicketSetResponsibleResponse,
-    TicketSetStatusRequest,
-    TicketSetStatusResponse,
 )
 
 
@@ -24,7 +24,7 @@ class TicketService:
     PATH_EDIT = "Ticket/Edit"
     PATH_DELETE = "Ticket/Delete"
     PATH_SET_RESPONSIBLE = "Ticket/SetResponsible"
-    PATH_SET_STATUS = "Ticket/SetStatus"
+    PATH_SET_PARTICIPANTS = "Ticket/SetParticipants"
     PATH_CLOSE = "Ticket/Close"
 
     def __init__(self, api):
@@ -51,8 +51,14 @@ class TicketService:
             TicketSetResponsibleResponse,
         )
 
-    async def set_status(self, req: TicketSetStatusRequest) -> TicketSetStatusResponse:
-        return await self.api.call(self.PATH_SET_STATUS, req, TicketSetStatusResponse)
+    async def set_participants(
+        self, req: TicketSetParticipantsRequest
+    ) -> TicketSetParticipantsResponse:
+        return await self.api.call(
+            self.PATH_SET_PARTICIPANTS,
+            req,
+            TicketSetParticipantsResponse,
+        )
 
     async def close(self, req: TicketCloseRequest) -> TicketCloseResponse:
         return await self.api.call(self.PATH_CLOSE, req, TicketCloseResponse)

@@ -1,4 +1,4 @@
-﻿"""Schemas for CRM deals."""
+"""Schemas for CRM deal endpoints."""
 
 from __future__ import annotations
 
@@ -21,35 +21,29 @@ class Deal(BaseSchema):
 
     id: Optional[int] = PydField(default=None, description="Deal id.")
     client_id: Optional[int] = PydField(default=None, description="Client id.")
+    task_id: Optional[int] = PydField(default=None, description="Task id.")
     client: Optional[Client] = PydField(default=None, description="Client payload.")
     lead_id: Optional[int] = PydField(default=None, description="Lead id.")
-    source_ticket_id: Optional[int] = PydField(
-        default=None, description="Source ticket id."
-    )
+    ticket_id: Optional[int] = PydField(default=None, description="Source ticket id.")
     source_deal_id: Optional[int] = PydField(default=None, description="Source deal id.")
     deal_type_id: Optional[int] = PydField(default=None, description="Deal type id.")
     pipeline_id: Optional[int] = PydField(default=None, description="Pipeline id.")
     stage_id: Optional[int] = PydField(default=None, description="Stage id.")
-    responsible_user_id: Optional[int] = PydField(
-        default=None, description="Responsible user id."
-    )
-    participant_user_ids: Optional[List[int]] = PydField(
-        default=None, description="Participant user ids."
-    )
+    responsible_user_id: Optional[int] = PydField(default=None, description="Responsible user id.")
+    participant_user_ids: Optional[List[int]] = PydField(default=None, description="Participant user ids.")
     title: Optional[str] = PydField(default=None, description="Deal title.")
     description: Optional[str] = PydField(default=None, description="Description.")
     open_date: Optional[int] = PydField(default=None, description="Open unix time.")
     close_date: Optional[int] = PydField(default=None, description="Close unix time.")
-    created_user_id: Optional[int] = PydField(
-        default=None, description="Created user id."
-    )
+    created_user_id: Optional[int] = PydField(default=None, description="Created user id.")
     last_update: Optional[int] = PydField(default=None, description="Last update unix time.")
     amount: Optional[Decimal] = PydField(default=None, description="Amount.")
     currency: Optional[Currency] = PydField(default=None, description="Currency payload.")
     chat_id: Optional[str] = PydField(default=None, description="Related chat UUID.")
-    fields: Optional[List[FieldValue]] = PydField(
-        default=None, description="Custom fields."
-    )
+    fields: Optional[List[FieldValue]] = PydField(default=None, description="Custom fields.")
+
+    # Legacy name used by old integrations.
+    source_ticket_id: Optional[int] = PydField(default=None, description="Legacy source ticket id.")
 
 
 class DealGetRequest(BaseSchema):
@@ -58,15 +52,14 @@ class DealGetRequest(BaseSchema):
     model_config = ConfigDict(extra="forbid")
 
     ids: Optional[List[int]] = PydField(default=None, description="Deal ids.")
+    client_ids: Optional[List[int]] = PydField(default=None, description="Client ids.")
+    task_ids: Optional[List[int]] = PydField(default=None, description="Task ids.")
     lead_ids: Optional[List[int]] = PydField(default=None, description="Lead ids.")
-    responsible_user_ids: Optional[List[int]] = PydField(
-        default=None, description="Responsible user ids."
-    )
+    responsible_user_ids: Optional[List[int]] = PydField(default=None, description="Responsible user ids.")
     stage_ids: Optional[List[int]] = PydField(default=None, description="Stage ids.")
+    pipeline_id: Optional[int] = PydField(default=None, ge=1, description="Pipeline id.")
     currency_id: Optional[int] = PydField(default=None, ge=1, description="Currency id.")
-    filters: Optional[List[Filter]] = PydField(
-        default=None, description="Additional filters."
-    )
+    filters: Optional[List[Filter]] = PydField(default=None, description="Additional filters.")
     limit: Optional[int] = PydField(default=None, ge=1, description="Page size.")
     offset: Optional[int] = PydField(default=None, ge=0, description="Page offset.")
 
@@ -77,11 +70,10 @@ class DealAddRequest(BaseSchema):
     model_config = ConfigDict(extra="forbid")
 
     source_lead_id: Optional[int] = PydField(default=None, ge=1, description="Source lead id.")
-    source_ticket_id: Optional[int] = PydField(
-        default=None, ge=1, description="Source ticket id."
-    )
+    ticket_id: Optional[int] = PydField(default=None, ge=1, description="Source ticket id.")
     source_deal_id: Optional[int] = PydField(default=None, ge=1, description="Source deal id.")
     client_id: Optional[int] = PydField(default=None, ge=1, description="Client id.")
+    task_id: Optional[int] = PydField(default=None, ge=1, description="Task id.")
     chat_id: Optional[str] = PydField(default=None, description="Existing chat UUID.")
     lead_id: Optional[int] = PydField(default=None, ge=1, description="Lead id.")
     deal_type_id: Optional[int] = PydField(default=None, ge=1, description="Deal type id.")
@@ -91,15 +83,12 @@ class DealAddRequest(BaseSchema):
     description: Optional[str] = PydField(default=None, description="Description.")
     amount: Optional[Decimal] = PydField(default=None, description="Amount.")
     currency_id: Optional[int] = PydField(default=None, ge=1, description="Currency id.")
-    responsible_user_id: Optional[int] = PydField(
-        default=None, ge=1, description="Responsible user id."
-    )
-    participant_user_ids: Optional[List[int]] = PydField(
-        default=None, description="Participant user ids."
-    )
-    fields: Optional[List[FieldValueAdd]] = PydField(
-        default=None, description="Custom field values."
-    )
+    responsible_user_id: Optional[int] = PydField(default=None, ge=1, description="Responsible user id.")
+    participant_user_ids: Optional[List[int]] = PydField(default=None, description="Participant user ids.")
+    fields: Optional[List[FieldValueAdd]] = PydField(default=None, description="Custom field values.")
+
+    # Legacy name used by old integrations.
+    source_ticket_id: Optional[int] = PydField(default=None, ge=1, description="Legacy source ticket id.")
 
 
 class DealEditRequest(BaseSchema):
@@ -108,6 +97,7 @@ class DealEditRequest(BaseSchema):
     model_config = ConfigDict(extra="forbid")
 
     id: int = PydField(..., ge=1, description="Deal id.")
+    task_id: Optional[int] = PydField(default=None, ge=0, description="Task id (0 to unbind).")
     deal_type_id: Optional[int] = PydField(default=None, ge=1, description="Deal type id.")
     pipeline_id: Optional[int] = PydField(default=None, ge=1, description="Pipeline id.")
     stage_id: Optional[int] = PydField(default=None, ge=1, description="Stage id.")
@@ -115,9 +105,7 @@ class DealEditRequest(BaseSchema):
     description: Optional[str] = PydField(default=None, description="Description.")
     amount: Optional[Decimal] = PydField(default=None, description="Amount.")
     currency_id: Optional[int] = PydField(default=None, ge=1, description="Currency id.")
-    fields: Optional[List[FieldValueEdit]] = PydField(
-        default=None, description="Custom field changes."
-    )
+    fields: Optional[List[FieldValueEdit]] = PydField(default=None, description="Custom field changes.")
 
 
 class DealDeleteRequest(BaseSchema):
@@ -153,9 +141,7 @@ class DealSetParticipantsRequest(BaseSchema):
     model_config = ConfigDict(extra="forbid")
 
     id: int = PydField(..., ge=1, description="Deal id.")
-    participant_user_ids: Optional[List[int]] = PydField(
-        default=None, description="Participant user ids."
-    )
+    participant_user_ids: Optional[List[int]] = PydField(default=None, description="Participant user ids.")
     replace_mode: Optional[bool] = PydField(default=None, description="Replace mode.")
 
 

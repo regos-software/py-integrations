@@ -1,4 +1,4 @@
-"""Schemas for chat quick replies."""
+"""Schemas for chat quick reply endpoints."""
 
 from __future__ import annotations
 
@@ -16,9 +16,7 @@ class QuickReply(BaseSchema):
 
     id: Optional[int] = PydField(default=None, ge=1, description="Quick reply id.")
     text: Optional[str] = PydField(default=None, description="Quick reply text.")
-    last_update: Optional[int] = PydField(
-        default=None, ge=0, description="Last update unix time."
-    )
+    last_update: Optional[int] = PydField(default=None, ge=0, description="Last update unix time.")
 
 
 class QuickReplyGetRequest(BaseSchema):
@@ -42,7 +40,7 @@ class QuickReplyAddRequest(BaseSchema):
 
     model_config = ConfigDict(extra="forbid")
 
-    text: str = PydField(..., min_length=1, max_length=200, description="Reply text.")
+    text: str = PydField(..., min_length=1, max_length=400, description="Reply text.")
 
     @field_validator("text", mode="before")
     @classmethod
