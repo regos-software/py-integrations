@@ -5980,6 +5980,8 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 return bot_hash, tg_chat_id
 
         ticket: Optional[Ticket] = None
+        ticket_id: Optional[int] = None
+        ticket_dialog_id = ""
         client_id: Optional[int] = None
 
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
@@ -6013,51 +6015,21 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     else []
                 )
                 ticket = ticket_rows[0] if ticket_rows else None
+                ticket_id = (
+                    _parse_int(str(getattr(ticket, "id", None) or ""), None)
+                    if ticket
+                    else None
+                )
+                ticket_dialog_id = (
+                    str(getattr(ticket, "external_dialog_id", None) or "").strip()
+                    if ticket
+                    else ""
+                )
                 client_id = (
                     _parse_int(str(getattr(ticket, "client_id", None) or ""), None)
                     if ticket
                     else None
                 )
-
-            # Primary routing source for Ticket-based CRM flow.
-            if ticket:
-                ticket_channel_id = _parse_int(str(getattr(ticket, "channel_id", None) or ""))
-                ticket_dialog_id = str(getattr(ticket, "external_dialog_id", None) or "").strip()
-                if ticket_channel_id and ticket_dialog_id:
-                    bot_hash = next(
-                        (
-                            bot.bot_hash
-                            for bot in runtime.bots
-                            if int(bot.channel_id) == int(ticket_channel_id)
-                        ),
-                        "",
-                    )
-                    if bot_hash:
-                        resolved_client_id = (
-                            _parse_int(str(getattr(ticket, "client_id", None) or ""), None)
-                            or cls._extract_client_id_from_chat_payload(chat_row)
-                        )
-                        if resolved_client_id:
-                            await cls._save_cached_mapping(
-                                connected_integration_id=connected_integration_id,
-                                bot_hash=bot_hash,
-                                tg_chat_id=ticket_dialog_id,
-                                lead_id=int(resolved_client_id),
-                                chat_id=chat_id,
-                                ticket_id=_parse_int(str(getattr(ticket, "id", None) or ""), None),
-                            )
-                        else:
-                            await cls._redis_set_mapping(
-                                mapping_by_chat_key,
-                                _json_dumps(
-                                    {
-                                        "bot_hash": str(bot_hash),
-                                        "tg_chat_id": str(ticket_dialog_id),
-                                        "chat_id": str(chat_id),
-                                    }
-                                ),
-                            )
-                        return str(bot_hash), str(ticket_dialog_id)
 
             if not client_id:
                 client_id = cls._extract_client_id_from_chat_payload(chat_row)
@@ -6086,16 +6058,35 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         bot_hash, tg_chat_id = _parse_tg_lead_external_id(
             getattr(client, "external_id", None)
         )
-        if not bot_hash or not tg_chat_id or bot_hash not in runtime.bots_by_hash:
+        resolved_tg_chat_id = str(tg_chat_id or ticket_dialog_id or "").strip()
+        if not bot_hash or not resolved_tg_chat_id:
+            logger.debug(
+                "Unable to resolve Telegram target by client external_id: ci=%s chat_id=%s client_id=%s external_id=%s ticket_id=%s",
+                connected_integration_id,
+                chat_id,
+                client.id,
+                getattr(client, "external_id", None),
+                ticket_id,
+            )
+            return None
+        if bot_hash not in runtime.bots_by_hash:
+            logger.debug(
+                "Skipping outbound relay for foreign bot_hash: ci=%s chat_id=%s client_id=%s bot_hash=%s",
+                connected_integration_id,
+                chat_id,
+                client.id,
+                bot_hash,
+            )
             return None
         await cls._save_cached_mapping(
             connected_integration_id=connected_integration_id,
             bot_hash=str(bot_hash),
-            tg_chat_id=str(tg_chat_id),
+            tg_chat_id=str(resolved_tg_chat_id),
             lead_id=int(client.id),
             chat_id=chat_id,
+            ticket_id=ticket_id,
         )
-        return str(bot_hash), str(tg_chat_id)
+        return str(bot_hash), str(resolved_tg_chat_id)
 
     @staticmethod
     def _extract_client_id_from_chat_payload(chat_payload: Any) -> Optional[int]:
