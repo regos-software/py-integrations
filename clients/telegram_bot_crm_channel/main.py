@@ -5255,26 +5255,29 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         client_id: int,
         external_dialog_id: str,
     ) -> Optional[Ticket]:
-        filters = [
-            Filter(
-                field="external_dialog_id",
-                operator=FilterOperator.Equal,
-                value=external_dialog_id,
-            )
-        ]
+        target_dialog_id = str(external_dialog_id or "").strip()
+        if not target_dialog_id:
+            return None
+
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
             response = await api.crm.ticket.get(
                 TicketGetRequest(
                     client_ids=[int(client_id)],
                     channel_ids=[int(bot_cfg.channel_id)],
                     statuses=[TicketStatusEnum.Open],
-                    filters=filters,
-                    limit=20,
+                    limit=200,
                     offset=0,
                 )
             )
         rows = response.result if response.ok and isinstance(response.result, list) else []
-        valid = [row for row in rows if row and row.id and row.chat_id]
+        valid = [
+            row
+            for row in rows
+            if row
+            and row.id
+            and row.chat_id
+            and str(getattr(row, "external_dialog_id", "") or "").strip() == target_dialog_id
+        ]
         if not valid:
             return None
         return max(valid, key=lambda row: int(row.id or 0))
@@ -5286,20 +5289,16 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         bot_cfg: BotSlotConfig,
         external_dialog_id: str,
     ) -> Optional[Ticket]:
-        filters = [
-            Filter(
-                field="external_dialog_id",
-                operator=FilterOperator.Equal,
-                value=external_dialog_id,
-            )
-        ]
+        target_dialog_id = str(external_dialog_id or "").strip()
+        if not target_dialog_id:
+            return None
+
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
             response = await api.crm.ticket.get(
                 TicketGetRequest(
                     channel_ids=[int(bot_cfg.channel_id)],
                     statuses=[TicketStatusEnum.Open],
-                    filters=filters,
-                    limit=20,
+                    limit=500,
                     offset=0,
                 )
             )
@@ -5307,7 +5306,11 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         valid = [
             row
             for row in rows
-            if row and row.id and row.chat_id and _parse_int(str(getattr(row, "client_id", None) or ""))
+            if row
+            and row.id
+            and row.chat_id
+            and _parse_int(str(getattr(row, "client_id", None) or ""))
+            and str(getattr(row, "external_dialog_id", "") or "").strip() == target_dialog_id
         ]
         if not valid:
             return None
