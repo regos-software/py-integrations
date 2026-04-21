@@ -3429,62 +3429,7 @@ return 0
                         min_ttl_sec=300,
                     )
                 return resolved_user_id
-
-        # Backward-compatible fallback for old environments where `internal_phone`
-        # may be unavailable in User/Get.
-        try:
-            async with RegosAPI(
-                connected_integration_id=runtime.connected_integration_id
-            ) as api:
-                response = await api.rbac.user.get(
-                    UserGetRequest(
-                        active=True,
-                        search=normalized_ext,
-                        limit=50,
-                        offset=0,
-                    )
-                )
-        except Exception as error:
-            logger.warning(
-                "User/Get fallback search failed for operator extension match: ci=%s operator_ext=%s error=%s",
-                runtime.connected_integration_id,
-                normalized_ext,
-                error,
-            )
-            return None
-
-        if not response.ok:
-            logger.warning(
-                "User/Get fallback search rejected for operator extension match: ci=%s operator_ext=%s payload=%s",
-                runtime.connected_integration_id,
-                normalized_ext,
-                response.result,
-            )
-            return None
-
-        rows = cls._rows_to_dict_list(response.result)
-        resolved_user_id, resolved_user_name = _resolve_from_rows(
-            rows,
-            allow_single_fallback=False,
-        )
-
-        if not resolved_user_id:
-            return None
-
-        await cls._redis_set_with_ttl(
-            cache_key,
-            str(resolved_user_id),
-            runtime.state_ttl_sec,
-            min_ttl_sec=300,
-        )
-        if resolved_user_name:
-            await cls._redis_set_with_ttl(
-                name_cache_key,
-                resolved_user_name,
-                runtime.state_ttl_sec,
-                min_ttl_sec=300,
-            )
-        return resolved_user_id
+        return None
 
     @classmethod
     async def _resolve_operator_name_by_operator_ext_best_effort(
@@ -3758,7 +3703,7 @@ return 0
                     external_id=_external_id(runtime.asterisk_hash, normalized_phone),
                 )
             )
-            add_result = add_response.result if isinstance(add_response.result, dict) else {}
+            add_result = cls._row_to_dict(add_response.result)
             if not add_response.ok:
                 error_code = add_result.get("error")
                 description = add_result.get("description")
@@ -3843,19 +3788,19 @@ return 0
         )
         async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
             add_response = await api.crm.ticket.add(payload)
-            add_result = add_response.result if isinstance(add_response.result, dict) else {}
+            add_result = cls._row_to_dict(add_response.result)
             if not add_response.ok:
                 error_code = add_result.get("error")
                 description = add_result.get("description")
                 raise NonRetryableCallEventError(
                     f"Ticket/Add rejected: error={error_code} description={description}"
                 )
-            new_id = _to_int(add_result.get("new_id"), None)
-            if not new_id:
+            ticket_id = _to_int(add_result.get("new_id"), None)
+            if not ticket_id:
                 raise RuntimeError("Ticket/Add did not return new_id")
 
             ticket_response = await api.crm.ticket.get(
-                TicketGetRequest(ids=[int(new_id)], limit=1, offset=0)
+                TicketGetRequest(ids=[int(ticket_id)], limit=1, offset=0)
             )
             ticket_rows = (
                 ticket_response.result
@@ -4025,7 +3970,7 @@ return 0
             )
 
         if not response.ok:
-            payload = response.result if isinstance(response.result, dict) else {}
+            payload = cls._row_to_dict(response.result)
             error_code = _to_int(payload.get("error"), None)
             error_description = str(payload.get("description") or "").strip() or None
             if error_code == AsteriskCrmChannelConfig.CHAT_MESSAGE_ADD_CLOSED_ENTITY_ERROR:
@@ -4035,7 +3980,7 @@ return 0
                 f"error={payload.get('error')} description={payload.get('description')}"
             )
 
-        result_payload = response.result if isinstance(response.result, dict) else {}
+        result_payload = cls._row_to_dict(response.result)
         message_uuid = str(result_payload.get("new_uuid") or "").strip()
         if not message_uuid:
             message_uuid = str(getattr(response.result, "new_uuid", "") or "").strip()
@@ -4063,7 +4008,7 @@ return 0
             )
 
         if not response.ok:
-            payload = response.result if isinstance(response.result, dict) else {}
+            payload = cls._row_to_dict(response.result)
             error_code = _to_int(payload.get("error"), None)
             error_description = str(payload.get("description") or "").strip() or None
             if error_code == AsteriskCrmChannelConfig.CHAT_MESSAGE_ADD_CLOSED_ENTITY_ERROR:
@@ -4073,7 +4018,7 @@ return 0
                 f"error={payload.get('error')} description={payload.get('description')}"
             )
 
-        payload = response.result if isinstance(response.result, dict) else {}
+        payload = cls._row_to_dict(response.result)
         file_id = _to_int(payload.get("file_id"), None)
         if not file_id:
             file_id = _to_int(getattr(response.result, "file_id", None), None)
@@ -4244,7 +4189,7 @@ return 0
                 )
             if response.ok:
                 return
-            payload = response.result if isinstance(response.result, dict) else {}
+            payload = cls._row_to_dict(response.result)
             logger.warning(
                 "Ticket/Close rejected: ci=%s ticket_id=%s status=%s error=%s description=%s",
                 runtime.connected_integration_id,
