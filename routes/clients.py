@@ -15,7 +15,7 @@ from schemas.integration.base import (
     IntegrationErrorResponse,
     IntegrationErrorModel,
 )
-from schemas.api.base import APIBaseResponse
+from schemas.api.integrations.connected_integration import ConnectedIntegrationGetRequest
 from core.logger import setup_logger
 
 # Импорт доступных интеграций (класс, не модуль)
@@ -62,41 +62,6 @@ _CONNECTED_INTEGRATION_ACTIVE_CACHE: Dict[str, Tuple[bool, float]] = {}
 _CONNECTED_INTEGRATION_ACTIVE_CACHE_LOCK = asyncio.Lock()
 
 
-def _extract_connected_integration_active_flag(payload: Any) -> Optional[bool]:
-    if isinstance(payload, dict):
-        for key in ("is_active", "isActive"):
-            if key in payload:
-                value = payload.get(key)
-                if isinstance(value, bool):
-                    return value
-                text = str(value or "").strip().lower()
-                if text in {"1", "true", "yes", "y", "on"}:
-                    return True
-                if text in {"0", "false", "no", "n", "off"}:
-                    return False
-        for nested_key in (
-            "connected_integration",
-            "integration",
-            "item",
-            "data",
-            "result",
-        ):
-            nested = payload.get(nested_key)
-            if nested is None:
-                continue
-            nested_value = _extract_connected_integration_active_flag(nested)
-            if nested_value is not None:
-                return nested_value
-        return None
-    if isinstance(payload, list):
-        for row in payload:
-            nested_value = _extract_connected_integration_active_flag(row)
-            if nested_value is not None:
-                return nested_value
-        return None
-    return None
-
-
 async def _is_connected_integration_active(
     connected_integration_id: Optional[str],
     *,
@@ -115,35 +80,36 @@ async def _is_connected_integration_active(
 
     detected: Optional[bool] = None
     last_error: Optional[Exception] = None
-    request_payloads = (
-        {},
-        {"connected_integration_id": ci, "limit": 1, "offset": 0},
-    )
-    for payload in request_payloads:
-        try:
-            async with RegosAPI(connected_integration_id=ci) as api:
-                response = await api.call(
-                    "ConnectedIntegration/Get",
-                    payload,
-                    APIBaseResponse[Any],
+    try:
+        async with RegosAPI(connected_integration_id=ci) as api:
+            response = await api.integrations.connected_integration.get(
+                ConnectedIntegrationGetRequest(
+                    connected_integration_ids=[ci],
+                    include_name=False,
+                    include_schedule=False,
                 )
-            if not response.ok:
-                continue
-            detected = _extract_connected_integration_active_flag(response.result)
-            if detected is not None:
-                break
-        except httpx.HTTPStatusError as error:
-            last_error = error
-            status_code = (
-                int(error.response.status_code)
-                if error.response is not None
-                else None
             )
-            if status_code in {401, 403, 404}:
-                detected = False
+        if response.ok and isinstance(response.result, list):
+            for row in response.result:
+                row_ci = str(getattr(row, "connected_integration_id", "") or "").strip()
+                if row_ci and row_ci != ci:
+                    continue
+                row_active = getattr(row, "is_active", None)
+                if row_active is None:
+                    continue
+                detected = bool(row_active)
                 break
-        except Exception as error:
-            last_error = error
+    except httpx.HTTPStatusError as error:
+        last_error = error
+        status_code = (
+            int(error.response.status_code)
+            if error.response is not None
+            else None
+        )
+        if status_code in {401, 403, 404}:
+            detected = False
+    except Exception as error:
+        last_error = error
 
     if detected is None:
         if last_error is not None:

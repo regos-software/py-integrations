@@ -21,6 +21,16 @@
 - English:
   `<p>The solution helps support teams reply faster and more consistently without switching between tools.</p><ul><li>Every customer message is automatically added to the CRM case.</li><li>Operators reply in CRM, and customers receive replies in the same Telegram chat.</li><li>If you use several bots, the system keeps the correct reply route and preserves conversation continuity.</li><li>Welcome and closing messages are sent automatically as part of your service flow.</li><li>Phone number request is built into the journey and stays user-friendly.</li><li>Automatic messages are visible to both customer and operator, making the history transparent for the whole team.</li></ul>`
 
+## Список обрабатываемых вебхуков
+
+- CRM:
+  - `ChatMessageAdded`
+  - `ChatMessageEdited`
+  - `ChatMessageDeleted`
+  - `ChatWriting`
+  - `TicketClosed`
+  - `ChannelEdited`
+
 ## Какие действия выполняются автоматически
 
 - Новые сообщения клиента.
@@ -31,19 +41,21 @@
 
 ## Настройки интеграции
 
-| Параметр | Для чего нужен | Пример |
-|---|---|---|
-| Доступ к Telegram-боту | Подключает вашего бота к CRM | Данные доступа из Telegram |
-| Канал CRM для обращений | Определяет, куда будут попадать диалоги клиентов | Канал “Поддержка” |
-| Тема нового обращения | Помогает красиво и понятно называть новые обращения | “Обращение от {имя клиента}” |
-| Ответственный по умолчанию | Назначает исполнителя, если правила распределения не заданы | Сотрудник первой линии |
-| Безопасная проверка входящих сообщений | Защищает канал от несанкционированных запросов | Секретная строка доступа |
-| Защита от дублей | Исключает повторную обработку одинаковых сообщений | 10 минут |
-| Время хранения служебного состояния | Стабилизирует маршрутизацию и вспомогательные сценарии | 1 час |
-| Передача внутренних сообщений в Telegram | Позволяет отправлять в Telegram не только клиентские, но и служебные сообщения | Включено/Выключено |
-| Текст запроса номера телефона | Формирует вежливый запрос контакта у клиента | “Поделитесь номером телефона” |
-| Текст кнопки отправки номера | Делает сценарий передачи контакта понятным для клиента | “Отправить номер” |
-| Режим обмена с Telegram | Выбирает удобный способ получения обновлений | Мгновенный режим |
+| Ключ | Обяз. | Тип данных | Наименование (RU / UZ / EN) | Описание (RU / UZ / EN) | Placeholder (RU / UZ / EN) |
+|---|---|---|---|---|---|
+| `bot_1_token` | Да | String | `Токен Telegram-бота` / `Telegram bot tokeni` / `Telegram bot token` | `Токен доступа к вашему боту в Telegram` / `Telegram botga kirish tokeni` / `Access token for your Telegram bot` | `123456:ABC...` / `123456:ABC...` / `123456:ABC...` |
+| `bot_1_channel_id` | Да | Integer | `ID CRM-канала` / `CRM kanal ID` / `CRM channel ID` | `Канал CRM, куда будут попадать клиентские диалоги` / `Mijoz muloqotlari tushadigan CRM kanal` / `CRM channel where customer conversations are routed` | `1` / `1` / `1` |
+| `bot_1_lead_subject_template` | Нет | String | `Шаблон темы обращения` / `Murojaat mavzusi shabloni` / `Case subject template` | `Шаблон названия нового обращения` / `Yangi murojaat nomi uchun shablon` / `Template for new case subject` | `{display_name}` / `{display_name}` / `{display_name}` |
+| `bot_1_default_responsible_user_id` | Нет | Integer | `Ответственный по умолчанию` / `Standart mas'ul` / `Default responsible user` | `Сотрудник, назначаемый ответственным при создании обращения` / `Murojaat yaratilganda biriktiriladigan mas'ul xodim` / `User assigned as responsible when a case is created` | `15` / `15` / `15` |
+| `telegram_secret_token` | Нет | String | `Секрет проверки Telegram` / `Telegram tekshiruv siri` / `Telegram verification secret` | `Секрет для проверки входящих webhook-запросов Telegram` / `Telegram webhook so'rovlarini tekshirish siri` / `Secret used to validate inbound Telegram webhook calls` | `secret-...` / `secret-...` / `secret-...` |
+| `send_private_messages` | Нет | Boolean | `Передавать private-сообщения` / `Private xabarlarni uzatish` / `Forward private messages` | `Разрешить отправку private-сообщений CRM в Telegram` / `CRM private xabarlarini Telegramga yuborishga ruxsat` / `Allow forwarding CRM private messages to Telegram` | `false` / `false` / `false` |
+| `forward_system_messages` | Нет | Boolean | `Передавать system-сообщения` / `System xabarlarni uzatish` / `Forward system messages` | `Разрешить отправку system-сообщений CRM в Telegram` / `CRM system xabarlarini Telegramga yuborishga ruxsat` / `Allow forwarding CRM system messages to Telegram` | `false` / `false` / `false` |
+| `phone_request_text` | Нет | String | `Текст запроса телефона` / `Telefon so'rovi matni` / `Phone request text` | `Текст, который бот отправляет при запросе номера телефона` / `Telefon raqamini so'raganda bot yuboradigan matn` / `Text sent when bot requests phone number` | `Поделитесь номером телефона` / `Telefon raqamingizni ulashing` / `Please share your phone number` |
+| `phone_share_button_text` | Нет | String | `Текст кнопки телефона` / `Telefon tugmasi matni` / `Phone button text` | `Подпись кнопки Telegram для отправки контакта` / `Kontakt yuborish uchun Telegram tugmasi matni` / `Telegram contact-share button label` | `Отправить номер / Raqamni ulashish` / `Raqamni ulashish` / `Share phone number` |
+
+Глобальная настройка сервиса (не поле интеграции):
+
+- `app_settings.telegram_update_mode`: `webhook` или `longpolling`.
 
 ## Порядок настройки
 

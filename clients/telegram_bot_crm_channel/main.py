@@ -31,10 +31,12 @@ from config.settings import settings as app_settings
 from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
 from core.redis import redis_client
-from schemas.api.base import APIBaseResponse
+from schemas.api.chat.chat import ChatGetRequest
 from schemas.api.chat.chat_message import (
     ChatMessageAddFileRequest,
     ChatMessageAddRequest,
+    ChatMessageDeleteRequest,
+    ChatMessageEditRequest,
     ChatMessageGetRequest,
     ChatMessageMarkReadRequest,
     ChatMessageTypeEnum,
@@ -53,9 +55,18 @@ from schemas.api.crm.ticket import (
     TicketDirectionEnum,
     TicketGetRequest,
 )
+from schemas.api.integrations.connected_integration import (
+    ConnectedIntegrationEditRequest,
+    ConnectedIntegrationGetRequest,
+)
 from schemas.api.files.file import FileGetRequest
 from schemas.api.integrations.connected_integration_setting import (
     ConnectedIntegrationSettingRequest,
+)
+from schemas.api.references.retail_customer import (
+    RetailCustomerAddRequest,
+    RetailCustomerEditRequest,
+    RetailCustomerGetRequest,
 )
 from schemas.integration.base import IntegrationErrorModel, IntegrationErrorResponse
 from schemas.integration.telegram_integration_base import IntegrationTelegramBase
@@ -137,7 +148,6 @@ class RuntimeConfig:
     bots_by_hash: Dict[str, BotSlotConfig]
     update_mode: str
     telegram_secret_token: Optional[str]
-    lead_dedupe_ttl_sec: int
     state_ttl_sec: int
     send_private_messages: bool
     forward_system_messages: bool
@@ -233,6 +243,43 @@ def _result_get(result: Any, key: str) -> Any:
     if isinstance(result, dict):
         return result.get(key)
     return getattr(result, key, None)
+
+
+def _row_to_dict(row: Any) -> Dict[str, Any]:
+    if isinstance(row, dict):
+        return row
+    if hasattr(row, "model_dump"):
+        try:
+            dumped = row.model_dump(mode="json")
+            if isinstance(dumped, dict):
+                return dumped
+        except Exception:
+            return {}
+    return {}
+
+
+def _rows_to_dict_list(rows: Any) -> List[Dict[str, Any]]:
+    if not isinstance(rows, list):
+        return []
+    parsed: List[Dict[str, Any]] = []
+    for row in rows:
+        row_dict = _row_to_dict(row)
+        if row_dict:
+            parsed.append(row_dict)
+    return parsed
+
+
+def _result_to_dict(result: Any) -> Dict[str, Any]:
+    if isinstance(result, dict):
+        return result
+    if hasattr(result, "model_dump"):
+        try:
+            dumped = result.model_dump(mode="json")
+            if isinstance(dumped, dict):
+                return dumped
+        except Exception:
+            return {}
+    return {}
 
 
 def _extract_add_new_id(result: Any) -> Optional[int]:
@@ -1470,22 +1517,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 settings_map.get("telegram_secret_token") or ""
             ).strip()
             or None,
-            lead_dedupe_ttl_sec=max(
-                _parse_int(
-                    settings_map.get("lead_dedupe_ttl_sec"),
-                    TelegramBotCrmChannelConfig.DEFAULT_DEDUPE_TTL_SEC,
-                )
-                or TelegramBotCrmChannelConfig.DEFAULT_DEDUPE_TTL_SEC,
-                60,
-            ),
-            state_ttl_sec=max(
-                _parse_int(
-                    settings_map.get("state_ttl_sec"),
-                    TelegramBotCrmChannelConfig.DEFAULT_STATE_TTL_SEC,
-                )
-                or TelegramBotCrmChannelConfig.DEFAULT_STATE_TTL_SEC,
-                60,
-            ),
+            state_ttl_sec=TelegramBotCrmChannelConfig.DEFAULT_STATE_TTL_SEC,
             send_private_messages=_parse_bool(
                 settings_map.get("send_private_messages"), False
             ),
@@ -1570,98 +1602,6 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             except Exception:
                 logger.exception("Error while closing Telegram shared http client")
 
-    @staticmethod
-    def _extract_ci_id(payload: Any) -> Optional[str]:
-        if not isinstance(payload, dict):
-            return None
-        for key in ("connected_integration_id", "connectedIntegrationId", "id"):
-            value = str(payload.get(key) or "").strip()
-            if value:
-                return value
-        nested = payload.get("connected_integration")
-        if isinstance(nested, dict):
-            for key in ("connected_integration_id", "connectedIntegrationId", "id"):
-                value = str(nested.get(key) or "").strip()
-                if value:
-                    return value
-        return None
-
-    @staticmethod
-    def _extract_ci_active_flag(payload: Any) -> Optional[bool]:
-        if isinstance(payload, dict):
-            for key in ("is_active", "isActive"):
-                if key in payload:
-                    return _parse_bool(payload.get(key), True)
-            for nested_key in ("connected_integration", "integration", "item", "data", "result"):
-                nested = payload.get(nested_key)
-                if nested is None:
-                    continue
-                nested_value = TelegramBotCrmChannelIntegration._extract_ci_active_flag(nested)
-                if nested_value is not None:
-                    return nested_value
-            return None
-        if isinstance(payload, list):
-            for row in payload:
-                nested_value = TelegramBotCrmChannelIntegration._extract_ci_active_flag(row)
-                if nested_value is not None:
-                    return nested_value
-            return None
-        return None
-
-    @classmethod
-    def _extract_ci_active_flag_for_ci(
-        cls,
-        payload: Any,
-        connected_integration_id: str,
-    ) -> Optional[bool]:
-        ci = str(connected_integration_id or "").strip()
-        if not ci:
-            return cls._extract_ci_active_flag(payload)
-
-        if isinstance(payload, list):
-            matched = False
-            single_unknown_row: Optional[Any] = payload[0] if len(payload) == 1 else None
-            for row in payload:
-                if not isinstance(row, dict):
-                    continue
-                row_ci = cls._extract_ci_id(row)
-                if not row_ci:
-                    continue
-                if row_ci != ci:
-                    continue
-                matched = True
-                nested_value = cls._extract_ci_active_flag_for_ci(row, ci)
-                if nested_value is not None:
-                    return nested_value
-            if matched:
-                return None
-            if single_unknown_row is not None:
-                return cls._extract_ci_active_flag_for_ci(single_unknown_row, ci)
-            return None
-
-        if isinstance(payload, dict):
-            payload_ci = cls._extract_ci_id(payload)
-            if payload_ci and payload_ci != ci:
-                for nested_key in ("connected_integration", "integration", "item", "data", "result"):
-                    nested = payload.get(nested_key)
-                    nested_value = cls._extract_ci_active_flag_for_ci(nested, ci)
-                    if nested_value is not None:
-                        return nested_value
-                return None
-
-            for key in ("is_active", "isActive"):
-                if key in payload:
-                    return _parse_bool(payload.get(key), True)
-
-            for nested_key in ("connected_integration", "integration", "item", "data", "result"):
-                nested = payload.get(nested_key)
-                nested_value = cls._extract_ci_active_flag_for_ci(nested, ci)
-                if nested_value is not None:
-                    return nested_value
-            return None
-
-        return None
-
     @classmethod
     async def _is_connected_integration_active(
         cls,
@@ -1679,40 +1619,38 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             if cached in {"1", "0"}:
                 return cached == "1"
 
-        request_payloads: Tuple[Dict[str, Any], ...] = (
-            {},
-            {"connected_integration_id": ci, "limit": 1, "offset": 0},
-        )
         detected: Optional[bool] = None
         last_error: Optional[Exception] = None
-        for payload in request_payloads:
-            try:
-                async with RegosAPI(connected_integration_id=ci) as api:
-                    response = await api.call(
-                        "ConnectedIntegration/Get",
-                        payload,
-                        APIBaseResponse[Any],
+        try:
+            async with RegosAPI(connected_integration_id=ci) as api:
+                response = await api.integrations.connected_integration.get(
+                    ConnectedIntegrationGetRequest(
+                        connected_integration_ids=[ci],
+                        include_name=False,
+                        include_schedule=False,
                     )
-                if not response.ok:
-                    continue
-                detected = cls._extract_ci_active_flag_for_ci(
-                    response.result,
-                    ci,
                 )
-                if detected is not None:
+            if response.ok and isinstance(response.result, list):
+                for row in response.result:
+                    row_ci = str(getattr(row, "connected_integration_id", "") or "").strip()
+                    if row_ci and row_ci != ci:
+                        continue
+                    row_active = getattr(row, "is_active", None)
+                    if row_active is None:
+                        continue
+                    detected = bool(row_active)
                     break
-            except httpx.HTTPStatusError as error:
-                last_error = error
-                status_code = (
-                    int(error.response.status_code)
-                    if error.response is not None
-                    else None
-                )
-                if status_code in {401, 403, 404}:
-                    detected = False
-                    break
-            except Exception as error:
-                last_error = error
+        except httpx.HTTPStatusError as error:
+            last_error = error
+            status_code = (
+                int(error.response.status_code)
+                if error.response is not None
+                else None
+            )
+            if status_code in {401, 403, 404}:
+                detected = False
+        except Exception as error:
+            last_error = error
 
         if detected is None:
             if last_error is not None:
@@ -1752,13 +1690,16 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
     async def _subscribe_required_webhooks(
         connected_integration_id: str,
     ) -> Dict[str, Any]:
-        payload = {
-            "connected_integration_id": connected_integration_id,
-            "webhooks": sorted(TelegramBotCrmChannelConfig.SUPPORTED_INBOUND_WEBHOOKS)
-        }
         try:
             async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-                await api.call("ConnectedIntegration/Edit", payload, APIBaseResponse)
+                await api.integrations.connected_integration.edit(
+                    ConnectedIntegrationEditRequest(
+                        connected_integration_id=connected_integration_id,
+                        webhooks=sorted(
+                            TelegramBotCrmChannelConfig.SUPPORTED_INBOUND_WEBHOOKS
+                        ),
+                    )
+                )
             return {"status": "ok"}
         except Exception as error:
             logger.warning("Webhook subscription failed for %s: %s", connected_integration_id, error)
@@ -2424,10 +2365,12 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         try:
             if customer_id and customer_id > 0:
                 async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-                    resp = await api.call(
-                        "RetailCustomer/Get",
-                        {"ids": [customer_id], "limit": 1, "offset": 0},
-                        APIBaseResponse[List[Dict[str, Any]]],
+                    resp = await api.references.retail_customer.get(
+                        RetailCustomerGetRequest(
+                            ids=[int(customer_id)],
+                            limit=1,
+                            offset=0,
+                        )
                     )
                 if not resp.ok:
                     logger.warning(
@@ -2438,8 +2381,8 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     )
                     return None
                 if resp.ok and isinstance(resp.result, list) and resp.result:
-                    row = resp.result[0]
-                    if isinstance(row, dict):
+                    row = _row_to_dict(resp.result[0])
+                    if row:
                         return bool(_normalize_phone(row.get("main_phone")))
 
             existing_row = await cls._find_existing_retail_customer(
@@ -2524,14 +2467,16 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
 
             if customer_id and customer_id > 0:
                 async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-                    response = await api.call(
-                        "RetailCustomer/Get",
-                        {"ids": [customer_id], "limit": 1, "offset": 0},
-                        APIBaseResponse[List[Dict[str, Any]]],
+                    response = await api.references.retail_customer.get(
+                        RetailCustomerGetRequest(
+                            ids=[int(customer_id)],
+                            limit=1,
+                            offset=0,
+                        )
                     )
                 if response.ok and isinstance(response.result, list) and response.result:
-                    row = response.result[0]
-                    if isinstance(row, dict):
+                    row = _row_to_dict(response.result[0])
+                    if row:
                         existing_row = row
                         resolved_customer_id = _parse_int(str(row.get("id") or ""), None)
 
@@ -2553,10 +2498,11 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 return False
 
             async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-                response = await api.call(
-                    "RetailCustomer/Edit",
-                    {"id": resolved_customer_id, "main_phone": normalized_phone},
-                    APIBaseResponse[Dict[str, Any]],
+                response = await api.references.retail_customer.edit(
+                    RetailCustomerEditRequest(
+                        id=int(resolved_customer_id),
+                        main_phone=normalized_phone,
+                    )
                 )
             if not response.ok:
                 logger.warning(
@@ -3155,25 +3101,23 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         telegram_id = cls._normalize_text_value(tg_chat_id)
         if not telegram_id:
             return None
-        payload = {
-            "filters": [
+        request = RetailCustomerGetRequest(
+            filters=[
                 Filter(
                     field="field_telegram_id",
                     operator=FilterOperator.Equal,
                     value=telegram_id,
-                ).model_dump(mode="json")
+                )
             ],
-            "limit": 10,
-            "offset": 0,
-        }
+            limit=10,
+            offset=0,
+        )
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-            resp = await api.call(
-                "RetailCustomer/Get",
-                payload,
-                APIBaseResponse[List[Dict[str, Any]]],
+            resp = await api.references.retail_customer.get(
+                request
             )
         if not resp.ok:
-            response_payload = resp.result if isinstance(resp.result, dict) else {}
+            response_payload = _result_to_dict(resp.result)
             error_code = response_payload.get("error")
             description = str(response_payload.get("description") or "").lower()
             if error_code == 7501 or "field_telegram_id" in description:
@@ -3184,11 +3128,11 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 return None
             logger.warning(
                 "RetailCustomer/Get rejected during pre-create telegram lookup: payload=%s result=%s",
-                payload,
+                request.model_dump(mode="json"),
                 resp.result,
             )
             return None
-        rows = resp.result if isinstance(resp.result, list) else []
+        rows = _rows_to_dict_list(resp.result)
         if resp.result is not None and not isinstance(resp.result, list):
             logger.warning("RetailCustomer/Get returned non-list result")
             return None
@@ -3319,10 +3263,8 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             return False
 
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-            resp = await api.call(
-                "RetailCustomer/Edit",
-                edit_payload,
-                APIBaseResponse[Dict[str, Any]],
+            resp = await api.references.retail_customer.edit(
+                RetailCustomerEditRequest(**edit_payload)
             )
         if not resp.ok:
             logger.warning(
@@ -3413,17 +3355,15 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
 
         main_phone = customer_payload.get("main_phone")
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-            resp = await api.call(
-                "RetailCustomer/Add",
-                {
-                    "group_id": group_id,
-                    "first_name": str(customer_payload.get("first_name") or tg_chat_id),
-                    "last_name": customer_payload.get("last_name"),
-                    "full_name": customer_payload.get("full_name"),
-                    "main_phone": main_phone,
-                    "fields": [{"key": "field_telegram_id", "value": str(tg_chat_id)}],
-                },
-                APIBaseResponse[Dict[str, Any]],
+            resp = await api.references.retail_customer.add(
+                RetailCustomerAddRequest(
+                    group_id=int(group_id),
+                    first_name=str(customer_payload.get("first_name") or tg_chat_id),
+                    last_name=customer_payload.get("last_name"),
+                    full_name=customer_payload.get("full_name"),
+                    main_phone=main_phone,
+                    fields=[{"key": "field_telegram_id", "value": str(tg_chat_id)}],
+                )
             )
         if not resp.ok:
             logger.warning(
@@ -3435,11 +3375,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             )
             return None, TelegramBotCrmChannelConfig.RETAIL_CUSTOMER_ACTION_NONE, None, None
 
-        customer_id = (
-            _parse_int(str(resp.result.get("new_id") or ""))
-            if isinstance(resp.result, dict)
-            else None
-        )
+        customer_id = _parse_int(str(_result_get(resp.result, "new_id") or ""))
         if not customer_id or customer_id <= 0:
             logger.warning(
                 "RetailCustomer/Add returned empty new_id: ci=%s bot_hash=%s tg_chat_id=%s payload=%s",
@@ -3506,15 +3442,13 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         )
         try:
             async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-                response = await api.call(
-                    "ChatMessage/Add",
-                    {
-                        "chat_id": chat_id,
-                        "message_type": ChatMessageTypeEnum.System.value,
-                        "text": text,
-                        "external_message_id": external_message_id,
-                    },
-                    APIBaseResponse[Dict[str, Any]],
+                response = await api.chat.chat_message.add(
+                    ChatMessageAddRequest(
+                        chat_id=chat_id,
+                        message_type=ChatMessageTypeEnum.System,
+                        text=text,
+                        external_message_id=external_message_id,
+                    )
                 )
             if not response.ok:
                 logger.warning(
@@ -3547,15 +3481,13 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             return
         try:
             async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-                response = await api.call(
-                    "ChatMessage/Add",
-                    {
-                        "chat_id": chat_id,
-                        "message_type": ChatMessageTypeEnum.System.value,
-                        "text": str(text),
-                        "external_message_id": str(external_message_id),
-                    },
-                    APIBaseResponse[Dict[str, Any]],
+                response = await api.chat.chat_message.add(
+                    ChatMessageAddRequest(
+                        chat_id=chat_id,
+                        message_type=ChatMessageTypeEnum.System,
+                        text=str(text),
+                        external_message_id=str(external_message_id),
+                    )
                 )
             if not response.ok:
                 logger.warning(
@@ -3984,7 +3916,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                         ClientEditRequest(id=lead_id, **edit_payload)
                     )
                 if not response.ok:
-                    payload = response.result if isinstance(response.result, dict) else {}
+                    payload = _result_to_dict(response.result)
                     logger.warning(
                         "Client/Edit rejected while syncing Telegram profile: ci=%s client_id=%s bot_hash=%s tg_chat_id=%s error=%s description=%s",
                         connected_integration_id,
@@ -4385,7 +4317,9 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     bot_hash=bot_hash,
                     message=message,
                 )
-                await cls._redis_set_with_ttl(dedupe_key, "1", runtime.lead_dedupe_ttl_sec)
+                await cls._redis_set_with_ttl(
+                    dedupe_key, "1", TelegramBotCrmChannelConfig.DEFAULT_DEDUPE_TTL_SEC
+                )
                 return
 
             edited_message = payload.get("edited_message")
@@ -4399,7 +4333,9 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     bot_hash=bot_hash,
                     message=edited_message,
                 )
-                await cls._redis_set_with_ttl(dedupe_key, "1", runtime.lead_dedupe_ttl_sec)
+                await cls._redis_set_with_ttl(
+                    dedupe_key, "1", TelegramBotCrmChannelConfig.DEFAULT_DEDUPE_TTL_SEC
+                )
                 return
 
             deleted_rows = _extract_deleted_telegram_messages(payload)
@@ -4410,7 +4346,9 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     bot_hash=bot_hash,
                     deleted_rows=deleted_rows,
                 )
-                await cls._redis_set_with_ttl(dedupe_key, "1", runtime.lead_dedupe_ttl_sec)
+                await cls._redis_set_with_ttl(
+                    dedupe_key, "1", TelegramBotCrmChannelConfig.DEFAULT_DEDUPE_TTL_SEC
+                )
         finally:
             await cls._release_lock(dedupe_lock_key, dedupe_lock_token)
 
@@ -4991,8 +4929,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
     ) -> Optional[str]:
         ext_message_id = _tg_external_message_id(bot_hash, tg_chat_id, tg_message_id)
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-            add_response = await api.call(
-                "ChatMessage/Add",
+            add_response = await api.chat.chat_message.add(
                 ChatMessageAddRequest(
                     chat_id=chat_id,
                     reply_id=reply_id,
@@ -5004,12 +4941,9 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     file_ids=file_ids or None,
                     external_message_id=ext_message_id,
                 ),
-                APIBaseResponse[Dict[str, Any]],
             )
         if not add_response.ok:
-            result_payload = (
-                add_response.result if isinstance(add_response.result, dict) else {}
-            )
+            result_payload = _result_to_dict(add_response.result)
             error_code = result_payload.get("error")
             error_description = result_payload.get("description")
             error_code_int = _parse_int(str(error_code or ""), None)
@@ -5038,11 +4972,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 f"error={error_code} description={error_description}"
             )
 
-        msg_uuid = ""
-        if isinstance(add_response.result, dict):
-            msg_uuid = str(add_response.result.get("new_uuid") or "").strip()
-        else:
-            msg_uuid = str(getattr(add_response.result, "new_uuid", "") or "").strip()
+        msg_uuid = str(_result_get(add_response.result, "new_uuid") or "").strip()
         if not msg_uuid:
             raise RuntimeError("ChatMessage/Add did not return new_uuid")
 
@@ -5070,21 +5000,18 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         text: str,
         file_ids: List[int],
     ) -> None:
-        payload: Dict[str, Any] = {
-            "id": regos_message_id,
-            "text": text,
-            "file_ids": file_ids,
-        }
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-            response = await api.call(
-                "ChatMessage/Edit",
-                payload,
-                APIBaseResponse[Dict[str, Any]],
+            response = await api.chat.chat_message.edit(
+                ChatMessageEditRequest(
+                    id=regos_message_id,
+                    text=text,
+                    file_ids=file_ids,
+                )
             )
         if response.ok:
             return
 
-        result_payload = response.result if isinstance(response.result, dict) else {}
+        result_payload = _result_to_dict(response.result)
         raise RuntimeError(
             "ChatMessage/Edit rejected: "
             f"error={result_payload.get('error')} "
@@ -5098,15 +5025,13 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         regos_message_id: str,
     ) -> None:
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-            response = await api.call(
-                "ChatMessage/Delete",
-                {"id": regos_message_id},
-                APIBaseResponse[Dict[str, Any]],
+            response = await api.chat.chat_message.delete(
+                ChatMessageDeleteRequest(id=regos_message_id)
             )
         if response.ok:
             return
 
-        result_payload = response.result if isinstance(response.result, dict) else {}
+        result_payload = _result_to_dict(response.result)
         raise RuntimeError(
             "ChatMessage/Delete rejected: "
             f"error={result_payload.get('error')} "
@@ -5125,7 +5050,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     ChatMessageMarkReadRequest(chat_id=chat_id)
                 )
             if not response.ok:
-                payload = response.result if isinstance(response.result, dict) else {}
+                payload = _result_to_dict(response.result)
                 logger.warning(
                     "ChatMessage/MarkRead rejected: ci=%s chat_id=%s error=%s description=%s",
                     connected_integration_id,
@@ -5393,7 +5318,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                             fields=client_telegram_fields,
                         )
                     )
-                    add_payload = add_resp.result if isinstance(add_resp.result, dict) else {}
+                    add_payload = _result_to_dict(add_resp.result)
                     if not add_resp.ok:
                         # In race conditions another worker can create the client first.
                         client = await cls._find_client_for_telegram_dialog(
@@ -5456,7 +5381,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     )
                 )
                 add_ticket_payload = (
-                    add_ticket_resp.result if isinstance(add_ticket_resp.result, dict) else {}
+                    _result_to_dict(add_ticket_resp.result)
                 )
                 if not add_ticket_resp.ok:
                     raise RuntimeError(
@@ -5538,7 +5463,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 )
             )
             add_ticket_payload = (
-                add_ticket_resp.result if isinstance(add_ticket_resp.result, dict) else {}
+                _result_to_dict(add_ticket_resp.result)
             )
             if not add_ticket_resp.ok:
                 raise RuntimeError(
@@ -5645,15 +5570,13 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     continue
                 payload_b64 = base64.b64encode(file_bytes).decode("ascii")
                 try:
-                    response = await api.call(
-                        "ChatMessage/AddFile",
+                    response = await api.chat.chat_message.add_file(
                         ChatMessageAddFileRequest(
                             chat_id=chat_id,
                             name=file_meta["name"],
                             extension=file_meta["extension"],
                             data=payload_b64,
                         ),
-                        APIBaseResponse[Dict[str, Any]],
                     )
                 except httpx.HTTPStatusError as error:
                     status_code = (
@@ -5672,7 +5595,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                         )
                         continue
                     raise
-                result_payload = response.result if isinstance(response.result, dict) else {}
+                result_payload = _result_to_dict(response.result)
                 if not response.ok:
                     error_code = result_payload.get("error")
                     error_description = result_payload.get("description")
@@ -5680,7 +5603,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                         "ChatMessage/AddFile rejected: "
                         f"error={error_code} description={error_description}"
                     )
-                file_id = _parse_int(str(result_payload.get("file_id") or ""))
+                file_id = _parse_int(str(_result_get(response.result, "file_id") or ""))
                 if not file_id:
                     raise RuntimeError("ChatMessage/AddFile did not return file_id")
                 uploaded_ids.append(file_id)
@@ -5851,7 +5774,9 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             if handler:
                 await handler(connected_integration_id, runtime, payload)
 
-            await cls._redis_set_with_ttl(dedupe_key, "1", runtime.lead_dedupe_ttl_sec)
+            await cls._redis_set_with_ttl(
+                dedupe_key, "1", TelegramBotCrmChannelConfig.DEFAULT_DEDUPE_TTL_SEC
+            )
         finally:
             await cls._release_lock(dedupe_lock_key, dedupe_lock_token)
 
@@ -6028,15 +5953,13 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
 
         try:
             async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-                add_resp = await api.call(
-                    "ChatMessage/Add",
+                add_resp = await api.chat.chat_message.add(
                     ChatMessageAddRequest(
                         chat_id=chat_id,
                         message_type=ChatMessageTypeEnum.System,
                         text=alert_text,
                         external_message_id=alert_external_id,
                     ),
-                    APIBaseResponse[Dict[str, Any]],
                 )
                 if add_resp.ok:
                     return
@@ -6097,10 +6020,8 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 return bot_hash, tg_chat_id
 
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-            chat_response = await api.call(
-                "Chat/Get",
-                {"ids": [chat_id], "limit": 1, "offset": 0},
-                APIBaseResponse[List[Dict[str, Any]]],
+            chat_response = await api.chat.chat.get(
+                ChatGetRequest(ids=[chat_id], limit=1, offset=0)
             )
             if not chat_response.ok:
                 logger.warning(
@@ -6111,11 +6032,11 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 )
                 return None
 
-            chat_rows = chat_response.result or []
+            chat_rows = _rows_to_dict_list(chat_response.result)
             if not chat_rows:
                 return None
 
-            chat_row = chat_rows[0] if isinstance(chat_rows[0], dict) else {}
+            chat_row = chat_rows[0]
             ticket_id = cls._extract_ticket_id_from_chat_payload(chat_row)
             if not ticket_id:
                 return None

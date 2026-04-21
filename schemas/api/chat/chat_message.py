@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import ConfigDict, Field as PydField, field_validator, model_validator
 
@@ -203,7 +203,7 @@ class ChatMessageAddResult(BaseSchema):
     new_uuid: Optional[str] = PydField(default=None, description="Created message UUID.")
 
 
-class ChatMessageAddResponse(APIBaseResponse[ChatMessageAddResult]):
+class ChatMessageAddResponse(APIBaseResponse[ChatMessageAddResult | Dict[str, Any]]):
     """Response for ChatMessage/Add."""
 
     model_config = ConfigDict(extra="ignore")
@@ -228,7 +228,7 @@ class ChatMessageAddFileResult(BaseSchema):
     file_id: Optional[int] = PydField(default=None, description="Created file id.")
 
 
-class ChatMessageAddFileResponse(APIBaseResponse[ChatMessageAddFileResult]):
+class ChatMessageAddFileResponse(APIBaseResponse[ChatMessageAddFileResult | Dict[str, Any]]):
     """Response for ChatMessage/AddFile."""
 
     model_config = ConfigDict(extra="ignore")
@@ -251,49 +251,49 @@ class ChatMessageMarkReadRequest(BaseSchema):
     chat_id: str = PydField(..., description="Chat UUID.")
 
 
-class ChatMessageGetResponse(APIBaseResponse[List[ChatMessage]]):
+class ChatMessageGetResponse(APIBaseResponse[List[ChatMessage] | Dict[str, Any]]):
     """Response for ChatMessage/Get."""
 
     model_config = ConfigDict(extra="ignore")
 
 
-class ChatMessageSearchResponse(APIBaseResponse[List[ChatMessage]]):
+class ChatMessageSearchResponse(APIBaseResponse[List[ChatMessage] | Dict[str, Any]]):
     """Response for ChatMessage/Search."""
 
     model_config = ConfigDict(extra="ignore")
 
 
-class ChatMessageDeleteResponse(APIBaseResponse[ArrayResult]):
+class ChatMessageDeleteResponse(APIBaseResponse[ArrayResult | Dict[str, Any]]):
     """Response for ChatMessage/Delete."""
 
     model_config = ConfigDict(extra="ignore")
 
 
-class ChatMessageEditResponse(APIBaseResponse[ArrayResult]):
+class ChatMessageEditResponse(APIBaseResponse[ArrayResult | Dict[str, Any]]):
     """Response for ChatMessage/Edit."""
 
     model_config = ConfigDict(extra="ignore")
 
 
-class ChatMessageMarkSentResponse(APIBaseResponse[ArrayResult]):
+class ChatMessageMarkSentResponse(APIBaseResponse[ArrayResult | Dict[str, Any]]):
     """Response for ChatMessage/MarkSent."""
 
     model_config = ConfigDict(extra="ignore")
 
 
-class ChatMessageMarkReadResponse(APIBaseResponse[ArrayResult]):
+class ChatMessageMarkReadResponse(APIBaseResponse[ArrayResult | Dict[str, Any]]):
     """Response for ChatMessage/MarkRead."""
 
     model_config = ConfigDict(extra="ignore")
 
 
-class ChatMessageWritingResponse(APIBaseResponse[ArrayResult]):
+class ChatMessageWritingResponse(APIBaseResponse[ArrayResult | Dict[str, Any]]):
     """Response for ChatMessage/Writing."""
 
     model_config = ConfigDict(extra="ignore")
 
 
-class ChatMessageSuggestResponse(APIBaseResponse[ArrayResult]):
+class ChatMessageSuggestResponse(APIBaseResponse[ArrayResult | Dict[str, Any]]):
     """Response for ChatMessage/Suggest."""
 
     model_config = ConfigDict(extra="ignore")

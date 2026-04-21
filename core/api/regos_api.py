@@ -191,10 +191,14 @@ class RegosAPI:
 
     class Integrations:
         def __init__(self, api: "RegosAPI"):
+            from core.api.integrations.connected_integration import (
+                ConnectedIntegrationService,
+            )
             from core.api.integrations.connected_integration_setting import (
                 ConnectedIntegrationSettingService,
             )
 
+            self.connected_integration = ConnectedIntegrationService(api)
             self.connected_integration_setting = ConnectedIntegrationSettingService(api)
 
     class Crm:
@@ -204,6 +208,7 @@ class RegosAPI:
             from core.api.crm.deal import DealService
             from core.api.crm.lead import LeadService
             from core.api.crm.pipeline import PipelineService
+            from core.api.crm.project_task import ProjectTaskService
             from core.api.crm.ticket import TicketService
 
             self.channel = ChannelService(api)
@@ -211,6 +216,7 @@ class RegosAPI:
             self.deal = DealService(api)
             self.lead = LeadService(api)
             self.pipeline = PipelineService(api)
+            self.project_task = ProjectTaskService(api)
             self.ticket = TicketService(api)
 
     class Chat:
@@ -240,6 +246,8 @@ class RegosAPI:
 
             from core.api.references.brand import BrandService
             from core.api.references.currency import CurrencyService
+            from core.api.references.delivery_type import DeliveryTypeService
+            from core.api.references.field import FieldService
             from core.api.references.item import ItemService
             from core.api.references.item_group import ItemGroupService
             from core.api.references.partner import PartnerService
@@ -253,6 +261,8 @@ class RegosAPI:
 
             self.brand = BrandService(api)
             self.currency = CurrencyService(api)
+            self.delivery_type = DeliveryTypeService(api)
+            self.field = FieldService(api)
             self.retail_customer = RetailCustomerService(api)
             self.item = ItemService(api)
             self.item_group = ItemGroupService(api)

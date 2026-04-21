@@ -8,52 +8,56 @@
 
 ## Краткое описание
 
-- Русский: `Интеграция превращает звонки в понятные CRM-обращения: команда видит ход разговора, результат и историю обслуживания в одном месте.`
-- O'zbekcha: `Integratsiya qo'ng'iroqlarni tushunarli CRM murojaatlariga aylantiradi: jamoa suhbat jarayoni, natija va xizmat tarixini bitta joyda ko'radi.`
-- English: `The integration turns calls into clear CRM cases so your team can track call progress, outcomes, and service history in one place.`
+- Русский: `Интеграция превращает звонки в CRM-обращения: команда видит статус разговора, ответственного и запись звонка в одной карточке.`
+- O'zbekcha: `Integratsiya qo'ng'iroqlarni CRM murojaatlariga aylantiradi: jamoa qo'ng'iroq holati, mas'ul xodim va yozuvni bitta kartada ko'radi.`
+- English: `The integration converts calls into CRM cases so your team can track call status, responsible user, and recording in one place.`
 
 ## Полное описание
 
 - Русский:
-  `<p>Решение помогает отделу продаж и поддержки быстрее работать со звонками и не терять детали общения.</p><ul><li>Каждый звонок фиксируется как отдельное обращение по принципу “1 звонок = 1 обращение”.</li><li>Этапы разговора отражаются в ленте обращения и формируют прозрачную историю контакта.</li><li>Система может автоматически назначать ответственного сотрудника по внутреннему номеру.</li><li>Если обращение уже завершено, повторные уведомления по тому же звонку не создают лишних новых карточек.</li><li>Запись разговора автоматически добавляется в обращение, чтобы менеджер видел полный контекст.</li><li>Язык системных сообщений выбирается в настройках и подходит для многоязычной команды.</li></ul>`
+  `<p>Решение помогает отделу продаж и поддержки быстрее обрабатывать звонки и сохранять прозрачную историю общения.</p><ul><li>Каждый звонок обрабатывается по модели “1 звонок = 1 обращение”.</li><li>События звонка последовательно публикуются в чат обращения.</li><li>Система может автоматически назначать ответственного по внутреннему номеру оператора.</li><li>Запись разговора прикладывается в обращение при поступлении события записи.</li><li>Повторные сигналы по одному звонку не создают лишних дублей в CRM.</li><li>Шаблоны системных сообщений поддерживают несколько языков.</li></ul>`
 - O'zbekcha:
-  `<p>Yechim savdo va qo'llab-quvvatlash bo'limiga qo'ng'iroqlar bilan tezroq ishlash va muloqot tafsilotlarini yo'qotmaslikka yordam beradi.</p><ul><li>Har bir qo'ng'iroq “1 qo'ng'iroq = 1 murojaat” tamoyili bo'yicha alohida murojaat sifatida qayd etiladi.</li><li>Suhbat bosqichlari murojaat tarixida ko'rinib, aloqa jarayonini shaffof qiladi.</li><li>Tizim ichki raqam asosida mas'ul xodimni avtomatik biriktira oladi.</li><li>Murojaat yakunlangan bo'lsa, shu qo'ng'iroq bo'yicha takroriy signallar ortiqcha yangi yozuv yaratmaydi.</li><li>Qo'ng'iroq yozuvi murojaatga avtomatik qo'shiladi va menejerga to'liq kontekst beradi.</li><li>Tizim xabarlari tili sozlamalarda tanlanadi va ko'p tilli jamoaga moslashadi.</li></ul>`
+  `<p>Yechim savdo va qo'llab-quvvatlash bo'limiga qo'ng'iroqlarni tezroq qayta ishlash va muloqot tarixini shaffof saqlashga yordam beradi.</p><ul><li>Har bir qo'ng'iroq “1 qo'ng'iroq = 1 murojaat” modeli bo'yicha yuritiladi.</li><li>Qo'ng'iroq hodisalari murojaat chatiga ketma-ket yuboriladi.</li><li>Tizim operatorning ichki raqamiga ko'ra mas'ulni avtomatik biriktira oladi.</li><li>Yozuv hodisasi kelganda qo'ng'iroq yozuvi murojaatga biriktiriladi.</li><li>Bitta qo'ng'iroq bo'yicha takroriy signallar CRMda ortiqcha dubl yaratmaydi.</li><li>Tizim xabarlari shablonlari bir nechta tilni qo'llab-quvvatlaydi.</li></ul>`
 - English:
-  `<p>The solution helps sales and support teams handle calls faster and keep every important detail.</p><ul><li>Each call is recorded as a separate case under the “1 call = 1 case” principle.</li><li>Call stages are reflected in the case timeline for full interaction visibility.</li><li>The system can automatically assign the responsible employee by internal line.</li><li>If a case is already closed, repeated updates for the same call do not create unnecessary new records.</li><li>Call recording is added automatically so managers have full context.</li><li>System message language is configurable and suitable for multilingual teams.</li></ul>`
+  `<p>The solution helps sales and support teams process calls faster while keeping communication history transparent.</p><ul><li>Each call follows the “1 call = 1 case” model.</li><li>Call events are posted to the case chat in order.</li><li>The system can auto-assign the responsible user by operator extension.</li><li>Call recording is attached to the case when recording event arrives.</li><li>Repeated signals for the same call do not create unnecessary duplicates in CRM.</li><li>System message templates support multiple languages.</li></ul>`
 
-## Какие события обрабатываются
+## Список обрабатываемых вебхуков
 
-- Начало звонка.
-- Дозвон и ожидание ответа.
-- Принятие звонка.
-- Пропущенный звонок.
-- Завершение разговора.
-- Неуспешный вызов.
-- Появление записи разговора.
+- CRM:
+  - `handle_webhook` не используется (возвращает `ignored`).
+
+
+## Какие действия выполняются автоматически
+
+- Создание или переиспользование обращения по звонку.
+- Публикация статусов звонка в чат обращения.
+- Назначение ответственного по внутреннему номеру (если включено).
+- Загрузка и прикрепление записи разговора.
+- Защита от повторной обработки дублей.
 
 ## Настройки интеграции
 
-| Параметр | Для чего нужен | Пример |
-|---|---|---|
-| Адрес телефонии | Подключает интеграцию к вашей телефонной станции | Адрес вашей телефонии |
-| Порт подключения | Уточняет канал связи с телефонией | Стандартный канал подключения |
-| Логин для подключения | Открывает доступ к событиям звонков | Учетная запись интеграции |
-| Пароль для подключения | Защищает подключение и подтверждает права доступа | Надежный пароль |
-| Канал CRM для звонков | Определяет, где создаются обращения по звонкам | Канал “Телефония” |
-| Ответственный по умолчанию | Назначает исполнителя, если автоопределение недоступно | Старший оператор смены |
-| Автораспределение по внутренним номерам | Автоматически связывает звонок с нужным сотрудником | Включено |
-| Шаблон названия обращения | Делает карточки звонков понятными для команды | “Входящий звонок от клиента” |
-| Список приоритетных линий | Помогает точнее определять сценарий звонка | Список внутренних линий компании |
-| Адрес хранения записей разговоров | Позволяет корректно прикладывать записи к обращению | Корпоративный адрес записей |
-| Код страны по умолчанию | Нормализует номера в едином формате | Код вашей страны |
-| Защита от дублей событий | Убирает повторную обработку одинаковых сигналов | 10 минут |
-| Время хранения служебного состояния | Сохраняет стабильность маршрутизации и обработки | 1 час |
-| Язык системных сообщений | Показывает служебные тексты на нужном языке | Русский / O'zbekcha / English |
+| Ключ | Обяз. | Тип данных | Наименование (RU / UZ / EN) | Описание (RU / UZ / EN) | Placeholder (RU / UZ / EN) |
+|---|---|---|---|---|---|
+| `asterisk_ami_host` | Да | String | `Хост Asterisk AMI` / `Asterisk AMI hosti` / `Asterisk AMI host` | `Адрес AMI-сервера Asterisk` / `Asterisk AMI server manzili` / `Address of Asterisk AMI server` | `192.168.1.10` / `192.168.1.10` / `192.168.1.10` |
+| `asterisk_ami_port` | Нет | Integer | `Порт Asterisk AMI` / `Asterisk AMI porti` / `Asterisk AMI port` | `Порт подключения к AMI` / `AMI ga ulanish porti` / `AMI connection port` | `5038` / `5038` / `5038` |
+| `asterisk_ami_user` | Да | String | `Пользователь AMI` / `AMI foydalanuvchisi` / `AMI user` | `Логин для доступа к AMI` / `AMI ga kirish logini` / `AMI access login` | `ami_user` / `ami_user` / `ami_user` |
+| `asterisk_ami_password` | Да | String | `Пароль AMI` / `AMI paroli` / `AMI password` | `Пароль для доступа к AMI` / `AMI ga kirish paroli` / `AMI access password` | `********` / `********` / `********` |
+| `asterisk_channel_id` | Да | Integer | `ID CRM-канала` / `CRM kanal ID` / `CRM channel ID` | `Канал CRM для публикации событий звонка` / `Qo'ng'iroq hodisalari yuboriladigan CRM kanal` / `CRM channel where call events are published` | `1` / `1` / `1` |
+| `asterisk_default_responsible_user_id` | Нет | Integer | `Ответственный по умолчанию` / `Standart mas'ul` / `Default responsible user` | `Ответственный, если автоопределение не сработало` / `Avtoaniqlash bo'lmasa biriktiriladigan mas'ul` / `Responsible user if auto-detection is not available` | `15` / `15` / `15` |
+| `asterisk_assign_responsible_by_operator_ext` | Нет | Boolean | `Назначение по внутреннему номеру` / `Ichki raqam bo'yicha biriktirish` / `Assign by operator extension` | `Назначать ответственного по extension оператора` / `Operator extension bo'yicha mas'ul biriktirish` / `Assign responsible by operator extension` | `true` / `true` / `true` |
+| `asterisk_close_ticket_on_call_end` | Нет | Boolean | `Автозакрытие обращения после звонка` / `Qo'ng'iroq tugagach murojaatni yopish` / `Close case after call ends` | `Если включено, обращение закрывается только после успешно завершенного разговора и только когда назначен ответственный` / `Yoqilgan bo'lsa, murojaat faqat muvaffaqiyatli yakunlangan suhbatdan keyin va mas'ul biriktirilganda yopiladi` / `When enabled, the case is closed only after a successful completed call and only when a responsible user is assigned` | `false` / `false` / `false` |
+| `asterisk_lead_subject_template` | Нет | String | `Шаблон темы обращения` / `Murojaat mavzusi shabloni` / `Case subject template` | `Шаблон заголовка обращения` / `Murojaat sarlavhasi shabloni` / `Template for case subject` | `Call {direction} {from_phone}` / `Call {direction} {from_phone}` / `Call {direction} {from_phone}` |
+| `asterisk_allowed_did_list` | Нет | String | `Список DID/линий` / `DID/liniyalar ro'yxati` / `DID lines list` | `Список линий для определения направления звонка` / `Qo'ng'iroq yo'nalishini aniqlash uchun liniyalar ro'yxati` / `List of lines used for call direction detection` | `998712000000,998712000001` / `998712000000,998712000001` / `998712000000,998712000001` |
+| `asterisk_recording_base_url` | Нет | String | `Базовый URL записей` / `Yozuvlar bazaviy URL` / `Recording base URL` | `База для формирования ссылок на записи` / `Yozuv havolalarini shakllantirish uchun baza` / `Base URL used to build recording links` | `https://pbx.example.com/records/` / `https://pbx.example.com/records/` / `https://pbx.example.com/records/` |
+| `asterisk_default_country_code` | Нет | String | `Код страны` / `Mamlakat kodi` / `Country code` | `Код страны для нормализации телефонов` / `Telefonlarni normallashtirish uchun mamlakat kodi` / `Country code for phone normalization` | `998` / `998` / `998` |
+| `asterisk_message_language` | Нет | String | `Язык системных сообщений` / `Tizim xabarlari tili` / `System message language` | `Язык служебных сообщений в чате` / `Chatdagi xizmat xabarlari tili` / `Language of service messages in chat` | `ru` / `uz` / `en` |
+
 
 ## Порядок настройки
 
-1. Подготовьте телефонную станцию и учетные данные для безопасного подключения.
-2. Выберите в CRM канал, в котором команда будет работать со звонками.
-3. Настройте правила назначения ответственных и тексты карточек обращений.
-4. Включите интеграцию и выполните тестовый входящий и исходящий звонок.
-5. Проверьте, что каждый звонок сохраняется как отдельное обращение с корректной историей.
+1. Включите AMI на стороне Asterisk и подготовьте учетные данные доступа.
+2. Заполните обязательные настройки (`asterisk_ami_host`, `asterisk_ami_user`, `asterisk_ami_password`, `asterisk_channel_id`).
+3. При необходимости настройте автоназначение ответственного и шаблоны сообщений.
+4. Подключите интеграцию и выполните тестовый входящий и исходящий звонок.
+5. Проверьте, что один звонок создает одно обращение и события публикуются в его чат.

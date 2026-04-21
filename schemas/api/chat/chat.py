@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import ConfigDict, Field as PydField, model_validator
 
@@ -37,6 +37,10 @@ class ChatParticipant(BaseSchema):
 
     entity_type: Optional[ChatEntityTypeEnum] = PydField(default=None, description="Participant entity type.")
     entity_id: Optional[int] = PydField(default=None, description="Participant entity id.")
+    connected_integration_id: Optional[str] = PydField(
+        default=None,
+        description="Connected integration id for chatbot participant.",
+    )
     role: Optional[ChatParticipantRoleEnum] = PydField(default=None, description="Participant role.")
     name: Optional[str] = PydField(default=None, description="Participant display name.")
     photo_url: Optional[str] = PydField(default=None, description="Participant photo URL.")
@@ -178,43 +182,43 @@ class ChatAddResult(BaseSchema):
     new_uuid: Optional[str] = PydField(default=None, description="Created chat UUID.")
 
 
-class ChatGetResponse(APIBaseResponse[List[Chat]]):
+class ChatGetResponse(APIBaseResponse[List[Chat] | Dict[str, Any]]):
     """Response for Chat/Get."""
 
     model_config = ConfigDict(extra="ignore")
 
 
-class ChatAddResponse(APIBaseResponse[ChatAddResult]):
+class ChatAddResponse(APIBaseResponse[ChatAddResult | Dict[str, Any]]):
     """Response for Chat/Add."""
 
     model_config = ConfigDict(extra="ignore")
 
 
-class ChatEditResponse(APIBaseResponse[ArrayResult]):
+class ChatEditResponse(APIBaseResponse[ArrayResult | Dict[str, Any]]):
     """Response for Chat/Edit."""
 
     model_config = ConfigDict(extra="ignore")
 
 
-class ChatRemoveParticipantsResponse(APIBaseResponse[ArrayResult]):
+class ChatRemoveParticipantsResponse(APIBaseResponse[ArrayResult | Dict[str, Any]]):
     """Response for Chat/RemoveParticipants."""
 
     model_config = ConfigDict(extra="ignore")
 
 
-class ChatSetParticipantsResponse(APIBaseResponse[ArrayResult]):
+class ChatSetParticipantsResponse(APIBaseResponse[ArrayResult | Dict[str, Any]]):
     """Response for Chat/SetParticipants."""
 
     model_config = ConfigDict(extra="ignore")
 
 
-class ChatAddParticipantResponse(APIBaseResponse[ArrayResult]):
+class ChatAddParticipantResponse(APIBaseResponse[ArrayResult | Dict[str, Any]]):
     """Response for Chat/AddParticipant."""
 
     model_config = ConfigDict(extra="ignore")
 
 
-class ChatAddBotResponse(APIBaseResponse[ArrayResult]):
+class ChatAddBotResponse(APIBaseResponse[ArrayResult | Dict[str, Any]]):
     """Response for Chat/AddBot."""
 
     model_config = ConfigDict(extra="ignore")

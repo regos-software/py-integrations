@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import ConfigDict, Field as PydField, field_validator
 
@@ -146,7 +146,7 @@ class UserGetRequest(BaseSchema):
         return value.strip() if isinstance(value, str) else value
 
 
-class UserGetResponse(APIBaseResponse[List[User]]):
+class UserGetResponse(APIBaseResponse[List[User] | Dict[str, Any]]):
     """Ответ на запрос списка пользователей."""
 
     model_config = ConfigDict(extra="ignore")

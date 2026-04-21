@@ -14,18 +14,29 @@ from config.settings import settings as app_settings
 from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
 from core.redis import redis_client
-from schemas.api.base import APIBaseResponse
+from schemas.api.chat.chat import ChatAddBotRequest, ChatGetRequest
 from schemas.api.chat.chat_message import (
     ChatMessage,
     ChatMessageAddRequest,
     ChatMessageGetRequest,
+    ChatMessageSuggestRequest,
     ChatMessageTypeEnum,
 )
 from schemas.api.chat.quick_reply import QuickReplyGetRequest
+from schemas.api.crm.client import ClientEditRequest, ClientGetRequest
+from schemas.api.crm.deal import DealEditRequest, DealGetRequest
+from schemas.api.crm.lead import LeadEditRequest, LeadGetRequest
+from schemas.api.crm.project_task import ProjectTaskEditRequest, ProjectTaskGetRequest
+from schemas.api.crm.ticket import TicketEditRequest, TicketGetRequest
 from schemas.api.files.file import FileGetRequest
+from schemas.api.integrations.connected_integration import (
+    ConnectedIntegrationEditRequest,
+    ConnectedIntegrationGetRequest,
+)
 from schemas.api.integrations.connected_integration_setting import (
     ConnectedIntegrationSettingRequest,
 )
+from schemas.api.references.field import FieldAddRequest, FieldGetRequest
 from schemas.integration.base import IntegrationErrorModel, IntegrationErrorResponse
 
 logger = setup_logger("gpt_crm_chat_assistant")
@@ -38,18 +49,18 @@ class GptCrmChatAssistantConfig:
     SETTINGS_TTL_SEC = max(int(app_settings.redis_cache_ttl or 60), 60)
     BOT_CACHE_TTL_SEC = 24 * 60 * 60
     DEDUPE_TTL_SEC = 5 * 60
-    OPENAI_TIMEOUT_SEC = 20
-    OPENAI_ENDPOINT = "https://api.openai.com/v1/chat/completions"
+    OPENAI_TIMEOUT_SEC = 12
     OPENAI_RESPONSES_ENDPOINT = "https://api.openai.com/v1/responses"
     OPENAI_CONVERSATIONS_ENDPOINT = "https://api.openai.com/v1/conversations"
-    MAX_CONTEXT_CHARS = 8000
-    MAX_CONTEXT_FILE_IDS = 50
+    MAX_CONTEXT_CHARS = 4000
+    MAX_CONTEXT_FILE_IDS = 20
     MAX_FILES_PER_MESSAGE = 5
-    MAX_CONTEXT_IMAGE_URLS = 4
+    MAX_CONTEXT_IMAGE_URLS = 2
     FILE_CACHE_TTL_SEC = 60 * 60
+    OPENAI_MAX_OUTPUT_TOKENS = 220
 
     DEFAULT_SUGGESTIONS_COUNT = 3
-    DEFAULT_HISTORY_LIMIT = 20
+    DEFAULT_HISTORY_LIMIT = 15
     DEFAULT_TEMPERATURE = 0.3
     DEFAULT_CONTEXT_SOURCE = "crm"
     ALLOWED_CONTEXT_SOURCES = {"crm", "conversation"}
@@ -63,7 +74,7 @@ class GptCrmChatAssistantConfig:
     FIELD_BOOTSTRAP_TTL_SEC = 10 * 60
     QUICK_REPLY_CACHE_TTL_SEC = 5 * 60
     MAX_QUICK_REPLIES_FETCH = 100
-    MAX_QUICK_REPLIES_IN_PROMPT = 30
+    MAX_QUICK_REPLIES_IN_PROMPT = 10
     MAX_QUICK_REPLY_TEXT_LEN = 200
 
     THREAD_FIELD_ENTITY_TYPES = ("Lead", "Deal", "Task", "Client", "Ticket")
@@ -135,112 +146,6 @@ def _normalize_text(value: Any) -> str:
 
 def _normalize_entity_type(value: Any) -> str:
     return str(value or "").strip().lower()
-
-
-def _extract_connected_integration_id(payload: Any) -> Optional[str]:
-    if not isinstance(payload, dict):
-        return None
-    for key in ("connected_integration_id", "connectedIntegrationId", "id"):
-        value = str(payload.get(key) or "").strip()
-        if value:
-            return value
-    nested = payload.get("connected_integration")
-    if isinstance(nested, dict):
-        for key in ("connected_integration_id", "connectedIntegrationId", "id"):
-            value = str(nested.get(key) or "").strip()
-            if value:
-                return value
-    return None
-
-
-def _extract_connected_integration_active_flag(payload: Any) -> Optional[bool]:
-    if isinstance(payload, dict):
-        for key in ("is_active", "isActive"):
-            if key in payload:
-                return _parse_bool(payload.get(key), True)
-        for nested_key in (
-            "connected_integration",
-            "integration",
-            "item",
-            "data",
-            "result",
-        ):
-            nested = payload.get(nested_key)
-            nested_value = _extract_connected_integration_active_flag(nested)
-            if nested_value is not None:
-                return nested_value
-        return None
-    if isinstance(payload, list):
-        for row in payload:
-            nested_value = _extract_connected_integration_active_flag(row)
-            if nested_value is not None:
-                return nested_value
-    return None
-
-
-def _extract_connected_integration_active_flag_for_ci(
-    payload: Any,
-    connected_integration_id: str,
-) -> Optional[bool]:
-    ci = str(connected_integration_id or "").strip()
-    if not ci:
-        return _extract_connected_integration_active_flag(payload)
-
-    if isinstance(payload, list):
-        matched = False
-        single_unknown_row: Optional[Any] = payload[0] if len(payload) == 1 else None
-        for row in payload:
-            if not isinstance(row, dict):
-                continue
-            row_ci = _extract_connected_integration_id(row)
-            if not row_ci:
-                continue
-            if row_ci != ci:
-                continue
-            matched = True
-            nested_value = _extract_connected_integration_active_flag_for_ci(row, ci)
-            if nested_value is not None:
-                return nested_value
-        if matched:
-            return None
-        if single_unknown_row is not None:
-            return _extract_connected_integration_active_flag_for_ci(single_unknown_row, ci)
-        return None
-
-    if isinstance(payload, dict):
-        payload_ci = _extract_connected_integration_id(payload)
-        if payload_ci and payload_ci != ci:
-            for nested_key in (
-                "connected_integration",
-                "integration",
-                "item",
-                "data",
-                "result",
-            ):
-                nested = payload.get(nested_key)
-                nested_value = _extract_connected_integration_active_flag_for_ci(nested, ci)
-                if nested_value is not None:
-                    return nested_value
-            return None
-
-        for key in ("is_active", "isActive"):
-            if key in payload:
-                return _parse_bool(payload.get(key), True)
-
-        for nested_key in (
-            "connected_integration",
-            "integration",
-            "item",
-            "data",
-            "result",
-        ):
-            nested = payload.get(nested_key)
-            nested_value = _extract_connected_integration_active_flag_for_ci(nested, ci)
-            if nested_value is not None:
-                return nested_value
-        return None
-
-    return None
 
 
 def _extract_json_object(raw_text: str) -> Optional[Dict[str, Any]]:
@@ -357,32 +262,12 @@ def _parse_auto_join_entities(raw: Any) -> Set[str]:
 
 
 class GptCrmChatAssistantIntegration(ClientBase):
-    _CHAT_ENTITY_TO_RESOURCE: Dict[str, Dict[str, str]] = {
-        "lead": {
-            "field_entity_type": "Lead",
-            "get_path": "Lead/Get",
-            "edit_path": "Lead/Edit",
-        },
-        "deal": {
-            "field_entity_type": "Deal",
-            "get_path": "Deal/Get",
-            "edit_path": "Deal/Edit",
-        },
-        "task": {
-            "field_entity_type": "Task",
-            "get_path": "ProjectTask/Get",
-            "edit_path": "ProjectTask/Edit",
-        },
-        "client": {
-            "field_entity_type": "Client",
-            "get_path": "Client/Get",
-            "edit_path": "Client/Edit",
-        },
-        "ticket": {
-            "field_entity_type": "Ticket",
-            "get_path": "Ticket/Get",
-            "edit_path": "Ticket/Edit",
-        },
+    _CHAT_ENTITY_TO_FIELD_ENTITY: Dict[str, str] = {
+        "lead": "Lead",
+        "deal": "Deal",
+        "task": "Task",
+        "client": "Client",
+        "ticket": "Ticket",
     }
 
     _ACTIVE_CACHE: Dict[str, Tuple[bool, float]] = {}
@@ -544,29 +429,27 @@ class GptCrmChatAssistantIntegration(ClientBase):
                     cls._ACTIVE_CACHE[ci] = (cached_value, now + 60)
                 return cached_value
 
-        detected: Optional[bool] = None
-        for payload in ({}, {"connected_integration_id": ci, "limit": 1, "offset": 0}):
-            try:
-                async with RegosAPI(connected_integration_id=ci) as api:
-                    response = await api.call(
-                        "ConnectedIntegration/Get",
-                        payload,
-                        APIBaseResponse[Any],
+        active = False
+        try:
+            async with RegosAPI(connected_integration_id=ci) as api:
+                response = await api.integrations.connected_integration.get(
+                    ConnectedIntegrationGetRequest(
+                        connected_integration_ids=[ci],
+                        include_name=False,
+                        include_schedule=False,
                     )
-                if response.ok:
-                    detected = _extract_connected_integration_active_flag_for_ci(
-                        response.result,
-                        ci,
-                    )
-                    if detected is not None:
-                        break
-            except Exception:
-                continue
+                )
+            if response.ok and isinstance(response.result, list):
+                for row in response.result:
+                    row_ci = str(getattr(row, "connected_integration_id", "") or "").strip()
+                    if row_ci != ci:
+                        continue
+                    row_active = getattr(row, "is_active", None)
+                    active = bool(row_active) if row_active is not None else False
+                    break
+        except Exception:
+            active = False
 
-        if detected is None:
-            detected = True
-
-        active = bool(detected)
         async with cls._ACTIVE_CACHE_LOCK:
             cls._ACTIVE_CACHE[ci] = (active, now + 60)
         await cls._redis_set(cls._ci_active_cache_key(ci), "1" if active else "0", 60)
@@ -601,7 +484,7 @@ class GptCrmChatAssistantIntegration(ClientBase):
             settings_map.get("assistant_history_limit"),
             GptCrmChatAssistantConfig.DEFAULT_HISTORY_LIMIT,
         )
-        history_limit = max(1, min(100, history_limit))
+        history_limit = max(1, min(30, history_limit))
 
         temperature = _parse_float(
             settings_map.get("assistant_temperature"),
@@ -677,13 +560,21 @@ class GptCrmChatAssistantIntegration(ClientBase):
         cls,
         connected_integration_id: str,
     ) -> Dict[str, Any]:
-        payload = {
-            "connected_integration_id": connected_integration_id,
-            "webhooks": sorted(GptCrmChatAssistantConfig.SUPPORTED_INBOUND_WEBHOOKS),
-        }
         try:
             async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-                await api.call("ConnectedIntegration/Edit", payload, APIBaseResponse)
+                response = await api.integrations.connected_integration.edit(
+                    ConnectedIntegrationEditRequest(
+                        connected_integration_id=connected_integration_id,
+                        webhooks=sorted(GptCrmChatAssistantConfig.SUPPORTED_INBOUND_WEBHOOKS),
+                    )
+                )
+            if not response.ok:
+                logger.warning(
+                    "Webhook subscription rejected for %s: %s",
+                    connected_integration_id,
+                    response.result,
+                )
+                return {"status": "failed", "error": str(response.result)}
             return {"status": "ok"}
         except Exception as error:
             logger.warning(
@@ -700,15 +591,12 @@ class GptCrmChatAssistantIntegration(ClientBase):
         entity_type: str,
         full_key: str,
     ) -> bool:
-        payload = {
-            "entity_type": entity_type,
-            "keys": [full_key],
-        }
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-            response = await api.call(
-                "Field/Get",
-                payload,
-                APIBaseResponse[List[Dict[str, Any]]],
+            response = await api.references.field.get(
+                FieldGetRequest(
+                    entity_type=entity_type,
+                    keys=[full_key],
+                )
             )
 
         if not response.ok:
@@ -718,9 +606,7 @@ class GptCrmChatAssistantIntegration(ClientBase):
         rows = response.result if isinstance(response.result, list) else []
         expected_key = full_key.strip().lower()
         for row in rows:
-            if not isinstance(row, dict):
-                continue
-            row_key = str(row.get("key") or "").strip().lower()
+            row_key = str(getattr(row, "key", "") or "").strip().lower()
             if row_key == expected_key:
                 return True
         return False
@@ -745,22 +631,27 @@ class GptCrmChatAssistantIntegration(ClientBase):
                 "status": "exists",
             }
 
-        payload = {
-            "key": raw_key,
-            "name": GptCrmChatAssistantConfig.THREAD_FIELD_NAME,
-            "entity_type": entity_type,
-            "data_type": GptCrmChatAssistantConfig.THREAD_FIELD_DATA_TYPE,
-            "required": False,
-        }
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-            response = await api.call(
-                "Field/Add",
-                payload,
-                APIBaseResponse[Dict[str, Any]],
+            response = await api.references.field.add(
+                FieldAddRequest(
+                    key=raw_key,
+                    name=GptCrmChatAssistantConfig.THREAD_FIELD_NAME,
+                    entity_type=entity_type,
+                    data_type=GptCrmChatAssistantConfig.THREAD_FIELD_DATA_TYPE,
+                    required=False,
+                )
             )
 
         if response.ok:
-            result_payload = response.result if isinstance(response.result, dict) else {}
+            result_payload = (
+                response.result if isinstance(response.result, dict) else {}
+            )
+            created_new_id = _parse_int(
+                result_payload.get("new_id")
+                if isinstance(response.result, dict)
+                else getattr(response.result, "new_id", 0),
+                0,
+            )
             for attempt in range(3):
                 if await cls._field_exists(
                     connected_integration_id=connected_integration_id,
@@ -771,7 +662,7 @@ class GptCrmChatAssistantIntegration(ClientBase):
                         "entity_type": entity_type,
                         "key": full_key,
                         "status": "created",
-                        "new_id": _parse_int(result_payload.get("new_id"), 0),
+                        "new_id": created_new_id,
                     }
                 if attempt < 2:
                     await asyncio.sleep(0.2)
@@ -785,17 +676,6 @@ class GptCrmChatAssistantIntegration(ClientBase):
             entity_type,
             response.result,
         )
-        # Another worker may create the field concurrently; re-check before failing.
-        if await cls._field_exists(
-            connected_integration_id=connected_integration_id,
-            entity_type=entity_type,
-            full_key=full_key,
-        ):
-            return {
-                "entity_type": entity_type,
-                "key": full_key,
-                "status": "exists_after_retry",
-            }
 
         raise RuntimeError(
             f"Field/Add rejected for required key={raw_key} entity_type={entity_type}: {response.result}"
@@ -1086,13 +966,6 @@ class GptCrmChatAssistantIntegration(ClientBase):
             if not isinstance(nested_action, str) or not isinstance(nested_data, dict):
                 return None, {}, wrapped_event_id
             return nested_action, nested_data, wrapped_event_id
-
-        if isinstance(data, dict):
-            nested_action = data.get("action")
-            nested_data = data.get("data")
-            nested_event_id = str(data.get("event_id") or event_id or "").strip() or None
-            if isinstance(nested_action, str) and isinstance(nested_data, dict):
-                return nested_action, nested_data, nested_event_id
 
         return None, {}, event_id
 
@@ -1632,13 +1505,13 @@ class GptCrmChatAssistantIntegration(ClientBase):
                 continue
 
         if not lines:
-            fallback_line, fallback_images = self._render_message_context_line(
+            source_line, source_images = self._render_message_context_line(
                 role="client",
                 text=str(source_message.text or ""),
                 file_ids=self._extract_message_file_ids(source_message),
                 files_map=files_map,
             )
-            return fallback_line, fallback_images[: GptCrmChatAssistantConfig.MAX_CONTEXT_IMAGE_URLS]
+            return source_line, source_images[: GptCrmChatAssistantConfig.MAX_CONTEXT_IMAGE_URLS]
 
         lines.sort(key=lambda item: item[0])
         raw_lines = [item[1] for item in lines]
@@ -1662,8 +1535,8 @@ class GptCrmChatAssistantIntegration(ClientBase):
         return "\n".join(selected)
 
     @classmethod
-    def _entity_resource(cls, chat_entity_type: str) -> Optional[Dict[str, str]]:
-        return cls._CHAT_ENTITY_TO_RESOURCE.get(_normalize_entity_type(chat_entity_type))
+    def _entity_field_type(cls, chat_entity_type: str) -> Optional[str]:
+        return cls._CHAT_ENTITY_TO_FIELD_ENTITY.get(_normalize_entity_type(chat_entity_type))
 
     @staticmethod
     def _extract_field_value(fields_raw: Any, key: str) -> Optional[str]:
@@ -1694,14 +1567,6 @@ class GptCrmChatAssistantIntegration(ClientBase):
             return str(result.get("description") or "").strip()
         return str(result or "").strip()
 
-    @classmethod
-    def _is_unknown_field_error(cls, result: Any, field_key: str) -> bool:
-        description = cls._api_error_description(result).lower()
-        target_key = str(field_key or "").strip().lower()
-        if not description or not target_key:
-            return False
-        return "unknown fields" in description and target_key in description
-
     @staticmethod
     def _normalize_conversation_id(value: Any) -> Optional[str]:
         text = str(value or "").strip()
@@ -1715,21 +1580,38 @@ class GptCrmChatAssistantIntegration(ClientBase):
         chat_entity_type: str,
         entity_id: int,
     ) -> Dict[str, Any]:
-        resource = self._entity_resource(chat_entity_type)
-        if not resource or entity_id <= 0:
+        field_entity_type = self._entity_field_type(chat_entity_type)
+        if not field_entity_type or entity_id <= 0:
             return {}
 
-        payload = {"ids": [int(entity_id)], "limit": 1, "offset": 0}
+        response: Any = None
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-            response = await api.call(
-                resource["get_path"],
-                payload,
-                APIBaseResponse[List[Dict[str, Any]]],
-            )
+            if field_entity_type == "Lead":
+                response = await api.crm.lead.get(
+                    LeadGetRequest(ids=[int(entity_id)], limit=1, offset=0)
+                )
+            elif field_entity_type == "Deal":
+                response = await api.crm.deal.get(
+                    DealGetRequest(ids=[int(entity_id)], limit=1, offset=0)
+                )
+            elif field_entity_type == "Task":
+                response = await api.crm.project_task.get(
+                    ProjectTaskGetRequest(ids=[int(entity_id)], limit=1, offset=0)
+                )
+            elif field_entity_type == "Client":
+                response = await api.crm.client.get(
+                    ClientGetRequest(ids=[int(entity_id)], limit=1, offset=0)
+                )
+            elif field_entity_type == "Ticket":
+                response = await api.crm.ticket.get(
+                    TicketGetRequest(ids=[int(entity_id)], limit=1, offset=0)
+                )
+            else:
+                return {}
         if not response.ok:
             logger.warning(
-                "%s rejected while loading entity: ci=%s entity_type=%s entity_id=%s payload=%s",
-                resource["get_path"],
+                "%s/Get rejected while loading entity: ci=%s entity_type=%s entity_id=%s payload=%s",
+                field_entity_type,
                 connected_integration_id,
                 chat_entity_type,
                 entity_id,
@@ -1739,7 +1621,12 @@ class GptCrmChatAssistantIntegration(ClientBase):
         if not isinstance(response.result, list) or not response.result:
             return {}
         row = response.result[0]
-        return row if isinstance(row, dict) else {}
+        if isinstance(row, dict):
+            return row
+        if hasattr(row, "model_dump"):
+            dumped = row.model_dump(mode="json")
+            return dumped if isinstance(dumped, dict) else {}
+        return {}
 
     async def _set_entity_thread_id(
         self,
@@ -1748,69 +1635,56 @@ class GptCrmChatAssistantIntegration(ClientBase):
         entity_id: int,
         conversation_id: str,
     ) -> bool:
-        resource = self._entity_resource(chat_entity_type)
-        if not resource or entity_id <= 0 or not conversation_id:
+        field_entity_type = self._entity_field_type(chat_entity_type)
+        if not field_entity_type or entity_id <= 0 or not conversation_id:
             return False
 
         full_key = GptCrmChatAssistantConfig.THREAD_FIELD_FULL_KEY
-        payload = {
-            "id": int(entity_id),
-            "fields": [
-                {
-                    "key": full_key,
-                    "value": conversation_id,
-                }
-            ],
-        }
+        response: Any = None
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-            response = await api.call(
-                resource["edit_path"],
-                payload,
-                APIBaseResponse[Dict[str, Any]],
-            )
+            if field_entity_type == "Lead":
+                response = await api.crm.lead.edit(
+                    LeadEditRequest(
+                        id=int(entity_id),
+                        fields=[{"key": full_key, "value": conversation_id}],
+                    )
+                )
+            elif field_entity_type == "Deal":
+                response = await api.crm.deal.edit(
+                    DealEditRequest(
+                        id=int(entity_id),
+                        fields=[{"key": full_key, "value": conversation_id}],
+                    )
+                )
+            elif field_entity_type == "Task":
+                response = await api.crm.project_task.edit(
+                    ProjectTaskEditRequest(
+                        id=int(entity_id),
+                        fields=[{"key": full_key, "value": conversation_id}],
+                    )
+                )
+            elif field_entity_type == "Client":
+                response = await api.crm.client.edit(
+                    ClientEditRequest(
+                        id=int(entity_id),
+                        fields=[{"key": full_key, "value": conversation_id}],
+                    )
+                )
+            elif field_entity_type == "Ticket":
+                response = await api.crm.ticket.edit(
+                    TicketEditRequest(
+                        id=int(entity_id),
+                        fields=[{"key": full_key, "value": conversation_id}],
+                    )
+                )
+            else:
+                return False
         if response.ok:
             return True
 
-        # Self-healing for integrations that started before field bootstrap/reconnect.
-        field_entity_type = str(resource.get("field_entity_type") or "").strip()
-        unknown_full = self._is_unknown_field_error(response.result, full_key)
-        if field_entity_type and unknown_full:
-            try:
-                await self._ensure_thread_custom_field(
-                    connected_integration_id=connected_integration_id,
-                    entity_type=field_entity_type,
-                )
-            except Exception as error:
-                logger.warning(
-                    "Field self-heal failed while persisting conversation id: ci=%s entity_type=%s entity_id=%s error=%s",
-                    connected_integration_id,
-                    chat_entity_type,
-                    entity_id,
-                    error,
-                )
-
-            async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-                retry_full = await api.call(
-                    resource["edit_path"],
-                    payload,
-                    APIBaseResponse[Dict[str, Any]],
-                )
-            if retry_full.ok:
-                return True
-
-            logger.warning(
-                "%s rejected after self-heal while persisting conversation id: ci=%s entity_type=%s entity_id=%s payload=%s",
-                resource["edit_path"],
-                connected_integration_id,
-                chat_entity_type,
-                entity_id,
-                retry_full.result,
-            )
-            return False
-
         logger.warning(
-            "%s rejected while persisting conversation id: ci=%s entity_type=%s entity_id=%s payload=%s",
-            resource["edit_path"],
+            "%s/Edit rejected while persisting conversation id: ci=%s entity_type=%s entity_id=%s payload=%s",
+            field_entity_type,
             connected_integration_id,
             chat_entity_type,
             entity_id,
@@ -1890,8 +1764,8 @@ class GptCrmChatAssistantIntegration(ClientBase):
             return {"status": "chat_not_found"}
 
         chat_entity_type = _normalize_entity_type(chat_row.get("entity_type"))
-        resource = self._entity_resource(chat_entity_type)
-        if not resource:
+        field_entity_type = self._entity_field_type(chat_entity_type)
+        if not field_entity_type:
             return {
                 "status": "unsupported_entity_type",
                 "entity_type": chat_entity_type,
@@ -2011,14 +1885,6 @@ class GptCrmChatAssistantIntegration(ClientBase):
             connected_integration_id=runtime.connected_integration_id,
             cached_bot_id=cached_bot_id,
         )
-        if not resolved and participants:
-            resolved = max(item["entity_id"] for item in participants)
-            logger.warning(
-                "Fallback chatbot resolution used max entity_id: ci=%s chat_id=%s bot_id=%s",
-                runtime.connected_integration_id,
-                chat_id,
-                resolved,
-            )
         if resolved:
             await self._set_cached_bot_id(
                 connected_integration_id=runtime.connected_integration_id,
@@ -2033,15 +1899,18 @@ class GptCrmChatAssistantIntegration(ClientBase):
         chat_id: str,
     ) -> Dict[str, Any]:
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-            response = await api.call(
-                "Chat/Get",
-                {"ids": [chat_id], "limit": 1, "offset": 0},
-                APIBaseResponse[List[Dict[str, Any]]],
+            response = await api.chat.chat.get(
+                ChatGetRequest(ids=[chat_id], limit=1, offset=0)
             )
         if not response.ok or not isinstance(response.result, list) or not response.result:
             return {}
         row = response.result[0]
-        return row if isinstance(row, dict) else {}
+        if isinstance(row, dict):
+            return row
+        if hasattr(row, "model_dump"):
+            dumped = row.model_dump(mode="json")
+            return dumped if isinstance(dumped, dict) else {}
+        return {}
 
     @staticmethod
     def _extract_chatbot_participants(chat_row: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -2098,13 +1967,11 @@ class GptCrmChatAssistantIntegration(ClientBase):
         chat_id: str,
     ) -> None:
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-            response = await api.call(
-                "Chat/AddBot",
-                {
-                    "chat_id": chat_id,
-                    "connected_integration_id": connected_integration_id,
-                },
-                APIBaseResponse[Dict[str, Any]],
+            response = await api.chat.chat.add_bot(
+                ChatAddBotRequest(
+                    chat_id=chat_id,
+                    connected_integration_id=connected_integration_id,
+                )
             )
         if not response.ok:
             logger.warning(
@@ -2206,33 +2073,49 @@ class GptCrmChatAssistantIntegration(ClientBase):
             if len(unique_image_urls) >= GptCrmChatAssistantConfig.MAX_CONTEXT_IMAGE_URLS:
                 break
 
-        def build_input(use_images: bool) -> List[Dict[str, Any]]:
-            user_content: Any = user_payload
-            if use_images and unique_image_urls:
-                user_parts: List[Dict[str, Any]] = [{"type": "input_text", "text": user_payload}]
-                for url in unique_image_urls:
-                    user_parts.append({"type": "input_image", "image_url": url})
-                user_content = user_parts
-            return [{"role": "user", "content": user_content}]
+        user_content: Any = user_payload
+        if unique_image_urls:
+            user_parts: List[Dict[str, Any]] = [{"type": "input_text", "text": user_payload}]
+            for url in unique_image_urls:
+                user_parts.append({"type": "input_image", "image_url": url})
+            user_content = user_parts
 
-        def build_payload(
-            use_conversation: bool,
-            use_images: bool,
-            conversation_key_mode: str = "conversation",
-        ) -> Dict[str, Any]:
-            payload: Dict[str, Any] = {
-                "model": runtime.assistant_model,
-                "instructions": f"{runtime.assistant_prompt}\n\n{system_instruction}",
-                "input": build_input(use_images=use_images),
-                "temperature": runtime.assistant_temperature,
-                "store": bool(use_conversation),
-            }
-            if use_conversation and conversation_id:
-                if conversation_key_mode == "conversation_id":
-                    payload["conversation_id"] = conversation_id
-                else:
-                    payload["conversation"] = conversation_id
-            return payload
+        use_conversation = (
+            runtime.assistant_context_source == "conversation"
+            and bool(self._normalize_conversation_id(conversation_id))
+        )
+        payload: Dict[str, Any] = {
+            "model": runtime.assistant_model,
+            "instructions": f"{runtime.assistant_prompt}\n\n{system_instruction}",
+            "input": [{"role": "user", "content": user_content}],
+            "temperature": runtime.assistant_temperature,
+            "max_output_tokens": GptCrmChatAssistantConfig.OPENAI_MAX_OUTPUT_TOKENS,
+            "store": bool(use_conversation),
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "crm_reply_suggestions",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["suggestions", "best_reply", "confidence"],
+                        "properties": {
+                            "suggestions": {
+                                "type": "array",
+                                "items": {"type": "string", "minLength": 1, "maxLength": 200},
+                                "minItems": 1,
+                                "maxItems": runtime.assistant_suggestions_count,
+                            },
+                            "best_reply": {"type": "string", "minLength": 1, "maxLength": 200},
+                            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                        },
+                    },
+                }
+            },
+        }
+        if use_conversation and conversation_id:
+            payload["conversation"] = str(conversation_id)
 
         headers = {
             "Authorization": f"Bearer {runtime.assistant_api_key}",
@@ -2240,60 +2123,21 @@ class GptCrmChatAssistantIntegration(ClientBase):
         }
 
         try:
-            use_conversation = (
-                runtime.assistant_context_source == "conversation"
-                and bool(self._normalize_conversation_id(conversation_id))
+            response = await self.http_client.post(
+                GptCrmChatAssistantConfig.OPENAI_RESPONSES_ENDPOINT,
+                headers=headers,
+                json=payload,
             )
-            use_images = bool(unique_image_urls)
-            attempts: List[Tuple[bool, bool, str]] = []
-            attempt_variants = (
-                (
-                    (True, use_images, "conversation"),
-                    (True, use_images, "conversation_id"),
-                    (True, False, "conversation"),
-                    (True, False, "conversation_id"),
+            if response.status_code >= 400:
+                logger.warning(
+                    "OpenAI request failed: status=%s conversation=%s images=%s body=%s",
+                    response.status_code,
+                    "on" if use_conversation else "off",
+                    "on" if bool(unique_image_urls) else "off",
+                    response.text[:1000],
                 )
-                if use_conversation
-                else (
-                    (False, use_images, "conversation"),
-                    (False, False, "conversation"),
-                )
-            )
-            for flags in attempt_variants:
-                if flags in attempts:
-                    continue
-                attempts.append(flags)
-
-            raw: Optional[Dict[str, Any]] = None
-            for try_index, (try_conversation, try_images, try_conversation_key) in enumerate(
-                attempts, start=1
-            ):
-                payload = build_payload(
-                    use_conversation=try_conversation,
-                    use_images=try_images,
-                    conversation_key_mode=try_conversation_key,
-                )
-                response = await self.http_client.post(
-                    GptCrmChatAssistantConfig.OPENAI_RESPONSES_ENDPOINT,
-                    headers=headers,
-                    json=payload,
-                )
-                if response.status_code >= 400:
-                    logger.warning(
-                        "OpenAI request failed: attempt=%s status=%s conversation=%s conversation_key=%s images=%s body=%s",
-                        try_index,
-                        response.status_code,
-                        "on" if try_conversation else "off",
-                        try_conversation_key if try_conversation else "-",
-                        "on" if try_images else "off",
-                        response.text[:1000],
-                    )
-                    continue
-                raw = response.json()
-                break
-
-            if raw is None:
                 return {"suggestions": [], "best_reply": "", "confidence": 0.0}
+            raw = response.json()
         except Exception as error:
             logger.warning("OpenAI request error: %s", error)
             return {"suggestions": [], "best_reply": "", "confidence": 0.0}
@@ -2317,31 +2161,14 @@ class GptCrmChatAssistantIntegration(ClientBase):
             return output_text
 
         responses_output = payload.get("output")
-        extracted_from_responses = _extract_text_from_responses_output(responses_output)
-        if extracted_from_responses:
-            return extracted_from_responses
-
-        choices = payload.get("choices")
-        if isinstance(choices, list) and choices:
-            first = choices[0] if isinstance(choices[0], dict) else {}
-            message = first.get("message") if isinstance(first, dict) else {}
-            if isinstance(message, dict):
-                content = message.get("content")
-                return _extract_text_from_openai_content(content)
-        return ""
+        return _extract_text_from_responses_output(responses_output)
 
     @staticmethod
     def _normalize_suggestions(raw_text: str, max_items: int) -> List[str]:
-        rows: List[str] = []
         payload = _extract_json_object(raw_text)
-        if payload and isinstance(payload.get("suggestions"), list):
-            for item in payload.get("suggestions") or []:
-                rows.append(str(item or ""))
-        else:
-            for line in re.split(r"[\r\n]+", str(raw_text or "")):
-                cleaned = re.sub(r"^\s*[-*•\d\.\)\(]+\s*", "", line).strip()
-                if cleaned:
-                    rows.append(cleaned)
+        if not payload or not isinstance(payload.get("suggestions"), list):
+            return []
+        rows = [str(item or "") for item in payload.get("suggestions") or []]
 
         normalized: List[str] = []
         seen: Set[str] = set()
@@ -2367,40 +2194,16 @@ class GptCrmChatAssistantIntegration(ClientBase):
         max_items: int,
     ) -> Dict[str, Any]:
         suggestions = cls._normalize_suggestions(raw_text, max_items)
-        best_reply = suggestions[0] if suggestions else ""
-        confidence = 0.0
 
         payload = _extract_json_object(raw_text)
-        if isinstance(payload, dict):
-            best_reply_candidate = _normalize_text(payload.get("best_reply"))
-            if best_reply_candidate:
-                best_reply = best_reply_candidate[:200].rstrip()
+        if not isinstance(payload, dict):
+            return {"suggestions": [], "best_reply": "", "confidence": 0.0}
 
-            confidence = _parse_float(payload.get("confidence"), 0.0)
-            confidence = min(max(confidence, 0.0), 1.0)
+        confidence = _parse_float(payload.get("confidence"), 0.0)
+        confidence = min(max(confidence, 0.0), 1.0)
 
-            payload_suggestions = payload.get("suggestions")
-            if isinstance(payload_suggestions, list):
-                normalized: List[str] = []
-                seen: Set[str] = set()
-                for item in payload_suggestions:
-                    text = _normalize_text(item)
-                    if not text:
-                        continue
-                    if len(text) > 200:
-                        text = text[:200].rstrip()
-                    key = text.casefold()
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    normalized.append(text)
-                    if len(normalized) >= max_items:
-                        break
-                if normalized:
-                    suggestions = normalized
-                    if not best_reply:
-                        best_reply = normalized[0]
-
+        best_reply_candidate = _normalize_text(payload.get("best_reply"))
+        best_reply = best_reply_candidate[:200].rstrip() if best_reply_candidate else ""
         if not best_reply and suggestions:
             best_reply = suggestions[0]
         if best_reply and not suggestions:
@@ -2555,18 +2358,15 @@ class GptCrmChatAssistantIntegration(ClientBase):
         bot_entity_id: int,
         suggestions: List[str],
     ) -> None:
-        payload = {
-            "chat_id": chat_id,
-            "author_entity_type": "ChatBot",
-            "author_entity_id": int(bot_entity_id),
-            "suggestions": suggestions,
-            "source_message_id": source_message_id,
-        }
         async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
-            response = await api.call(
-                "ChatMessage/Suggest",
-                payload,
-                APIBaseResponse[Dict[str, Any]],
+            response = await api.chat.chat_message.suggest(
+                ChatMessageSuggestRequest(
+                    chat_id=chat_id,
+                    author_entity_type="ChatBot",
+                    author_entity_id=int(bot_entity_id),
+                    suggestions=suggestions,
+                    source_message_id=source_message_id,
+                )
             )
         if not response.ok:
             logger.warning(

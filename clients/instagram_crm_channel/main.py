@@ -19,7 +19,7 @@ from config.settings import settings as app_settings
 from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
 from core.redis import redis_client
-from schemas.api.base import APIBaseResponse
+from schemas.api.chat.chat import ChatGetRequest
 from schemas.api.chat.chat_message import (
     ChatMessage,
     ChatMessageAddRequest,
@@ -36,6 +36,7 @@ from schemas.api.crm.ticket import (
     TicketGetRequest,
     TicketStatusEnum,
 )
+from schemas.api.integrations.connected_integration import ConnectedIntegrationGetRequest
 from schemas.api.integrations.connected_integration_setting import (
     ConnectedIntegrationSettingEditItem,
     ConnectedIntegrationSettingEditRequest,
@@ -132,6 +133,19 @@ def _to_bool(value: Any, default: bool = False) -> bool:
     return default
 
 
+def _row_to_dict(row: Any) -> Dict[str, Any]:
+    if isinstance(row, dict):
+        return row
+    if hasattr(row, "model_dump"):
+        try:
+            dumped = row.model_dump(mode="json")
+            if isinstance(dumped, dict):
+                return dumped
+        except Exception:
+            return {}
+    return {}
+
+
 def _query_get(query: Dict[str, Any], key: str) -> Optional[str]:
     value = query.get(key)
     if isinstance(value, list):
@@ -152,94 +166,6 @@ def _headers_ci(headers: Dict[str, Any], key: str) -> Optional[str]:
 
 def _redis_enabled() -> bool:
     return bool(app_settings.redis_enabled and redis_client is not None)
-
-
-def _extract_connected_integration_id(payload: Any) -> Optional[str]:
-    if not isinstance(payload, dict):
-        return None
-    for key in ("connected_integration_id", "connectedIntegrationId", "id"):
-        value = str(payload.get(key) or "").strip()
-        if value:
-            return value
-    nested = payload.get("connected_integration")
-    if isinstance(nested, dict):
-        for key in ("connected_integration_id", "connectedIntegrationId", "id"):
-            value = str(nested.get(key) or "").strip()
-            if value:
-                return value
-    return None
-
-
-def _extract_connected_integration_active_flag(payload: Any) -> Optional[bool]:
-    if isinstance(payload, dict):
-        for key in ("is_active", "isActive"):
-            if key in payload:
-                return _to_bool(payload.get(key), True)
-        for nested_key in ("connected_integration", "integration", "item", "data", "result"):
-            nested = payload.get(nested_key)
-            nested_value = _extract_connected_integration_active_flag(nested)
-            if nested_value is not None:
-                return nested_value
-        return None
-    if isinstance(payload, list):
-        for row in payload:
-            nested_value = _extract_connected_integration_active_flag(row)
-            if nested_value is not None:
-                return nested_value
-    return None
-
-
-def _extract_connected_integration_active_flag_for_ci(
-    payload: Any,
-    connected_integration_id: str,
-) -> Optional[bool]:
-    ci = str(connected_integration_id or "").strip()
-    if not ci:
-        return _extract_connected_integration_active_flag(payload)
-
-    if isinstance(payload, list):
-        matched = False
-        single_unknown_row: Optional[Any] = payload[0] if len(payload) == 1 else None
-        for row in payload:
-            if not isinstance(row, dict):
-                continue
-            row_ci = _extract_connected_integration_id(row)
-            if not row_ci:
-                continue
-            if row_ci != ci:
-                continue
-            matched = True
-            nested_value = _extract_connected_integration_active_flag_for_ci(row, ci)
-            if nested_value is not None:
-                return nested_value
-        if matched:
-            return None
-        if single_unknown_row is not None:
-            return _extract_connected_integration_active_flag_for_ci(single_unknown_row, ci)
-        return None
-
-    if isinstance(payload, dict):
-        payload_ci = _extract_connected_integration_id(payload)
-        if payload_ci and payload_ci != ci:
-            for nested_key in ("connected_integration", "integration", "item", "data", "result"):
-                nested = payload.get(nested_key)
-                nested_value = _extract_connected_integration_active_flag_for_ci(nested, ci)
-                if nested_value is not None:
-                    return nested_value
-            return None
-
-        for key in ("is_active", "isActive"):
-            if key in payload:
-                return _to_bool(payload.get(key), True)
-
-        for nested_key in ("connected_integration", "integration", "item", "data", "result"):
-            nested = payload.get(nested_key)
-            nested_value = _extract_connected_integration_active_flag_for_ci(nested, ci)
-            if nested_value is not None:
-                return nested_value
-        return None
-
-    return None
 
 
 class InstagramCrmChannelIntegration(ClientBase):
@@ -350,19 +276,27 @@ class InstagramCrmChannelIntegration(ClientBase):
                 return cached[0]
 
         detected: Optional[bool] = None
-        for payload in ({}, {"connected_integration_id": ci, "limit": 1, "offset": 0}):
-            try:
-                async with RegosAPI(connected_integration_id=ci) as api:
-                    response = await api.call("ConnectedIntegration/Get", payload, APIBaseResponse[Any])
-                if response.ok:
-                    detected = _extract_connected_integration_active_flag_for_ci(
-                        response.result,
-                        ci,
+        try:
+            async with RegosAPI(connected_integration_id=ci) as api:
+                response = await api.integrations.connected_integration.get(
+                    ConnectedIntegrationGetRequest(
+                        connected_integration_ids=[ci],
+                        include_name=False,
+                        include_schedule=False,
                     )
-                    if detected is not None:
-                        break
-            except Exception:
-                continue
+                )
+            if response.ok and isinstance(response.result, list):
+                for row in response.result:
+                    row_ci = str(getattr(row, "connected_integration_id", "") or "").strip()
+                    if row_ci and row_ci != ci:
+                        continue
+                    row_active = getattr(row, "is_active", None)
+                    if row_active is None:
+                        continue
+                    detected = bool(row_active)
+                    break
+        except Exception:
+            detected = None
         if detected is None:
             detected = True
 
@@ -769,11 +703,13 @@ class InstagramCrmChannelIntegration(ClientBase):
                     return external_user_id
 
         async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
-            chat_response = await api.call("Chat/Get", {"ids": [chat_id], "limit": 1, "offset": 0}, APIBaseResponse[Any])
+            chat_response = await api.chat.chat.get(
+                ChatGetRequest(ids=[chat_id], limit=1, offset=0)
+            )
         if not chat_response.ok or not isinstance(chat_response.result, list) or not chat_response.result:
             return None
 
-        row = chat_response.result[0] if isinstance(chat_response.result[0], dict) else {}
+        row = _row_to_dict(chat_response.result[0])
         participants = row.get("participants") if isinstance(row, dict) else None
         client_id: Optional[int] = None
         ticket_id: Optional[int] = None
@@ -972,8 +908,7 @@ class InstagramCrmChannelIntegration(ClientBase):
     async def _post_chat_message(cls, runtime: RuntimeConfig, lead_ctx: LeadContext, external_user_id: str, text: str, message_id: str) -> None:
         external_message_id = cls._inbound_external_message_id(runtime, external_user_id, message_id)
         async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
-            response = await api.call(
-                "ChatMessage/Add",
+            response = await api.chat.chat_message.add(
                 ChatMessageAddRequest(
                     chat_id=lead_ctx.chat_id,
                     author_entity_type="Client",
@@ -982,10 +917,9 @@ class InstagramCrmChannelIntegration(ClientBase):
                     text=text,
                     external_message_id=external_message_id,
                 ),
-                APIBaseResponse[Dict[str, Any]],
             )
         if not response.ok:
-            payload = response.result if isinstance(response.result, dict) else {}
+            payload = _row_to_dict(response.result)
             raise RuntimeError(f"ChatMessage/Add rejected: error={payload.get('error')} description={payload.get('description')}")
 
     @classmethod
@@ -1143,25 +1077,33 @@ class InstagramCrmChannelIntegration(ClientBase):
     @classmethod
     async def _load_chat_message(cls, connected_integration_id: str, chat_id: str, message_id: str) -> Optional[ChatMessage]:
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-            response = await api.call(
-                "ChatMessage/Get",
-                ChatMessageGetRequest(chat_id=chat_id, ids=[message_id], limit=1, offset=0, include_staff_private=True),
-                APIBaseResponse[Any],
+            response = await api.chat.chat_message.get(
+                ChatMessageGetRequest(
+                    chat_id=chat_id,
+                    ids=[message_id],
+                    limit=1,
+                    offset=0,
+                    include_staff_private=True,
+                )
             )
         if not response.ok or not isinstance(response.result, list) or not response.result:
             return None
+        row = response.result[0]
+        if isinstance(row, ChatMessage):
+            return row
         try:
-            return ChatMessage.model_validate(response.result[0])
+            return ChatMessage.model_validate(row)
         except Exception:
             return None
 
     @classmethod
     async def _mark_chat_message_sent(cls, connected_integration_id: str, message_id: str, external_message_id: str) -> None:
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-            response = await api.call(
-                "ChatMessage/MarkSent",
-                ChatMessageMarkSentRequest(id=message_id, external_message_id=external_message_id),
-                APIBaseResponse[Any],
+            response = await api.chat.chat_message.mark_sent(
+                ChatMessageMarkSentRequest(
+                    id=message_id,
+                    external_message_id=external_message_id,
+                )
             )
         if not response.ok:
             logger.warning("ChatMessage/MarkSent rejected: ci=%s message_id=%s payload=%s", connected_integration_id, message_id, response.result)

@@ -23,7 +23,6 @@ from config.settings import settings as app_settings
 from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
 from core.redis import redis_client
-from schemas.api.base import APIBaseResponse
 from schemas.api.chat.chat_message import (
     ChatMessageAddFileRequest,
     ChatMessageAddRequest,
@@ -33,6 +32,7 @@ from schemas.api.common.filters import Filter, FilterOperator
 from schemas.api.crm.client import ClientAddRequest, ClientGetRequest
 from schemas.api.crm.ticket import (
     TicketAddRequest,
+    TicketCloseRequest,
     TicketDirectionEnum,
     TicketGetRequest,
     TicketSetResponsibleRequest,
@@ -40,6 +40,8 @@ from schemas.api.crm.ticket import (
 from schemas.api.integrations.connected_integration_setting import (
     ConnectedIntegrationSettingRequest,
 )
+from schemas.api.integrations.connected_integration import ConnectedIntegrationGetRequest
+from schemas.api.rbac.user import UserGetRequest
 from schemas.integration.base import IntegrationErrorModel, IntegrationErrorResponse
 
 logger = setup_logger("asterisk_crm_channel")
@@ -87,6 +89,7 @@ class AsteriskCrmChannelConfig:
         "failed",
     }
     EVENT_STATUSES = CALL_STATE_STATUSES | {"recording_ready"}
+    CLOSE_ON_CALL_END_STATUSES = {"completed"}
 
 
 @dataclass
@@ -102,11 +105,11 @@ class RuntimeConfig:
     subject_template: str
     allowed_did_set: set[str]
     recording_base_url: Optional[str]
-    dedupe_ttl_sec: int
     state_ttl_sec: int
     default_country_code: str
     assign_responsible_by_operator_ext: bool
     message_language: str
+    close_ticket_on_call_end: bool
 
 
 @dataclass
@@ -929,98 +932,6 @@ return 0
             _HTTP_CLIENT = httpx.AsyncClient(timeout=90)
         return _HTTP_CLIENT
 
-    @staticmethod
-    def _extract_ci_id(payload: Any) -> Optional[str]:
-        if not isinstance(payload, dict):
-            return None
-        for key in ("connected_integration_id", "connectedIntegrationId", "id"):
-            value = str(payload.get(key) or "").strip()
-            if value:
-                return value
-        nested = payload.get("connected_integration")
-        if isinstance(nested, dict):
-            for key in ("connected_integration_id", "connectedIntegrationId", "id"):
-                value = str(nested.get(key) or "").strip()
-                if value:
-                    return value
-        return None
-
-    @staticmethod
-    def _extract_ci_active_flag(payload: Any) -> Optional[bool]:
-        if isinstance(payload, dict):
-            for key in ("is_active", "isActive"):
-                if key in payload:
-                    return _to_bool(payload.get(key), True)
-            for nested_key in ("connected_integration", "integration", "item", "data", "result"):
-                nested = payload.get(nested_key)
-                if nested is None:
-                    continue
-                nested_value = AsteriskCrmChannelIntegration._extract_ci_active_flag(nested)
-                if nested_value is not None:
-                    return nested_value
-            return None
-        if isinstance(payload, list):
-            for row in payload:
-                nested_value = AsteriskCrmChannelIntegration._extract_ci_active_flag(row)
-                if nested_value is not None:
-                    return nested_value
-            return None
-        return None
-
-    @classmethod
-    def _extract_ci_active_flag_for_ci(
-        cls,
-        payload: Any,
-        connected_integration_id: str,
-    ) -> Optional[bool]:
-        ci = str(connected_integration_id or "").strip()
-        if not ci:
-            return cls._extract_ci_active_flag(payload)
-
-        if isinstance(payload, list):
-            matched = False
-            single_unknown_row: Optional[Any] = payload[0] if len(payload) == 1 else None
-            for row in payload:
-                if not isinstance(row, dict):
-                    continue
-                row_ci = cls._extract_ci_id(row)
-                if not row_ci:
-                    continue
-                if row_ci != ci:
-                    continue
-                matched = True
-                nested_value = cls._extract_ci_active_flag_for_ci(row, ci)
-                if nested_value is not None:
-                    return nested_value
-            if matched:
-                return None
-            if single_unknown_row is not None:
-                return cls._extract_ci_active_flag_for_ci(single_unknown_row, ci)
-            return None
-
-        if isinstance(payload, dict):
-            payload_ci = cls._extract_ci_id(payload)
-            if payload_ci and payload_ci != ci:
-                for nested_key in ("connected_integration", "integration", "item", "data", "result"):
-                    nested = payload.get(nested_key)
-                    nested_value = cls._extract_ci_active_flag_for_ci(nested, ci)
-                    if nested_value is not None:
-                        return nested_value
-                return None
-
-            for key in ("is_active", "isActive"):
-                if key in payload:
-                    return _to_bool(payload.get(key), True)
-
-            for nested_key in ("connected_integration", "integration", "item", "data", "result"):
-                nested = payload.get(nested_key)
-                nested_value = cls._extract_ci_active_flag_for_ci(nested, ci)
-                if nested_value is not None:
-                    return nested_value
-            return None
-
-        return None
-
     @classmethod
     async def _is_connected_integration_active(
         cls,
@@ -1057,40 +968,38 @@ return 0
                         cls._ci_active_memory_cache_set(ci, detected)
                         return detected
 
-            request_payloads: Tuple[Dict[str, Any], ...] = (
-                {},
-                {"connected_integration_id": ci, "limit": 1, "offset": 0},
-            )
             detected: Optional[bool] = None
             last_error: Optional[Exception] = None
-            for payload in request_payloads:
-                try:
-                    async with RegosAPI(connected_integration_id=ci) as api:
-                        response = await api.call(
-                            "ConnectedIntegration/Get",
-                            payload,
-                            APIBaseResponse[Any],
+            try:
+                async with RegosAPI(connected_integration_id=ci) as api:
+                    response = await api.integrations.connected_integration.get(
+                        ConnectedIntegrationGetRequest(
+                            connected_integration_ids=[ci],
+                            include_name=False,
+                            include_schedule=False,
                         )
-                    if not response.ok:
-                        continue
-                    detected = cls._extract_ci_active_flag_for_ci(
-                        response.result,
-                        ci,
                     )
-                    if detected is not None:
+                if response.ok and isinstance(response.result, list):
+                    for row in response.result:
+                        row_ci = str(getattr(row, "connected_integration_id", "") or "").strip()
+                        if row_ci and row_ci != ci:
+                            continue
+                        row_active = getattr(row, "is_active", None)
+                        if row_active is None:
+                            continue
+                        detected = bool(row_active)
                         break
-                except httpx.HTTPStatusError as error:
-                    last_error = error
-                    status_code = (
-                        int(error.response.status_code)
-                        if error.response is not None
-                        else None
-                    )
-                    if status_code in {401, 403, 404}:
-                        detected = False
-                        break
-                except Exception as error:
-                    last_error = error
+            except httpx.HTTPStatusError as error:
+                last_error = error
+                status_code = (
+                    int(error.response.status_code)
+                    if error.response is not None
+                    else None
+                )
+                if status_code in {401, 403, 404}:
+                    detected = False
+            except Exception as error:
+                last_error = error
 
             if detected is None:
                 if last_error is not None:
@@ -1247,22 +1156,7 @@ return 0
             recording_base_url=(
                 str(settings_map.get("asterisk_recording_base_url") or "").strip() or None
             ),
-            dedupe_ttl_sec=max(
-                _to_int(
-                    settings_map.get("lead_dedupe_ttl_sec"),
-                    AsteriskCrmChannelConfig.DEFAULT_DEDUPE_TTL_SEC,
-                )
-                or AsteriskCrmChannelConfig.DEFAULT_DEDUPE_TTL_SEC,
-                60,
-            ),
-            state_ttl_sec=max(
-                _to_int(
-                    settings_map.get("state_ttl_sec"),
-                    AsteriskCrmChannelConfig.DEFAULT_STATE_TTL_SEC,
-                )
-                or AsteriskCrmChannelConfig.DEFAULT_STATE_TTL_SEC,
-                60,
-            ),
+            state_ttl_sec=AsteriskCrmChannelConfig.DEFAULT_STATE_TTL_SEC,
             default_country_code=default_country_code,
             assign_responsible_by_operator_ext=_to_bool(
                 settings_map.get("asterisk_assign_responsible_by_operator_ext"),
@@ -1271,6 +1165,10 @@ return 0
             message_language=_normalize_message_language(
                 settings_map.get("asterisk_message_language"),
                 "ru",
+            ),
+            close_ticket_on_call_end=_to_bool(
+                settings_map.get("asterisk_close_ticket_on_call_end"),
+                False,
             ),
         )
 
@@ -2057,7 +1955,6 @@ return 0
                 "event": cls._event_to_dict(event),
                 "attempt": "0",
                 "enqueued_at": str(_now_ts()),
-                "state_ttl_sec": str(runtime.state_ttl_sec),
             },
             stream_ttl_sec=runtime.state_ttl_sec,
         )
@@ -2640,11 +2537,7 @@ return 0
         connected_integration_id: str,
     ) -> None:
         attempts = _to_int(fields.get("attempt"), 0) or 0
-        state_ttl_sec = max(
-            _to_int(fields.get("state_ttl_sec"), AsteriskCrmChannelConfig.DEFAULT_STATE_TTL_SEC)
-            or AsteriskCrmChannelConfig.DEFAULT_STATE_TTL_SEC,
-            60,
-        )
+        state_ttl_sec = AsteriskCrmChannelConfig.DEFAULT_STATE_TTL_SEC
         try:
             raw_event = fields.get("event")
             if not raw_event:
@@ -2804,7 +2697,7 @@ return 0
                 await cls._redis_set_with_ttl(
                     dedupe_key,
                     "1",
-                    runtime.dedupe_ttl_sec,
+                    AsteriskCrmChannelConfig.DEFAULT_DEDUPE_TTL_SEC,
                     min_ttl_sec=60,
                 )
                 return
@@ -2822,7 +2715,7 @@ return 0
                     await cls._redis_set_with_ttl(
                         dedupe_key,
                         "1",
-                        runtime.dedupe_ttl_sec,
+                        AsteriskCrmChannelConfig.DEFAULT_DEDUPE_TTL_SEC,
                         min_ttl_sec=60,
                     )
                     return
@@ -2839,7 +2732,7 @@ return 0
             await cls._redis_set_with_ttl(
                 dedupe_key,
                 "1",
-                runtime.dedupe_ttl_sec,
+                AsteriskCrmChannelConfig.DEFAULT_DEDUPE_TTL_SEC,
                 min_ttl_sec=60,
             )
         except Exception as error:
@@ -3330,6 +3223,30 @@ return 0
             if token
         }
 
+    @staticmethod
+    def _row_to_dict(row: Any) -> Dict[str, Any]:
+        if isinstance(row, dict):
+            return row
+        if hasattr(row, "model_dump"):
+            try:
+                dumped = row.model_dump(mode="json")
+                if isinstance(dumped, dict):
+                    return dumped
+            except Exception:
+                return {}
+        return {}
+
+    @classmethod
+    def _rows_to_dict_list(cls, rows: Any) -> List[Dict[str, Any]]:
+        if not isinstance(rows, list):
+            return []
+        parsed: List[Dict[str, Any]] = []
+        for row in rows:
+            row_dict = cls._row_to_dict(row)
+            if row_dict:
+                parsed.append(row_dict)
+        return parsed
+
     @classmethod
     def _user_matches_operator_ext(
         cls,
@@ -3463,15 +3380,13 @@ return 0
             async with RegosAPI(
                 connected_integration_id=runtime.connected_integration_id
             ) as api:
-                response = await api.call(
-                    "User/Get",
-                    {
-                        "active": True,
-                        "internal_phone": normalized_ext,
-                        "limit": 50,
-                        "offset": 0,
-                    },
-                    APIBaseResponse[List[Dict[str, Any]]],
+                response = await api.rbac.user.get(
+                    UserGetRequest(
+                        active=True,
+                        internal_phone=normalized_ext,
+                        limit=50,
+                        offset=0,
+                    )
                 )
         except Exception as error:
             logger.warning(
@@ -3494,7 +3409,7 @@ return 0
         resolved_user_id: Optional[int] = None
         resolved_user_name: Optional[str] = None
         if response and response.ok:
-            internal_rows = response.result if isinstance(response.result, list) else []
+            internal_rows = cls._rows_to_dict_list(response.result)
             resolved_user_id, resolved_user_name = _resolve_from_rows(
                 internal_rows,
                 allow_single_fallback=True,
@@ -3521,15 +3436,13 @@ return 0
             async with RegosAPI(
                 connected_integration_id=runtime.connected_integration_id
             ) as api:
-                response = await api.call(
-                    "User/Get",
-                    {
-                        "active": True,
-                        "search": normalized_ext,
-                        "limit": 50,
-                        "offset": 0,
-                    },
-                    APIBaseResponse[List[Dict[str, Any]]],
+                response = await api.rbac.user.get(
+                    UserGetRequest(
+                        active=True,
+                        search=normalized_ext,
+                        limit=50,
+                        offset=0,
+                    )
                 )
         except Exception as error:
             logger.warning(
@@ -3549,7 +3462,7 @@ return 0
             )
             return None
 
-        rows = response.result if isinstance(response.result, list) else []
+        rows = cls._rows_to_dict_list(response.result)
         resolved_user_id, resolved_user_name = _resolve_from_rows(
             rows,
             allow_single_fallback=False,
@@ -3604,15 +3517,13 @@ return 0
             async with RegosAPI(
                 connected_integration_id=runtime.connected_integration_id
             ) as api:
-                response = await api.call(
-                    "User/Get",
-                    {
-                        "ids": [user_id],
-                        "active": True,
-                        "limit": 1,
-                        "offset": 0,
-                    },
-                    APIBaseResponse[List[Dict[str, Any]]],
+                response = await api.rbac.user.get(
+                    UserGetRequest(
+                        ids=[user_id],
+                        active=True,
+                        limit=1,
+                        offset=0,
+                    )
                 )
         except Exception as error:
             logger.warning(
@@ -3634,7 +3545,7 @@ return 0
             )
             return None
 
-        rows = response.result if isinstance(response.result, list) else []
+        rows = cls._rows_to_dict_list(response.result)
         if not rows or not isinstance(rows[0], dict):
             return None
 
@@ -4103,8 +4014,7 @@ return 0
         file_ids: Optional[List[int]] = None,
     ) -> str:
         async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
-            response = await api.call(
-                "ChatMessage/Add",
+            response = await api.chat.chat_message.add(
                 ChatMessageAddRequest(
                     chat_id=lead_ctx.chat_id,
                     message_type=ChatMessageTypeEnum.System,
@@ -4112,7 +4022,6 @@ return 0
                     file_ids=file_ids or None,
                     external_message_id=cls._event_external_message_id(event),
                 ),
-                APIBaseResponse[Dict[str, Any]],
             )
 
         if not response.ok:
@@ -4144,15 +4053,13 @@ return 0
         payload_b64: str,
     ) -> int:
         async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
-            response = await api.call(
-                "ChatMessage/AddFile",
+            response = await api.chat.chat_message.add_file(
                 ChatMessageAddFileRequest(
                     chat_id=chat_id,
                     name=file_name,
                     extension=extension,
                     data=payload_b64,
                 ),
-                APIBaseResponse[Dict[str, Any]],
             )
 
         if not response.ok:
@@ -4312,9 +4219,79 @@ return 0
         event: CallEvent,
         lead_ctx: LeadContext,
     ) -> None:
-        _ = (runtime, event, lead_ctx)
-        # Ticket-only flow: telephony does not transition ticket status automatically.
-        return
+        if not runtime.close_ticket_on_call_end:
+            return
+        if lead_ctx.ticket_id <= 0:
+            return
+        status = str(event.status or "").strip().lower()
+        if status not in AsteriskCrmChannelConfig.CLOSE_ON_CALL_END_STATUSES:
+            return
+        has_responsible = await cls._ticket_has_responsible_before_close(
+            runtime=runtime,
+            ticket_id=int(lead_ctx.ticket_id),
+        )
+        if not has_responsible:
+            return
+
+        resolved_date = int(event.event_ts) if int(event.event_ts or 0) > 0 else None
+        try:
+            async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
+                response = await api.crm.ticket.close(
+                    TicketCloseRequest(
+                        id=int(lead_ctx.ticket_id),
+                        resolved_date=resolved_date,
+                    )
+                )
+            if response.ok:
+                return
+            payload = response.result if isinstance(response.result, dict) else {}
+            logger.warning(
+                "Ticket/Close rejected: ci=%s ticket_id=%s status=%s error=%s description=%s",
+                runtime.connected_integration_id,
+                lead_ctx.ticket_id,
+                status,
+                payload.get("error"),
+                payload.get("description"),
+            )
+        except Exception as error:
+            logger.warning(
+                "Ticket close failed: ci=%s ticket_id=%s status=%s error=%s",
+                runtime.connected_integration_id,
+                lead_ctx.ticket_id,
+                status,
+                error,
+            )
+
+    @classmethod
+    async def _ticket_has_responsible_before_close(
+        cls,
+        runtime: RuntimeConfig,
+        ticket_id: int,
+    ) -> bool:
+        if ticket_id <= 0:
+            return False
+        try:
+            async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
+                response = await api.crm.ticket.get(
+                    TicketGetRequest(
+                        ids=[int(ticket_id)],
+                        limit=1,
+                        offset=0,
+                    )
+                )
+            rows = response.result if response.ok and isinstance(response.result, list) else []
+            ticket = rows[0] if rows else None
+            if not ticket:
+                return False
+            return bool(_to_int(getattr(ticket, "responsible_user_id", None), None))
+        except Exception as error:
+            logger.warning(
+                "Ticket/Get failed while checking responsible before close: ci=%s ticket_id=%s error=%s",
+                runtime.connected_integration_id,
+                ticket_id,
+                error,
+            )
+            return False
 
     @staticmethod
     def _extract_events_from_body(body: Any) -> List[Dict[str, Any]]:

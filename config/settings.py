@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     debug: bool = True
     api_token: str = ""
     integration_url: str = "https://integration.regos.uz"
+    proxy_integration_url: str = ""
     integration_rps: int = 2
     integration_burst: int = 50
     service_a_token: str = ""
@@ -17,6 +18,7 @@ class Settings(BaseSettings):
     redis_db: int = 0
     redis_password: str = "psw"
     redis_cache_ttl: int = 60
+    telegram_webhook_refresh_ttl: int = 86400
     telegram_update_mode: str = "webhook"
 
     oauth_endpoint: str = "https://auth.regos.uz/" # oath/token
