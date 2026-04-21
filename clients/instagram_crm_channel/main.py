@@ -154,6 +154,22 @@ def _redis_enabled() -> bool:
     return bool(app_settings.redis_enabled and redis_client is not None)
 
 
+def _extract_connected_integration_id(payload: Any) -> Optional[str]:
+    if not isinstance(payload, dict):
+        return None
+    for key in ("connected_integration_id", "connectedIntegrationId", "id"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    nested = payload.get("connected_integration")
+    if isinstance(nested, dict):
+        for key in ("connected_integration_id", "connectedIntegrationId", "id"):
+            value = str(nested.get(key) or "").strip()
+            if value:
+                return value
+    return None
+
+
 def _extract_connected_integration_active_flag(payload: Any) -> Optional[bool]:
     if isinstance(payload, dict):
         for key in ("is_active", "isActive"):
@@ -170,6 +186,59 @@ def _extract_connected_integration_active_flag(payload: Any) -> Optional[bool]:
             nested_value = _extract_connected_integration_active_flag(row)
             if nested_value is not None:
                 return nested_value
+    return None
+
+
+def _extract_connected_integration_active_flag_for_ci(
+    payload: Any,
+    connected_integration_id: str,
+) -> Optional[bool]:
+    ci = str(connected_integration_id or "").strip()
+    if not ci:
+        return _extract_connected_integration_active_flag(payload)
+
+    if isinstance(payload, list):
+        matched = False
+        single_unknown_row: Optional[Any] = payload[0] if len(payload) == 1 else None
+        for row in payload:
+            if not isinstance(row, dict):
+                continue
+            row_ci = _extract_connected_integration_id(row)
+            if not row_ci:
+                continue
+            if row_ci != ci:
+                continue
+            matched = True
+            nested_value = _extract_connected_integration_active_flag_for_ci(row, ci)
+            if nested_value is not None:
+                return nested_value
+        if matched:
+            return None
+        if single_unknown_row is not None:
+            return _extract_connected_integration_active_flag_for_ci(single_unknown_row, ci)
+        return None
+
+    if isinstance(payload, dict):
+        payload_ci = _extract_connected_integration_id(payload)
+        if payload_ci and payload_ci != ci:
+            for nested_key in ("connected_integration", "integration", "item", "data", "result"):
+                nested = payload.get(nested_key)
+                nested_value = _extract_connected_integration_active_flag_for_ci(nested, ci)
+                if nested_value is not None:
+                    return nested_value
+            return None
+
+        for key in ("is_active", "isActive"):
+            if key in payload:
+                return _to_bool(payload.get(key), True)
+
+        for nested_key in ("connected_integration", "integration", "item", "data", "result"):
+            nested = payload.get(nested_key)
+            nested_value = _extract_connected_integration_active_flag_for_ci(nested, ci)
+            if nested_value is not None:
+                return nested_value
+        return None
+
     return None
 
 
@@ -286,7 +355,10 @@ class InstagramCrmChannelIntegration(ClientBase):
                 async with RegosAPI(connected_integration_id=ci) as api:
                     response = await api.call("ConnectedIntegration/Get", payload, APIBaseResponse[Any])
                 if response.ok:
-                    detected = _extract_connected_integration_active_flag(response.result)
+                    detected = _extract_connected_integration_active_flag_for_ci(
+                        response.result,
+                        ci,
+                    )
                     if detected is not None:
                         break
             except Exception:

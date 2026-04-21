@@ -930,6 +930,22 @@ return 0
         return _HTTP_CLIENT
 
     @staticmethod
+    def _extract_ci_id(payload: Any) -> Optional[str]:
+        if not isinstance(payload, dict):
+            return None
+        for key in ("connected_integration_id", "connectedIntegrationId", "id"):
+            value = str(payload.get(key) or "").strip()
+            if value:
+                return value
+        nested = payload.get("connected_integration")
+        if isinstance(nested, dict):
+            for key in ("connected_integration_id", "connectedIntegrationId", "id"):
+                value = str(nested.get(key) or "").strip()
+                if value:
+                    return value
+        return None
+
+    @staticmethod
     def _extract_ci_active_flag(payload: Any) -> Optional[bool]:
         if isinstance(payload, dict):
             for key in ("is_active", "isActive"):
@@ -949,6 +965,60 @@ return 0
                 if nested_value is not None:
                     return nested_value
             return None
+        return None
+
+    @classmethod
+    def _extract_ci_active_flag_for_ci(
+        cls,
+        payload: Any,
+        connected_integration_id: str,
+    ) -> Optional[bool]:
+        ci = str(connected_integration_id or "").strip()
+        if not ci:
+            return cls._extract_ci_active_flag(payload)
+
+        if isinstance(payload, list):
+            matched = False
+            single_unknown_row: Optional[Any] = payload[0] if len(payload) == 1 else None
+            for row in payload:
+                if not isinstance(row, dict):
+                    continue
+                row_ci = cls._extract_ci_id(row)
+                if not row_ci:
+                    continue
+                if row_ci != ci:
+                    continue
+                matched = True
+                nested_value = cls._extract_ci_active_flag_for_ci(row, ci)
+                if nested_value is not None:
+                    return nested_value
+            if matched:
+                return None
+            if single_unknown_row is not None:
+                return cls._extract_ci_active_flag_for_ci(single_unknown_row, ci)
+            return None
+
+        if isinstance(payload, dict):
+            payload_ci = cls._extract_ci_id(payload)
+            if payload_ci and payload_ci != ci:
+                for nested_key in ("connected_integration", "integration", "item", "data", "result"):
+                    nested = payload.get(nested_key)
+                    nested_value = cls._extract_ci_active_flag_for_ci(nested, ci)
+                    if nested_value is not None:
+                        return nested_value
+                return None
+
+            for key in ("is_active", "isActive"):
+                if key in payload:
+                    return _to_bool(payload.get(key), True)
+
+            for nested_key in ("connected_integration", "integration", "item", "data", "result"):
+                nested = payload.get(nested_key)
+                nested_value = cls._extract_ci_active_flag_for_ci(nested, ci)
+                if nested_value is not None:
+                    return nested_value
+            return None
+
         return None
 
     @classmethod
@@ -1003,7 +1073,10 @@ return 0
                         )
                     if not response.ok:
                         continue
-                    detected = cls._extract_ci_active_flag(response.result)
+                    detected = cls._extract_ci_active_flag_for_ci(
+                        response.result,
+                        ci,
+                    )
                     if detected is not None:
                         break
                 except httpx.HTTPStatusError as error:
