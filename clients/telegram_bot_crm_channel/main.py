@@ -18,6 +18,8 @@ import httpx
 from aiogram import Bot
 from aiogram.types import (
     BufferedInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
     KeyboardButton,
     Message,
     ReplyKeyboardMarkup,
@@ -54,6 +56,9 @@ from schemas.api.crm.ticket import (
     TicketAddRequest,
     TicketDirectionEnum,
     TicketGetRequest,
+    TicketSetRatingRequest,
+    TicketSetStatusRequest,
+    TicketStatusEnum,
 )
 from schemas.api.integrations.connected_integration import (
     ConnectedIntegrationEditRequest,
@@ -129,6 +134,13 @@ class TelegramBotCrmChannelConfig:
     PHONE_STATE_FIELD = "phone_state"
     CLIENT_TELEGRAM_FIELD_KEY = "field_telegram_id"
     UNKNOWN_CLIENT_NAME = "Unknown"
+    RATING_CALLBACK_PREFIX = "tgcrm_rate"
+    RATING_POSITIVE_THRESHOLD = 4
+    RATING_STATE_TTL_SEC = 30 * 24 * 60 * 60
+    RATING_CALLBACK_TTL_SEC = 24 * 60 * 60
+    RATING_ACK_TEXT = "Thank you for your feedback."
+    RATING_ALREADY_SAVED_ACK_TEXT = "Your rating is already saved."
+    RATING_ERROR_ACK_TEXT = "We could not save your rating right now."
 
 
 @dataclass
@@ -153,6 +165,18 @@ class RuntimeConfig:
     forward_system_messages: bool
     phone_request_text: Optional[str]
     phone_share_button_text: str
+
+
+@dataclass
+class ChannelMessageSettings:
+    start_message: Optional[str]
+    end_message: Optional[str]
+    off_hours_message: Optional[str]
+    rating_enabled: bool
+    rating_message: Optional[str]
+    rating_positive_message: Optional[str]
+    rating_negative_message: Optional[str]
+    intervals: List[Dict[str, int]]
 
 
 _MANAGER_LOCK = asyncio.Lock()
@@ -1210,6 +1234,49 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         )
 
     @staticmethod
+    def _rating_state_key(connected_integration_id: str, ticket_id: int) -> str:
+        return TelegramBotCrmChannelIntegration._redis_key(
+            "rating", "ticket", connected_integration_id, ticket_id
+        )
+
+    @staticmethod
+    def _rating_callback_dedupe_key(
+        connected_integration_id: str, bot_hash: str, callback_id: str
+    ) -> str:
+        return TelegramBotCrmChannelIntegration._redis_key(
+            "rating", "cb", connected_integration_id, bot_hash, callback_id
+        )
+
+    @staticmethod
+    def _rating_lock_key(connected_integration_id: str, ticket_id: int) -> str:
+        return TelegramBotCrmChannelIntegration._redis_key(
+            "lock", "rating", connected_integration_id, ticket_id
+        )
+
+    @staticmethod
+    def _build_rating_callback_data(ticket_id: int, rating: int) -> str:
+        return (
+            f"{TelegramBotCrmChannelConfig.RATING_CALLBACK_PREFIX}:{int(ticket_id)}:{int(rating)}"
+        )
+
+    @staticmethod
+    def _parse_rating_callback_data(value: Any) -> Tuple[Optional[int], Optional[int]]:
+        text = str(value or "").strip()
+        prefix = f"{TelegramBotCrmChannelConfig.RATING_CALLBACK_PREFIX}:"
+        if not text or not text.startswith(prefix):
+            return None, None
+        parts = text.split(":")
+        if len(parts) != 3:
+            return None, None
+        ticket_id = _parse_int(parts[1], None)
+        rating = _parse_int(parts[2], None)
+        if not ticket_id or not rating:
+            return None, None
+        if rating < 1 or rating > 5:
+            return None, None
+        return int(ticket_id), int(rating)
+
+    @staticmethod
     def _lead_sync_cache_key(connected_integration_id: str, lead_id: int) -> str:
         return TelegramBotCrmChannelIntegration._redis_key(
             "lead_sync", connected_integration_id, lead_id
@@ -1411,7 +1478,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
     @staticmethod
     def _parse_channel_messages_cache(
         raw: Optional[str],
-    ) -> Optional[Tuple[Optional[str], Optional[str]]]:
+    ) -> Optional[ChannelMessageSettings]:
         if not raw:
             return None
         try:
@@ -1422,17 +1489,110 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             return None
         start_message = str(payload.get("start_message") or "").strip() or None
         end_message = str(payload.get("end_message") or "").strip() or None
-        return start_message, end_message
+        off_hours_message = str(payload.get("off_hours_message") or "").strip() or None
+        rating_enabled = _parse_bool(payload.get("rating_enabled"), False)
+        rating_message = str(payload.get("rating_message") or "").strip() or None
+        rating_positive_message = (
+            str(payload.get("rating_positive_message") or "").strip() or None
+        )
+        rating_negative_message = (
+            str(payload.get("rating_negative_message") or "").strip() or None
+        )
+        parsed_intervals: List[Dict[str, int]] = []
+        intervals = payload.get("intervals")
+        if isinstance(intervals, list):
+            for interval in intervals:
+                if not isinstance(interval, dict):
+                    continue
+                day_of_week = _parse_int(str(interval.get("day_of_week") or ""), None)
+                start_minute = _parse_int(str(interval.get("start_minute") or ""), None)
+                end_minute = _parse_int(str(interval.get("end_minute") or ""), None)
+                if day_of_week is None or start_minute is None or end_minute is None:
+                    continue
+                if not (1 <= int(day_of_week) <= 7):
+                    continue
+                if not (0 <= int(start_minute) <= 1439 and 0 <= int(end_minute) <= 1439):
+                    continue
+                if int(start_minute) == int(end_minute):
+                    continue
+                parsed_intervals.append(
+                    {
+                        "day_of_week": int(day_of_week),
+                        "start_minute": int(start_minute),
+                        "end_minute": int(end_minute),
+                    }
+                )
+        return ChannelMessageSettings(
+            start_message=start_message,
+            end_message=end_message,
+            off_hours_message=off_hours_message,
+            rating_enabled=rating_enabled,
+            rating_message=rating_message,
+            rating_positive_message=rating_positive_message,
+            rating_negative_message=rating_negative_message,
+            intervals=parsed_intervals,
+        )
+
+    @staticmethod
+    def _is_now_within_channel_intervals(
+        intervals: List[Dict[str, int]],
+        *,
+        now_ts: Optional[int] = None,
+    ) -> bool:
+        # Empty schedule means "always available" to avoid accidental off-hours spam.
+        if not intervals:
+            return True
+
+        now_struct = time.localtime(now_ts) if now_ts is not None else time.localtime()
+        current_day = int(now_struct.tm_wday) + 1  # tm_wday: Monday=0
+        current_minute = int(now_struct.tm_hour) * 60 + int(now_struct.tm_min)
+
+        for interval in intervals:
+            day = _parse_int(str(interval.get("day_of_week") or ""), None)
+            start_minute = _parse_int(str(interval.get("start_minute") or ""), None)
+            end_minute = _parse_int(str(interval.get("end_minute") or ""), None)
+            if day is None or start_minute is None or end_minute is None:
+                continue
+            day_int = int(day)
+            start_int = int(start_minute)
+            end_int = int(end_minute)
+            if day_int < 1 or day_int > 7 or start_int < 0 or start_int > 1439 or end_int < 0 or end_int > 1439:
+                continue
+            if start_int == end_int:
+                continue
+
+            # Regular daytime interval.
+            if start_int < end_int:
+                if current_day == day_int and start_int <= current_minute < end_int:
+                    return True
+                continue
+
+            # Overnight interval (e.g. 22:00 -> 02:00).
+            next_day = day_int + 1 if day_int < 7 else 1
+            if current_day == day_int and current_minute >= start_int:
+                return True
+            if current_day == next_day and current_minute < end_int:
+                return True
+        return False
 
     @classmethod
-    async def _get_channel_start_end_messages(
+    async def _get_channel_message_settings(
         cls,
         connected_integration_id: str,
         channel_id: Any,
-    ) -> Tuple[Optional[str], Optional[str]]:
+    ) -> ChannelMessageSettings:
         resolved_channel_id = _parse_int(str(channel_id or ""), None)
         if not resolved_channel_id:
-            return None, None
+            return ChannelMessageSettings(
+                start_message=None,
+                end_message=None,
+                off_hours_message=None,
+                rating_enabled=False,
+                rating_message=None,
+                rating_positive_message=None,
+                rating_negative_message=None,
+                intervals=[],
+            )
 
         cache_key = cls._channel_cache_key(
             connected_integration_id,
@@ -1453,21 +1613,91 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 resolved_channel_id,
                 response.result,
             )
-            return None, None
+            return ChannelMessageSettings(
+                start_message=None,
+                end_message=None,
+                off_hours_message=None,
+                rating_enabled=False,
+                rating_message=None,
+                rating_positive_message=None,
+                rating_negative_message=None,
+                intervals=[],
+            )
         rows = response.result if response.ok and isinstance(response.result, list) else []
         channel: Optional[Channel] = rows[0] if rows else None
 
         start_message = str(getattr(channel, "start_message", "") or "").strip() or None
         end_message = str(getattr(channel, "end_message", "") or "").strip() or None
+        off_hours_message = str(getattr(channel, "off_hours_message", "") or "").strip() or None
+        rating_enabled = bool(getattr(channel, "rating_enabled", False))
+        rating_message = str(getattr(channel, "rating_message", "") or "").strip() or None
+        rating_positive_message = (
+            str(getattr(channel, "rating_positive_message", "") or "").strip() or None
+        )
+        rating_negative_message = (
+            str(getattr(channel, "rating_negative_message", "") or "").strip() or None
+        )
+        parsed_intervals: List[Dict[str, int]] = []
+        raw_intervals = getattr(channel, "intervals", None)
+        if isinstance(raw_intervals, list):
+            for interval in raw_intervals:
+                day_of_week = _parse_int(str(getattr(interval, "day_of_week", None) or ""), None)
+                start_minute = _parse_int(str(getattr(interval, "start_minute", None) or ""), None)
+                end_minute = _parse_int(str(getattr(interval, "end_minute", None) or ""), None)
+                if day_of_week is None or start_minute is None or end_minute is None:
+                    continue
+                if not (1 <= int(day_of_week) <= 7):
+                    continue
+                if not (0 <= int(start_minute) <= 1439 and 0 <= int(end_minute) <= 1439):
+                    continue
+                if int(start_minute) == int(end_minute):
+                    continue
+                parsed_intervals.append(
+                    {
+                        "day_of_week": int(day_of_week),
+                        "start_minute": int(start_minute),
+                        "end_minute": int(end_minute),
+                    }
+                )
         payload = _json_dumps(
-            {"start_message": start_message or "", "end_message": end_message or ""}
+            {
+                "start_message": start_message or "",
+                "end_message": end_message or "",
+                "off_hours_message": off_hours_message or "",
+                "rating_enabled": rating_enabled,
+                "rating_message": rating_message or "",
+                "rating_positive_message": rating_positive_message or "",
+                "rating_negative_message": rating_negative_message or "",
+                "intervals": parsed_intervals,
+            }
         )
         await cls._redis_set_with_ttl(
             cache_key,
             payload,
             TelegramBotCrmChannelConfig.SETTINGS_TTL,
         )
-        return start_message, end_message
+        return ChannelMessageSettings(
+            start_message=start_message,
+            end_message=end_message,
+            off_hours_message=off_hours_message,
+            rating_enabled=rating_enabled,
+            rating_message=rating_message,
+            rating_positive_message=rating_positive_message,
+            rating_negative_message=rating_negative_message,
+            intervals=parsed_intervals,
+        )
+
+    @classmethod
+    async def _get_channel_start_end_messages(
+        cls,
+        connected_integration_id: str,
+        channel_id: Any,
+    ) -> Tuple[Optional[str], Optional[str]]:
+        channel_settings = await cls._get_channel_message_settings(
+            connected_integration_id=connected_integration_id,
+            channel_id=channel_id,
+        )
+        return channel_settings.start_message, channel_settings.end_message
 
     @staticmethod
     def _parse_bots(settings_map: Dict[str, str]) -> List[BotSlotConfig]:
@@ -2933,6 +3163,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         bot_cfg: BotSlotConfig,
         tg_chat_id: str,
         text: Optional[str],
+        reply_markup: Optional[Any] = None,
     ) -> Optional[str]:
         rendered_text, parse_mode = cls._channel_message_to_telegram_payload(text)
         if not rendered_text.strip():
@@ -2942,6 +3173,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             chat_id=_tg_chat_id_cast(tg_chat_id),
             text=rendered_text,
             parse_mode=parse_mode,
+            reply_markup=reply_markup,
         )
         return rendered_text
 
@@ -2972,33 +3204,40 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         tg_chat_id: str,
         chat_id: str,
     ) -> None:
-        start_message, _ = await cls._get_channel_start_end_messages(
+        channel_settings = await cls._get_channel_message_settings(
             connected_integration_id=connected_integration_id,
             channel_id=bot_cfg.channel_id,
         )
-        if not start_message:
+        is_work_hours = cls._is_now_within_channel_intervals(channel_settings.intervals)
+        outbound_text = channel_settings.start_message
+        outbound_kind = "channel_start_sent"
+        if not is_work_hours and channel_settings.off_hours_message:
+            outbound_text = channel_settings.off_hours_message
+            outbound_kind = "channel_off_hours_sent"
+        if not outbound_text:
             return
         try:
             sent_text = await cls._send_channel_message_to_telegram(
                 bot_cfg=bot_cfg,
                 tg_chat_id=tg_chat_id,
-                text=start_message,
+                text=outbound_text,
             )
             if sent_text and chat_id:
                 await cls._send_phone_system_message_best_effort(
                     connected_integration_id=connected_integration_id,
                     chat_id=chat_id,
                     external_message_id=(
-                        f"tgsys:channel_start_sent:{bot_cfg.bot_hash}:{tg_chat_id}:{chat_id}"
+                        f"tgsys:{outbound_kind}:{bot_cfg.bot_hash}:{tg_chat_id}:{chat_id}"
                     ),
                     text=sent_text,
                 )
         except Exception as error:
             logger.warning(
-                "Failed to send channel start message: ci=%s channel_id=%s tg_chat_id=%s error=%s",
+                "Failed to send channel auto message: ci=%s channel_id=%s tg_chat_id=%s kind=%s error=%s",
                 connected_integration_id,
                 bot_cfg.channel_id,
                 tg_chat_id,
+                outbound_kind,
                 error,
             )
 
@@ -4338,6 +4577,20 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 )
                 return
 
+            callback_query = payload.get("callback_query")
+            if isinstance(callback_query, dict):
+                await cls._process_rating_callback_query(
+                    connected_integration_id=connected_integration_id,
+                    runtime=runtime,
+                    bot_cfg=bot_cfg,
+                    bot_hash=bot_hash,
+                    callback_query=callback_query,
+                )
+                await cls._redis_set_with_ttl(
+                    dedupe_key, "1", TelegramBotCrmChannelConfig.DEFAULT_DEDUPE_TTL_SEC
+                )
+                return
+
             deleted_rows = _extract_deleted_telegram_messages(payload)
             if deleted_rows:
                 await cls._process_deleted_telegram_events(
@@ -4467,6 +4720,17 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 reply_id=reply_regos_message_id,
                 replay_text=reply_text if reply_regos_message_id else None,
             )
+            ticket_id_for_status = await cls._resolve_ticket_id_from_tg_mapping(
+                connected_integration_id=connected_integration_id,
+                bot_hash=bot_hash,
+                tg_chat_id=tg_chat_id,
+            )
+            await cls._set_ticket_status_best_effort(
+                connected_integration_id=connected_integration_id,
+                ticket_id=ticket_id_for_status,
+                status=TicketStatusEnum.WaitingStaff,
+                context="telegram_inbound_message_added",
+            )
             return
         except ChatMessageAddClosedEntityError as error:
             logger.info(
@@ -4541,6 +4805,348 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             reply_id=fresh_reply_regos_message_id,
             replay_text=reply_text if fresh_reply_regos_message_id else None,
         )
+        ticket_id_for_status = await cls._resolve_ticket_id_from_tg_mapping(
+            connected_integration_id=connected_integration_id,
+            bot_hash=bot_hash,
+            tg_chat_id=tg_chat_id,
+        )
+        await cls._set_ticket_status_best_effort(
+            connected_integration_id=connected_integration_id,
+            ticket_id=ticket_id_for_status,
+            status=TicketStatusEnum.WaitingStaff,
+            context="telegram_inbound_message_added_after_reopen",
+        )
+
+    @classmethod
+    async def _resolve_ticket_id_from_tg_mapping(
+        cls,
+        connected_integration_id: str,
+        bot_hash: str,
+        tg_chat_id: str,
+    ) -> Optional[int]:
+        mapping_raw = await cls._redis_get(
+            cls._mapping_by_tg_key(connected_integration_id, bot_hash, tg_chat_id)
+        )
+        mapping_payload = cls._parse_cached_mapping(mapping_raw)
+        if not mapping_payload:
+            return None
+        return _parse_int(str(mapping_payload.get("ticket_id") or ""), None)
+
+    @classmethod
+    async def _resolve_ticket_id_by_chat(
+        cls,
+        connected_integration_id: str,
+        chat_id: str,
+    ) -> Optional[int]:
+        mapping_raw = await cls._redis_get(
+            cls._mapping_by_chat_key(connected_integration_id, chat_id)
+        )
+        mapping_payload = cls._parse_cached_mapping(mapping_raw)
+        ticket_id = (
+            _parse_int(str(mapping_payload.get("ticket_id") or ""), None)
+            if mapping_payload
+            else None
+        )
+        if ticket_id:
+            return int(ticket_id)
+
+        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+            chat_response = await api.chat.chat.get(
+                ChatGetRequest(ids=[chat_id], limit=1, offset=0)
+            )
+        if not chat_response.ok:
+            return None
+        chat_rows = _rows_to_dict_list(chat_response.result)
+        if not chat_rows:
+            return None
+        return cls._extract_ticket_id_from_chat_payload(chat_rows[0])
+
+    @classmethod
+    async def _set_ticket_status_best_effort(
+        cls,
+        *,
+        connected_integration_id: str,
+        ticket_id: Optional[int],
+        status: TicketStatusEnum,
+        context: str,
+    ) -> None:
+        if not ticket_id:
+            return
+        try:
+            async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+                response = await api.crm.ticket.set_status(
+                    TicketSetStatusRequest(id=int(ticket_id), status=status)
+                )
+            if not response.ok:
+                logger.warning(
+                    "Ticket/SetStatus rejected: ci=%s ticket_id=%s status=%s context=%s payload=%s",
+                    connected_integration_id,
+                    ticket_id,
+                    status.value,
+                    context,
+                    response.result,
+                )
+        except Exception as error:
+            logger.warning(
+                "Ticket/SetStatus failed: ci=%s ticket_id=%s status=%s context=%s error=%s",
+                connected_integration_id,
+                ticket_id,
+                status.value,
+                context,
+                error,
+            )
+
+    @classmethod
+    def _build_rating_keyboard(cls, ticket_id: int) -> InlineKeyboardMarkup:
+        buttons = [
+            InlineKeyboardButton(
+                text=str(rate),
+                callback_data=cls._build_rating_callback_data(int(ticket_id), int(rate)),
+            )
+            for rate in range(1, 6)
+        ]
+        return InlineKeyboardMarkup(inline_keyboard=[buttons])
+
+    @classmethod
+    async def _answer_rating_callback_best_effort(
+        cls,
+        *,
+        bot_cfg: BotSlotConfig,
+        callback_query_id: str,
+        text: str,
+    ) -> None:
+        if not callback_query_id:
+            return
+        try:
+            bot = await cls._get_bot(bot_cfg.token)
+            await bot.answer_callback_query(
+                callback_query_id=callback_query_id,
+                text=str(text or "").strip() or TelegramBotCrmChannelConfig.RATING_ACK_TEXT,
+                show_alert=False,
+            )
+        except Exception as error:
+            logger.debug(
+                "Failed to answer Telegram callback query: bot_hash=%s callback_id=%s error=%s",
+                bot_cfg.bot_hash,
+                callback_query_id,
+                error,
+            )
+
+    @classmethod
+    async def _process_rating_callback_query(
+        cls,
+        *,
+        connected_integration_id: str,
+        runtime: RuntimeConfig,
+        bot_cfg: BotSlotConfig,
+        bot_hash: str,
+        callback_query: Dict[str, Any],
+    ) -> None:
+        _ = runtime
+        callback_query_id = str(callback_query.get("id") or "").strip()
+        ticket_id, rating = cls._parse_rating_callback_data(callback_query.get("data"))
+        if not callback_query_id or not ticket_id or not rating:
+            return
+
+        dedupe_key = cls._rating_callback_dedupe_key(
+            connected_integration_id,
+            bot_hash,
+            callback_query_id,
+        )
+        if await cls._redis_get(dedupe_key):
+            await cls._answer_rating_callback_best_effort(
+                bot_cfg=bot_cfg,
+                callback_query_id=callback_query_id,
+                text=TelegramBotCrmChannelConfig.RATING_ALREADY_SAVED_ACK_TEXT,
+            )
+            return
+
+        callback_message = callback_query.get("message")
+        callback_message = callback_message if isinstance(callback_message, dict) else {}
+        callback_chat = callback_message.get("chat")
+        callback_chat = callback_chat if isinstance(callback_chat, dict) else {}
+        tg_chat_id = str(
+            callback_chat.get("id")
+            or ((callback_query.get("from") or {}).get("id") if isinstance(callback_query.get("from"), dict) else "")
+            or ""
+        ).strip()
+
+        rating_state_key = cls._rating_state_key(connected_integration_id, int(ticket_id))
+        if await cls._redis_get(rating_state_key):
+            await cls._redis_set_with_ttl(
+                dedupe_key,
+                "1",
+                TelegramBotCrmChannelConfig.RATING_CALLBACK_TTL_SEC,
+            )
+            await cls._answer_rating_callback_best_effort(
+                bot_cfg=bot_cfg,
+                callback_query_id=callback_query_id,
+                text=TelegramBotCrmChannelConfig.RATING_ALREADY_SAVED_ACK_TEXT,
+            )
+            return
+
+        lock_key = cls._rating_lock_key(connected_integration_id, int(ticket_id))
+        lock_token = await cls._acquire_lock(lock_key, 60)
+        if not lock_token:
+            await cls._answer_rating_callback_best_effort(
+                bot_cfg=bot_cfg,
+                callback_query_id=callback_query_id,
+                text=TelegramBotCrmChannelConfig.RATING_ALREADY_SAVED_ACK_TEXT,
+            )
+            return
+
+        try:
+            if await cls._redis_get(rating_state_key):
+                await cls._redis_set_with_ttl(
+                    dedupe_key,
+                    "1",
+                    TelegramBotCrmChannelConfig.RATING_CALLBACK_TTL_SEC,
+                )
+                await cls._answer_rating_callback_best_effort(
+                    bot_cfg=bot_cfg,
+                    callback_query_id=callback_query_id,
+                    text=TelegramBotCrmChannelConfig.RATING_ALREADY_SAVED_ACK_TEXT,
+                )
+                return
+
+            async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+                ticket_response = await api.crm.ticket.get(
+                    TicketGetRequest(ids=[int(ticket_id)], limit=1, offset=0)
+                )
+                ticket_rows = (
+                    ticket_response.result
+                    if ticket_response.ok and isinstance(ticket_response.result, list)
+                    else []
+                )
+                ticket = ticket_rows[0] if ticket_rows else None
+                if not ticket or not ticket.id:
+                    await cls._redis_set_with_ttl(
+                        dedupe_key,
+                        "1",
+                        TelegramBotCrmChannelConfig.RATING_CALLBACK_TTL_SEC,
+                    )
+                    await cls._answer_rating_callback_best_effort(
+                        bot_cfg=bot_cfg,
+                        callback_query_id=callback_query_id,
+                        text=TelegramBotCrmChannelConfig.RATING_ERROR_ACK_TEXT,
+                    )
+                    return
+
+                route_ci, route_tg_chat_id = _parse_ticket_external_dialog_id(
+                    getattr(ticket, "external_dialog_id", None)
+                )
+                if route_ci and route_ci != connected_integration_id:
+                    await cls._redis_set_with_ttl(
+                        dedupe_key,
+                        "1",
+                        TelegramBotCrmChannelConfig.RATING_CALLBACK_TTL_SEC,
+                    )
+                    await cls._answer_rating_callback_best_effort(
+                        bot_cfg=bot_cfg,
+                        callback_query_id=callback_query_id,
+                        text=TelegramBotCrmChannelConfig.RATING_ERROR_ACK_TEXT,
+                    )
+                    return
+                if route_tg_chat_id and tg_chat_id and route_tg_chat_id != tg_chat_id:
+                    await cls._redis_set_with_ttl(
+                        dedupe_key,
+                        "1",
+                        TelegramBotCrmChannelConfig.RATING_CALLBACK_TTL_SEC,
+                    )
+                    await cls._answer_rating_callback_best_effort(
+                        bot_cfg=bot_cfg,
+                        callback_query_id=callback_query_id,
+                        text=TelegramBotCrmChannelConfig.RATING_ERROR_ACK_TEXT,
+                    )
+                    return
+
+                set_rating_response = await api.crm.ticket.set_rating(
+                    TicketSetRatingRequest(id=int(ticket.id), rating=int(rating))
+                )
+                if not set_rating_response.ok:
+                    payload = _result_to_dict(set_rating_response.result)
+                    description = str(payload.get("description") or "").strip()
+                    lower_description = description.lower()
+                    already_rated = any(
+                        token in lower_description
+                        for token in ("already", "repeat", "повтор", "запрещ")
+                    )
+                    if not already_rated:
+                        logger.warning(
+                            "Ticket/SetRating rejected: ci=%s ticket_id=%s rating=%s payload=%s",
+                            connected_integration_id,
+                            ticket.id,
+                            rating,
+                            set_rating_response.result,
+                        )
+                        await cls._answer_rating_callback_best_effort(
+                            bot_cfg=bot_cfg,
+                            callback_query_id=callback_query_id,
+                            text=TelegramBotCrmChannelConfig.RATING_ERROR_ACK_TEXT,
+                        )
+                        await cls._redis_set_with_ttl(
+                            dedupe_key,
+                            "1",
+                            TelegramBotCrmChannelConfig.RATING_CALLBACK_TTL_SEC,
+                        )
+                        return
+
+                await cls._redis_set_with_ttl(
+                    rating_state_key,
+                    str(int(rating)),
+                    TelegramBotCrmChannelConfig.RATING_STATE_TTL_SEC,
+                )
+                await cls._redis_set_with_ttl(
+                    dedupe_key,
+                    "1",
+                    TelegramBotCrmChannelConfig.RATING_CALLBACK_TTL_SEC,
+                )
+                await cls._answer_rating_callback_best_effort(
+                    bot_cfg=bot_cfg,
+                    callback_query_id=callback_query_id,
+                    text=TelegramBotCrmChannelConfig.RATING_ACK_TEXT,
+                )
+
+                channel_settings = await cls._get_channel_message_settings(
+                    connected_integration_id=connected_integration_id,
+                    channel_id=getattr(ticket, "channel_id", None),
+                )
+                followup_text = (
+                    channel_settings.rating_positive_message
+                    if int(rating) >= TelegramBotCrmChannelConfig.RATING_POSITIVE_THRESHOLD
+                    else channel_settings.rating_negative_message
+                )
+                ticket_chat_id = str(getattr(ticket, "chat_id", "") or "").strip()
+                if followup_text and tg_chat_id:
+                    sent_text = await cls._send_channel_message_to_telegram(
+                        bot_cfg=bot_cfg,
+                        tg_chat_id=tg_chat_id,
+                        text=followup_text,
+                    )
+                    if sent_text and ticket_chat_id:
+                        await cls._send_phone_system_message_best_effort(
+                            connected_integration_id=connected_integration_id,
+                            chat_id=ticket_chat_id,
+                            external_message_id=(
+                                f"tgsys:channel_rating_result_sent:{bot_cfg.bot_hash}:{tg_chat_id}:{ticket_chat_id}:{int(ticket_id)}:{int(rating)}"
+                            ),
+                            text=sent_text,
+                        )
+        except Exception as error:
+            logger.warning(
+                "Failed to process Telegram rating callback: ci=%s bot_hash=%s callback_id=%s error=%s",
+                connected_integration_id,
+                bot_hash,
+                callback_query_id,
+                error,
+            )
+            await cls._answer_rating_callback_best_effort(
+                bot_cfg=bot_cfg,
+                callback_query_id=callback_query_id,
+                text=TelegramBotCrmChannelConfig.RATING_ERROR_ACK_TEXT,
+            )
+        finally:
+            await cls._release_lock(lock_key, lock_token)
 
     @classmethod
     async def _process_edited_telegram_message(
@@ -5247,6 +5853,62 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         return None
 
     @classmethod
+    async def _get_ticket_by_id(
+        cls,
+        *,
+        api: RegosAPI,
+        ticket_id: int,
+    ) -> Optional[Ticket]:
+        ticket_response = await api.crm.ticket.get(
+            TicketGetRequest(ids=[int(ticket_id)], limit=1, offset=0)
+        )
+        ticket_rows = (
+            ticket_response.result
+            if ticket_response.ok and isinstance(ticket_response.result, list)
+            else []
+        )
+        return ticket_rows[0] if ticket_rows else None
+
+    @classmethod
+    async def _add_or_get_ticket_for_telegram_dialog(
+        cls,
+        *,
+        api: RegosAPI,
+        connected_integration_id: str,
+        bot_cfg: BotSlotConfig,
+        client_id: int,
+        tg_chat_id: str,
+        subject: Optional[str] = None,
+    ) -> Ticket:
+        route_external_dialog_id = _build_ticket_external_dialog_id(
+            connected_integration_id=connected_integration_id,
+            tg_chat_id=tg_chat_id,
+        )
+        add_ticket_resp = await api.crm.ticket.add(
+            TicketAddRequest(
+                client_id=int(client_id),
+                channel_id=bot_cfg.channel_id,
+                direction=TicketDirectionEnum.Inbound,
+                external_dialog_id=route_external_dialog_id,
+                subject=subject,
+                responsible_user_id=bot_cfg.default_responsible_user_id,
+            )
+        )
+        add_ticket_payload = _result_to_dict(add_ticket_resp.result)
+        if not add_ticket_resp.ok:
+            raise RuntimeError(
+                "Ticket/Add rejected: "
+                f"error={add_ticket_payload.get('error')} description={add_ticket_payload.get('description')}"
+            )
+        ticket_id_from_add = _extract_add_new_id(add_ticket_resp.result)
+        if not ticket_id_from_add:
+            raise RuntimeError("Ticket/Add did not return new_id")
+        ticket = await cls._get_ticket_by_id(api=api, ticket_id=int(ticket_id_from_add))
+        if not ticket or not ticket.id or not ticket.chat_id:
+            raise RuntimeError("Ticket/Get did not return chat_id")
+        return ticket
+
+    @classmethod
     async def _resolve_or_create_lead(
         cls,
         connected_integration_id: str,
@@ -5366,43 +6028,14 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                         ClientEditRequest(id=int(client.id), **client_patch)
                     )
 
-                route_external_dialog_id = _build_ticket_external_dialog_id(
+                ticket = await cls._add_or_get_ticket_for_telegram_dialog(
+                    api=api,
                     connected_integration_id=connected_integration_id,
+                    bot_cfg=bot_cfg,
+                    client_id=int(client.id),
                     tg_chat_id=tg_chat_id,
+                    subject=subject,
                 )
-                add_ticket_resp = await api.crm.ticket.add(
-                    TicketAddRequest(
-                        client_id=int(client.id),
-                        channel_id=bot_cfg.channel_id,
-                        direction=TicketDirectionEnum.Inbound,
-                        external_dialog_id=route_external_dialog_id,
-                        subject=subject,
-                        responsible_user_id=bot_cfg.default_responsible_user_id,
-                    )
-                )
-                add_ticket_payload = (
-                    _result_to_dict(add_ticket_resp.result)
-                )
-                if not add_ticket_resp.ok:
-                    raise RuntimeError(
-                        "Ticket/Add rejected: "
-                        f"error={add_ticket_payload.get('error')} description={add_ticket_payload.get('description')}"
-                    )
-                ticket_id_from_add = _extract_add_new_id(add_ticket_resp.result)
-                if not ticket_id_from_add:
-                    raise RuntimeError("Ticket/Add did not return new_id")
-                ticket_get = await api.crm.ticket.get(
-                    TicketGetRequest(ids=[int(ticket_id_from_add)], limit=1, offset=0)
-                )
-                ticket_rows = (
-                    ticket_get.result
-                    if ticket_get.ok and isinstance(ticket_get.result, list)
-                    else []
-                )
-                ticket = ticket_rows[0] if ticket_rows else None
-
-                if not ticket or not ticket.id or not ticket.chat_id:
-                    raise RuntimeError("Ticket/Get did not return chat_id")
                 ticket_created_now = cls._is_ticket_created_now(ticket)
 
                 logger.debug(
@@ -5449,39 +6082,14 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             )
             if not client or not client.id:
                 return None, None
-            route_external_dialog_id = _build_ticket_external_dialog_id(
+            ticket = await cls._add_or_get_ticket_for_telegram_dialog(
+                api=api,
                 connected_integration_id=connected_integration_id,
+                bot_cfg=bot_cfg,
+                client_id=int(client.id),
                 tg_chat_id=tg_chat_id,
+                subject=None,
             )
-            add_ticket_resp = await api.crm.ticket.add(
-                TicketAddRequest(
-                    client_id=int(client.id),
-                    channel_id=bot_cfg.channel_id,
-                    direction=TicketDirectionEnum.Inbound,
-                    external_dialog_id=route_external_dialog_id,
-                    responsible_user_id=bot_cfg.default_responsible_user_id,
-                )
-            )
-            add_ticket_payload = (
-                _result_to_dict(add_ticket_resp.result)
-            )
-            if not add_ticket_resp.ok:
-                raise RuntimeError(
-                    "Ticket/Add rejected: "
-                    f"error={add_ticket_payload.get('error')} description={add_ticket_payload.get('description')}"
-                )
-            ticket_id_from_add = _extract_add_new_id(add_ticket_resp.result)
-            if not ticket_id_from_add:
-                raise RuntimeError("Ticket/Add did not return new_id")
-            ticket_get = await api.crm.ticket.get(
-                TicketGetRequest(ids=[int(ticket_id_from_add)], limit=1, offset=0)
-            )
-            ticket_rows = (
-                ticket_get.result
-                if ticket_get.ok and isinstance(ticket_get.result, list)
-                else []
-            )
-            ticket = ticket_rows[0] if ticket_rows else None
 
         if not client or not client.id or not ticket or not ticket.id or not ticket.chat_id:
             return None, None
@@ -6205,6 +6813,18 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 str(sent_tg_message_id),
             )
 
+            if chat_message.message_type != ChatMessageTypeEnum.System:
+                ticket_id_for_status = await cls._resolve_ticket_id_by_chat(
+                    connected_integration_id=connected_integration_id,
+                    chat_id=chat_id,
+                )
+                await cls._set_ticket_status_best_effort(
+                    connected_integration_id=connected_integration_id,
+                    ticket_id=ticket_id_for_status,
+                    status=TicketStatusEnum.WaitingClient,
+                    context="crm_outbound_message_added",
+                )
+
     @classmethod
     async def _telegram_send_with_optional_reply(
         cls,
@@ -6544,12 +7164,10 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if not chat_id:
             return
 
-        _, end_message = await cls._get_channel_start_end_messages(
+        channel_settings = await cls._get_channel_message_settings(
             connected_integration_id=connected_integration_id,
             channel_id=getattr(ticket, "channel_id", None),
         )
-        if not end_message:
-            return
 
         target = await cls._resolve_target_by_chat(
             connected_integration_id,
@@ -6564,23 +7182,42 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if not bot_cfg:
             return
         try:
-            sent_text = await cls._send_channel_message_to_telegram(
-                bot_cfg=bot_cfg,
-                tg_chat_id=tg_chat_id,
-                text=end_message,
-            )
-            if sent_text:
-                await cls._send_phone_system_message_best_effort(
-                    connected_integration_id=connected_integration_id,
-                    chat_id=chat_id,
-                    external_message_id=(
-                        f"tgsys:channel_end_sent:{bot_cfg.bot_hash}:{tg_chat_id}:{chat_id}"
-                    ),
-                    text=sent_text,
+            if channel_settings.end_message:
+                sent_text = await cls._send_channel_message_to_telegram(
+                    bot_cfg=bot_cfg,
+                    tg_chat_id=tg_chat_id,
+                    text=channel_settings.end_message,
                 )
+                if sent_text:
+                    await cls._send_phone_system_message_best_effort(
+                        connected_integration_id=connected_integration_id,
+                        chat_id=chat_id,
+                        external_message_id=(
+                            f"tgsys:channel_end_sent:{bot_cfg.bot_hash}:{tg_chat_id}:{chat_id}"
+                        ),
+                        text=sent_text,
+                    )
+
+            if channel_settings.rating_enabled and channel_settings.rating_message:
+                rating_keyboard = cls._build_rating_keyboard(int(ticket_id))
+                rating_prompt_text = await cls._send_channel_message_to_telegram(
+                    bot_cfg=bot_cfg,
+                    tg_chat_id=tg_chat_id,
+                    text=channel_settings.rating_message,
+                    reply_markup=rating_keyboard,
+                )
+                if rating_prompt_text:
+                    await cls._send_phone_system_message_best_effort(
+                        connected_integration_id=connected_integration_id,
+                        chat_id=chat_id,
+                        external_message_id=(
+                            f"tgsys:channel_rating_prompt_sent:{bot_cfg.bot_hash}:{tg_chat_id}:{chat_id}:{int(ticket_id)}"
+                        ),
+                        text=rating_prompt_text,
+                    )
         except Exception as error:
             logger.warning(
-                "Failed to send channel end message: ci=%s ticket_id=%s channel_id=%s tg_chat_id=%s error=%s",
+                "Failed to send ticket close auto message(s): ci=%s ticket_id=%s channel_id=%s tg_chat_id=%s error=%s",
                 connected_integration_id,
                 ticket_id,
                 getattr(ticket, "channel_id", None),

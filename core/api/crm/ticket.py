@@ -13,8 +13,12 @@ from schemas.api.crm.ticket import (
     TicketGetResponse,
     TicketSetParticipantsRequest,
     TicketSetParticipantsResponse,
+    TicketSetRatingRequest,
+    TicketSetRatingResponse,
     TicketSetResponsibleRequest,
     TicketSetResponsibleResponse,
+    TicketSetStatusRequest,
+    TicketSetStatusResponse,
 )
 
 
@@ -25,6 +29,8 @@ class TicketService:
     PATH_DELETE = "Ticket/Delete"
     PATH_SET_RESPONSIBLE = "Ticket/SetResponsible"
     PATH_SET_PARTICIPANTS = "Ticket/SetParticipants"
+    PATH_SET_STATUS = "Ticket/SetStatus"
+    PATH_SET_RATING = "Ticket/SetRating"
     PATH_CLOSE = "Ticket/Close"
 
     def __init__(self, api):
@@ -59,6 +65,12 @@ class TicketService:
             req,
             TicketSetParticipantsResponse,
         )
+
+    async def set_status(self, req: TicketSetStatusRequest) -> TicketSetStatusResponse:
+        return await self.api.call(self.PATH_SET_STATUS, req, TicketSetStatusResponse)
+
+    async def set_rating(self, req: TicketSetRatingRequest) -> TicketSetRatingResponse:
+        return await self.api.call(self.PATH_SET_RATING, req, TicketSetRatingResponse)
 
     async def close(self, req: TicketCloseRequest) -> TicketCloseResponse:
         return await self.api.call(self.PATH_CLOSE, req, TicketCloseResponse)

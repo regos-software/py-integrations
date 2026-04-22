@@ -21,6 +21,8 @@ class TicketDirectionEnum(str, Enum):
 class TicketStatusEnum(str, Enum):
     Open = "Open"
     Closed = "Closed"
+    WaitingClient = "WaitingClient"
+    WaitingStaff = "WaitingStaff"
 
 
 class Ticket(BaseSchema):
@@ -63,6 +65,7 @@ class TicketGetRequest(BaseSchema):
     search: Optional[str] = PydField(default=None, description="Search string.")
     client_ids: Optional[List[int]] = PydField(default=None, description="Client ids.")
     channel_ids: Optional[List[int]] = PydField(default=None, description="Channel ids.")
+    external_dialog_id: Optional[str] = PydField(default=None, description="External dialog id.")
     responsible_user_ids: Optional[List[int]] = PydField(default=None, description="Responsible user ids.")
     statuses: Optional[List[TicketStatusEnum]] = PydField(default=None, description="Ticket statuses.")
     from_date: Optional[int] = PydField(default=None, description="From unix time.")
@@ -127,6 +130,25 @@ class TicketSetParticipantsRequest(BaseSchema):
     replace_mode: Optional[bool] = PydField(default=None, description="Replace mode.")
 
 
+class TicketSetStatusRequest(BaseSchema):
+    """Request for Ticket/SetStatus."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: int = PydField(..., ge=1, description="Ticket id.")
+    status: TicketStatusEnum = PydField(..., description="Ticket status.")
+
+
+class TicketSetRatingRequest(BaseSchema):
+    """Request for Ticket/SetRating."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: int = PydField(..., ge=1, description="Ticket id.")
+    rating: int = PydField(..., ge=1, le=5, description="Ticket rating.")
+    rating_comment: Optional[str] = PydField(default=None, description="Ticket rating comment.")
+
+
 class TicketCloseRequest(BaseSchema):
     """Request for Ticket/Close."""
 
@@ -172,6 +194,18 @@ class TicketSetParticipantsResponse(APIBaseResponse[ArrayResult]):
     model_config = ConfigDict(extra="ignore")
 
 
+class TicketSetStatusResponse(APIBaseResponse[ArrayResult]):
+    """Response for Ticket/SetStatus."""
+
+    model_config = ConfigDict(extra="ignore")
+
+
+class TicketSetRatingResponse(APIBaseResponse[ArrayResult]):
+    """Response for Ticket/SetRating."""
+
+    model_config = ConfigDict(extra="ignore")
+
+
 class TicketCloseResponse(APIBaseResponse[ArrayResult]):
     """Response for Ticket/Close."""
 
@@ -193,7 +227,11 @@ __all__ = [
     "TicketGetResponse",
     "TicketSetParticipantsRequest",
     "TicketSetParticipantsResponse",
+    "TicketSetRatingRequest",
+    "TicketSetRatingResponse",
     "TicketSetResponsibleRequest",
     "TicketSetResponsibleResponse",
+    "TicketSetStatusRequest",
+    "TicketSetStatusResponse",
     "TicketStatusEnum",
 ]
