@@ -4934,6 +4934,31 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             )
 
     @classmethod
+    async def _delete_rating_prompt_message_best_effort(
+        cls,
+        *,
+        bot_cfg: BotSlotConfig,
+        tg_chat_id: str,
+        tg_message_id: int,
+    ) -> None:
+        if not tg_chat_id or not tg_message_id or tg_message_id <= 0:
+            return
+        try:
+            bot = await cls._get_bot(bot_cfg.token)
+            await bot.delete_message(
+                chat_id=_tg_chat_id_cast(tg_chat_id),
+                message_id=int(tg_message_id),
+            )
+        except Exception as error:
+            logger.debug(
+                "Failed to delete rating prompt message: bot_hash=%s tg_chat_id=%s message_id=%s error=%s",
+                bot_cfg.bot_hash,
+                tg_chat_id,
+                tg_message_id,
+                error,
+            )
+
+    @classmethod
     async def _process_rating_callback_query(
         cls,
         *,
@@ -4956,19 +4981,6 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             )
             return
 
-        dedupe_key = cls._rating_callback_dedupe_key(
-            connected_integration_id,
-            bot_hash,
-            callback_query_id,
-        )
-        if await cls._redis_get(dedupe_key):
-            await cls._answer_rating_callback_best_effort(
-                bot_cfg=bot_cfg,
-                callback_query_id=callback_query_id,
-                text=TelegramBotCrmChannelConfig.RATING_ALREADY_SAVED_ACK_TEXT,
-            )
-            return
-
         callback_message = callback_query.get("message")
         callback_message = callback_message if isinstance(callback_message, dict) else {}
         callback_chat = callback_message.get("chat")
@@ -4978,45 +4990,9 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             or ((callback_query.get("from") or {}).get("id") if isinstance(callback_query.get("from"), dict) else "")
             or ""
         ).strip()
-
-        rating_state_key = cls._rating_state_key(connected_integration_id, int(ticket_id))
-        if await cls._redis_get(rating_state_key):
-            await cls._redis_set_with_ttl(
-                dedupe_key,
-                "1",
-                TelegramBotCrmChannelConfig.RATING_CALLBACK_TTL_SEC,
-            )
-            await cls._answer_rating_callback_best_effort(
-                bot_cfg=bot_cfg,
-                callback_query_id=callback_query_id,
-                text=TelegramBotCrmChannelConfig.RATING_ALREADY_SAVED_ACK_TEXT,
-            )
-            return
-
-        lock_key = cls._rating_lock_key(connected_integration_id, int(ticket_id))
-        lock_token = await cls._acquire_lock(lock_key, 60)
-        if not lock_token:
-            await cls._answer_rating_callback_best_effort(
-                bot_cfg=bot_cfg,
-                callback_query_id=callback_query_id,
-                text=TelegramBotCrmChannelConfig.RATING_ALREADY_SAVED_ACK_TEXT,
-            )
-            return
+        callback_message_id = _parse_int(str(callback_message.get("message_id") or ""), None)
 
         try:
-            if await cls._redis_get(rating_state_key):
-                await cls._redis_set_with_ttl(
-                    dedupe_key,
-                    "1",
-                    TelegramBotCrmChannelConfig.RATING_CALLBACK_TTL_SEC,
-                )
-                await cls._answer_rating_callback_best_effort(
-                    bot_cfg=bot_cfg,
-                    callback_query_id=callback_query_id,
-                    text=TelegramBotCrmChannelConfig.RATING_ALREADY_SAVED_ACK_TEXT,
-                )
-                return
-
             async with RegosAPI(connected_integration_id=connected_integration_id) as api:
                 ticket_response = await api.crm.ticket.get(
                     TicketGetRequest(ids=[int(ticket_id)], limit=1, offset=0)
@@ -5028,11 +5004,6 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 )
                 ticket = ticket_rows[0] if ticket_rows else None
                 if not ticket or not ticket.id:
-                    await cls._redis_set_with_ttl(
-                        dedupe_key,
-                        "1",
-                        TelegramBotCrmChannelConfig.RATING_CALLBACK_TTL_SEC,
-                    )
                     await cls._answer_rating_callback_best_effort(
                         bot_cfg=bot_cfg,
                         callback_query_id=callback_query_id,
@@ -5044,11 +5015,6 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     getattr(ticket, "external_dialog_id", None)
                 )
                 if route_ci and route_ci != connected_integration_id:
-                    await cls._redis_set_with_ttl(
-                        dedupe_key,
-                        "1",
-                        TelegramBotCrmChannelConfig.RATING_CALLBACK_TTL_SEC,
-                    )
                     await cls._answer_rating_callback_best_effort(
                         bot_cfg=bot_cfg,
                         callback_query_id=callback_query_id,
@@ -5056,11 +5022,6 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     )
                     return
                 if route_tg_chat_id and tg_chat_id and route_tg_chat_id != tg_chat_id:
-                    await cls._redis_set_with_ttl(
-                        dedupe_key,
-                        "1",
-                        TelegramBotCrmChannelConfig.RATING_CALLBACK_TTL_SEC,
-                    )
                     await cls._answer_rating_callback_best_effort(
                         bot_cfg=bot_cfg,
                         callback_query_id=callback_query_id,
@@ -5077,43 +5038,47 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     lower_description = description.lower()
                     already_rated = any(
                         token in lower_description
-                        for token in ("already", "repeat", "повтор", "запрещ")
+                        for token in ("already", "repeat", "rated", "exists")
                     )
-                    if not already_rated:
-                        logger.warning(
-                            "Ticket/SetRating rejected: ci=%s ticket_id=%s rating=%s payload=%s",
-                            connected_integration_id,
-                            ticket.id,
-                            rating,
-                            set_rating_response.result,
-                        )
+                    if already_rated:
                         await cls._answer_rating_callback_best_effort(
                             bot_cfg=bot_cfg,
                             callback_query_id=callback_query_id,
-                            text=TelegramBotCrmChannelConfig.RATING_ERROR_ACK_TEXT,
+                            text=TelegramBotCrmChannelConfig.RATING_ALREADY_SAVED_ACK_TEXT,
                         )
-                        await cls._redis_set_with_ttl(
-                            dedupe_key,
-                            "1",
-                            TelegramBotCrmChannelConfig.RATING_CALLBACK_TTL_SEC,
-                        )
+                        if callback_message_id and tg_chat_id:
+                            await cls._delete_rating_prompt_message_best_effort(
+                                bot_cfg=bot_cfg,
+                                tg_chat_id=tg_chat_id,
+                                tg_message_id=int(callback_message_id),
+                            )
                         return
 
-                await cls._redis_set_with_ttl(
-                    rating_state_key,
-                    str(int(rating)),
-                    TelegramBotCrmChannelConfig.RATING_STATE_TTL_SEC,
-                )
-                await cls._redis_set_with_ttl(
-                    dedupe_key,
-                    "1",
-                    TelegramBotCrmChannelConfig.RATING_CALLBACK_TTL_SEC,
-                )
+                    logger.warning(
+                        "Ticket/SetRating rejected: ci=%s ticket_id=%s rating=%s payload=%s",
+                        connected_integration_id,
+                        ticket.id,
+                        rating,
+                        set_rating_response.result,
+                    )
+                    await cls._answer_rating_callback_best_effort(
+                        bot_cfg=bot_cfg,
+                        callback_query_id=callback_query_id,
+                        text=TelegramBotCrmChannelConfig.RATING_ERROR_ACK_TEXT,
+                    )
+                    return
+
                 await cls._answer_rating_callback_best_effort(
                     bot_cfg=bot_cfg,
                     callback_query_id=callback_query_id,
                     text=TelegramBotCrmChannelConfig.RATING_ACK_TEXT,
                 )
+                if callback_message_id and tg_chat_id:
+                    await cls._delete_rating_prompt_message_best_effort(
+                        bot_cfg=bot_cfg,
+                        tg_chat_id=tg_chat_id,
+                        tg_message_id=int(callback_message_id),
+                    )
 
                 channel_settings = await cls._get_channel_message_settings(
                     connected_integration_id=connected_integration_id,
@@ -5153,8 +5118,6 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 callback_query_id=callback_query_id,
                 text=TelegramBotCrmChannelConfig.RATING_ERROR_ACK_TEXT,
             )
-        finally:
-            await cls._release_lock(lock_key, lock_token)
 
     @classmethod
     async def _process_edited_telegram_message(
@@ -7260,4 +7223,3 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 channel_id,
                 error,
             )
-
