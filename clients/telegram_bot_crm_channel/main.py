@@ -4448,6 +4448,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                             "business_message",
                             "edited_message",
                             "edited_business_message",
+                            "callback_query",
                             "deleted_business_messages",
                         ],
                     )
@@ -4946,6 +4947,13 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         callback_query_id = str(callback_query.get("id") or "").strip()
         ticket_id, rating = cls._parse_rating_callback_data(callback_query.get("data"))
         if not callback_query_id or not ticket_id or not rating:
+            logger.debug(
+                "Skip rating callback with invalid payload: ci=%s bot_hash=%s callback_id=%s data=%s",
+                connected_integration_id,
+                bot_hash,
+                callback_query_id or "-",
+                callback_query.get("data"),
+            )
             return
 
         dedupe_key = cls._rating_callback_dedupe_key(
