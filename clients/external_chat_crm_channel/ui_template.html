@@ -158,15 +158,170 @@
       letter-spacing: 0.28px;
       text-transform: uppercase;
     }}
+    .onboarding-card {{
+      width: min(100%, 620px);
+      margin: 0 auto;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 14px;
+      background: rgba(255, 255, 255, 0.96);
+      box-shadow: var(--shadow-soft);
+      animation: rise .18s cubic-bezier(0.2, 0.8, 0.2, 1);
+    }}
+    .onboarding-title {{
+      margin: 0;
+      font: 700 15px/1.2 "Space Grotesk", "Manrope", sans-serif;
+      letter-spacing: 0.18px;
+    }}
+    .onboarding-note {{
+      margin: 6px 0 0 0;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.4;
+    }}
+    .onboarding-form {{
+      margin-top: 12px;
+      display: grid;
+      gap: 10px;
+    }}
+    .onboarding-field {{
+      display: grid;
+      gap: 6px;
+      text-align: left;
+    }}
+    .onboarding-label {{
+      color: var(--muted);
+      font-size: 11px;
+      letter-spacing: 0.28px;
+      text-transform: uppercase;
+    }}
+    .onboarding-field input {{
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      padding: 10px 11px;
+      font: inherit;
+      color: var(--text);
+      background: #fff;
+      transition: border-color .18s ease, box-shadow .18s ease;
+    }}
+    .onboarding-field input:focus {{
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(10, 102, 194, 0.12);
+    }}
+    .onboarding-field input.input-error {{
+      border-color: #d64545;
+      box-shadow: 0 0 0 3px rgba(214, 69, 69, 0.12);
+    }}
+    .onboarding-error {{
+      color: #bf2d2d;
+      font-size: 11px;
+      line-height: 1.25;
+    }}
+    .onboarding-submit {{
+      border: 0;
+      border-radius: 12px;
+      min-height: 40px;
+      padding: 0 16px;
+      background: var(--accent);
+      color: #fff;
+      font: 700 13px/1 "Space Grotesk", "Manrope", sans-serif;
+      letter-spacing: 0.2px;
+      cursor: pointer;
+      box-shadow: 0 9px 18px rgba(10, 102, 194, 0.22);
+      transition: transform .14s ease, box-shadow .14s ease, filter .14s ease;
+    }}
+    .onboarding-submit:hover:not(:disabled) {{
+      transform: translateY(-1px);
+      filter: brightness(1.04);
+      box-shadow: 0 12px 22px rgba(10, 102, 194, 0.27);
+    }}
+    .onboarding-submit:disabled {{
+      opacity: .65;
+      cursor: default;
+      box-shadow: none;
+    }}
+    .rating-box {{
+      border-top: 1px solid var(--line);
+      padding: 10px 14px;
+      background: rgba(255, 255, 255, 0.93);
+      display: grid;
+      gap: 8px;
+    }}
+    .rating-text {{
+      color: var(--text);
+      font-size: 13px;
+      line-height: 1.4;
+    }}
+    .rating-actions {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }}
+    .rating-btn {{
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      min-width: 40px;
+      height: 34px;
+      padding: 0 10px;
+      background: #fff;
+      color: var(--text);
+      font: 700 12px/1 "Space Grotesk", "Manrope", sans-serif;
+      cursor: pointer;
+      transition: border-color .14s ease, transform .14s ease, box-shadow .14s ease;
+    }}
+    .rating-btn:hover:not(:disabled) {{
+      border-color: var(--accent);
+      transform: translateY(-1px);
+      box-shadow: 0 8px 14px rgba(10, 102, 194, 0.14);
+    }}
+    .rating-btn.active {{
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }}
+    .rating-btn:disabled {{
+      opacity: .55;
+      cursor: default;
+      box-shadow: none;
+      transform: none;
+    }}
     .composer {{
       display: grid;
-      grid-template-columns: 1fr auto;
+      grid-template-columns: auto 1fr auto;
       gap: 10px;
+      align-items: end;
       border-top: 1px solid var(--line);
       padding: 14px 16px;
       background: linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(248, 251, 255, 0.92) 100%);
     }}
+    .attach-btn {{
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      width: 42px;
+      height: 42px;
+      padding: 0;
+      background: #fff;
+      color: var(--muted);
+      font: 700 20px/1 "Space Grotesk", "Manrope", sans-serif;
+      cursor: pointer;
+      transition: border-color .14s ease, color .14s ease, transform .14s ease, box-shadow .14s ease;
+    }}
+    .attach-btn:hover:not(:disabled) {{
+      border-color: var(--accent);
+      color: var(--accent);
+      transform: translateY(-1px);
+      box-shadow: 0 8px 16px rgba(10, 102, 194, 0.12);
+    }}
+    .attach-btn:disabled {{
+      opacity: .5;
+      cursor: default;
+      transform: none;
+      box-shadow: none;
+    }}
     .composer textarea {{
+      grid-column: 2;
       width: 100%;
       min-height: 44px;
       max-height: 126px;
@@ -185,7 +340,8 @@
       box-shadow: 0 0 0 3px rgba(10, 102, 194, 0.14);
       background: #fff;
     }}
-    .composer button {{
+    .send-btn {{
+      grid-column: 3;
       border: 0;
       border-radius: 13px;
       min-width: 110px;
@@ -198,18 +354,51 @@
       box-shadow: 0 10px 20px rgba(10, 102, 194, 0.24);
       transition: transform .14s ease, box-shadow .14s ease, filter .14s ease;
     }}
-    .composer button:hover:not(:disabled) {{
+    .send-btn:hover:not(:disabled) {{
       transform: translateY(-1px);
       filter: brightness(1.04);
       box-shadow: 0 13px 24px rgba(10, 102, 194, 0.28);
     }}
-    .composer button:active:not(:disabled) {{
+    .send-btn:active:not(:disabled) {{
       transform: translateY(0);
     }}
-    .composer button:disabled {{
+    .send-btn:disabled {{
       opacity: .5;
       cursor: default;
       box-shadow: none;
+    }}
+    .attach-note {{
+      grid-column: 1 / -1;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      padding: 7px 10px;
+      color: var(--muted);
+      font-size: 12px;
+      background: rgba(255, 255, 255, 0.9);
+    }}
+    .attach-note-text {{
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      min-width: 0;
+    }}
+    .attach-clear {{
+      border: 0;
+      border-radius: 8px;
+      min-height: 24px;
+      padding: 0 8px;
+      background: rgba(19, 32, 51, 0.08);
+      color: var(--text);
+      font: 700 11px/1 "Manrope", sans-serif;
+      cursor: pointer;
+    }}
+    .attach-clear:disabled {{
+      opacity: .5;
+      cursor: default;
     }}
     @keyframes rise {{
       from {{ transform: translateY(10px) scale(.985); opacity: .32; }}
@@ -234,8 +423,11 @@
       .composer {{
         padding: 10px 12px;
       }}
-      .composer button {{
+      .send-btn {{
         min-width: 96px;
+      }}
+      .attach-note {{
+        font-size: 11px;
       }}
     }}
   </style>
@@ -247,9 +439,19 @@
       <div class="status" id="status">connecting...</div>
     </div>
     <div class="history" id="history"></div>
+    <div class="rating-box" id="ratingBox" hidden>
+      <div class="rating-text" id="ratingText"></div>
+      <div class="rating-actions" id="ratingActions"></div>
+    </div>
     <form class="composer" id="composer">
+      <button type="button" class="attach-btn" id="attachButton" title="Attach file">+</button>
       <textarea id="text" maxlength="{ExternalChatCrmChannelConfig.MAX_MESSAGE_LENGTH}" placeholder="Type your message"></textarea>
-      <button type="submit">Send</button>
+      <button type="submit" class="send-btn">Send</button>
+      <input type="file" id="fileInput" hidden>
+      <div class="attach-note" id="attachNote" hidden>
+        <div class="attach-note-text" id="attachNoteText"></div>
+        <button type="button" class="attach-clear" id="attachClear">Clear</button>
+      </div>
     </form>
   </div>
   <script>
@@ -257,6 +459,7 @@
       ci: "{safe_ci}",
       profileKey: "webchat:profile:{safe_ci}",
       visitorKey: "webchat:visitor:{safe_ci}",
+      maxUploadBytes: {ExternalChatCrmChannelConfig.MAX_UPLOAD_FILE_SIZE_BYTES},
       required: {{
         display_name: {safe_require_display_name},
         phone: {safe_require_phone},
@@ -269,10 +472,10 @@
       phone: "phone",
       email: "email",
     }};
-    const FIELD_PROMPTS = {{
-      display_name: "Before we start, please tell us your name.",
-      phone: "Please share your phone number.",
-      email: "Please share your email address.",
+    const FIELD_PLACEHOLDERS = {{
+      display_name: "John Smith",
+      phone: "+998 90 123 45 67",
+      email: "name@example.com",
     }};
     const FIELD_INVALID = {{
       display_name: "Please enter a valid name.",
@@ -282,9 +485,17 @@
 
     const statusEl = document.getElementById("status");
     const historyEl = document.getElementById("history");
+    const ratingBoxEl = document.getElementById("ratingBox");
+    const ratingTextEl = document.getElementById("ratingText");
+    const ratingActionsEl = document.getElementById("ratingActions");
+    const attachButtonEl = document.getElementById("attachButton");
+    const fileInputEl = document.getElementById("fileInput");
+    const attachNoteEl = document.getElementById("attachNote");
+    const attachNoteTextEl = document.getElementById("attachNoteText");
+    const attachClearEl = document.getElementById("attachClear");
     const textEl = document.getElementById("text");
     const formEl = document.getElementById("composer");
-    const sendButtonEl = formEl.querySelector("button");
+    const sendButtonEl = formEl.querySelector(".send-btn");
     statusEl.textContent = "initializing...";
 
     const state = {{
@@ -298,7 +509,16 @@
         phone: "",
         email: "",
       }},
-      onboardingLog: [],
+      onboardingErrors: {{}},
+      onboardingSubmitBusy: false,
+      ratingEnabled: false,
+      ratingRequired: false,
+      ratingSubmitted: false,
+      ticketRating: null,
+      ratingMessage: "",
+      ratingSubmitting: false,
+      pendingFile: null,
+      fileReading: false,
       lastHistoryFingerprint: "",
     }};
 
@@ -331,6 +551,75 @@
         return "";
       }}
       return email;
+    }}
+    function normalizeRating(value) {{
+      const num = Number(value);
+      if (!Number.isInteger(num) || num < 1 || num > 5) {{
+        return null;
+      }}
+      return num;
+    }}
+    function normalizeFileName(value) {{
+      const raw = String(value || "").trim();
+      if (!raw) {{
+        return "file.bin";
+      }}
+      const parts = raw.replace(/\\/g, "/").split("/");
+      const name = String(parts[parts.length - 1] || "").trim();
+      return name || "file.bin";
+    }}
+    function normalizeFileExtension(value) {{
+      const raw = String(value || "").trim().toLowerCase().replace(/^\./, "");
+      const cleaned = raw.replace(/[^a-z0-9]/g, "");
+      return cleaned.slice(0, 20);
+    }}
+    function getExtensionFromFileName(fileName) {{
+      const name = String(fileName || "");
+      const idx = name.lastIndexOf(".");
+      if (idx < 1 || idx >= name.length - 1) {{
+        return "";
+      }}
+      return normalizeFileExtension(name.slice(idx + 1));
+    }}
+    function formatBytes(size) {{
+      const value = Number(size || 0);
+      if (!value) {{
+        return "0 B";
+      }}
+      if (value < 1024) {{
+        return value + " B";
+      }}
+      if (value < 1024 * 1024) {{
+        return (value / 1024).toFixed(1) + " KB";
+      }}
+      return (value / (1024 * 1024)).toFixed(1) + " MB";
+    }}
+    function clearPendingFile() {{
+      state.pendingFile = null;
+      if (fileInputEl) {{
+        fileInputEl.value = "";
+      }}
+      renderPendingFile();
+    }}
+    function renderPendingFile() {{
+      const pending = state.pendingFile;
+      if (!pending) {{
+        attachNoteEl.hidden = true;
+        attachNoteTextEl.textContent = "";
+        attachClearEl.disabled = false;
+        return;
+      }}
+      attachNoteEl.hidden = false;
+      attachNoteTextEl.textContent = pending.name + " (" + formatBytes(pending.size) + ")";
+      attachClearEl.disabled = state.fileReading;
+    }}
+    function readFileAsDataURL(file) {{
+      return new Promise((resolve, reject) => {{
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(new Error("Failed to read file"));
+        reader.readAsDataURL(file);
+      }});
     }}
     function normalizeVisitorId(value) {{
       const raw = String(value || "").trim();
@@ -411,18 +700,36 @@
       }}
       return missing;
     }}
-    function getCurrentOnboardingField() {{
-      const missing = getMissingRequiredFields();
-      return missing.length ? missing[0] : "";
+    function getRequiredProfileFields() {{
+      const required = CONFIG.required || {{}};
+      const fields = [];
+      for (const field of REQUIRED_ORDER) {{
+        if (required[field]) {{
+          fields.push(field);
+        }}
+      }}
+      return fields;
+    }}
+    function isOnboardingRequired() {{
+      return !state.chatReady && getMissingRequiredFields().length > 0;
     }}
     function fieldLabel(field) {{
       return FIELD_LABELS[field] || field;
     }}
-    function fieldPrompt(field) {{
-      return FIELD_PROMPTS[field] || ("Please provide " + fieldLabel(field) + ".");
+    function fieldPlaceholder(field) {{
+      return FIELD_PLACEHOLDERS[field] || "";
     }}
     function fieldInvalid(field) {{
       return FIELD_INVALID[field] || ("Invalid " + fieldLabel(field) + ".");
+    }}
+    function fieldInputType(field) {{
+      if (field === "email") {{
+        return "email";
+      }}
+      if (field === "phone") {{
+        return "tel";
+      }}
+      return "text";
     }}
     function normalizeProfileValue(field, value) {{
       if (field === "display_name") {{
@@ -468,7 +775,7 @@
 
       const meta = document.createElement("div");
       meta.className = "meta";
-      const who = type === "System" ? "system" : (item.mine ? "you" : (item.author_name || "operator"));
+      const who = type === "System" ? "system" : (item.mine ? "you" : "operator");
       const stamp = toTime(item.created_date);
       meta.textContent = who + (stamp ? ("  " + stamp) : "") + (item.edited ? " (edited)" : "");
       box.appendChild(meta);
@@ -494,52 +801,222 @@
       }}
       state.lastHistoryFingerprint = fingerprint;
     }}
-    function pushOnboardingMessage(item) {{
-      state.onboardingLog.push({{
-        id: "local:" + Date.now().toString(36) + ":" + Math.random().toString(16).slice(2),
-        text: String(item.text || "").trim(),
-        message_type: item.message_type || "System",
-        mine: !!item.mine,
-        edited: false,
-        author_name: item.author_name || (item.mine ? "you" : "system"),
-        created_date: 0,
-      }});
-    }}
-    function buildOnboardingItems() {{
-      const items = state.onboardingLog.slice();
-      const field = getCurrentOnboardingField();
-      if (field) {{
-        items.push({{
-          id: "local:ask:" + field,
-          text: fieldPrompt(field),
-          message_type: "System",
-          mine: false,
-          edited: false,
-          author_name: "system",
-          created_date: 0,
-        }});
+    function renderRatingPanel() {{
+      const visible = (
+        state.chatReady
+        && !state.chatWritable
+        && !isOnboardingRequired()
+        && (
+          state.ratingRequired
+          || (state.ratingSubmitted && normalizeRating(state.ticketRating) !== null)
+        )
+      );
+      ratingBoxEl.hidden = !visible;
+      ratingActionsEl.innerHTML = "";
+      if (!visible) {{
+        return;
       }}
-      return items;
+
+      if (state.ratingSubmitted) {{
+        const savedRating = normalizeRating(state.ticketRating);
+        ratingTextEl.textContent = savedRating !== null
+          ? ("Thanks for your feedback. Rating: " + savedRating + "/5")
+          : "Thanks for your feedback.";
+        return;
+      }}
+
+      ratingTextEl.textContent = String(state.ratingMessage || "").trim() || "Please rate this chat.";
+      for (let rating = 1; rating <= 5; rating += 1) {{
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "rating-btn";
+        btn.textContent = String(rating);
+        btn.disabled = state.ratingSubmitting;
+        btn.addEventListener("click", () => {{
+          submitRating(rating).catch((error) => {{
+            handleActionError(error);
+          }});
+        }});
+        ratingActionsEl.appendChild(btn);
+      }}
+    }}
+    async function submitRating(rating) {{
+      const normalized = normalizeRating(rating);
+      if (normalized === null || !state.chatReady || state.ratingSubmitting) {{
+        return;
+      }}
+      state.ratingSubmitting = true;
+      statusEl.textContent = "saving rating...";
+      renderRatingPanel();
+      updateComposerState();
+      try {{
+        const result = await callApi("set_rating", {{
+          visitor_id: state.visitorId,
+          rating: normalized,
+          display_name: state.profile.display_name,
+          email: state.profile.email,
+          phone: state.profile.phone
+        }});
+        applyWriteState(result);
+        await refreshHistory(true);
+        statusEl.textContent = "thanks for your feedback";
+      }} finally {{
+        state.ratingSubmitting = false;
+        renderRatingPanel();
+        updateComposerState();
+      }}
+    }}
+    async function submitOnboardingForm(event) {{
+      event.preventDefault();
+      if (state.onboardingSubmitBusy || state.chatReady) {{
+        return;
+      }}
+
+      const form = event.currentTarget;
+      const formData = new FormData(form);
+      const requiredFields = getRequiredProfileFields();
+      const errors = {{}};
+      const updatedProfile = {{
+        display_name: state.profile.display_name,
+        phone: state.profile.phone,
+        email: state.profile.email,
+      }};
+
+      for (const field of requiredFields) {{
+        const rawValue = formData.get(field);
+        const normalized = normalizeProfileValue(field, rawValue);
+        if (!normalized) {{
+          errors[field] = fieldInvalid(field);
+          continue;
+        }}
+        updatedProfile[field] = normalized;
+      }}
+
+      state.onboardingErrors = errors;
+      if (Object.keys(errors).length) {{
+        const firstField = requiredFields.find((field) => errors[field]);
+        statusEl.textContent = firstField ? errors[firstField] : "please fill required fields";
+        renderOnboarding();
+        updateComposerState();
+        return;
+      }}
+
+      state.profile = updatedProfile;
+      persistProfile();
+      state.onboardingSubmitBusy = true;
+      statusEl.textContent = "connecting...";
+      renderOnboarding();
+      updateComposerState();
+      try {{
+        await initChat();
+      }} catch (error) {{
+        state.chatReady = false;
+        handleActionError(error);
+      }} finally {{
+        state.onboardingSubmitBusy = false;
+        updateComposerState();
+        if (isOnboardingRequired()) {{
+          renderOnboarding();
+        }}
+      }}
     }}
     function renderOnboarding() {{
-      renderHistory(buildOnboardingItems());
+      if (!isOnboardingRequired()) {{
+        return;
+      }}
+
+      const fields = getRequiredProfileFields();
+      historyEl.innerHTML = "";
+
+      const card = document.createElement("div");
+      card.className = "onboarding-card";
+
+      const title = document.createElement("h3");
+      title.className = "onboarding-title";
+      title.textContent = "Before we start, please fill the form";
+      card.appendChild(title);
+
+      const note = document.createElement("p");
+      note.className = "onboarding-note";
+      note.textContent = "These details are required to open a support conversation.";
+      card.appendChild(note);
+
+      const form = document.createElement("form");
+      form.className = "onboarding-form";
+      form.noValidate = true;
+      form.addEventListener("submit", submitOnboardingForm);
+
+      for (const field of fields) {{
+        const fieldWrap = document.createElement("label");
+        fieldWrap.className = "onboarding-field";
+
+        const label = document.createElement("span");
+        label.className = "onboarding-label";
+        label.textContent = fieldLabel(field);
+        fieldWrap.appendChild(label);
+
+        const input = document.createElement("input");
+        input.name = field;
+        input.type = fieldInputType(field);
+        input.autocomplete = field === "display_name" ? "name" : (field === "phone" ? "tel" : "email");
+        input.placeholder = fieldPlaceholder(field);
+        input.value = String(state.profile[field] || "");
+        input.required = true;
+        if (state.onboardingErrors[field]) {{
+          input.classList.add("input-error");
+        }}
+        fieldWrap.appendChild(input);
+
+        const error = state.onboardingErrors[field];
+        if (error) {{
+          const errorEl = document.createElement("div");
+          errorEl.className = "onboarding-error";
+          errorEl.textContent = error;
+          fieldWrap.appendChild(errorEl);
+        }}
+        form.appendChild(fieldWrap);
+      }}
+
+      const submit = document.createElement("button");
+      submit.type = "submit";
+      submit.className = "onboarding-submit";
+      submit.disabled = state.onboardingSubmitBusy;
+      submit.textContent = state.onboardingSubmitBusy ? "Connecting..." : "Start chat";
+      form.appendChild(submit);
+
+      card.appendChild(form);
+      historyEl.appendChild(card);
+      historyEl.scrollTop = historyEl.scrollHeight;
+      state.lastHistoryFingerprint = "__onboarding__";
     }}
     function updateComposerState() {{
-      const onboardingField = getCurrentOnboardingField();
-      const onboardingMode = !state.chatReady && !!onboardingField;
-      if (state.chatReady && !state.chatWritable) {{
+      const onboardingMode = isOnboardingRequired() || state.onboardingSubmitBusy;
+      const lockedByTicket = state.chatReady && !state.chatWritable;
+      const hardDisabled = onboardingMode || lockedByTicket;
+      attachButtonEl.disabled = hardDisabled || state.fileReading;
+      fileInputEl.disabled = hardDisabled || state.fileReading;
+      attachClearEl.disabled = hardDisabled || state.fileReading;
+      if (onboardingMode) {{
+        textEl.disabled = true;
+        sendButtonEl.disabled = true;
+        sendButtonEl.textContent = "Locked";
+        textEl.placeholder = "Fill the form above to start";
+        renderPendingFile();
+        return;
+      }}
+      if (lockedByTicket) {{
         textEl.disabled = true;
         sendButtonEl.disabled = true;
         sendButtonEl.textContent = "Closed";
         textEl.placeholder = "Conversation is closed";
+        renderPendingFile();
         return;
       }}
       textEl.disabled = false;
-      sendButtonEl.disabled = false;
-      sendButtonEl.textContent = onboardingMode ? "Next" : "Send";
-      textEl.placeholder = onboardingMode
-        ? ("Enter " + fieldLabel(onboardingField))
-        : "Type your message";
+      sendButtonEl.disabled = state.fileReading;
+      sendButtonEl.textContent = state.pendingFile ? "Send file" : "Send";
+      textEl.placeholder = state.pendingFile ? "Add message (optional)" : "Type your message";
+      renderPendingFile();
     }}
 
     const basePath = window.location.pathname.replace(/\/+$/g, "").replace(/\/+/g, "/");
@@ -571,10 +1048,16 @@
       if (payload && Number(payload.chat_revision) > 0) {{
         state.chatRevision = Number(payload.chat_revision);
       }}
+      state.ratingEnabled = !!(payload && payload.rating_enabled === true);
+      state.ratingRequired = !!(payload && payload.rating_required === true);
+      state.ratingSubmitted = !!(payload && payload.rating_submitted === true);
+      state.ticketRating = normalizeRating(payload && payload.ticket_rating);
+      state.ratingMessage = String((payload && payload.rating_message) || "");
       state.chatWritable = canWrite;
       if (!canWrite) {{
         statusEl.textContent = "ticket is closed";
       }}
+      renderRatingPanel();
       updateComposerState();
     }}
 
@@ -584,7 +1067,7 @@
       }}
       const missing = getMissingRequiredFields();
       if (missing.length) {{
-        statusEl.textContent = "need " + fieldLabel(missing[0]);
+        statusEl.textContent = "fill required fields";
         renderOnboarding();
         updateComposerState();
         return;
@@ -601,7 +1084,7 @@
         storageSet(CONFIG.visitorKey, state.visitorId);
       }}
       state.chatReady = true;
-      state.onboardingLog = [];
+      state.onboardingErrors = {{}};
       applyWriteState(result);
       renderHistory(result.history || [], true);
       if (state.chatWritable) {{
@@ -630,42 +1113,6 @@
         statusEl.textContent = "online";
       }}
     }}
-    async function processOnboardingInput(value) {{
-      const field = getCurrentOnboardingField();
-      if (!field) {{
-        return false;
-      }}
-      const normalized = normalizeProfileValue(field, value);
-      if (!normalized) {{
-        statusEl.textContent = fieldInvalid(field);
-        return true;
-      }}
-      pushOnboardingMessage({{
-        message_type: "Regular",
-        mine: true,
-        author_name: "you",
-        text: value,
-      }});
-      state.profile[field] = normalized;
-      persistProfile();
-      pushOnboardingMessage({{
-        message_type: "System",
-        mine: false,
-        author_name: "system",
-        text: "Saved " + fieldLabel(field) + ".",
-      }});
-      renderOnboarding();
-      updateComposerState();
-
-      const missing = getMissingRequiredFields();
-      if (missing.length) {{
-        statusEl.textContent = "need " + fieldLabel(missing[0]);
-        return true;
-      }}
-
-      await initChat();
-      return true;
-    }}
     async function sendChatMessage(text) {{
       if (!state.chatReady) {{
         await initChat();
@@ -676,6 +1123,29 @@
       const result = await callApi("send_message", {{
         visitor_id: state.visitorId,
         text: text,
+        display_name: state.profile.display_name,
+        email: state.profile.email,
+        phone: state.profile.phone
+      }});
+      applyWriteState(result);
+      await refreshHistory(true);
+    }}
+    async function sendChatFile(payload) {{
+      if (!payload) {{
+        return;
+      }}
+      if (!state.chatReady) {{
+        await initChat();
+      }}
+      if (!state.chatReady || !state.chatWritable) {{
+        return;
+      }}
+      const result = await callApi("send_file", {{
+        visitor_id: state.visitorId,
+        text: payload.text || "",
+        file_name: payload.name,
+        extension: payload.extension,
+        data: payload.data,
         display_name: state.profile.display_name,
         email: state.profile.email,
         phone: state.profile.phone
@@ -695,22 +1165,93 @@
 
     formEl.addEventListener("submit", async (event) => {{
       event.preventDefault();
+      if (isOnboardingRequired() || state.onboardingSubmitBusy) {{
+        return;
+      }}
       const text = (textEl.value || "").trim();
-      if (!text) return;
+      const pendingFile = state.pendingFile;
+      if (!text && !pendingFile) {{
+        return;
+      }}
       try {{
         sendButtonEl.disabled = true;
-        if (!state.chatReady && getCurrentOnboardingField()) {{
-          await processOnboardingInput(text);
-          textEl.value = "";
-          return;
+        if (pendingFile) {{
+          await sendChatFile({{
+            text: text,
+            name: pendingFile.name,
+            extension: pendingFile.extension,
+            data: pendingFile.data,
+          }});
+          clearPendingFile();
+        }} else {{
+          await sendChatMessage(text);
         }}
-        await sendChatMessage(text);
         textEl.value = "";
       }} catch (error) {{
         handleActionError(error);
       }} finally {{
         updateComposerState();
       }}
+    }});
+    attachButtonEl.addEventListener("click", () => {{
+      if (attachButtonEl.disabled || state.fileReading) {{
+        return;
+      }}
+      fileInputEl.click();
+    }});
+    attachClearEl.addEventListener("click", () => {{
+      if (state.fileReading) {{
+        return;
+      }}
+      clearPendingFile();
+      updateComposerState();
+    }});
+    fileInputEl.addEventListener("change", async () => {{
+      const file = fileInputEl.files && fileInputEl.files[0];
+      if (!file) {{
+        return;
+      }}
+      const maxUploadBytes = Number(CONFIG.maxUploadBytes || 0);
+      if (maxUploadBytes > 0 && Number(file.size || 0) > maxUploadBytes) {{
+        clearPendingFile();
+        statusEl.textContent = "file is too large (max " + formatBytes(maxUploadBytes) + ")";
+        updateComposerState();
+        return;
+      }}
+      state.fileReading = true;
+      updateComposerState();
+      try {{
+        const dataUrl = await readFileAsDataURL(file);
+        const base64Payload = String(dataUrl || "").split(",", 2)[1] || "";
+        if (!base64Payload) {{
+          throw new Error("Failed to read file");
+        }}
+        const fileName = normalizeFileName(file.name || "file.bin");
+        const extension = normalizeFileExtension(getExtensionFromFileName(fileName)) || "bin";
+        state.pendingFile = {{
+          name: fileName,
+          extension: extension,
+          data: base64Payload,
+          size: Number(file.size || 0),
+        }};
+        statusEl.textContent = "file attached";
+      }} catch (error) {{
+        clearPendingFile();
+        statusEl.textContent = "file error: " + (error && error.message ? error.message : "unexpected error");
+      }} finally {{
+        state.fileReading = false;
+        updateComposerState();
+      }}
+    }});
+    textEl.addEventListener("keydown", (event) => {{
+      if (event.key !== "Enter") {{
+        return;
+      }}
+      if (event.shiftKey || event.ctrlKey || event.metaKey || event.altKey || event.isComposing) {{
+        return;
+      }}
+      event.preventDefault();
+      formEl.requestSubmit();
     }});
 
     async function bootstrapChat() {{
@@ -724,9 +1265,9 @@
       initVisitorId();
       updateComposerState();
 
-      if (getCurrentOnboardingField()) {{
+      if (isOnboardingRequired()) {{
         renderOnboarding();
-        statusEl.textContent = "need " + fieldLabel(getCurrentOnboardingField());
+        statusEl.textContent = "fill required fields";
       }} else {{
         await initChat();
       }}
@@ -738,8 +1279,10 @@
           refreshHistory(forceFull).catch((error) => {{
             handleActionError(error);
           }});
-        }} else if (getCurrentOnboardingField()) {{
-          renderOnboarding();
+        }} else if (isOnboardingRequired()) {{
+          if (!historyEl.querySelector(".onboarding-card")) {{
+            renderOnboarding();
+          }}
         }} else {{
           initChat().catch((error) => {{
             state.chatReady = false;

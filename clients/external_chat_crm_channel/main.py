@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import html
 import json
 import re
@@ -20,6 +22,7 @@ from core.logger import setup_logger
 from core.redis import redis_client
 from schemas.api.chat.chat import ChatEntityTypeEnum
 from schemas.api.chat.chat_message import (
+    ChatMessageAddFileRequest,
     ChatMessageAddRequest,
     ChatMessageGetRequest,
     ChatMessageMarkReadRequest,
@@ -32,6 +35,7 @@ from schemas.api.crm.ticket import (
     TicketAddRequest,
     TicketDirectionEnum,
     TicketGetRequest,
+    TicketSetRatingRequest,
     TicketStatusEnum,
 )
 from schemas.api.integrations.connected_integration import (
@@ -55,11 +59,15 @@ class ExternalChatCrmChannelConfig:
     DEFAULT_HISTORY_LIMIT = 50
     MAX_HISTORY_LIMIT = 200
     MAX_MESSAGE_LENGTH = 4000
+    MAX_UPLOAD_FILE_SIZE_BYTES = 20 * 1024 * 1024
+    MAX_FILE_NAME_LENGTH = 160
+    MAX_FILE_EXTENSION_LENGTH = 20
     DEFAULT_CHAT_TITLE = "Support Chat"
     DEFAULT_SUBJECT_TEMPLATE = "Web chat {visitor_id}"
     CLOSED_ENTITY_ERROR_CODE = 1220
     CHAT_REVISION_DEFAULT = 1
     WEBHOOK_DEDUPE_TTL_SEC = 10 * 60
+    RATING_POSITIVE_THRESHOLD = 4
     SUPPORTED_INBOUND_WEBHOOKS = {
         "ChatMessageAdded",
         "ChatMessageEdited",
@@ -88,6 +96,11 @@ class RuntimeConfig:
     default_responsible_user_id: Optional[int]
     chat_title: str
     channel_start_message: Optional[str]
+    channel_end_message: Optional[str]
+    channel_rating_enabled: bool
+    channel_rating_message: Optional[str]
+    channel_rating_positive_message: Optional[str]
+    channel_rating_negative_message: Optional[str]
     require_display_name: bool
     require_phone: bool
     require_email: bool
@@ -152,6 +165,53 @@ def _normalize_email(value: Any) -> Optional[str]:
     if not email or "@" not in email or " " in email:
         return None
     return email
+
+
+def _normalize_rating(value: Any) -> Optional[int]:
+    parsed = _parse_int(value, None)
+    if parsed is None:
+        return None
+    if 1 <= int(parsed) <= 5:
+        return int(parsed)
+    return None
+
+
+def _normalize_file_name(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "file.bin"
+    raw = raw.replace("\\", "/").split("/")[-1]
+    cleaned = "".join(ch for ch in raw if 31 < ord(ch) < 127 and ch not in {"<", ">", ":", "\"", "|", "?", "*"})
+    cleaned = cleaned.strip(" .")
+    if not cleaned:
+        cleaned = "file.bin"
+    return cleaned[: ExternalChatCrmChannelConfig.MAX_FILE_NAME_LENGTH]
+
+
+def _normalize_file_extension(value: Any) -> str:
+    raw = str(value or "").strip().lower().lstrip(".")
+    if not raw:
+        return ""
+    cleaned = "".join(ch for ch in raw if ch.isalnum())
+    return cleaned[: ExternalChatCrmChannelConfig.MAX_FILE_EXTENSION_LENGTH]
+
+
+def _guess_extension_from_name(file_name: str) -> str:
+    name = str(file_name or "").strip()
+    if "." not in name:
+        return ""
+    return _normalize_file_extension(name.rsplit(".", 1)[-1])
+
+
+def _extract_base64_payload(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith("data:"):
+        _, sep, tail = raw.partition(",")
+        if sep:
+            raw = tail.strip()
+    return raw
 
 
 _ALLOWED_THEME_KEYS = set(ExternalChatCrmChannelConfig.DEFAULT_THEME_VARS.keys())
@@ -335,6 +395,20 @@ class ExternalChatCrmChannelIntegration(ClientBase):
     @classmethod
     def _ticket_chat_index_key(cls, connected_integration_id: str, ticket_id: int) -> str:
         return cls._redis_key("ticket_chat", connected_integration_id, ticket_id)
+
+    @classmethod
+    def _ticket_once_flag_key(
+        cls,
+        connected_integration_id: str,
+        ticket_id: int,
+        flag: str,
+    ) -> str:
+        return cls._redis_key(
+            "ticket_once",
+            connected_integration_id,
+            int(ticket_id),
+            str(flag or "").strip().lower(),
+        )
 
     @staticmethod
     async def _redis_get(key: str) -> Optional[str]:
@@ -543,6 +617,19 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         channel_start_message = (
             _normalize_text(getattr(channel, "start_message", None), 300) or None
         )
+        channel_end_message = (
+            _normalize_text(getattr(channel, "end_message", None), 300) or None
+        )
+        channel_rating_enabled = bool(getattr(channel, "rating_enabled", False))
+        channel_rating_message = (
+            _normalize_text(getattr(channel, "rating_message", None), 300) or None
+        )
+        channel_rating_positive_message = (
+            _normalize_text(getattr(channel, "rating_positive_message", None), 300) or None
+        )
+        channel_rating_negative_message = (
+            _normalize_text(getattr(channel, "rating_negative_message", None), 300) or None
+        )
 
         return RuntimeConfig(
             connected_integration_id=connected_integration_id,
@@ -553,6 +640,11 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             ),
             chat_title=chat_title,
             channel_start_message=channel_start_message,
+            channel_end_message=channel_end_message,
+            channel_rating_enabled=channel_rating_enabled,
+            channel_rating_message=channel_rating_message,
+            channel_rating_positive_message=channel_rating_positive_message,
+            channel_rating_negative_message=channel_rating_negative_message,
             require_display_name=require_display_name,
             require_phone=require_phone,
             require_email=require_email,
@@ -606,6 +698,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             "ticket_status": "",
             "ticket_closed": False,
             "can_write": True,
+            "ticket_rating": None,
         }
 
     @classmethod
@@ -627,7 +720,87 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             normalized["ticket_status"] = status_value
         normalized["ticket_closed"] = ticket_closed
         normalized["can_write"] = can_write
+        normalized["ticket_rating"] = _normalize_rating(payload.get("ticket_rating"))
         return normalized
+
+    @classmethod
+    def _compose_ticket_view_state(
+        cls,
+        runtime: RuntimeConfig,
+        ticket_state: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        base = cls._normalize_ticket_state(ticket_state)
+        ticket_rating = _normalize_rating(base.get("ticket_rating"))
+        rating_enabled = bool(runtime.channel_rating_enabled)
+        rating_submitted = ticket_rating is not None
+        rating_required = bool(
+            rating_enabled
+            and bool(base.get("ticket_closed"))
+            and not rating_submitted
+        )
+        return {
+            **base,
+            "ticket_rating": ticket_rating,
+            "rating_enabled": rating_enabled,
+            "rating_submitted": rating_submitted,
+            "rating_required": rating_required,
+            "rating_message": str(runtime.channel_rating_message or ""),
+        }
+
+    @staticmethod
+    def _ticket_closed_response(
+        visitor_id: str,
+        ticket_view: Dict[str, Any],
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": 409,
+                "description": "Ticket is closed",
+                "visitor_id": visitor_id,
+                **ticket_view,
+            },
+        )
+
+    async def _load_ticket_view_for_write(
+        self,
+        runtime: RuntimeConfig,
+        *,
+        connected_integration_id: str,
+        ticket_id: int,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        ticket_state = await self._get_ticket_write_state(
+            connected_integration_id,
+            int(ticket_id),
+        )
+        ticket_view = self._compose_ticket_view_state(runtime, ticket_state)
+        if ticket_state.get("can_write", True):
+            return ticket_state, ticket_view
+        refreshed_state = await self._get_ticket_write_state(
+            connected_integration_id,
+            int(ticket_id),
+            force_refresh=True,
+        )
+        refreshed_view = self._compose_ticket_view_state(runtime, refreshed_state)
+        return refreshed_state, refreshed_view
+
+    async def _cache_closed_ticket_view(
+        self,
+        runtime: RuntimeConfig,
+        *,
+        connected_integration_id: str,
+        ticket_id: int,
+    ) -> Dict[str, Any]:
+        closed_state = await self._cache_ticket_state(
+            connected_integration_id,
+            int(ticket_id),
+            {
+                "ticket_status": TicketStatusEnum.Closed.value,
+                "ticket_closed": True,
+                "can_write": False,
+            },
+        )
+        return self._compose_ticket_view_state(runtime, closed_state)
 
     @classmethod
     async def _set_ticket_chat_index(
@@ -746,7 +919,11 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         ticket_id: int,
         state: Dict[str, Any],
     ) -> Dict[str, Any]:
-        normalized = cls._normalize_ticket_state(state)
+        existing = await cls._get_cached_ticket_state(connected_integration_id, int(ticket_id))
+        merged: Dict[str, Any] = dict(existing or {})
+        if isinstance(state, dict):
+            merged.update(state)
+        normalized = cls._normalize_ticket_state(merged)
         if not ticket_id:
             return normalized
         if not _redis_enabled():
@@ -921,6 +1098,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             "ticket_status": status_value,
             "ticket_closed": ticket_closed,
             "can_write": not ticket_closed,
+            "ticket_rating": _normalize_rating(getattr(ticket, "rating", None)),
         }
         return await cls._cache_ticket_state(
             connected_integration_id,
@@ -1088,7 +1266,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     await api.chat.chat_message.add(
                         ChatMessageAddRequest(
                             chat_id=str(ticket.chat_id),
-                            message_type=ChatMessageTypeEnum.System,
+                            message_type=ChatMessageTypeEnum.Regular,
                             text=runtime.channel_start_message,
                             external_message_id=f"webchat:channel_start:{visitor_id}:{int(ticket.id)}",
                         )
@@ -1110,6 +1288,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 "ticket_status": ticket_status,
                 "ticket_closed": ticket_status == TicketStatusEnum.Closed.value,
                 "can_write": ticket_status != TicketStatusEnum.Closed.value,
+                "ticket_rating": _normalize_rating(getattr(ticket, "rating", None)),
             },
         )
         context = ChatContext(
@@ -1158,6 +1337,197 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         )
 
     @classmethod
+    def _extract_upload_payload(
+        cls,
+        data: Dict[str, Any],
+    ) -> Tuple[str, str, str, int]:
+        file_name = _normalize_file_name(
+            data.get("file_name") or data.get("name") or data.get("filename")
+        )
+        extension = _normalize_file_extension(
+            data.get("extension") or _guess_extension_from_name(file_name)
+        )
+        if not extension:
+            extension = "bin"
+
+        payload_raw = _extract_base64_payload(
+            data.get("data") or data.get("file_data") or data.get("payload")
+        )
+        payload_compact = "".join(payload_raw.split())
+        if not payload_compact:
+            raise ValueError("file data is required")
+        try:
+            file_bytes = base64.b64decode(payload_compact, validate=True)
+        except binascii.Error as error:
+            raise ValueError("file data must be valid base64") from error
+        if not file_bytes:
+            raise ValueError("file data is empty")
+        max_size = int(ExternalChatCrmChannelConfig.MAX_UPLOAD_FILE_SIZE_BYTES)
+        if len(file_bytes) > max_size:
+            raise ValueError(f"file is too large (max {max_size} bytes)")
+
+        return file_name, extension, payload_compact, len(file_bytes)
+
+    @classmethod
+    async def _add_file_message_from_visitor(
+        cls,
+        connected_integration_id: str,
+        context: ChatContext,
+        *,
+        text: Optional[str],
+        file_name: str,
+        extension: str,
+        payload_b64: str,
+        external_message_id: str,
+    ) -> Tuple[str, int]:
+        safe_text = _normalize_text(text, ExternalChatCrmChannelConfig.MAX_MESSAGE_LENGTH)
+        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+            add_file_response = await api.chat.chat_message.add_file(
+                ChatMessageAddFileRequest(
+                    chat_id=context.chat_id,
+                    name=file_name,
+                    extension=extension,
+                    data=payload_b64,
+                )
+            )
+            if not add_file_response.ok:
+                file_payload = _result_to_dict(add_file_response.result)
+                file_error_code = _parse_int(file_payload.get("error"), None)
+                if file_error_code == ExternalChatCrmChannelConfig.CLOSED_ENTITY_ERROR_CODE:
+                    raise ChatMessageAddClosedEntityError("ChatMessage/AddFile rejected for closed entity")
+                raise RuntimeError(
+                    "ChatMessage/AddFile rejected: "
+                    f"error={file_payload.get('error')} description={file_payload.get('description')}"
+                )
+            file_id = _parse_int(_result_get(add_file_response.result, "file_id"), None)
+            if not file_id:
+                raise RuntimeError("ChatMessage/AddFile did not return file_id")
+
+            add_message_response = await api.chat.chat_message.add(
+                ChatMessageAddRequest(
+                    chat_id=context.chat_id,
+                    author_entity_type=ChatEntityTypeEnum.Client,
+                    author_entity_id=int(context.client_id),
+                    message_type=ChatMessageTypeEnum.Regular,
+                    text=safe_text or None,
+                    file_ids=[int(file_id)],
+                    external_message_id=external_message_id,
+                )
+            )
+            if not add_message_response.ok:
+                message_payload = _result_to_dict(add_message_response.result)
+                message_error_code = _parse_int(message_payload.get("error"), None)
+                if message_error_code == ExternalChatCrmChannelConfig.CLOSED_ENTITY_ERROR_CODE:
+                    raise ChatMessageAddClosedEntityError("ChatMessage/Add rejected for closed entity")
+                raise RuntimeError(
+                    "ChatMessage/Add rejected: "
+                    f"error={message_payload.get('error')} description={message_payload.get('description')}"
+                )
+            message_id = str(_result_get(add_message_response.result, "new_uuid") or "").strip()
+            if not message_id:
+                raise RuntimeError("ChatMessage/Add did not return new_uuid")
+
+        await cls._bump_chat_revision(
+            connected_integration_id,
+            str(context.chat_id),
+        )
+        return message_id, int(file_id)
+
+    @staticmethod
+    def _is_duplicate_external_message_error(payload: Dict[str, Any]) -> bool:
+        description = str(payload.get("description") or "").strip().lower()
+        if not description:
+            return False
+        return any(
+            token in description
+            for token in ("duplicate", "already", "exists", "external_message_id")
+        )
+
+    @classmethod
+    async def _mark_ticket_once_flag(
+        cls,
+        connected_integration_id: str,
+        ticket_id: int,
+        flag: str,
+    ) -> bool:
+        if not ticket_id or not str(flag or "").strip():
+            return False
+        if not _redis_enabled():
+            return True
+        return await cls._redis_set_nx(
+            cls._ticket_once_flag_key(connected_integration_id, int(ticket_id), flag),
+            "1",
+            ExternalChatCrmChannelConfig.CONTEXT_TTL_SEC,
+        )
+
+    @classmethod
+    async def _add_system_message(
+        cls,
+        connected_integration_id: str,
+        *,
+        chat_id: str,
+        text: str,
+        external_message_id: str,
+    ) -> bool:
+        safe_chat_id = str(chat_id or "").strip()
+        safe_text = _normalize_text(text, 300)
+        safe_external_message_id = str(external_message_id or "").strip()
+        if not safe_chat_id or not safe_text or not safe_external_message_id:
+            return False
+
+        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+            response = await api.chat.chat_message.add(
+                ChatMessageAddRequest(
+                    chat_id=safe_chat_id,
+                    message_type=ChatMessageTypeEnum.Regular,
+                    text=safe_text,
+                    external_message_id=safe_external_message_id,
+                )
+            )
+        if response.ok:
+            await cls._bump_chat_revision(
+                connected_integration_id,
+                safe_chat_id,
+            )
+            return True
+
+        payload = _result_to_dict(response.result)
+        if cls._is_duplicate_external_message_error(payload):
+            return False
+        logger.warning(
+            "ChatMessage/Add rejected for system message: ci=%s chat_id=%s external_message_id=%s payload=%s",
+            connected_integration_id,
+            safe_chat_id,
+            safe_external_message_id,
+            response.result,
+        )
+        return False
+
+    @classmethod
+    async def _send_ticket_closed_message_if_needed(
+        cls,
+        connected_integration_id: str,
+        *,
+        runtime: RuntimeConfig,
+        ticket_id: int,
+        chat_id: str,
+    ) -> bool:
+        if not runtime.channel_end_message:
+            return False
+        if not await cls._mark_ticket_once_flag(
+            connected_integration_id,
+            int(ticket_id),
+            "end_message_sent",
+        ):
+            return False
+        return await cls._add_system_message(
+            connected_integration_id,
+            chat_id=chat_id,
+            text=runtime.channel_end_message,
+            external_message_id=f"webchat:channel_end:{int(ticket_id)}",
+        )
+
+    @classmethod
     async def _read_history(
         cls,
         connected_integration_id: str,
@@ -1181,7 +1551,10 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         history: List[Dict[str, Any]] = []
         for row in rows:
             message_type = _enum_value(getattr(row, "message_type", None)).strip() or ChatMessageTypeEnum.Regular.value
-            if message_type == ChatMessageTypeEnum.Private.value:
+            if message_type in {
+                ChatMessageTypeEnum.Private.value,
+                ChatMessageTypeEnum.System.value,
+            }:
                 continue
             author_type = _enum_value(getattr(row, "author_entity_type", None)).strip().lower()
             author_id = _parse_int(getattr(row, "author_entity_id", None), None)
@@ -1303,6 +1676,9 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         ).replace(
             "{ExternalChatCrmChannelConfig.DEFAULT_HISTORY_LIMIT}",
             str(ExternalChatCrmChannelConfig.DEFAULT_HISTORY_LIMIT),
+        ).replace(
+            "{ExternalChatCrmChannelConfig.MAX_UPLOAD_FILE_SIZE_BYTES}",
+            str(ExternalChatCrmChannelConfig.MAX_UPLOAD_FILE_SIZE_BYTES),
         )
         return prepared_template.format(
             safe_title=safe_title,
@@ -1478,6 +1854,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         if webhook_action == "TicketClosed" and not status_value:
             status_value = TicketStatusEnum.Closed.value
         ticket_closed = status_value == TicketStatusEnum.Closed.value
+        ticket_rating = _normalize_rating(payload.get("rating"))
 
         state = await cls._cache_ticket_state(
             connected_integration_id,
@@ -1486,6 +1863,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 "ticket_status": status_value,
                 "ticket_closed": ticket_closed,
                 "can_write": not ticket_closed,
+                "ticket_rating": ticket_rating,
             },
         )
 
@@ -1499,6 +1877,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 chat_id,
             )
 
+        ticket: Optional[Ticket] = None
         if not status_value or not chat_id:
             try:
                 async with RegosAPI(connected_integration_id=connected_integration_id) as api:
@@ -1506,18 +1885,10 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             except Exception:
                 ticket = None
             if ticket:
+                ticket_rating = _normalize_rating(getattr(ticket, "rating", None))
                 if not status_value:
                     status_value = _enum_value(getattr(ticket, "status", None)).strip()
                     ticket_closed = status_value == TicketStatusEnum.Closed.value
-                    state = await cls._cache_ticket_state(
-                        connected_integration_id,
-                        int(ticket_id),
-                        {
-                            "ticket_status": status_value,
-                            "ticket_closed": ticket_closed,
-                            "can_write": not ticket_closed,
-                        },
-                    )
                 if not chat_id:
                     chat_id = str(getattr(ticket, "chat_id", "") or "").strip()
                     if chat_id:
@@ -1526,10 +1897,37 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                             int(ticket_id),
                             chat_id,
                         )
+                state = await cls._cache_ticket_state(
+                    connected_integration_id,
+                    int(ticket_id),
+                    {
+                        "ticket_status": status_value,
+                        "ticket_closed": ticket_closed,
+                        "can_write": not ticket_closed,
+                        "ticket_rating": ticket_rating,
+                    },
+                )
 
         revision = 0
         if chat_id:
             revision = await cls._bump_chat_revision(connected_integration_id, chat_id)
+            if ticket_closed:
+                try:
+                    runtime = await cls._load_runtime(connected_integration_id)
+                    await cls._send_ticket_closed_message_if_needed(
+                        connected_integration_id,
+                        runtime=runtime,
+                        ticket_id=int(ticket_id),
+                        chat_id=chat_id,
+                    )
+                except Exception as error:
+                    logger.warning(
+                        "Failed to send ticket close message: ci=%s ticket_id=%s chat_id=%s error=%s",
+                        connected_integration_id,
+                        ticket_id,
+                        chat_id,
+                        error,
+                    )
 
         return {
             "status": "processed",
@@ -1704,6 +2102,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     int(context.ticket_id),
                     force_refresh=True,
                 )
+                ticket_view = self._compose_ticket_view_state(runtime, ticket_state)
                 chat_revision = await self._get_chat_revision(ci, str(context.chat_id))
                 history = await self._read_history(
                     ci,
@@ -1722,7 +2121,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     },
                     "chat_revision": chat_revision,
                     "history_changed": True,
-                    **ticket_state,
+                    **ticket_view,
                     "history": history,
                 }
 
@@ -1733,6 +2132,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     int(context.ticket_id),
                     force_refresh=force_full,
                 )
+                ticket_view = self._compose_ticket_view_state(runtime, ticket_state)
                 chat_revision = await self._get_chat_revision(ci, str(context.chat_id))
                 known_revision = _parse_int(data.get("known_revision"), None)
                 limit = _parse_int(
@@ -1750,7 +2150,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                         "visitor_id": visitor_id,
                         "chat_revision": chat_revision,
                         "history_changed": False,
-                        **ticket_state,
+                        **ticket_view,
                     }
                 history = await self._read_history(
                     ci,
@@ -1762,7 +2162,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     "visitor_id": visitor_id,
                     "chat_revision": chat_revision,
                     "history_changed": True,
-                    **ticket_state,
+                    **ticket_view,
                     "history": history,
                 }
 
@@ -1776,23 +2176,13 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                         status_code=400,
                         content={"error": 400, "description": "text is required"},
                     )
-                ticket_state = await self._get_ticket_write_state(ci, int(context.ticket_id))
+                ticket_state, ticket_view = await self._load_ticket_view_for_write(
+                    runtime,
+                    connected_integration_id=ci,
+                    ticket_id=int(context.ticket_id),
+                )
                 if not ticket_state.get("can_write", True):
-                    ticket_state = await self._get_ticket_write_state(
-                        ci,
-                        int(context.ticket_id),
-                        force_refresh=True,
-                    )
-                if not ticket_state.get("can_write", True):
-                    return JSONResponse(
-                        status_code=409,
-                        content={
-                            "error": 409,
-                            "description": "Ticket is closed",
-                            "visitor_id": visitor_id,
-                            **ticket_state,
-                        },
-                    )
+                    return self._ticket_closed_response(visitor_id, ticket_view)
                 ext_id = f"webchat:msg:{visitor_id}:{uuid.uuid4().hex[:12]}"
                 try:
                     message_id = await self._add_message_from_visitor(
@@ -1802,24 +2192,12 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                         external_message_id=ext_id,
                     )
                 except ChatMessageAddClosedEntityError:
-                    closed_state = await self._cache_ticket_state(
-                        ci,
-                        int(context.ticket_id),
-                        {
-                            "ticket_status": TicketStatusEnum.Closed.value,
-                            "ticket_closed": True,
-                            "can_write": False,
-                        },
+                    closed_view = await self._cache_closed_ticket_view(
+                        runtime,
+                        connected_integration_id=ci,
+                        ticket_id=int(context.ticket_id),
                     )
-                    return JSONResponse(
-                        status_code=409,
-                        content={
-                            "error": 409,
-                            "description": "Ticket is closed",
-                            "visitor_id": visitor_id,
-                            **closed_state,
-                        },
-                    )
+                    return self._ticket_closed_response(visitor_id, closed_view)
                 await self._mark_read(ci, context)
                 chat_revision = await self._get_chat_revision(ci, str(context.chat_id))
                 return {
@@ -1827,18 +2205,182 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     "visitor_id": visitor_id,
                     "message_id": message_id,
                     "chat_revision": chat_revision,
-                    **ticket_state,
+                    **ticket_view,
+                }
+
+            if action == "send_file":
+                try:
+                    file_name, extension, payload_b64, file_size = self._extract_upload_payload(data)
+                except ValueError as error:
+                    return JSONResponse(
+                        status_code=400,
+                        content={"error": 400, "description": str(error)},
+                    )
+                text = _normalize_text(
+                    data.get("text"),
+                    ExternalChatCrmChannelConfig.MAX_MESSAGE_LENGTH,
+                )
+                ticket_state, ticket_view = await self._load_ticket_view_for_write(
+                    runtime,
+                    connected_integration_id=ci,
+                    ticket_id=int(context.ticket_id),
+                )
+                if not ticket_state.get("can_write", True):
+                    return self._ticket_closed_response(visitor_id, ticket_view)
+
+                ext_id = f"webchat:file:{visitor_id}:{uuid.uuid4().hex[:12]}"
+                try:
+                    message_id, file_id = await self._add_file_message_from_visitor(
+                        connected_integration_id=ci,
+                        context=context,
+                        text=text,
+                        file_name=file_name,
+                        extension=extension,
+                        payload_b64=payload_b64,
+                        external_message_id=ext_id,
+                    )
+                except ChatMessageAddClosedEntityError:
+                    closed_view = await self._cache_closed_ticket_view(
+                        runtime,
+                        connected_integration_id=ci,
+                        ticket_id=int(context.ticket_id),
+                    )
+                    return self._ticket_closed_response(visitor_id, closed_view)
+                await self._mark_read(ci, context)
+                chat_revision = await self._get_chat_revision(ci, str(context.chat_id))
+                return {
+                    "status": "ok",
+                    "visitor_id": visitor_id,
+                    "message_id": message_id,
+                    "file_id": int(file_id),
+                    "file_name": file_name,
+                    "file_size": int(file_size),
+                    "chat_revision": chat_revision,
+                    **ticket_view,
+                }
+
+            if action == "set_rating":
+                rating = _normalize_rating(data.get("rating"))
+                if rating is None:
+                    return JSONResponse(
+                        status_code=400,
+                        content={"error": 400, "description": "rating must be integer from 1 to 5"},
+                    )
+
+                ticket_state = await self._get_ticket_write_state(
+                    ci,
+                    int(context.ticket_id),
+                    force_refresh=True,
+                )
+                ticket_view = self._compose_ticket_view_state(runtime, ticket_state)
+                if not ticket_view.get("ticket_closed", False):
+                    return JSONResponse(
+                        status_code=409,
+                        content={
+                            "error": 409,
+                            "description": "Ticket is not closed",
+                            "visitor_id": visitor_id,
+                            **ticket_view,
+                        },
+                    )
+                if not ticket_view.get("rating_enabled", False):
+                    return JSONResponse(
+                        status_code=409,
+                        content={
+                            "error": 409,
+                            "description": "Rating is disabled",
+                            "visitor_id": visitor_id,
+                            **ticket_view,
+                        },
+                    )
+                if ticket_view.get("rating_submitted", False):
+                    return {
+                        "status": "ok",
+                        "visitor_id": visitor_id,
+                        "rating_saved": False,
+                        "already_rated": True,
+                        **ticket_view,
+                    }
+
+                async with RegosAPI(connected_integration_id=ci) as api:
+                    set_rating_response = await api.crm.ticket.set_rating(
+                        TicketSetRatingRequest(
+                            id=int(context.ticket_id),
+                            rating=int(rating),
+                        )
+                    )
+
+                if not set_rating_response.ok:
+                    payload = _result_to_dict(set_rating_response.result)
+                    description = str(payload.get("description") or "").strip().lower()
+                    already_rated = any(
+                        token in description
+                        for token in ("already", "repeat", "rated", "exists")
+                    )
+                    refreshed_state = await self._get_ticket_write_state(
+                        ci,
+                        int(context.ticket_id),
+                        force_refresh=True,
+                    )
+                    refreshed_view = self._compose_ticket_view_state(runtime, refreshed_state)
+                    if already_rated or refreshed_view.get("rating_submitted", False):
+                        return {
+                            "status": "ok",
+                            "visitor_id": visitor_id,
+                            "rating_saved": False,
+                            "already_rated": True,
+                            **refreshed_view,
+                        }
+                    return JSONResponse(
+                        status_code=500,
+                        content={
+                            "error": 500,
+                            "description": "Failed to save rating",
+                            "visitor_id": visitor_id,
+                            **refreshed_view,
+                        },
+                    )
+
+                saved_state = await self._cache_ticket_state(
+                    ci,
+                    int(context.ticket_id),
+                    {"ticket_rating": int(rating)},
+                )
+                followup_text = (
+                    runtime.channel_rating_positive_message
+                    if int(rating) >= ExternalChatCrmChannelConfig.RATING_POSITIVE_THRESHOLD
+                    else runtime.channel_rating_negative_message
+                )
+                if followup_text:
+                    await self._add_system_message(
+                        ci,
+                        chat_id=context.chat_id,
+                        text=followup_text,
+                        external_message_id=(
+                            f"webchat:channel_rating_result:{int(context.ticket_id)}:{int(rating)}"
+                        ),
+                    )
+                chat_revision = await self._get_chat_revision(ci, str(context.chat_id))
+                saved_view = self._compose_ticket_view_state(runtime, saved_state)
+                return {
+                    "status": "ok",
+                    "visitor_id": visitor_id,
+                    "rating_saved": True,
+                    "already_rated": False,
+                    "chat_revision": chat_revision,
+                    **saved_view,
                 }
 
             if action == "mark_read":
                 await self._mark_read(ci, context)
                 ticket_state = await self._get_ticket_write_state(ci, int(context.ticket_id))
+                ticket_view = self._compose_ticket_view_state(runtime, ticket_state)
                 chat_revision = await self._get_chat_revision(ci, str(context.chat_id))
                 return {
                     "status": "ok",
                     "visitor_id": visitor_id,
                     "chat_revision": chat_revision,
-                    **ticket_state,
+                    **ticket_view,
                 }
 
             return JSONResponse(
