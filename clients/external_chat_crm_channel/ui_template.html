@@ -8,17 +8,19 @@
     @import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Space+Grotesk:wght@600;700&display=swap");
     :root {{
 {theme_vars_css}
-      --shell: #f2f6fb;
-      --shadow-strong: 0 28px 60px rgba(13, 31, 55, 0.16);
-      --shadow-soft: 0 10px 26px rgba(13, 31, 55, 0.1);
+      --shell: #f4f8ff;
+      --glass: rgba(255, 255, 255, 0.74);
+      --shadow-strong: 0 34px 76px rgba(14, 34, 61, 0.18);
+      --shadow-soft: 0 14px 28px rgba(14, 34, 61, 0.12);
+      --shadow-chip: 0 8px 18px rgba(14, 34, 61, 0.1);
     }}
     * {{ box-sizing: border-box; }}
     body {{
       margin: 0;
       background:
-        radial-gradient(circle at 12% -8%, #d7e8ff 0%, rgba(215, 232, 255, 0) 38%),
-        radial-gradient(circle at 92% 112%, #d7ffe9 0%, rgba(215, 255, 233, 0) 34%),
-        linear-gradient(180deg, #f8fbff 0%, #eef3f8 100%);
+        radial-gradient(circle at 9% -12%, #cadeff 0%, rgba(202, 222, 255, 0) 42%),
+        radial-gradient(circle at 98% 118%, #cbffe8 0%, rgba(203, 255, 232, 0) 36%),
+        linear-gradient(180deg, #f8fbff 0%, #ebf2fb 100%);
       color: var(--text);
       font: 14px/1.52 "Manrope", "Trebuchet MS", "Verdana", sans-serif;
       min-height: 100vh;
@@ -43,72 +45,83 @@
     }}
     .wrap {{
       width: 100%;
-      max-width: 860px;
+      max-width: 900px;
       display: grid;
       grid-template-rows: auto 1fr auto;
-      background: var(--card);
-      border: 1px solid var(--line);
-      border-radius: 22px;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(246, 250, 255, 0.94) 100%);
+      border: 1px solid rgba(181, 199, 223, 0.54);
+      border-radius: 26px;
       overflow: hidden;
       box-shadow: var(--shadow-strong);
       position: relative;
-      backdrop-filter: blur(8px);
+      backdrop-filter: blur(10px);
     }}
     .wrap::before {{
       content: "";
       position: absolute;
       inset: 0 0 auto 0;
-      height: 84px;
+      height: 112px;
       pointer-events: none;
-      background: linear-gradient(180deg, rgba(255, 255, 255, 0.45) 0%, rgba(255, 255, 255, 0) 100%);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.62) 0%, rgba(255, 255, 255, 0) 100%);
     }}
     .head {{
-      padding: 16px 18px;
-      border-bottom: 1px solid var(--line);
+      padding: 18px 20px;
+      border-bottom: 1px solid rgba(181, 199, 223, 0.54);
       display: flex;
       justify-content: space-between;
       align-items: center;
       gap: 12px;
-      background: linear-gradient(180deg, rgba(255, 255, 255, 0.92) 0%, rgba(245, 249, 255, 0.76) 100%);
-      backdrop-filter: blur(10px);
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.96) 0%, rgba(241, 248, 255, 0.82) 100%);
+      backdrop-filter: blur(12px);
+      position: relative;
+    }}
+    .head::after {{
+      content: "";
+      position: absolute;
+      left: 20px;
+      right: 20px;
+      bottom: 0;
+      height: 1px;
+      background: linear-gradient(90deg, rgba(104, 141, 184, 0), rgba(104, 141, 184, 0.38), rgba(104, 141, 184, 0));
     }}
     .title {{
-      font: 700 17px/1.2 "Space Grotesk", "Manrope", sans-serif;
-      letter-spacing: 0.2px;
+      font: 700 18px/1.2 "Space Grotesk", "Manrope", sans-serif;
+      letter-spacing: 0.25px;
     }}
     .status {{
-      color: var(--muted);
+      color: #5e718d;
       font-size: 11px;
       display: inline-flex;
       align-items: center;
       gap: 7px;
-      padding: 6px 10px;
+      padding: 7px 11px;
       border-radius: 999px;
-      border: 1px solid var(--line);
-      background: rgba(255, 255, 255, 0.74);
+      border: 1px solid rgba(181, 199, 223, 0.62);
+      background: var(--glass);
       text-transform: uppercase;
-      letter-spacing: 0.35px;
+      letter-spacing: 0.4px;
+      box-shadow: var(--shadow-chip);
     }}
     .status::before {{
       content: "";
-      width: 7px;
-      height: 7px;
+      width: 8px;
+      height: 8px;
       border-radius: 50%;
-      background: #35c76b;
-      box-shadow: 0 0 0 3px rgba(53, 199, 107, 0.2);
+      background: #2fc368;
+      box-shadow: 0 0 0 4px rgba(47, 195, 104, 0.18);
     }}
     .history {{
-      padding: 18px 18px;
+      padding: 20px 20px;
       overflow-y: auto;
       background:
-        radial-gradient(circle at 10% 0%, rgba(255, 255, 255, 0.82) 0%, rgba(255, 255, 255, 0) 38%),
-        linear-gradient(180deg, rgba(255, 255, 255, 0.35) 0%, rgba(255, 255, 255, 0.08) 100%),
+        radial-gradient(circle at 9% 0%, rgba(255, 255, 255, 0.84) 0%, rgba(255, 255, 255, 0) 40%),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.42) 0%, rgba(255, 255, 255, 0.12) 100%),
         var(--bg);
-      min-height: 360px;
+      min-height: 380px;
       max-height: 60vh;
       display: flex;
       flex-direction: column;
-      gap: 10px;
+      gap: 12px;
       scroll-behavior: smooth;
     }}
     .history::-webkit-scrollbar {{
@@ -125,24 +138,25 @@
     }}
     .msg {{
       max-width: 82%;
-      padding: 10px 12px;
-      border-radius: 16px;
-      border: 1px solid var(--line);
+      padding: 11px 13px;
+      border-radius: 18px;
+      border: 1px solid rgba(181, 199, 223, 0.62);
       white-space: pre-wrap;
       word-break: break-word;
       animation: rise .18s cubic-bezier(0.2, 0.8, 0.2, 1);
       box-shadow: var(--shadow-soft);
-      line-height: 1.45;
+      line-height: 1.48;
+      position: relative;
     }}
     .msg.mine {{
       margin-left: auto;
-      background: var(--mine);
-      border-bottom-right-radius: 6px;
+      background: linear-gradient(180deg, rgba(231, 243, 255, 0.96) 0%, rgba(219, 237, 255, 0.96) 100%);
+      border-bottom-right-radius: 8px;
     }}
     .msg.other {{
       margin-right: auto;
-      background: var(--other);
-      border-bottom-left-radius: 6px;
+      background: linear-gradient(180deg, rgba(241, 244, 249, 0.96) 0%, rgba(235, 240, 246, 0.96) 100%);
+      border-bottom-left-radius: 8px;
     }}
     .msg.system {{
       margin: 0 auto;
@@ -150,6 +164,35 @@
       max-width: 96%;
       border-style: dashed;
       text-align: center;
+    }}
+    .msg.mine::after {{
+      content: "";
+      position: absolute;
+      right: -6px;
+      bottom: 10px;
+      width: 12px;
+      height: 12px;
+      border-right: 1px solid rgba(181, 199, 223, 0.62);
+      border-top: 1px solid rgba(181, 199, 223, 0.62);
+      background: rgba(219, 237, 255, 0.96);
+      transform: rotate(45deg);
+      border-radius: 2px;
+    }}
+    .msg.other::after {{
+      content: "";
+      position: absolute;
+      left: -6px;
+      bottom: 10px;
+      width: 12px;
+      height: 12px;
+      border-left: 1px solid rgba(181, 199, 223, 0.62);
+      border-bottom: 1px solid rgba(181, 199, 223, 0.62);
+      background: rgba(235, 240, 246, 0.96);
+      transform: rotate(45deg);
+      border-radius: 2px;
+    }}
+    .msg.system::after {{
+      display: none;
     }}
     .meta {{
       margin-top: 6px;
@@ -292,19 +335,19 @@
       grid-template-columns: auto 1fr auto;
       gap: 10px;
       align-items: end;
-      border-top: 1px solid var(--line);
-      padding: 14px 16px;
-      background: linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(248, 251, 255, 0.92) 100%);
+      border-top: 1px solid rgba(181, 199, 223, 0.56);
+      padding: 12px 14px 14px;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(244, 249, 255, 0.93) 100%);
     }}
     .attach-btn {{
-      border: 1px solid var(--line);
-      border-radius: 13px;
+      border: 1px solid rgba(181, 199, 223, 0.62);
+      border-radius: 14px;
       width: 42px;
       height: 42px;
       padding: 0;
       background: #fff;
-      color: var(--muted);
-      font: 700 20px/1 "Space Grotesk", "Manrope", sans-serif;
+      color: #667b99;
+      font: 700 21px/1 "Space Grotesk", "Manrope", sans-serif;
       cursor: pointer;
       transition: border-color .14s ease, color .14s ease, transform .14s ease, box-shadow .14s ease;
     }}
@@ -324,14 +367,14 @@
       grid-column: 2;
       width: 100%;
       min-height: 44px;
-      max-height: 126px;
-      resize: vertical;
-      border: 1px solid var(--line);
-      border-radius: 13px;
+      max-height: 136px;
+      resize: none;
+      border: 1px solid rgba(181, 199, 223, 0.62);
+      border-radius: 14px;
       padding: 11px 12px;
       font: inherit;
       color: var(--text);
-      background: rgba(255, 255, 255, 0.95);
+      background: rgba(255, 255, 255, 0.98);
       transition: border-color .18s ease, box-shadow .18s ease, background-color .18s ease;
     }}
     .composer textarea:focus {{
@@ -343,10 +386,10 @@
     .send-btn {{
       grid-column: 3;
       border: 0;
-      border-radius: 13px;
-      min-width: 110px;
+      border-radius: 14px;
+      min-width: 112px;
       padding: 0 18px;
-      background: var(--accent);
+      background: linear-gradient(180deg, #2a80d1 0%, var(--accent) 100%);
       color: #fff;
       font: 700 13px/1 "Space Grotesk", "Manrope", sans-serif;
       letter-spacing: 0.2px;
@@ -373,12 +416,12 @@
       align-items: center;
       justify-content: space-between;
       gap: 10px;
-      border: 1px solid var(--line);
+      border: 1px solid rgba(181, 199, 223, 0.62);
       border-radius: 11px;
       padding: 7px 10px;
       color: var(--muted);
       font-size: 12px;
-      background: rgba(255, 255, 255, 0.9);
+      background: rgba(255, 255, 255, 0.94);
     }}
     .attach-note-text {{
       overflow: hidden;
@@ -419,7 +462,7 @@
       .history {{
         padding: 14px;
       }}
-      .history {{ max-height: 56vh; }}
+      .history {{ max-height: 56vh; min-height: 280px; }}
       .composer {{
         padding: 10px 12px;
       }}
@@ -500,7 +543,7 @@
 
     const state = {{
       chatReady: false,
-      chatWritable: true,
+      ticketClosed: false,
       chatRevision: 0,
       pollTick: 0,
       visitorId: "",
@@ -593,6 +636,13 @@
         return (value / 1024).toFixed(1) + " KB";
       }}
       return (value / (1024 * 1024)).toFixed(1) + " MB";
+    }}
+    function autoSizeTextarea() {{
+      const minHeight = 44;
+      const maxHeight = 136;
+      textEl.style.height = "0px";
+      const nextHeight = Math.min(Math.max(textEl.scrollHeight, minHeight), maxHeight);
+      textEl.style.height = nextHeight + "px";
     }}
     function clearPendingFile() {{
       state.pendingFile = null;
@@ -804,7 +854,7 @@
     function renderRatingPanel() {{
       const visible = (
         state.chatReady
-        && !state.chatWritable
+        && state.ticketClosed
         && !isOnboardingRequired()
         && (
           state.ratingRequired
@@ -991,8 +1041,7 @@
     }}
     function updateComposerState() {{
       const onboardingMode = isOnboardingRequired() || state.onboardingSubmitBusy;
-      const lockedByTicket = state.chatReady && !state.chatWritable;
-      const hardDisabled = onboardingMode || lockedByTicket;
+      const hardDisabled = onboardingMode;
       attachButtonEl.disabled = hardDisabled || state.fileReading;
       fileInputEl.disabled = hardDisabled || state.fileReading;
       attachClearEl.disabled = hardDisabled || state.fileReading;
@@ -1004,19 +1053,12 @@
         renderPendingFile();
         return;
       }}
-      if (lockedByTicket) {{
-        textEl.disabled = true;
-        sendButtonEl.disabled = true;
-        sendButtonEl.textContent = "Closed";
-        textEl.placeholder = "Conversation is closed";
-        renderPendingFile();
-        return;
-      }}
       textEl.disabled = false;
       sendButtonEl.disabled = state.fileReading;
       sendButtonEl.textContent = state.pendingFile ? "Send file" : "Send";
       textEl.placeholder = state.pendingFile ? "Add message (optional)" : "Type your message";
       renderPendingFile();
+      autoSizeTextarea();
     }}
 
     const basePath = window.location.pathname.replace(/\/+$/g, "").replace(/\/+/g, "/");
@@ -1044,7 +1086,6 @@
       return payload;
     }}
     function applyWriteState(payload) {{
-      const canWrite = !(payload && (payload.ticket_closed === true || payload.can_write === false));
       if (payload && Number(payload.chat_revision) > 0) {{
         state.chatRevision = Number(payload.chat_revision);
       }}
@@ -1053,10 +1094,7 @@
       state.ratingSubmitted = !!(payload && payload.rating_submitted === true);
       state.ticketRating = normalizeRating(payload && payload.ticket_rating);
       state.ratingMessage = String((payload && payload.rating_message) || "");
-      state.chatWritable = canWrite;
-      if (!canWrite) {{
-        statusEl.textContent = "ticket is closed";
-      }}
+      state.ticketClosed = !!(payload && payload.ticket_closed === true);
       renderRatingPanel();
       updateComposerState();
     }}
@@ -1087,9 +1125,7 @@
       state.onboardingErrors = {{}};
       applyWriteState(result);
       renderHistory(result.history || [], true);
-      if (state.chatWritable) {{
-        statusEl.textContent = "online";
-      }}
+      statusEl.textContent = "online";
     }}
 
     async function refreshHistory(forceFull = false) {{
@@ -1109,15 +1145,13 @@
       if (result.history_changed !== false) {{
         renderHistory(result.history || []);
       }}
-      if (state.chatWritable) {{
-        statusEl.textContent = "online";
-      }}
+      statusEl.textContent = "online";
     }}
     async function sendChatMessage(text) {{
       if (!state.chatReady) {{
         await initChat();
       }}
-      if (!state.chatReady || !state.chatWritable) {{
+      if (!state.chatReady) {{
         return;
       }}
       const result = await callApi("send_message", {{
@@ -1137,7 +1171,7 @@
       if (!state.chatReady) {{
         await initChat();
       }}
-      if (!state.chatReady || !state.chatWritable) {{
+      if (!state.chatReady) {{
         return;
       }}
       const result = await callApi("send_file", {{
@@ -1155,10 +1189,13 @@
     }}
     function handleActionError(error) {{
       const payload = error && error.payload ? error.payload : {{}};
-      if (error && error.status === 409 && (payload.ticket_closed || payload.can_write === false)) {{
+      const hasTicketState =
+        payload
+        && (Object.prototype.hasOwnProperty.call(payload, "ticket_closed")
+          || Object.prototype.hasOwnProperty.call(payload, "can_write")
+          || Object.prototype.hasOwnProperty.call(payload, "rating_enabled"));
+      if (hasTicketState) {{
         applyWriteState(payload);
-        refreshHistory().catch(() => {{}});
-        return;
       }}
       statusEl.textContent = "error: " + (error && error.message ? error.message : "unexpected error");
     }}
@@ -1187,6 +1224,7 @@
           await sendChatMessage(text);
         }}
         textEl.value = "";
+        autoSizeTextarea();
       }} catch (error) {{
         handleActionError(error);
       }} finally {{
@@ -1243,6 +1281,9 @@
         updateComposerState();
       }}
     }});
+    textEl.addEventListener("input", () => {{
+      autoSizeTextarea();
+    }});
     textEl.addEventListener("keydown", (event) => {{
       if (event.key !== "Enter") {{
         return;
@@ -1264,6 +1305,7 @@
       persistProfile();
       initVisitorId();
       updateComposerState();
+      autoSizeTextarea();
 
       if (isOnboardingRequired()) {{
         renderOnboarding();

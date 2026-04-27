@@ -747,61 +747,6 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             "rating_message": str(runtime.channel_rating_message or ""),
         }
 
-    @staticmethod
-    def _ticket_closed_response(
-        visitor_id: str,
-        ticket_view: Dict[str, Any],
-    ) -> JSONResponse:
-        return JSONResponse(
-            status_code=409,
-            content={
-                "error": 409,
-                "description": "Ticket is closed",
-                "visitor_id": visitor_id,
-                **ticket_view,
-            },
-        )
-
-    async def _load_ticket_view_for_write(
-        self,
-        runtime: RuntimeConfig,
-        *,
-        connected_integration_id: str,
-        ticket_id: int,
-    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        ticket_state = await self._get_ticket_write_state(
-            connected_integration_id,
-            int(ticket_id),
-        )
-        ticket_view = self._compose_ticket_view_state(runtime, ticket_state)
-        if ticket_state.get("can_write", True):
-            return ticket_state, ticket_view
-        refreshed_state = await self._get_ticket_write_state(
-            connected_integration_id,
-            int(ticket_id),
-            force_refresh=True,
-        )
-        refreshed_view = self._compose_ticket_view_state(runtime, refreshed_state)
-        return refreshed_state, refreshed_view
-
-    async def _cache_closed_ticket_view(
-        self,
-        runtime: RuntimeConfig,
-        *,
-        connected_integration_id: str,
-        ticket_id: int,
-    ) -> Dict[str, Any]:
-        closed_state = await self._cache_ticket_state(
-            connected_integration_id,
-            int(ticket_id),
-            {
-                "ticket_status": TicketStatusEnum.Closed.value,
-                "ticket_closed": True,
-                "can_write": False,
-            },
-        )
-        return self._compose_ticket_view_state(runtime, closed_state)
-
     @classmethod
     async def _set_ticket_chat_index(
         cls,
@@ -1212,26 +1157,47 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         runtime: RuntimeConfig,
         visitor_id: str,
         profile: Dict[str, Any],
+        *,
+        require_writable: bool = False,
+        force_refresh: bool = False,
     ) -> ChatContext:
-        cached = await cls._load_cached_context(connected_integration_id, visitor_id)
+        cached = None
+        if not force_refresh:
+            cached = await cls._load_cached_context(connected_integration_id, visitor_id)
         if cached:
-            await cls._set_ticket_chat_index(
+            cached_state = await cls._get_ticket_write_state(
                 connected_integration_id,
                 int(cached.ticket_id),
-                str(cached.chat_id),
+                force_refresh=require_writable,
             )
-            await cls._ensure_chat_revision_exists(
-                connected_integration_id,
-                str(cached.chat_id),
-            )
-            return cached
+            if require_writable and not cached_state.get("can_write", True):
+                cached = None
+            else:
+                await cls._set_ticket_chat_index(
+                    connected_integration_id,
+                    int(cached.ticket_id),
+                    str(cached.chat_id),
+                )
+                await cls._ensure_chat_revision_exists(
+                    connected_integration_id,
+                    str(cached.chat_id),
+                )
+                return cached
+
+        if not cached:
+            cached = await cls._load_cached_context(connected_integration_id, visitor_id)
+        cached_client_id = int(cached.client_id) if cached and cached.client_id else None
 
         external_client_id = cls._build_client_external_id(connected_integration_id, visitor_id)
         external_dialog_id = cls._build_ticket_external_dialog_id(connected_integration_id, visitor_id)
 
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
             created_ticket_now = False
-            client = await cls._find_client_by_external_id(api, external_client_id)
+            client = None
+            if cached_client_id:
+                client = await cls._load_client_by_id(api, int(cached_client_id))
+            if not client or not client.id:
+                client = await cls._find_client_by_external_id(api, external_client_id)
             if not client or not client.id:
                 client = await cls._create_client(
                     api,
@@ -1245,8 +1211,15 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 external_dialog_id,
                 runtime.channel_id,
             )
+            ticket_status = _enum_value(getattr(ticket, "status", None)).strip() if ticket else ""
+            ticket_closed = ticket_status == TicketStatusEnum.Closed.value
 
-            if not ticket or not ticket.id or not getattr(ticket, "chat_id", None):
+            if (
+                not ticket
+                or not ticket.id
+                or not getattr(ticket, "chat_id", None)
+                or (require_writable and ticket_closed)
+            ):
                 subject = cls._build_subject(runtime.ticket_subject_template, visitor_id, profile)
                 ticket = await cls._create_ticket(
                     api,
@@ -1299,6 +1272,142 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         )
         await cls._save_cached_context(connected_integration_id, context)
         return context
+
+    @classmethod
+    async def _load_client_by_id(
+        cls,
+        api: RegosAPI,
+        client_id: int,
+    ) -> Optional[Client]:
+        if not client_id:
+            return None
+        response = await api.crm.client.get(
+            ClientGetRequest(ids=[int(client_id)], limit=1, offset=0)
+        )
+        rows = response.result if response.ok and isinstance(response.result, list) else []
+        return rows[0] if rows else None
+
+    @classmethod
+    async def _refresh_writable_context(
+        cls,
+        connected_integration_id: str,
+        runtime: RuntimeConfig,
+        visitor_id: str,
+        profile: Dict[str, Any],
+    ) -> ChatContext:
+        return await cls._ensure_chat_context(
+            connected_integration_id=connected_integration_id,
+            runtime=runtime,
+            visitor_id=visitor_id,
+            profile=profile,
+            require_writable=True,
+            force_refresh=True,
+        )
+
+    @classmethod
+    async def _send_visitor_message_with_reopen(
+        cls,
+        connected_integration_id: str,
+        runtime: RuntimeConfig,
+        visitor_id: str,
+        profile: Dict[str, Any],
+        context: ChatContext,
+        text: str,
+        external_message_id: str,
+    ) -> Tuple[ChatContext, str]:
+        try:
+            message_id = await cls._add_message_from_visitor(
+                connected_integration_id=connected_integration_id,
+                context=context,
+                text=text,
+                external_message_id=external_message_id,
+            )
+            return context, message_id
+        except ChatMessageAddClosedEntityError:
+            refreshed_context = await cls._refresh_writable_context(
+                connected_integration_id=connected_integration_id,
+                runtime=runtime,
+                visitor_id=visitor_id,
+                profile=profile,
+            )
+            message_id = await cls._add_message_from_visitor(
+                connected_integration_id=connected_integration_id,
+                context=refreshed_context,
+                text=text,
+                external_message_id=external_message_id,
+            )
+            return refreshed_context, message_id
+
+    @classmethod
+    async def _send_visitor_file_with_reopen(
+        cls,
+        connected_integration_id: str,
+        runtime: RuntimeConfig,
+        visitor_id: str,
+        profile: Dict[str, Any],
+        context: ChatContext,
+        *,
+        text: Optional[str],
+        file_name: str,
+        extension: str,
+        payload_b64: str,
+        external_message_id: str,
+    ) -> Tuple[ChatContext, str, int]:
+        try:
+            message_id, file_id = await cls._add_file_message_from_visitor(
+                connected_integration_id=connected_integration_id,
+                context=context,
+                text=text,
+                file_name=file_name,
+                extension=extension,
+                payload_b64=payload_b64,
+                external_message_id=external_message_id,
+            )
+            return context, message_id, int(file_id)
+        except ChatMessageAddClosedEntityError:
+            refreshed_context = await cls._refresh_writable_context(
+                connected_integration_id=connected_integration_id,
+                runtime=runtime,
+                visitor_id=visitor_id,
+                profile=profile,
+            )
+            message_id, file_id = await cls._add_file_message_from_visitor(
+                connected_integration_id=connected_integration_id,
+                context=refreshed_context,
+                text=text,
+                file_name=file_name,
+                extension=extension,
+                payload_b64=payload_b64,
+                external_message_id=external_message_id,
+            )
+            return refreshed_context, message_id, int(file_id)
+
+    @classmethod
+    async def _compose_context_ticket_view(
+        cls,
+        connected_integration_id: str,
+        runtime: RuntimeConfig,
+        context: ChatContext,
+    ) -> Dict[str, Any]:
+        ticket_state = await cls._get_ticket_write_state(
+            connected_integration_id,
+            int(context.ticket_id),
+        )
+        return cls._compose_ticket_view_state(runtime, ticket_state)
+
+    @classmethod
+    async def _compose_context_ticket_view_fresh(
+        cls,
+        connected_integration_id: str,
+        runtime: RuntimeConfig,
+        context: ChatContext,
+    ) -> Dict[str, Any]:
+        ticket_state = await cls._get_ticket_write_state(
+            connected_integration_id,
+            int(context.ticket_id),
+            force_refresh=True,
+        )
+        return cls._compose_ticket_view_state(runtime, ticket_state)
 
     @classmethod
     async def _add_message_from_visitor(
@@ -2088,21 +2197,22 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 },
             )
 
+        require_writable_context = action in {"send_message", "send_file"}
         context = await self._ensure_chat_context(
             connected_integration_id=ci,
             runtime=runtime,
             visitor_id=visitor_id,
             profile=profile,
+            require_writable=require_writable_context,
         )
 
         try:
             if action == "init":
-                ticket_state = await self._get_ticket_write_state(
+                ticket_view = await self._compose_context_ticket_view_fresh(
                     ci,
-                    int(context.ticket_id),
-                    force_refresh=True,
+                    runtime,
+                    context,
                 )
-                ticket_view = self._compose_ticket_view_state(runtime, ticket_state)
                 chat_revision = await self._get_chat_revision(ci, str(context.chat_id))
                 history = await self._read_history(
                     ci,
@@ -2127,12 +2237,18 @@ class ExternalChatCrmChannelIntegration(ClientBase):
 
             if action == "history":
                 force_full = _parse_bool(data.get("force_full"), False)
-                ticket_state = await self._get_ticket_write_state(
-                    ci,
-                    int(context.ticket_id),
-                    force_refresh=force_full,
-                )
-                ticket_view = self._compose_ticket_view_state(runtime, ticket_state)
+                if force_full:
+                    ticket_view = await self._compose_context_ticket_view_fresh(
+                        ci,
+                        runtime,
+                        context,
+                    )
+                else:
+                    ticket_view = await self._compose_context_ticket_view(
+                        ci,
+                        runtime,
+                        context,
+                    )
                 chat_revision = await self._get_chat_revision(ci, str(context.chat_id))
                 known_revision = _parse_int(data.get("known_revision"), None)
                 limit = _parse_int(
@@ -2176,30 +2292,19 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                         status_code=400,
                         content={"error": 400, "description": "text is required"},
                     )
-                ticket_state, ticket_view = await self._load_ticket_view_for_write(
-                    runtime,
-                    connected_integration_id=ci,
-                    ticket_id=int(context.ticket_id),
-                )
-                if not ticket_state.get("can_write", True):
-                    return self._ticket_closed_response(visitor_id, ticket_view)
                 ext_id = f"webchat:msg:{visitor_id}:{uuid.uuid4().hex[:12]}"
-                try:
-                    message_id = await self._add_message_from_visitor(
-                        connected_integration_id=ci,
-                        context=context,
-                        text=text,
-                        external_message_id=ext_id,
-                    )
-                except ChatMessageAddClosedEntityError:
-                    closed_view = await self._cache_closed_ticket_view(
-                        runtime,
-                        connected_integration_id=ci,
-                        ticket_id=int(context.ticket_id),
-                    )
-                    return self._ticket_closed_response(visitor_id, closed_view)
+                context, message_id = await self._send_visitor_message_with_reopen(
+                    connected_integration_id=ci,
+                    runtime=runtime,
+                    visitor_id=visitor_id,
+                    profile=profile,
+                    context=context,
+                    text=text,
+                    external_message_id=ext_id,
+                )
                 await self._mark_read(ci, context)
                 chat_revision = await self._get_chat_revision(ci, str(context.chat_id))
+                ticket_view = await self._compose_context_ticket_view(ci, runtime, context)
                 return {
                     "status": "ok",
                     "visitor_id": visitor_id,
@@ -2220,34 +2325,22 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     data.get("text"),
                     ExternalChatCrmChannelConfig.MAX_MESSAGE_LENGTH,
                 )
-                ticket_state, ticket_view = await self._load_ticket_view_for_write(
-                    runtime,
-                    connected_integration_id=ci,
-                    ticket_id=int(context.ticket_id),
-                )
-                if not ticket_state.get("can_write", True):
-                    return self._ticket_closed_response(visitor_id, ticket_view)
-
                 ext_id = f"webchat:file:{visitor_id}:{uuid.uuid4().hex[:12]}"
-                try:
-                    message_id, file_id = await self._add_file_message_from_visitor(
-                        connected_integration_id=ci,
-                        context=context,
-                        text=text,
-                        file_name=file_name,
-                        extension=extension,
-                        payload_b64=payload_b64,
-                        external_message_id=ext_id,
-                    )
-                except ChatMessageAddClosedEntityError:
-                    closed_view = await self._cache_closed_ticket_view(
-                        runtime,
-                        connected_integration_id=ci,
-                        ticket_id=int(context.ticket_id),
-                    )
-                    return self._ticket_closed_response(visitor_id, closed_view)
+                context, message_id, file_id = await self._send_visitor_file_with_reopen(
+                    connected_integration_id=ci,
+                    runtime=runtime,
+                    visitor_id=visitor_id,
+                    profile=profile,
+                    context=context,
+                    text=text,
+                    file_name=file_name,
+                    extension=extension,
+                    payload_b64=payload_b64,
+                    external_message_id=ext_id,
+                )
                 await self._mark_read(ci, context)
                 chat_revision = await self._get_chat_revision(ci, str(context.chat_id))
+                ticket_view = await self._compose_context_ticket_view(ci, runtime, context)
                 return {
                     "status": "ok",
                     "visitor_id": visitor_id,
