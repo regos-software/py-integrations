@@ -28,6 +28,7 @@ from clients.telegram_bot_orders.main import TelegramBotOrdersIntegration
 from clients.telegram_bot_crm_channel.main import TelegramBotCrmChannelIntegration
 from clients.asterisk_crm_channel.main import AsteriskCrmChannelIntegration
 from clients.instagram_crm_channel.main import InstagramCrmChannelIntegration
+from clients.external_chat_crm_channel.main import ExternalChatCrmChannelIntegration
 from clients.gpt_crm_chat_assistant.main import GptCrmChatAssistantIntegration
 from clients.tsd.main import TsdIntegration
 
@@ -45,6 +46,7 @@ INTEGRATION_CLASSES = {
     "telegram_bot_crm_channel": TelegramBotCrmChannelIntegration,
     "asterisk_crm_channel": AsteriskCrmChannelIntegration,
     "instagram_crm_channel": InstagramCrmChannelIntegration,
+    "external_chat_crm_channel": ExternalChatCrmChannelIntegration,
     "gpt_crm_chat_assistant": GptCrmChatAssistantIntegration,
     "tsd": TsdIntegration,
 }
