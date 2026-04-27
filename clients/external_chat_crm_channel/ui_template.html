@@ -285,6 +285,7 @@
     const textEl = document.getElementById("text");
     const formEl = document.getElementById("composer");
     const sendButtonEl = formEl.querySelector("button");
+    statusEl.textContent = "initializing...";
 
     const state = {{
       chatReady: false,
@@ -301,11 +302,27 @@
       lastHistoryFingerprint: "",
     }};
 
+    function storageGet(key) {{
+      try {{
+        return localStorage.getItem(key);
+      }} catch (_) {{
+        return null;
+      }}
+    }}
+    function storageSet(key, value) {{
+      try {{
+        localStorage.setItem(key, value);
+        return true;
+      }} catch (_) {{
+        return false;
+      }}
+    }}
+
     function normalizeText(value, maxLen = 120) {{
       return String(value || "").trim().slice(0, maxLen);
     }}
     function normalizePhone(value) {{
-      const digits = String(value || "").replace(/\\D/g, "");
+      const digits = String(value || "").replace(/\D/g, "");
       return digits;
     }}
     function normalizeEmail(value) {{
@@ -335,7 +352,7 @@
     }}
     function loadProfile() {{
       try {{
-        const raw = localStorage.getItem(CONFIG.profileKey);
+        const raw = storageGet(CONFIG.profileKey);
         if (!raw) {{
           return;
         }}
@@ -349,7 +366,7 @@
       }} catch (_) {{}}
     }}
     function persistProfile() {{
-      localStorage.setItem(CONFIG.profileKey, JSON.stringify(state.profile));
+      storageSet(CONFIG.profileKey, JSON.stringify(state.profile));
     }}
     function applyQueryProfileOverrides() {{
       const queryDisplayName = normalizeText(getFirstQueryValue(["display_name", "name", "full_name"]), 120);
@@ -369,7 +386,7 @@
       const queryVisitorId = normalizeVisitorId(
         getFirstQueryValue(["visitor_id", "visitor", "visitorId", "vid"])
       );
-      const storedVisitorId = normalizeVisitorId(localStorage.getItem(CONFIG.visitorKey) || "");
+      const storedVisitorId = normalizeVisitorId(storageGet(CONFIG.visitorKey) || "");
       let visitorId = queryVisitorId || storedVisitorId;
       if (!visitorId) {{
         visitorId = normalizeVisitorId(
@@ -379,7 +396,7 @@
         );
       }}
       state.visitorId = visitorId;
-      localStorage.setItem(CONFIG.visitorKey, visitorId);
+      storageSet(CONFIG.visitorKey, visitorId);
     }}
     function getMissingRequiredFields() {{
       const required = CONFIG.required || {{}};
@@ -525,8 +542,9 @@
         : "Type your message";
     }}
 
-    const basePath = window.location.pathname.replace(/\\/+$/g, "").replace(/\\/+/g, "/");
+    const basePath = window.location.pathname.replace(/\/+$/g, "").replace(/\/+/g, "/");
     const externalUrl = basePath + "/external?ci=" + encodeURIComponent(CONFIG.ci);
+    console.info("[external_chat] externalUrl:", externalUrl);
 
     async function callApi(action, data) {{
       const resp = await fetch(externalUrl, {{
@@ -536,7 +554,11 @@
       }});
       const payload = await resp.json().catch(() => ({{}}));
       if (!resp.ok) {{
-        const message = payload?.result?.description || payload?.description || ("HTTP " + resp.status);
+        const message = (
+          (payload && payload.result && payload.result.description)
+          || (payload && payload.description)
+          || ("HTTP " + resp.status)
+        );
         const error = new Error(message);
         error.status = resp.status;
         error.payload = payload || {{}};
@@ -576,7 +598,7 @@
       }});
       if (result.visitor_id && result.visitor_id !== state.visitorId) {{
         state.visitorId = normalizeVisitorId(result.visitor_id);
-        localStorage.setItem(CONFIG.visitorKey, state.visitorId);
+        storageSet(CONFIG.visitorKey, state.visitorId);
       }}
       state.chatReady = true;
       state.onboardingLog = [];
@@ -691,40 +713,51 @@
       }}
     }});
 
-    loadProfile();
-    applyQueryProfileOverrides();
-    persistProfile();
-    initVisitorId();
-    updateComposerState();
+    async function bootstrapChat() {{
+      if (!window.fetch) {{
+        throw new Error("Fetch API is not available in this browser");
+      }}
 
-    if (getCurrentOnboardingField()) {{
-      renderOnboarding();
-      statusEl.textContent = "need " + fieldLabel(getCurrentOnboardingField());
-    }} else {{
-      initChat().catch((error) => {{
-        state.chatReady = false;
-        handleActionError(error);
-      }});
+      loadProfile();
+      applyQueryProfileOverrides();
+      persistProfile();
+      initVisitorId();
+      updateComposerState();
+
+      if (getCurrentOnboardingField()) {{
+        renderOnboarding();
+        statusEl.textContent = "need " + fieldLabel(getCurrentOnboardingField());
+      }} else {{
+        await initChat();
+      }}
+
+      setInterval(() => {{
+        state.pollTick += 1;
+        if (state.chatReady) {{
+          const forceFull = state.pollTick % 20 === 0;
+          refreshHistory(forceFull).catch((error) => {{
+            handleActionError(error);
+          }});
+        }} else if (getCurrentOnboardingField()) {{
+          renderOnboarding();
+        }} else {{
+          initChat().catch((error) => {{
+            state.chatReady = false;
+            handleActionError(error);
+          }});
+        }}
+        updateComposerState();
+      }}, 3000);
+      updateComposerState();
     }}
 
-    setInterval(() => {{
-      state.pollTick += 1;
-      if (state.chatReady) {{
-        const forceFull = state.pollTick % 20 === 0;
-        refreshHistory(forceFull).catch((error) => {{
-          handleActionError(error);
-        }});
-      }} else if (getCurrentOnboardingField()) {{
-        renderOnboarding();
-      }} else {{
-        initChat().catch((error) => {{
-          state.chatReady = false;
-          handleActionError(error);
-        }});
-      }}
+    bootstrapChat().catch((error) => {{
+      state.chatReady = false;
+      statusEl.textContent = "startup error";
+      console.error("[external_chat] bootstrap failed:", error);
+      handleActionError(error);
       updateComposerState();
-    }}, 3000);
-    updateComposerState();
+    }});
   </script>
 </body>
 </html>

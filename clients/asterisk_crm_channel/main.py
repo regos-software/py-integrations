@@ -56,6 +56,8 @@ class AsteriskCrmChannelConfig:
     CI_ACTIVE_MEMORY_TTL_SEC = 5
     DEFAULT_DEDUPE_TTL_SEC = 6 * 60 * 60
     DEFAULT_STATE_TTL_SEC = 6 * 60 * 60
+    OPERATOR_NOT_FOUND_CACHE_TTL_SEC = 10 * 60
+    STORE_DECISION_TRACE = bool(getattr(app_settings, "debug", False))
 
     STREAM_GROUP = "asterisk_crm_channel_workers"
     STREAM_MAXLEN = 10000
@@ -172,6 +174,7 @@ _INSTANCE_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
 _HTTP_CLIENT: Optional[httpx.AsyncClient] = None
 _CI_ACTIVE_MEMORY_CACHE: Dict[str, Tuple[bool, int]] = {}
 _CI_ACTIVE_LOCKS: Dict[str, asyncio.Lock] = {}
+_STREAM_EXPIRE_TOUCH_TS: Dict[str, int] = {}
 
 
 def _now_ts() -> int:
@@ -770,6 +773,32 @@ class AsteriskCrmChannelIntegration(ClientBase):
             connected_integration_id,
             asterisk_hash,
             external_call_id,
+        )
+
+    @staticmethod
+    def _call_responsible_name_key(
+        connected_integration_id: str,
+        asterisk_hash: str,
+        external_call_id: str,
+    ) -> str:
+        return AsteriskCrmChannelIntegration._redis_key(
+            "call_responsible_name",
+            connected_integration_id,
+            asterisk_hash,
+            external_call_id,
+        )
+
+    @staticmethod
+    def _user_name_cache_key(
+        connected_integration_id: str,
+        asterisk_hash: str,
+        user_id: int,
+    ) -> str:
+        return AsteriskCrmChannelIntegration._redis_key(
+            "user_name",
+            connected_integration_id,
+            asterisk_hash,
+            int(user_id),
         )
 
     @staticmethod
@@ -1403,8 +1432,47 @@ return 0
             "talk_duration_sec": event.talk_duration_sec,
             "recording_url": event.recording_url,
             "operator_ext": event.operator_ext,
-            "raw_payload": event.raw_payload,
+            "raw_payload": AsteriskCrmChannelIntegration._compact_raw_payload_for_stream(
+                event.raw_payload
+            ),
         }
+
+    @classmethod
+    def _compact_raw_payload_for_stream(cls, payload: Any) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {}
+
+        compact: Dict[str, Any] = {}
+        for key in (
+            "event",
+            "linkedid",
+            "linked_id",
+            "external_call_id",
+            "call_id",
+            "uniqueid",
+            "destuniqueid",
+            "bridgeuniqueid",
+        ):
+            value = payload.get(key)
+            if value not in (None, ""):
+                compact[key] = value
+
+        for key, fields in (
+            ("channel", ("linkedid", "uniqueid", "id")),
+            ("destchannel", ("uniqueid", "id")),
+        ):
+            source = payload.get(key)
+            if not isinstance(source, dict):
+                continue
+            nested: Dict[str, Any] = {}
+            for field in fields:
+                value = source.get(field)
+                if value not in (None, ""):
+                    nested[field] = value
+            if nested:
+                compact[key] = nested
+
+        return compact
 
     @staticmethod
     def _event_from_dict(payload: Dict[str, Any]) -> Optional[CallEvent]:
@@ -1899,15 +1967,25 @@ return 0
 
         resolved_aliases: List[str] = []
         canonical: Optional[str] = None
-        for candidate in candidates:
-            alias_key = cls._call_alias_key(
+        alias_keys: List[str] = [
+            cls._call_alias_key(
                 runtime.connected_integration_id,
                 runtime.asterisk_hash,
                 candidate,
             )
-            alias = cls._normalize_call_id(await cls._redis_get(alias_key))
-            if alias:
-                resolved_aliases.append(alias)
+            for candidate in candidates
+        ]
+        if _redis_enabled():
+            aliases_raw = await redis_client.mget(*alias_keys)
+            for alias_raw in aliases_raw:
+                alias = cls._normalize_call_id(alias_raw)
+                if alias:
+                    resolved_aliases.append(alias)
+        else:
+            for alias_key in alias_keys:
+                alias = cls._normalize_call_id(await cls._redis_get(alias_key))
+                if alias:
+                    resolved_aliases.append(alias)
 
         if preferred_linked:
             canonical = preferred_linked
@@ -1916,18 +1994,31 @@ return 0
         else:
             canonical = candidates[0]
 
-        for candidate in {canonical, *candidates, *resolved_aliases}:
-            alias_key = cls._call_alias_key(
-                runtime.connected_integration_id,
-                runtime.asterisk_hash,
-                candidate,
-            )
-            await cls._redis_set_with_ttl(
-                alias_key,
-                canonical,
-                runtime.state_ttl_sec,
-                min_ttl_sec=300,
-            )
+        aliases_to_write = {canonical, *candidates, *resolved_aliases}
+        if _redis_enabled():
+            ttl = max(_to_int(runtime.state_ttl_sec, 300) or 300, 300)
+            pipeline = redis_client.pipeline()
+            for candidate in aliases_to_write:
+                alias_key = cls._call_alias_key(
+                    runtime.connected_integration_id,
+                    runtime.asterisk_hash,
+                    candidate,
+                )
+                pipeline.set(alias_key, canonical, ex=ttl)
+            await pipeline.execute()
+        else:
+            for candidate in aliases_to_write:
+                alias_key = cls._call_alias_key(
+                    runtime.connected_integration_id,
+                    runtime.asterisk_hash,
+                    candidate,
+                )
+                await cls._redis_set_with_ttl(
+                    alias_key,
+                    canonical,
+                    runtime.state_ttl_sec,
+                    min_ttl_sec=300,
+                )
         return canonical
 
     @classmethod
@@ -1999,7 +2090,12 @@ return 0
             approximate=True,
         )
         ttl = max(_to_int(stream_ttl_sec, 60) or 60, 60)
-        await redis_client.expire(stream_key, ttl)
+        now_ts = _now_ts()
+        refresh_interval_sec = min(60, max(10, ttl // 4))
+        last_touch_ts = _to_int(_STREAM_EXPIRE_TOUCH_TS.get(stream_key), 0) or 0
+        if now_ts - last_touch_ts >= refresh_interval_sec:
+            await redis_client.expire(stream_key, ttl)
+            _STREAM_EXPIRE_TOUCH_TS[stream_key] = now_ts
 
     @classmethod
     async def _set_worker_heartbeat(cls, connected_integration_id: str) -> None:
@@ -3070,12 +3166,14 @@ return 0
         if should_emit and status and status != "recording_ready":
             posted_statuses.add(status)
         recording_posted = bool(cached.get("recording_posted")) or status == "recording_ready"
-        cached_trace = cached.get("decision_trace")
         decision_trace: List[Dict[str, Any]] = []
-        if isinstance(cached_trace, list):
-            for row in cached_trace[-19:]:
-                if isinstance(row, dict):
-                    decision_trace.append(dict(row))
+        store_decision_trace = bool(AsteriskCrmChannelConfig.STORE_DECISION_TRACE)
+        if store_decision_trace:
+            cached_trace = cached.get("decision_trace")
+            if isinstance(cached_trace, list):
+                for row in cached_trace[-19:]:
+                    if isinstance(row, dict):
+                        decision_trace.append(dict(row))
         if not decision_reasons:
             decision_reasons.append("emitted" if should_emit else "suppressed")
         trace_entry = {
@@ -3088,31 +3186,35 @@ return 0
             "reasons": decision_reasons,
             "raw_event_type": raw_event_type or None,
         }
-        decision_trace.append(trace_entry)
-        decision_trace = decision_trace[-20:]
+        if store_decision_trace:
+            decision_trace.append(trace_entry)
+            decision_trace = decision_trace[-20:]
+
+        progress_payload: Dict[str, Any] = {
+            "direction": stable_direction or "",
+            "client_phone": stable_client_phone or "",
+            "operator_ext": stable_operator_ext or "",
+            "locked_operator_ext": locked_operator_ext or "",
+            "from_phone": stable_from_phone or "",
+            "to_phone": stable_to_phone or "",
+            "posted_statuses": sorted(posted_statuses),
+            "last_rank": int(next_last_rank),
+            "recording_posted": recording_posted,
+            "answered_at": int(answered_at) if answered_at is not None else None,
+            "pending_inbound_completed_at": (
+                int(pending_inbound_completed_at)
+                if pending_inbound_completed_at is not None
+                else None
+            ),
+            "last_decision": trace_entry,
+            "updated_at": _now_ts(),
+        }
+        if store_decision_trace:
+            progress_payload["decision_trace"] = decision_trace
 
         await cls._redis_set_json_with_ttl(
             progress_key,
-            {
-                "direction": stable_direction or "",
-                "client_phone": stable_client_phone or "",
-                "operator_ext": stable_operator_ext or "",
-                "locked_operator_ext": locked_operator_ext or "",
-                "from_phone": stable_from_phone or "",
-                "to_phone": stable_to_phone or "",
-                "posted_statuses": sorted(posted_statuses),
-                "last_rank": int(next_last_rank),
-                "recording_posted": recording_posted,
-                "answered_at": int(answered_at) if answered_at is not None else None,
-                "pending_inbound_completed_at": (
-                    int(pending_inbound_completed_at)
-                    if pending_inbound_completed_at is not None
-                    else None
-                ),
-                "last_decision": trace_entry,
-                "decision_trace": decision_trace,
-                "updated_at": _now_ts(),
-            },
+            progress_payload,
             runtime.state_ttl_sec,
             min_ttl_sec=300,
         )
@@ -3181,19 +3283,24 @@ return 0
             "raw_event_type": raw_event_type or None,
         }
 
-        cached_trace = cached.get("decision_trace")
         decision_trace: List[Dict[str, Any]] = []
-        if isinstance(cached_trace, list):
-            for row in cached_trace[-19:]:
-                if isinstance(row, dict):
-                    decision_trace.append(dict(row))
-        decision_trace.append(rollback_entry)
-        decision_trace = decision_trace[-20:]
+        store_decision_trace = bool(AsteriskCrmChannelConfig.STORE_DECISION_TRACE)
+        if store_decision_trace:
+            cached_trace = cached.get("decision_trace")
+            if isinstance(cached_trace, list):
+                for row in cached_trace[-19:]:
+                    if isinstance(row, dict):
+                        decision_trace.append(dict(row))
+            decision_trace.append(rollback_entry)
+            decision_trace = decision_trace[-20:]
 
         cached["posted_statuses"] = sorted(posted_statuses)
         cached["last_rank"] = int(recalculated_rank)
         cached["last_decision"] = rollback_entry
-        cached["decision_trace"] = decision_trace
+        if store_decision_trace:
+            cached["decision_trace"] = decision_trace
+        else:
+            cached.pop("decision_trace", None)
         cached["updated_at"] = _now_ts()
         await cls._redis_set_json_with_ttl(
             progress_key,
@@ -3328,8 +3435,10 @@ return 0
             normalized_ext,
         )
         cached_user_id = _to_int(await cls._redis_get(cache_key), None)
-        if cached_user_id and cached_user_id > 0:
-            return cached_user_id
+        if cached_user_id is not None:
+            if cached_user_id > 0:
+                return cached_user_id
+            return None
 
         def _resolve_from_rows(
             rows: List[Dict[str, Any]],
@@ -3408,7 +3517,9 @@ return 0
 
         resolved_user_id: Optional[int] = None
         resolved_user_name: Optional[str] = None
+        lookup_successful = False
         if response and response.ok:
+            lookup_successful = True
             internal_rows = cls._rows_to_dict_list(response.result)
             resolved_user_id, resolved_user_name = _resolve_from_rows(
                 internal_rows,
@@ -3423,12 +3534,30 @@ return 0
                 )
                 if resolved_user_name:
                     await cls._redis_set_with_ttl(
+                        cls._user_name_cache_key(
+                            runtime.connected_integration_id,
+                            runtime.asterisk_hash,
+                            int(resolved_user_id),
+                        ),
+                        resolved_user_name,
+                        runtime.state_ttl_sec,
+                        min_ttl_sec=300,
+                    )
+                if resolved_user_name:
+                    await cls._redis_set_with_ttl(
                         name_cache_key,
                         resolved_user_name,
                         runtime.state_ttl_sec,
                         min_ttl_sec=300,
                     )
                 return resolved_user_id
+        if lookup_successful:
+            await cls._redis_set_with_ttl(
+                cache_key,
+                "0",
+                AsteriskCrmChannelConfig.OPERATOR_NOT_FOUND_CACHE_TTL_SEC,
+                min_ttl_sec=60,
+            )
         return None
 
     @classmethod
@@ -3453,6 +3582,21 @@ return 0
         user_id = await cls._resolve_user_id_by_operator_ext_best_effort(runtime, normalized_ext)
         if not user_id:
             return None
+
+        user_name_cache_key = cls._user_name_cache_key(
+            runtime.connected_integration_id,
+            runtime.asterisk_hash,
+            user_id,
+        )
+        cached_user_name = str(await cls._redis_get(user_name_cache_key) or "").strip()
+        if cached_user_name:
+            await cls._redis_set_with_ttl(
+                name_cache_key,
+                cached_user_name,
+                runtime.state_ttl_sec,
+                min_ttl_sec=300,
+            )
+            return cached_user_name
 
         cached_name = str(await cls._redis_get(name_cache_key) or "").strip()
         if cached_name:
@@ -3504,6 +3648,12 @@ return 0
             runtime.state_ttl_sec,
             min_ttl_sec=300,
         )
+        await cls._redis_set_with_ttl(
+            user_name_cache_key,
+            name,
+            runtime.state_ttl_sec,
+            min_ttl_sec=300,
+        )
         return name
 
     @classmethod
@@ -3513,6 +3663,56 @@ return 0
         event: CallEvent,
     ) -> Optional[str]:
         operator_ext = _normalize_phone(event.operator_ext) or cls._operator_phone_from_event(event)
+        if not event.external_call_id:
+            if not operator_ext:
+                return None
+            return await cls._resolve_operator_name_by_operator_ext_best_effort(
+                runtime,
+                operator_ext,
+            )
+
+        call_responsible_name_key = cls._call_responsible_name_key(
+            runtime.connected_integration_id,
+            runtime.asterisk_hash,
+            event.external_call_id,
+        )
+        cached_call_name = str(await cls._redis_get(call_responsible_name_key) or "").strip()
+        if cached_call_name:
+            return cached_call_name
+
+        call_responsible_id = _to_int(
+            await cls._redis_get(
+                cls._call_responsible_key(
+                    runtime.connected_integration_id,
+                    runtime.asterisk_hash,
+                    event.external_call_id,
+                )
+            ),
+            None,
+        )
+        if call_responsible_id and call_responsible_id > 0:
+            cached_user_name = str(
+                await cls._redis_get(
+                    cls._user_name_cache_key(
+                        runtime.connected_integration_id,
+                        runtime.asterisk_hash,
+                        int(call_responsible_id),
+                    )
+                )
+                or ""
+            ).strip()
+            if cached_user_name:
+                await cls._redis_set_with_ttl(
+                    call_responsible_name_key,
+                    cached_user_name,
+                    runtime.state_ttl_sec,
+                    min_ttl_sec=300,
+                )
+                return cached_user_name
+            if operator_ext:
+                return operator_ext
+            return None
+
         if not operator_ext:
             return None
         return await cls._resolve_operator_name_by_operator_ext_best_effort(
@@ -3537,22 +3737,20 @@ return 0
         if not operator_ext:
             return
 
-        target_user_id = await cls._resolve_user_id_by_operator_ext_best_effort(
-            runtime,
-            operator_ext,
-        )
-        if not target_user_id:
-            return
-
         call_key = cls._call_responsible_key(
             runtime.connected_integration_id,
             runtime.asterisk_hash,
             event.external_call_id,
         )
         already_bound = _to_int(await cls._redis_get(call_key), None)
-        if already_bound and already_bound == target_user_id:
+        if already_bound and already_bound > 0:
             return
-        if already_bound and already_bound != target_user_id:
+
+        target_user_id = await cls._resolve_user_id_by_operator_ext_best_effort(
+            runtime,
+            operator_ext,
+        )
+        if not target_user_id:
             return
 
         try:
@@ -3581,6 +3779,27 @@ return 0
                 runtime.state_ttl_sec,
                 min_ttl_sec=300,
             )
+            resolved_user_name = str(
+                await cls._redis_get(
+                    cls._operator_name_cache_key(
+                        runtime.connected_integration_id,
+                        runtime.asterisk_hash,
+                        operator_ext,
+                    )
+                )
+                or ""
+            ).strip()
+            if resolved_user_name:
+                await cls._redis_set_with_ttl(
+                    cls._call_responsible_name_key(
+                        runtime.connected_integration_id,
+                        runtime.asterisk_hash,
+                        event.external_call_id,
+                    ),
+                    resolved_user_name,
+                    runtime.state_ttl_sec,
+                    min_ttl_sec=300,
+                )
         except Exception as error:
             logger.warning(
                 "Failed to bind responsible by operator extension: ci=%s ticket_id=%s operator_ext=%s user_id=%s error=%s",
