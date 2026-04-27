@@ -5,6 +5,7 @@ import base64
 import binascii
 import html
 import json
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -37,6 +38,7 @@ from schemas.api.crm.ticket import (
     TicketSetRatingRequest,
     TicketStatusEnum,
 )
+from schemas.api.files.file import FileGetRequest
 from schemas.api.integrations.connected_integration import (
     ConnectedIntegrationEditRequest,
     ConnectedIntegrationGetRequest,
@@ -47,6 +49,36 @@ from schemas.api.integrations.connected_integration_setting import (
 from schemas.integration.base import IntegrationErrorModel, IntegrationErrorResponse
 
 logger = setup_logger("external_chat_crm_channel")
+
+_BBCODE_SIMPLE_REPLACEMENTS: Tuple[Tuple[re.Pattern, str], ...] = (
+    (re.compile(r"(?is)\[b\]"), "**"),
+    (re.compile(r"(?is)\[/b\]"), "**"),
+    (re.compile(r"(?is)\[i\]"), "_"),
+    (re.compile(r"(?is)\[/i\]"), "_"),
+    (re.compile(r"(?is)\[u\]"), "++"),
+    (re.compile(r"(?is)\[/u\]"), "++"),
+    (re.compile(r"(?is)\[s\]"), "~~"),
+    (re.compile(r"(?is)\[/s\]"), "~~"),
+    (re.compile(r"(?is)\[br\s*/?\]"), "\n"),
+)
+_BBCODE_URL_LABEL_RE = re.compile(r"(?is)\[url=(.*?)\](.*?)\[/url\]")
+_BBCODE_URL_SIMPLE_RE = re.compile(r"(?is)\[url\](.*?)\[/url\]")
+_BBCODE_CODE_RE = re.compile(r"(?is)\[code\](.*?)\[/code\]")
+_BBCODE_QUOTE_RE = re.compile(r"(?is)\[quote\](.*?)\[/quote\]")
+_IMAGE_FILE_EXTENSIONS = {
+    "apng",
+    "avif",
+    "bmp",
+    "gif",
+    "heic",
+    "heif",
+    "ico",
+    "jpeg",
+    "jpg",
+    "png",
+    "svg",
+    "webp",
+}
 
 
 class ExternalChatCrmChannelConfig:
@@ -61,6 +93,9 @@ class ExternalChatCrmChannelConfig:
     MAX_UPLOAD_FILE_SIZE_BYTES = 20 * 1024 * 1024
     MAX_FILE_NAME_LENGTH = 160
     MAX_FILE_EXTENSION_LENGTH = 20
+    FILE_META_CACHE_TTL_SEC = 10 * 60
+    MAX_FILE_META_BATCH = 200
+    FILE_META_CACHE_MAX_ITEMS = 5000
     DEFAULT_CHAT_TITLE = "Support Chat"
     DEFAULT_SUBJECT_TEMPLATE = "{channel_name} {display_name}"
     CLOSED_ENTITY_ERROR_CODE = 1220
@@ -203,6 +238,74 @@ def _extract_base64_payload(value: Any) -> str:
     return raw
 
 
+def _normalize_message_markup(value: Any, max_len: int = 500) -> str:
+    normalized = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not normalized:
+        return ""
+
+    for pattern, replacement in _BBCODE_SIMPLE_REPLACEMENTS:
+        normalized = pattern.sub(replacement, normalized)
+
+    def _replace_url_with_label(match: re.Match) -> str:
+        url = str(match.group(1) or "").strip()
+        label = str(match.group(2) or "").strip()
+        if not url and not label:
+            return ""
+        final_url = url or label
+        final_label = label or final_url
+        return f"[{final_label}]({final_url})"
+
+    def _replace_url_simple(match: re.Match) -> str:
+        url = str(match.group(1) or "").strip()
+        if not url:
+            return ""
+        return f"[{url}]({url})"
+
+    def _replace_code(match: re.Match) -> str:
+        body = str(match.group(1) or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not body:
+            return ""
+        return f"```\n{body}\n```"
+
+    def _replace_quote(match: re.Match) -> str:
+        body = str(match.group(1) or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if not body:
+            return ""
+        lines = body.split("\n")
+        return "\n".join(f"> {line}" if line else ">" for line in lines)
+
+    normalized = _BBCODE_URL_LABEL_RE.sub(_replace_url_with_label, normalized)
+    normalized = _BBCODE_URL_SIMPLE_RE.sub(_replace_url_simple, normalized)
+    normalized = _BBCODE_CODE_RE.sub(_replace_code, normalized)
+    normalized = _BBCODE_QUOTE_RE.sub(_replace_quote, normalized)
+    return _normalize_text(normalized, max_len)
+
+
+def _parse_file_ids(value: Any) -> List[int]:
+    if not isinstance(value, list):
+        return []
+    seen: Dict[int, bool] = {}
+    normalized: List[int] = []
+    for row in value:
+        file_id = _parse_int(row, None)
+        if not file_id or int(file_id) <= 0:
+            continue
+        safe_file_id = int(file_id)
+        if seen.get(safe_file_id):
+            continue
+        seen[safe_file_id] = True
+        normalized.append(safe_file_id)
+    return normalized
+
+
+def _is_image_file(extension: Any, mime_type: Any) -> bool:
+    ext = _normalize_file_extension(extension)
+    mime = str(mime_type or "").strip().lower()
+    if mime.startswith("image/"):
+        return True
+    return ext in _IMAGE_FILE_EXTENSIONS
+
+
 def _parse_chat_css_url(raw: Any) -> Optional[str]:
     if raw is None:
         return None
@@ -293,6 +396,7 @@ class ChatMessageAddClosedEntityError(RuntimeError):
 
 class ExternalChatCrmChannelIntegration(ClientBase):
     _ACTIVE_CACHE: Dict[str, Tuple[bool, float]] = {}
+    _FILE_META_CACHE: Dict[str, Tuple[Dict[str, Any], float]] = {}
     _UI_TEMPLATE_CACHE: Optional[str] = None
     _UI_CSS_TEMPLATE_CACHE: Optional[str] = None
     _UI_I18N_CACHE: Optional[Dict[str, Dict[str, str]]] = None
@@ -301,6 +405,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
     _UI_I18N_DIR_PATH = Path(__file__).with_name("i18n")
 
     _ACTIVE_CACHE_LOCK = asyncio.Lock()
+    _FILE_META_CACHE_LOCK = asyncio.Lock()
 
     @staticmethod
     def _error_response(code: int, description: str) -> IntegrationErrorResponse:
@@ -640,6 +745,150 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             subject = f"{safe_channel_name} {display_name}"
         normalized = _normalize_text(subject, 200)
         return normalized or f"{safe_channel_name} {display_name}"
+
+    @classmethod
+    def _file_meta_cache_key(cls, connected_integration_id: str, file_id: int) -> str:
+        return f"{connected_integration_id}:{int(file_id)}"
+
+    @staticmethod
+    def _build_file_view(file_model: Any) -> Optional[Dict[str, Any]]:
+        file_id = _parse_int(getattr(file_model, "id", None), None)
+        if not file_id or int(file_id) <= 0:
+            return None
+
+        file_name = _normalize_file_name(getattr(file_model, "name", None))
+        extension = _normalize_file_extension(
+            getattr(file_model, "extension", None) or _guess_extension_from_name(file_name)
+        )
+        mime_type = _normalize_text(getattr(file_model, "mime_type", None), 120)
+        file_size = _parse_int(getattr(file_model, "size", None), None)
+        url = _normalize_text(getattr(file_model, "url", None), 2000)
+        return {
+            "id": int(file_id),
+            "name": file_name,
+            "url": url,
+            "size": int(file_size) if file_size and int(file_size) > 0 else 0,
+            "extension": extension,
+            "mime_type": mime_type,
+            "is_image": _is_image_file(extension, mime_type),
+        }
+
+    @classmethod
+    async def _read_cached_file_views(
+        cls,
+        connected_integration_id: str,
+        file_ids: List[int],
+    ) -> Tuple[Dict[int, Dict[str, Any]], List[int]]:
+        if not file_ids:
+            return {}, []
+        now = time.time()
+        cached: Dict[int, Dict[str, Any]] = {}
+        missing: List[int] = []
+        async with cls._FILE_META_CACHE_LOCK:
+            for file_id in file_ids:
+                cache_key = cls._file_meta_cache_key(connected_integration_id, int(file_id))
+                cache_row = cls._FILE_META_CACHE.get(cache_key)
+                if not cache_row:
+                    missing.append(int(file_id))
+                    continue
+                payload, valid_till = cache_row
+                if float(valid_till) <= now:
+                    cls._FILE_META_CACHE.pop(cache_key, None)
+                    missing.append(int(file_id))
+                    continue
+                cached[int(file_id)] = dict(payload)
+        return cached, missing
+
+    @classmethod
+    async def _write_cached_file_views(
+        cls,
+        connected_integration_id: str,
+        views: Dict[int, Dict[str, Any]],
+    ) -> None:
+        if not views:
+            return
+        valid_till = time.time() + max(int(ExternalChatCrmChannelConfig.FILE_META_CACHE_TTL_SEC), 1)
+        async with cls._FILE_META_CACHE_LOCK:
+            for file_id, payload in views.items():
+                cache_key = cls._file_meta_cache_key(connected_integration_id, int(file_id))
+                cls._FILE_META_CACHE[cache_key] = (dict(payload), valid_till)
+            max_items = max(int(ExternalChatCrmChannelConfig.FILE_META_CACHE_MAX_ITEMS), 1000)
+            if len(cls._FILE_META_CACHE) > max_items:
+                now = time.time()
+                expired_keys = [
+                    key
+                    for key, cache_row in cls._FILE_META_CACHE.items()
+                    if float(cache_row[1]) <= now
+                ]
+                for key in expired_keys:
+                    cls._FILE_META_CACHE.pop(key, None)
+                while len(cls._FILE_META_CACHE) > max_items:
+                    first_key = next(iter(cls._FILE_META_CACHE), None)
+                    if first_key is None:
+                        break
+                    cls._FILE_META_CACHE.pop(first_key, None)
+
+    @classmethod
+    async def _load_file_views(
+        cls,
+        *,
+        api: RegosAPI,
+        connected_integration_id: str,
+        file_ids: List[int],
+    ) -> Dict[int, Dict[str, Any]]:
+        unique_ids: List[int] = []
+        seen: Dict[int, bool] = {}
+        for file_id in file_ids:
+            safe_id = int(file_id)
+            if safe_id <= 0 or seen.get(safe_id):
+                continue
+            seen[safe_id] = True
+            unique_ids.append(safe_id)
+        if not unique_ids:
+            return {}
+
+        resolved, missing = await cls._read_cached_file_views(
+            connected_integration_id,
+            unique_ids,
+        )
+        if not missing:
+            return resolved
+
+        loaded: Dict[int, Dict[str, Any]] = {}
+        batch_size = max(int(ExternalChatCrmChannelConfig.MAX_FILE_META_BATCH), 1)
+        for offset in range(0, len(missing), batch_size):
+            batch_ids = missing[offset : offset + batch_size]
+            try:
+                response = await api.files.file.get(
+                    FileGetRequest(
+                        ids=batch_ids,
+                        limit=len(batch_ids),
+                        offset=0,
+                    )
+                )
+            except Exception as error:
+                logger.warning(
+                    "Files/Get failed while loading chat file metadata: ci=%s ids=%s error=%s",
+                    connected_integration_id,
+                    batch_ids,
+                    error,
+                )
+                continue
+
+            rows = response.result if response.ok and isinstance(response.result, list) else []
+            for row in rows:
+                payload = cls._build_file_view(row)
+                if not payload:
+                    continue
+                loaded[int(payload["id"])] = payload
+
+        if loaded:
+            await cls._write_cached_file_views(
+                connected_integration_id,
+                loaded,
+            )
+        resolved.update(loaded)
+        return resolved
 
     @staticmethod
     def _default_ticket_state() -> Dict[str, Any]:
@@ -1443,7 +1692,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         payload_b64: str,
         external_message_id: str,
     ) -> Tuple[str, int]:
-        safe_text = _normalize_text(text, ExternalChatCrmChannelConfig.MAX_MESSAGE_LENGTH)
+        safe_text = _normalize_message_markup(text, ExternalChatCrmChannelConfig.MAX_MESSAGE_LENGTH)
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
             add_file_response = await api.chat.chat_message.add_file(
                 ChatMessageAddFileRequest(
@@ -1533,7 +1782,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         external_message_id: str,
     ) -> bool:
         safe_chat_id = str(chat_id or "").strip()
-        safe_text = _normalize_text(text, 300)
+        safe_text = _normalize_message_markup(text, 300)
         safe_external_message_id = str(external_message_id or "").strip()
         if not safe_chat_id or not safe_text or not safe_external_message_id:
             return False
@@ -1610,25 +1859,55 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     include_staff_private=False,
                 )
             )
-        rows = response.result if response.ok and isinstance(response.result, list) else []
+            rows = response.result if response.ok and isinstance(response.result, list) else []
+            visible_rows: List[Tuple[Any, str, bool, List[int]]] = []
+            all_file_ids: List[int] = []
+            for row in rows:
+                message_type = (
+                    _enum_value(getattr(row, "message_type", None)).strip()
+                    or ChatMessageTypeEnum.Regular.value
+                )
+                if message_type in {
+                    ChatMessageTypeEnum.Private.value,
+                    ChatMessageTypeEnum.System.value,
+                }:
+                    continue
+                author_type = _enum_value(getattr(row, "author_entity_type", None)).strip().lower()
+                author_id = _parse_int(getattr(row, "author_entity_id", None), None)
+                mine = (
+                    author_type == ChatEntityTypeEnum.Client.value.lower()
+                    and author_id == context.client_id
+                )
+                file_ids = _parse_file_ids(getattr(row, "file_ids", None))
+                if file_ids:
+                    all_file_ids.extend(file_ids)
+                visible_rows.append((row, message_type, bool(mine), file_ids))
+
+            file_views_map = await cls._load_file_views(
+                api=api,
+                connected_integration_id=connected_integration_id,
+                file_ids=all_file_ids,
+            )
+
         history: List[Dict[str, Any]] = []
-        for row in rows:
-            message_type = _enum_value(getattr(row, "message_type", None)).strip() or ChatMessageTypeEnum.Regular.value
-            if message_type in {
-                ChatMessageTypeEnum.Private.value,
-                ChatMessageTypeEnum.System.value,
-            }:
-                continue
-            author_type = _enum_value(getattr(row, "author_entity_type", None)).strip().lower()
-            author_id = _parse_int(getattr(row, "author_entity_id", None), None)
-            mine = author_type == ChatEntityTypeEnum.Client.value.lower() and author_id == context.client_id
-            text = _normalize_text(getattr(row, "text", ""), ExternalChatCrmChannelConfig.MAX_MESSAGE_LENGTH)
-            if not text and getattr(row, "file_ids", None):
-                text = "[Attachment]"
+        for row, message_type, mine, file_ids in visible_rows:
+            files: List[Dict[str, Any]] = []
+            for file_id in file_ids:
+                payload = file_views_map.get(int(file_id))
+                if payload:
+                    files.append(payload)
+
+            text = _normalize_message_markup(
+                getattr(row, "text", ""),
+                ExternalChatCrmChannelConfig.MAX_MESSAGE_LENGTH,
+            )
+            if not text and files:
+                text = ""
             history.append(
                 {
                     "id": str(getattr(row, "id", "") or ""),
                     "text": text,
+                    "files": files,
                     "created_date": _parse_int(getattr(row, "created_date", None), 0) or 0,
                     "message_type": message_type,
                     "mine": bool(mine),
@@ -2301,7 +2580,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 }
 
             if action == "send_message":
-                text = _normalize_text(
+                text = _normalize_message_markup(
                     data.get("text"),
                     ExternalChatCrmChannelConfig.MAX_MESSAGE_LENGTH,
                 )
@@ -2339,7 +2618,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                         status_code=400,
                         content={"error": 400, "description": str(error)},
                     )
-                text = _normalize_text(
+                text = _normalize_message_markup(
                     data.get("text"),
                     ExternalChatCrmChannelConfig.MAX_MESSAGE_LENGTH,
                 )

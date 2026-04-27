@@ -2,8 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>{safe_title}</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
   {style_block}
 </head>
 <body>
@@ -28,9 +29,9 @@
       <button type="button" class="attach-btn" id="attachButton" title="Attach file">+</button>
       <textarea id="text" maxlength="{ExternalChatCrmChannelConfig.MAX_MESSAGE_LENGTH}" placeholder="Type your message"></textarea>
       <button type="submit" class="send-btn">Send</button>
-      <input type="file" id="fileInput" hidden>
+      <input type="file" id="fileInput" hidden multiple>
       <div class="attach-note" id="attachNote" hidden>
-        <div class="attach-note-text" id="attachNoteText"></div>
+        <div class="attach-list" id="attachList"></div>
         <button type="button" class="attach-clear" id="attachClear">Clear</button>
       </div>
     </form>
@@ -51,6 +52,15 @@
     }};
     const REQUIRED_ORDER = ["display_name", "phone", "email"];
     const LANGUAGES = ["ru", "uz", "en"];
+    const MARKDOWN_TAG_MARKERS = [
+      ["**", "strong"],
+      ["++", "u"],
+      ["~~", "s"],
+      ["__", "strong"],
+      ["*", "em"],
+      ["_", "em"],
+    ];
+    const MOBILE_BREAKPOINT = 700;
 
     const languageSelectEl = document.getElementById("languageSelect");
     const statusEl = document.getElementById("status");
@@ -61,7 +71,7 @@
     const attachButtonEl = document.getElementById("attachButton");
     const fileInputEl = document.getElementById("fileInput");
     const attachNoteEl = document.getElementById("attachNote");
-    const attachNoteTextEl = document.getElementById("attachNoteText");
+    const attachListEl = document.getElementById("attachList");
     const attachClearEl = document.getElementById("attachClear");
     const textEl = document.getElementById("text");
     const formEl = document.getElementById("composer");
@@ -88,7 +98,7 @@
       ticketRating: null,
       ratingMessage: "",
       ratingSubmitting: false,
-      pendingFile: null,
+      pendingFiles: [],
       fileReading: false,
       lastHistoryFingerprint: "",
       lastHistoryItems: [],
@@ -252,23 +262,248 @@
       const nextHeight = Math.min(Math.max(textEl.scrollHeight, minHeight), maxHeight);
       textEl.style.height = nextHeight + "px";
     }}
-    function clearPendingFile() {{
-      state.pendingFile = null;
+    let viewportRafId = 0;
+    let viewportTimerId = 0;
+    let viewportBindingsReady = false;
+    let lastViewportHeightCss = "";
+    let lastKeyboardOffsetCss = "";
+    function isMobileLayoutActive() {{
+      if (window.matchMedia) {{
+        return window.matchMedia("(max-width: " + MOBILE_BREAKPOINT + "px)").matches;
+      }}
+      return window.innerWidth <= MOBILE_BREAKPOINT;
+    }}
+    function isChatFieldFocused() {{
+      const active = document.activeElement;
+      if (!active || !active.closest) {{
+        return false;
+      }}
+      if (active.tagName !== "INPUT" && active.tagName !== "TEXTAREA") {{
+        return false;
+      }}
+      return !!active.closest(".wrap");
+    }}
+    function applyViewportCssVars(force = false) {{
+      const root = document.documentElement;
+      if (!root || !root.style) {{
+        return;
+      }}
+
+      const layoutHeightRaw = Number(window.innerHeight || root.clientHeight || 0);
+      const layoutHeight = Math.max(Math.round(layoutHeightRaw), 320);
+      const vv = window.visualViewport || null;
+      let viewportHeight = layoutHeight;
+      let keyboardOffset = 0;
+
+      if (vv && Number(vv.height) > 0) {{
+        const visualHeight = Math.max(Math.round(Number(vv.height || 0)), 320);
+        viewportHeight = visualHeight;
+        const visualBottom = Number(vv.height || 0) + Number(vv.offsetTop || 0);
+        const overlap = Math.max(Math.round(layoutHeight - visualBottom), 0);
+
+        if (isMobileLayoutActive() && isChatFieldFocused() && overlap > 0 && Math.abs(layoutHeight - viewportHeight) <= 2) {{
+          keyboardOffset = overlap;
+        }}
+      }}
+
+      const nextViewportCss = viewportHeight + "px";
+      const nextKeyboardCss = keyboardOffset + "px";
+      if (force || nextViewportCss !== lastViewportHeightCss) {{
+        root.style.setProperty("--app-vh", nextViewportCss);
+        lastViewportHeightCss = nextViewportCss;
+      }}
+      if (force || nextKeyboardCss !== lastKeyboardOffsetCss) {{
+        root.style.setProperty("--keyboard-offset", nextKeyboardCss);
+        lastKeyboardOffsetCss = nextKeyboardCss;
+      }}
+    }}
+    function scheduleViewportCssUpdate(delayMs = 0) {{
+      if (viewportTimerId) {{
+        clearTimeout(viewportTimerId);
+        viewportTimerId = 0;
+      }}
+      const queueUpdate = () => {{
+        if (viewportRafId) {{
+          return;
+        }}
+        viewportRafId = window.requestAnimationFrame(() => {{
+          viewportRafId = 0;
+          applyViewportCssVars(false);
+        }});
+      }};
+      if (delayMs > 0) {{
+        viewportTimerId = window.setTimeout(() => {{
+          viewportTimerId = 0;
+          queueUpdate();
+        }}, delayMs);
+        return;
+      }}
+      queueUpdate();
+    }}
+    function keepComposerVisibleOnMobile() {{
+      if (!isMobileLayoutActive()) {{
+        return;
+      }}
+      if (!formEl || !isChatFieldFocused()) {{
+        return;
+      }}
+      if (typeof formEl.scrollIntoView === "function") {{
+        formEl.scrollIntoView({{ block: "end", inline: "nearest" }});
+      }}
+    }}
+    function bindViewportHandlers() {{
+      if (viewportBindingsReady) {{
+        return;
+      }}
+      viewportBindingsReady = true;
+
+      const onViewportChange = () => {{
+        scheduleViewportCssUpdate(0);
+      }};
+      window.addEventListener("resize", onViewportChange, {{ passive: true }});
+      window.addEventListener("orientationchange", () => {{
+        scheduleViewportCssUpdate(120);
+      }}, {{ passive: true }});
+      document.addEventListener("focusin", () => {{
+        scheduleViewportCssUpdate(80);
+        keepComposerVisibleOnMobile();
+      }}, true);
+      document.addEventListener("focusout", () => {{
+        scheduleViewportCssUpdate(140);
+      }}, true);
+      if (window.visualViewport) {{
+        window.visualViewport.addEventListener("resize", onViewportChange, {{ passive: true }});
+        window.visualViewport.addEventListener("scroll", onViewportChange, {{ passive: true }});
+      }}
+      applyViewportCssVars(true);
+    }}
+    let pendingFileSeq = 0;
+    function buildPendingFileId() {{
+      pendingFileSeq += 1;
+      return "pf_" + Date.now() + "_" + pendingFileSeq;
+    }}
+    function isImageFileMeta(extension, mimeType) {{
+      const ext = normalizeFileExtension(extension);
+      const mime = String(mimeType || "").trim().toLowerCase();
+      if (mime.startsWith("image/")) {{
+        return true;
+      }}
+      return ["apng", "avif", "bmp", "gif", "heic", "heif", "ico", "jpeg", "jpg", "png", "svg", "webp"].indexOf(ext) >= 0;
+    }}
+    function revokePendingPreview(fileItem) {{
+      if (!fileItem || !fileItem.preview_url || !window.URL || !window.URL.revokeObjectURL) {{
+        return;
+      }}
+      try {{
+        window.URL.revokeObjectURL(fileItem.preview_url);
+      }} catch (_) {{}}
+    }}
+    function clearPendingFiles() {{
+      const current = Array.isArray(state.pendingFiles) ? state.pendingFiles : [];
+      for (const fileItem of current) {{
+        revokePendingPreview(fileItem);
+      }}
+      state.pendingFiles = [];
       if (fileInputEl) {{
         fileInputEl.value = "";
       }}
-      renderPendingFile();
+      renderPendingFiles();
     }}
-    function renderPendingFile() {{
-      const pending = state.pendingFile;
-      if (!pending) {{
+    function removePendingFileById(fileId) {{
+      const current = Array.isArray(state.pendingFiles) ? state.pendingFiles : [];
+      const next = [];
+      for (const fileItem of current) {{
+        if (String(fileItem.id || "") === String(fileId || "")) {{
+          revokePendingPreview(fileItem);
+          continue;
+        }}
+        next.push(fileItem);
+      }}
+      state.pendingFiles = next;
+      renderPendingFiles();
+    }}
+    function queuePendingFile(file) {{
+      if (!file) {{
+        return;
+      }}
+      const name = normalizeFileName(file.name || "file.bin");
+      const extension = normalizeFileExtension(getExtensionFromFileName(name)) || "bin";
+      const mimeType = String(file.type || "").trim().toLowerCase();
+      const isImage = isImageFileMeta(extension, mimeType);
+      let previewUrl = "";
+      if (isImage && window.URL && window.URL.createObjectURL) {{
+        try {{
+          previewUrl = window.URL.createObjectURL(file);
+        }} catch (_) {{
+          previewUrl = "";
+        }}
+      }}
+      state.pendingFiles.push({{
+        id: buildPendingFileId(),
+        name: name,
+        extension: extension,
+        size: Number(file.size || 0),
+        mime_type: mimeType,
+        is_image: isImage,
+        preview_url: previewUrl,
+        file: file,
+      }});
+    }}
+    function renderPendingFiles() {{
+      const pendingFiles = Array.isArray(state.pendingFiles) ? state.pendingFiles : [];
+      if (!pendingFiles.length) {{
         attachNoteEl.hidden = true;
-        attachNoteTextEl.textContent = "";
+        attachListEl.innerHTML = "";
         attachClearEl.disabled = false;
         return;
       }}
       attachNoteEl.hidden = false;
-      attachNoteTextEl.textContent = pending.name + " (" + formatBytes(pending.size) + ")";
+      attachListEl.innerHTML = "";
+      for (const pending of pendingFiles) {{
+        const row = document.createElement("div");
+        row.className = "attach-item";
+
+        if (pending.is_image && pending.preview_url) {{
+          const preview = document.createElement("img");
+          preview.className = "attach-item-preview";
+          preview.src = pending.preview_url;
+          preview.alt = pending.name || "";
+          row.appendChild(preview);
+        }} else {{
+          const icon = document.createElement("span");
+          icon.className = "attach-item-icon";
+          icon.innerHTML = '<i class="fa-regular fa-file"></i>';
+          row.appendChild(icon);
+        }}
+
+        const info = document.createElement("div");
+        info.className = "attach-item-info";
+        const nameEl = document.createElement("div");
+        nameEl.className = "attach-item-name";
+        nameEl.textContent = pending.name || "file.bin";
+        const sizeEl = document.createElement("div");
+        sizeEl.className = "attach-item-size";
+        sizeEl.textContent = formatBytes(pending.size);
+        info.appendChild(nameEl);
+        info.appendChild(sizeEl);
+        row.appendChild(info);
+
+        const removeBtn = document.createElement("button");
+        removeBtn.type = "button";
+        removeBtn.className = "attach-item-remove";
+        removeBtn.disabled = state.fileReading;
+        removeBtn.title = t("attach_remove");
+        removeBtn.innerHTML = '<i class="fa-solid fa-xmark"></i>';
+        removeBtn.addEventListener("click", () => {{
+          if (state.fileReading) {{
+            return;
+          }}
+          removePendingFileById(pending.id);
+          updateComposerState();
+        }});
+        row.appendChild(removeBtn);
+        attachListEl.appendChild(row);
+      }}
       attachClearEl.disabled = state.fileReading;
     }}
     function readFileAsDataURL(file) {{
@@ -401,6 +636,278 @@
       }}
       return normalizeText(value, 120);
     }}
+    function escapeHtml(text) {{
+      const source = String(text || "");
+      return source
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }}
+    function unescapeMarkdownText(text) {{
+      const source = String(text || "");
+      if (source.indexOf("\\\\") < 0 && source.indexOf("\\") < 0) {{
+        return source;
+      }}
+      const chunks = [];
+      for (let idx = 0; idx < source.length; idx += 1) {{
+        const char = source[idx];
+        if (char === "\\" && idx + 1 < source.length) {{
+          chunks.push(source[idx + 1]);
+          idx += 1;
+          continue;
+        }}
+        chunks.push(char);
+      }}
+      return chunks.join("");
+    }}
+    function findUnescapedToken(text, token, start) {{
+      const source = String(text || "");
+      const marker = String(token || "");
+      if (!marker) {{
+        return -1;
+      }}
+      let idx = source.indexOf(marker, Math.max(Number(start || 0), 0));
+      const step = Math.max(marker.length, 1);
+      while (idx >= 0) {{
+        let slashCount = 0;
+        let probe = idx - 1;
+        while (probe >= 0 && source[probe] === "\\") {{
+          slashCount += 1;
+          probe -= 1;
+        }}
+        if (slashCount % 2 === 0) {{
+          return idx;
+        }}
+        idx = source.indexOf(marker, idx + step);
+      }}
+      return -1;
+    }}
+    function findMarkdownLinkUrlEnd(text, start) {{
+      const source = String(text || "");
+      let depth = 1;
+      let idx = Math.max(Number(start || 0), 0);
+      while (idx < source.length) {{
+        const char = source[idx];
+        if (char === "\\" && idx + 1 < source.length) {{
+          idx += 2;
+          continue;
+        }}
+        if (char === "(") {{
+          depth += 1;
+        }} else if (char === ")") {{
+          depth -= 1;
+          if (depth === 0) {{
+            return idx;
+          }}
+        }}
+        idx += 1;
+      }}
+      return -1;
+    }}
+    function isAsciiWordChar(ch) {{
+      return /^[0-9A-Za-z]$/.test(String(ch || ""));
+    }}
+    function isValidSingleMarkerBounds(text, openIdx, closeIdx) {{
+      const source = String(text || "");
+      if (closeIdx <= openIdx + 1) {{
+        return false;
+      }}
+      if (/^\s$/.test(source[openIdx + 1] || "") || /^\s$/.test(source[closeIdx - 1] || "")) {{
+        return false;
+      }}
+      const prev = openIdx > 0 ? source[openIdx - 1] : "";
+      const next = closeIdx + 1 < source.length ? source[closeIdx + 1] : "";
+      if (prev && isAsciiWordChar(prev)) {{
+        return false;
+      }}
+      if (next && isAsciiWordChar(next)) {{
+        return false;
+      }}
+      return true;
+    }}
+    function sanitizeLinkHref(rawUrl) {{
+      const url = String(rawUrl || "").trim();
+      if (!url) {{
+        return "";
+      }}
+      if (url.startsWith("/") || url.startsWith("./") || url.startsWith("../")) {{
+        return url;
+      }}
+      try {{
+        const parsed = new URL(url, window.location.origin);
+        const protocol = String(parsed.protocol || "").toLowerCase();
+        if (["http:", "https:", "mailto:", "tel:", "blob:"].indexOf(protocol) >= 0) {{
+          return parsed.href;
+        }}
+      }} catch (_) {{
+        return "";
+      }}
+      return "";
+    }}
+    function renderMarkdownCodeBlock(rawBlock) {{
+      const block = String(rawBlock || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+      let language = "";
+      let codeText = block;
+      const newlineIdx = block.indexOf("\n");
+      if (newlineIdx >= 0) {{
+        const candidate = block.slice(0, newlineIdx).trim();
+        if (/^[A-Za-z0-9][A-Za-z0-9_+\-]{{0,31}}$/.test(candidate)) {{
+          language = candidate;
+          codeText = block.slice(newlineIdx + 1);
+        }}
+      }}
+      const safeCode = escapeHtml(codeText);
+      if (language) {{
+        return '<pre><code class="language-' + escapeHtml(language) + '">' + safeCode + "</code></pre>";
+      }}
+      return "<pre>" + safeCode + "</pre>";
+    }}
+    function parseMarkdownSegment(text) {{
+      const source = String(text || "");
+      let idx = 0;
+      const size = source.length;
+      const chunks = [];
+      while (idx < size) {{
+        if (source.startsWith("\\", idx)) {{
+          if (idx + 1 < size) {{
+            chunks.push(escapeHtml(source[idx + 1]));
+            idx += 2;
+            continue;
+          }}
+          chunks.push("\\");
+          idx += 1;
+          continue;
+        }}
+        if (source.startsWith("```", idx)) {{
+          const closeIdx = findUnescapedToken(source, "```", idx + 3);
+          if (closeIdx >= 0) {{
+            chunks.push(renderMarkdownCodeBlock(source.slice(idx + 3, closeIdx)));
+            idx = closeIdx + 3;
+            continue;
+          }}
+        }}
+        if (source.startsWith("`", idx)) {{
+          const closeIdx = findUnescapedToken(source, "`", idx + 1);
+          if (closeIdx >= 0) {{
+            const inlineCode = source.slice(idx + 1, closeIdx);
+            chunks.push("<code>" + escapeHtml(unescapeMarkdownText(inlineCode)) + "</code>");
+            idx = closeIdx + 1;
+            continue;
+          }}
+        }}
+        if (source.startsWith("[", idx)) {{
+          const closeLabel = findUnescapedToken(source, "]", idx + 1);
+          if (closeLabel >= 0 && closeLabel + 1 < size && source[closeLabel + 1] === "(") {{
+            const closeUrl = findMarkdownLinkUrlEnd(source, closeLabel + 2);
+            if (closeUrl >= 0) {{
+              const labelRaw = source.slice(idx + 1, closeLabel);
+              const urlRaw = source.slice(closeLabel + 2, closeUrl);
+              const href = sanitizeLinkHref(unescapeMarkdownText(urlRaw));
+              if (href) {{
+                const labelHtml = parseMarkdownSegment(labelRaw);
+                chunks.push(
+                  '<a href="' + escapeHtml(href) + '" target="_blank" rel="noopener noreferrer">' + labelHtml + "</a>"
+                );
+                idx = closeUrl + 1;
+                continue;
+              }}
+            }}
+          }}
+        }}
+        let markerHandled = false;
+        for (const [marker, tag] of MARKDOWN_TAG_MARKERS) {{
+          if (!source.startsWith(marker, idx)) {{
+            continue;
+          }}
+          const closeIdx = findUnescapedToken(source, marker, idx + marker.length);
+          if (closeIdx < 0) {{
+            continue;
+          }}
+          if (marker.length === 1 && !isValidSingleMarkerBounds(source, idx, closeIdx)) {{
+            continue;
+          }}
+          const innerRaw = source.slice(idx + marker.length, closeIdx);
+          if (!innerRaw) {{
+            continue;
+          }}
+          const innerHtml = parseMarkdownSegment(innerRaw);
+          chunks.push("<" + tag + ">" + innerHtml + "</" + tag + ">");
+          idx = closeIdx + marker.length;
+          markerHandled = true;
+          break;
+        }}
+        if (markerHandled) {{
+          continue;
+        }}
+        chunks.push(escapeHtml(source[idx]));
+        idx += 1;
+      }}
+      return chunks.join("");
+    }}
+    function extractQuoteLine(line) {{
+      const raw = String(line || "");
+      const stripped = raw.replace(/^\s+/, "");
+      if (!stripped || stripped.startsWith("\\>") || !stripped.startsWith(">")) {{
+        return null;
+      }}
+      let idx = 0;
+      while (idx < stripped.length && stripped[idx] === ">") {{
+        idx += 1;
+      }}
+      let content = stripped.slice(idx);
+      if (content.startsWith(" ")) {{
+        content = content.slice(1);
+      }}
+      return content;
+    }}
+    function markdownToSafeHtml(text) {{
+      const source = String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+      if (!source) {{
+        return "";
+      }}
+      if (source.indexOf(">") < 0) {{
+        return parseMarkdownSegment(source);
+      }}
+      const blocks = [];
+      const plainLines = [];
+      const quoteLines = [];
+      const flushPlain = () => {{
+        if (!plainLines.length) {{
+          return;
+        }}
+        blocks.push(parseMarkdownSegment(plainLines.join("\n")));
+        plainLines.length = 0;
+      }};
+      const flushQuote = () => {{
+        if (!quoteLines.length) {{
+          return;
+        }}
+        blocks.push("<blockquote>" + parseMarkdownSegment(quoteLines.join("\n")) + "</blockquote>");
+        quoteLines.length = 0;
+      }};
+      for (const line of source.split("\n")) {{
+        const quoteContent = extractQuoteLine(line);
+        if (quoteContent === null) {{
+          flushQuote();
+          plainLines.push(line);
+          continue;
+        }}
+        flushPlain();
+        quoteLines.push(quoteContent);
+      }}
+      flushQuote();
+      flushPlain();
+      return blocks.join("\n");
+    }}
+    function renderFormattedText(rawText) {{
+      const normalized = String(rawText || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+      if (!normalized) {{
+        return "";
+      }}
+      return markdownToSafeHtml(normalized);
+    }}
     function toTime(ts) {{
       const value = Number(ts || 0);
       if (!value) return "";
@@ -414,7 +921,14 @@
         const text = String(item.text || "");
         const edited = item.edited ? "1" : "0";
         const type = String(item.message_type || "");
-        chunks.push(id + "|" + type + "|" + edited + "|" + text);
+        const files = Array.isArray(item.files) ? item.files : [];
+        const filesChunk = files.map((file) => {{
+          const fileId = String((file && file.id) || "");
+          const fileUrl = String((file && file.url) || "");
+          const fileName = String((file && file.name) || "");
+          return fileId + ":" + fileName + ":" + fileUrl;
+        }}).join(",");
+        chunks.push(id + "|" + type + "|" + edited + "|" + text + "|" + filesChunk);
       }}
       return chunks.join("||");
     }}
@@ -422,14 +936,106 @@
       const delta = historyEl.scrollHeight - historyEl.scrollTop - historyEl.clientHeight;
       return delta <= 48;
     }}
+    function normalizeHistoryFiles(value) {{
+      return Array.isArray(value) ? value.filter((row) => row && typeof row === "object") : [];
+    }}
+    function fileIconClass(file) {{
+      const extension = normalizeFileExtension(file && file.extension);
+      const mimeType = String((file && file.mime_type) || "").trim().toLowerCase();
+      if ((file && file.is_image) || isImageFileMeta(extension, mimeType)) {{
+        return "fa-regular fa-image";
+      }}
+      if (mimeType.startsWith("audio/") || ["mp3", "wav", "ogg", "m4a", "flac"].indexOf(extension) >= 0) {{
+        return "fa-regular fa-file-audio";
+      }}
+      if (mimeType.startsWith("video/") || ["mp4", "mov", "avi", "mkv", "webm"].indexOf(extension) >= 0) {{
+        return "fa-regular fa-file-video";
+      }}
+      if (mimeType.indexOf("pdf") >= 0 || extension === "pdf") {{
+        return "fa-regular fa-file-pdf";
+      }}
+      if (["doc", "docx", "odt", "rtf", "txt"].indexOf(extension) >= 0) {{
+        return "fa-regular fa-file-lines";
+      }}
+      if (["xls", "xlsx", "csv"].indexOf(extension) >= 0) {{
+        return "fa-regular fa-file-excel";
+      }}
+      if (["zip", "rar", "7z", "tar", "gz"].indexOf(extension) >= 0) {{
+        return "fa-regular fa-file-zipper";
+      }}
+      return "fa-regular fa-file";
+    }}
+    function buildMessageFileNode(file) {{
+      const href = sanitizeLinkHref(file && file.url);
+      const name = normalizeFileName((file && file.name) || "file.bin");
+      const size = Number((file && file.size) || 0);
+      const mimeType = String((file && file.mime_type) || "").trim().toLowerCase();
+      const extension = normalizeFileExtension(file && file.extension);
+      const isImage = !!((file && file.is_image) || isImageFileMeta(extension, mimeType));
+
+      const item = document.createElement(href ? "a" : "div");
+      item.className = "msg-file" + (isImage ? " image" : "");
+      if (href) {{
+        item.href = href;
+        item.target = "_blank";
+        item.rel = "noopener noreferrer";
+      }}
+      if (isImage && href) {{
+        const image = document.createElement("img");
+        image.className = "msg-file-image";
+        image.src = href;
+        image.alt = name;
+        image.loading = "lazy";
+        item.appendChild(image);
+      }} else {{
+        const icon = document.createElement("span");
+        icon.className = "msg-file-icon";
+        icon.innerHTML = '<i class="' + fileIconClass(file) + '"></i>';
+        item.appendChild(icon);
+      }}
+      const content = document.createElement("span");
+      content.className = "msg-file-content";
+      const title = document.createElement("span");
+      title.className = "msg-file-name";
+      title.textContent = name;
+      const meta = document.createElement("span");
+      meta.className = "msg-file-meta";
+      const sizeLabel = size > 0 ? formatBytes(size) : t("file_meta_no_size");
+      meta.textContent = isImage ? t("file_meta_image", {{ size: sizeLabel }}) : sizeLabel;
+      content.appendChild(title);
+      content.appendChild(meta);
+      item.appendChild(content);
+      return item;
+    }}
+    function buildMessageFilesNode(files) {{
+      const list = normalizeHistoryFiles(files);
+      if (!list.length) {{
+        return null;
+      }}
+      const box = document.createElement("div");
+      box.className = "msg-files";
+      for (const file of list) {{
+        box.appendChild(buildMessageFileNode(file));
+      }}
+      return box;
+    }}
     function buildMessageNode(item) {{
       const type = item.message_type || "Regular";
       const box = document.createElement("div");
       box.className = "msg " + (type === "System" ? "system" : (item.mine ? "mine" : "other"));
 
       const text = document.createElement("div");
-      text.textContent = item.text || "";
-      box.appendChild(text);
+      text.className = "msg-text";
+      const formattedText = renderFormattedText(item.text || "");
+      text.innerHTML = formattedText || escapeHtml(String(item.text || ""));
+      if (formattedText || String(item.text || "").trim()) {{
+        box.appendChild(text);
+      }}
+
+      const filesNode = buildMessageFilesNode(item.files);
+      if (filesNode) {{
+        box.appendChild(filesNode);
+      }}
 
       const meta = document.createElement("div");
       meta.className = "meta";
@@ -652,23 +1258,30 @@
       const onboardingMode = isOnboardingRequired() || state.onboardingSubmitBusy;
       const hardDisabled = onboardingMode;
       attachButtonEl.title = t("attach_title");
-      attachClearEl.textContent = t("attach_clear");
+      attachButtonEl.innerHTML = '<i class="fa-solid fa-paperclip"></i>';
+      attachClearEl.innerHTML = '<i class="fa-regular fa-trash-can"></i><span>' + t("attach_clear") + "</span>";
       attachButtonEl.disabled = hardDisabled || state.fileReading;
       fileInputEl.disabled = hardDisabled || state.fileReading;
       attachClearEl.disabled = hardDisabled || state.fileReading;
+      const pendingCount = Array.isArray(state.pendingFiles) ? state.pendingFiles.length : 0;
       if (onboardingMode) {{
         textEl.disabled = true;
         sendButtonEl.disabled = true;
         sendButtonEl.textContent = t("composer_locked");
         textEl.placeholder = t("composer_placeholder_fill");
-        renderPendingFile();
+        renderPendingFiles();
         return;
       }}
       textEl.disabled = false;
       sendButtonEl.disabled = state.fileReading;
-      sendButtonEl.textContent = state.pendingFile ? t("composer_send_file") : t("composer_send");
-      textEl.placeholder = state.pendingFile ? t("composer_placeholder_optional") : t("composer_placeholder_type");
-      renderPendingFile();
+      if (pendingCount > 0) {{
+        sendButtonEl.innerHTML = '<i class="fa-solid fa-paper-plane"></i><span>' + t("composer_send_files", {{ count: pendingCount }}) + "</span>";
+        textEl.placeholder = t("composer_placeholder_optional");
+      }} else {{
+        sendButtonEl.innerHTML = '<i class="fa-solid fa-paper-plane"></i><span>' + t("composer_send") + "</span>";
+        textEl.placeholder = t("composer_placeholder_type");
+      }}
+      renderPendingFiles();
       autoSizeTextarea();
     }}
 
@@ -765,9 +1378,13 @@
       if (!state.chatReady) {{
         return;
       }}
+      const normalizedText = String(text || "").trim();
+      if (!normalizedText) {{
+        return;
+      }}
       const result = await callApi("send_message", {{
         visitor_id: state.visitorId,
-        text: text,
+        text: normalizedText,
         display_name: state.profile.display_name,
         email: state.profile.email,
         phone: state.profile.phone
@@ -775,10 +1392,26 @@
       applyWriteState(result);
       await refreshHistory(true);
     }}
-    async function sendChatFile(payload) {{
+    async function buildUploadPayload(pendingFile) {{
+      if (!pendingFile || !pendingFile.file) {{
+        throw new Error(t("error_file_read_failed"));
+      }}
+      const dataUrl = await readFileAsDataURL(pendingFile.file);
+      const base64Payload = String(dataUrl || "").split(",", 2)[1] || "";
+      if (!base64Payload) {{
+        throw new Error(t("error_file_read_failed"));
+      }}
+      return {{
+        name: pendingFile.name || "file.bin",
+        extension: pendingFile.extension || "bin",
+        data: base64Payload,
+      }};
+    }}
+    async function sendChatFile(payload, options = {{}}) {{
       if (!payload) {{
         return;
       }}
+      const refresh = options.refresh !== false;
       if (!state.chatReady) {{
         await initChat();
       }}
@@ -787,7 +1420,7 @@
       }}
       const result = await callApi("send_file", {{
         visitor_id: state.visitorId,
-        text: payload.text || "",
+        text: String(payload.text || "").trim(),
         file_name: payload.name,
         extension: payload.extension,
         data: payload.data,
@@ -796,7 +1429,45 @@
         phone: state.profile.phone
       }});
       applyWriteState(result);
-      await refreshHistory(true);
+      if (refresh) {{
+        await refreshHistory(true);
+      }}
+    }}
+    async function sendPendingFilesQueue(text) {{
+      const pendingFiles = Array.isArray(state.pendingFiles) ? state.pendingFiles : [];
+      if (!pendingFiles.length) {{
+        return 0;
+      }}
+      let caption = String(text || "").trim();
+      let sentCount = 0;
+      const total = pendingFiles.length;
+      while (state.pendingFiles.length > 0) {{
+        const pending = state.pendingFiles[0];
+        statusEl.textContent = t("status_sending_files_progress", {{
+          current: sentCount + 1,
+          total: total,
+        }});
+        const upload = await buildUploadPayload(pending);
+        await sendChatFile({{
+          text: caption,
+          name: upload.name,
+          extension: upload.extension,
+          data: upload.data,
+        }}, {{ refresh: false }});
+        caption = "";
+        revokePendingPreview(pending);
+        state.pendingFiles.shift();
+        sentCount += 1;
+        renderPendingFiles();
+      }}
+      if (fileInputEl) {{
+        fileInputEl.value = "";
+      }}
+      if (sentCount > 0) {{
+        await refreshHistory(true);
+        statusEl.textContent = t("status_files_sent", {{ count: sentCount }});
+      }}
+      return sentCount;
     }}
     function handleActionError(error) {{
       const payload = error && error.payload ? error.payload : {{}};
@@ -817,20 +1488,15 @@
         return;
       }}
       const text = (textEl.value || "").trim();
-      const pendingFile = state.pendingFile;
-      if (!text && !pendingFile) {{
+      const pendingCount = Array.isArray(state.pendingFiles) ? state.pendingFiles.length : 0;
+      if (!text && pendingCount === 0) {{
         return;
       }}
       try {{
+        state.fileReading = true;
         sendButtonEl.disabled = true;
-        if (pendingFile) {{
-          await sendChatFile({{
-            text: text,
-            name: pendingFile.name,
-            extension: pendingFile.extension,
-            data: pendingFile.data,
-          }});
-          clearPendingFile();
+        if (pendingCount > 0) {{
+          await sendPendingFilesQueue(text);
         }} else {{
           await sendChatMessage(text);
         }}
@@ -839,6 +1505,7 @@
       }} catch (error) {{
         handleActionError(error);
       }} finally {{
+        state.fileReading = false;
         updateComposerState();
       }}
     }});
@@ -857,48 +1524,49 @@
       if (state.fileReading) {{
         return;
       }}
-      clearPendingFile();
+      clearPendingFiles();
       updateComposerState();
     }});
     fileInputEl.addEventListener("change", async () => {{
-      const file = fileInputEl.files && fileInputEl.files[0];
-      if (!file) {{
+      const files = Array.from(fileInputEl.files || []);
+      if (!files.length) {{
         return;
       }}
       const maxUploadBytes = Number(CONFIG.maxUploadBytes || 0);
-      if (maxUploadBytes > 0 && Number(file.size || 0) > maxUploadBytes) {{
-        clearPendingFile();
-        statusEl.textContent = t("status_file_too_large", {{ max: formatBytes(maxUploadBytes) }});
-        updateComposerState();
-        return;
-      }}
-      state.fileReading = true;
-      updateComposerState();
-      try {{
-        const dataUrl = await readFileAsDataURL(file);
-        const base64Payload = String(dataUrl || "").split(",", 2)[1] || "";
-        if (!base64Payload) {{
-          throw new Error(t("error_file_read_failed"));
+      let addedCount = 0;
+      let skippedCount = 0;
+      for (const file of files) {{
+        if (maxUploadBytes > 0 && Number(file.size || 0) > maxUploadBytes) {{
+          skippedCount += 1;
+          continue;
         }}
-        const fileName = normalizeFileName(file.name || "file.bin");
-        const extension = normalizeFileExtension(getExtensionFromFileName(fileName)) || "bin";
-        state.pendingFile = {{
-          name: fileName,
-          extension: extension,
-          data: base64Payload,
-          size: Number(file.size || 0),
-        }};
-        statusEl.textContent = t("status_file_attached");
-      }} catch (error) {{
-        clearPendingFile();
-        statusEl.textContent = t("status_file_error_prefix") + (error && error.message ? error.message : t("error_unexpected"));
-      }} finally {{
-        state.fileReading = false;
-        updateComposerState();
+        queuePendingFile(file);
+        addedCount += 1;
       }}
+      if (addedCount > 0 && skippedCount > 0) {{
+        statusEl.textContent = t("status_files_attached_partial", {{ added: addedCount, skipped: skippedCount }});
+      }} else if (addedCount > 0) {{
+        statusEl.textContent = t("status_files_attached", {{ count: addedCount }});
+      }} else if (skippedCount > 0) {{
+        statusEl.textContent = t("status_file_too_large", {{ max: formatBytes(maxUploadBytes) }});
+      }}
+      if (fileInputEl) {{
+        fileInputEl.value = "";
+      }}
+      updateComposerState();
     }});
     textEl.addEventListener("input", () => {{
       autoSizeTextarea();
+      scheduleViewportCssUpdate(0);
+    }});
+    textEl.addEventListener("focus", () => {{
+      scheduleViewportCssUpdate(70);
+      window.setTimeout(() => {{
+        keepComposerVisibleOnMobile();
+      }}, 90);
+    }});
+    textEl.addEventListener("blur", () => {{
+      scheduleViewportCssUpdate(140);
     }});
     textEl.addEventListener("keydown", (event) => {{
       if (event.key !== "Enter") {{
@@ -918,6 +1586,7 @@
 
       initLanguage();
       statusEl.textContent = t("status_initializing");
+      bindViewportHandlers();
       loadProfile();
       applyQueryProfileOverrides();
       persistProfile();
