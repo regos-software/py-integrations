@@ -4,439 +4,20 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{safe_title}</title>
-  <style>
-    @import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Space+Grotesk:wght@600;700&display=swap");
-    :root {{
-{theme_vars_css}
-      --shell: #f2f6fb;
-      --shadow-strong: 0 28px 60px rgba(13, 31, 55, 0.16);
-      --shadow-soft: 0 10px 26px rgba(13, 31, 55, 0.1);
-    }}
-    * {{ box-sizing: border-box; }}
-    body {{
-      margin: 0;
-      background:
-        radial-gradient(circle at 12% -8%, #d7e8ff 0%, rgba(215, 232, 255, 0) 38%),
-        radial-gradient(circle at 92% 112%, #d7ffe9 0%, rgba(215, 255, 233, 0) 34%),
-        linear-gradient(180deg, #f8fbff 0%, #eef3f8 100%);
-      color: var(--text);
-      font: 14px/1.52 "Manrope", "Trebuchet MS", "Verdana", sans-serif;
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      position: relative;
-      isolation: isolate;
-      padding: 16px;
-    }}
-    body::before {{
-      content: "";
-      position: fixed;
-      inset: 0;
-      z-index: -1;
-      pointer-events: none;
-      background-image:
-        linear-gradient(rgba(255, 255, 255, 0.35) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(255, 255, 255, 0.35) 1px, transparent 1px);
-      background-size: 36px 36px;
-      opacity: 0.38;
-    }}
-    .wrap {{
-      width: 100%;
-      max-width: 860px;
-      display: grid;
-      grid-template-rows: auto 1fr auto;
-      background: var(--card);
-      border: 1px solid var(--line);
-      border-radius: 22px;
-      overflow: hidden;
-      box-shadow: var(--shadow-strong);
-      position: relative;
-      backdrop-filter: blur(8px);
-    }}
-    .wrap::before {{
-      content: "";
-      position: absolute;
-      inset: 0 0 auto 0;
-      height: 84px;
-      pointer-events: none;
-      background: linear-gradient(180deg, rgba(255, 255, 255, 0.45) 0%, rgba(255, 255, 255, 0) 100%);
-    }}
-    .head {{
-      padding: 16px 18px;
-      border-bottom: 1px solid var(--line);
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 12px;
-      background: linear-gradient(180deg, rgba(255, 255, 255, 0.92) 0%, rgba(245, 249, 255, 0.76) 100%);
-      backdrop-filter: blur(10px);
-    }}
-    .title {{
-      font: 700 17px/1.2 "Space Grotesk", "Manrope", sans-serif;
-      letter-spacing: 0.2px;
-    }}
-    .status {{
-      color: var(--muted);
-      font-size: 11px;
-      display: inline-flex;
-      align-items: center;
-      gap: 7px;
-      padding: 6px 10px;
-      border-radius: 999px;
-      border: 1px solid var(--line);
-      background: rgba(255, 255, 255, 0.74);
-      text-transform: uppercase;
-      letter-spacing: 0.35px;
-    }}
-    .status::before {{
-      content: "";
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      background: #35c76b;
-      box-shadow: 0 0 0 3px rgba(53, 199, 107, 0.2);
-    }}
-    .history {{
-      padding: 18px 18px;
-      overflow-y: auto;
-      background:
-        radial-gradient(circle at 10% 0%, rgba(255, 255, 255, 0.82) 0%, rgba(255, 255, 255, 0) 38%),
-        linear-gradient(180deg, rgba(255, 255, 255, 0.35) 0%, rgba(255, 255, 255, 0.08) 100%),
-        var(--bg);
-      min-height: 360px;
-      max-height: 60vh;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      scroll-behavior: smooth;
-    }}
-    .history::-webkit-scrollbar {{
-      width: 10px;
-    }}
-    .history::-webkit-scrollbar-track {{
-      background: transparent;
-    }}
-    .history::-webkit-scrollbar-thumb {{
-      background: rgba(52, 75, 102, 0.22);
-      border-radius: 999px;
-      border: 2px solid transparent;
-      background-clip: padding-box;
-    }}
-    .msg {{
-      max-width: 82%;
-      padding: 10px 12px;
-      border-radius: 16px;
-      border: 1px solid var(--line);
-      white-space: pre-wrap;
-      word-break: break-word;
-      animation: rise .18s cubic-bezier(0.2, 0.8, 0.2, 1);
-      box-shadow: var(--shadow-soft);
-      line-height: 1.45;
-    }}
-    .msg.mine {{
-      margin-left: auto;
-      background: var(--mine);
-      border-bottom-right-radius: 6px;
-    }}
-    .msg.other {{
-      margin-right: auto;
-      background: var(--other);
-      border-bottom-left-radius: 6px;
-    }}
-    .msg.system {{
-      margin: 0 auto;
-      background: var(--system);
-      max-width: 96%;
-      border-style: dashed;
-      text-align: center;
-    }}
-    .meta {{
-      margin-top: 6px;
-      color: var(--muted);
-      font-size: 10px;
-      letter-spacing: 0.28px;
-      text-transform: uppercase;
-    }}
-    .onboarding-card {{
-      width: min(100%, 620px);
-      margin: 0 auto;
-      border: 1px solid var(--line);
-      border-radius: 18px;
-      padding: 14px;
-      background: rgba(255, 255, 255, 0.96);
-      box-shadow: var(--shadow-soft);
-      animation: rise .18s cubic-bezier(0.2, 0.8, 0.2, 1);
-    }}
-    .onboarding-title {{
-      margin: 0;
-      font: 700 15px/1.2 "Space Grotesk", "Manrope", sans-serif;
-      letter-spacing: 0.18px;
-    }}
-    .onboarding-note {{
-      margin: 6px 0 0 0;
-      color: var(--muted);
-      font-size: 12px;
-      line-height: 1.4;
-    }}
-    .onboarding-form {{
-      margin-top: 12px;
-      display: grid;
-      gap: 10px;
-    }}
-    .onboarding-field {{
-      display: grid;
-      gap: 6px;
-      text-align: left;
-    }}
-    .onboarding-label {{
-      color: var(--muted);
-      font-size: 11px;
-      letter-spacing: 0.28px;
-      text-transform: uppercase;
-    }}
-    .onboarding-field input {{
-      width: 100%;
-      border: 1px solid var(--line);
-      border-radius: 11px;
-      padding: 10px 11px;
-      font: inherit;
-      color: var(--text);
-      background: #fff;
-      transition: border-color .18s ease, box-shadow .18s ease;
-    }}
-    .onboarding-field input:focus {{
-      outline: none;
-      border-color: var(--accent);
-      box-shadow: 0 0 0 3px rgba(10, 102, 194, 0.12);
-    }}
-    .onboarding-field input.input-error {{
-      border-color: #d64545;
-      box-shadow: 0 0 0 3px rgba(214, 69, 69, 0.12);
-    }}
-    .onboarding-error {{
-      color: #bf2d2d;
-      font-size: 11px;
-      line-height: 1.25;
-    }}
-    .onboarding-submit {{
-      border: 0;
-      border-radius: 12px;
-      min-height: 40px;
-      padding: 0 16px;
-      background: var(--accent);
-      color: #fff;
-      font: 700 13px/1 "Space Grotesk", "Manrope", sans-serif;
-      letter-spacing: 0.2px;
-      cursor: pointer;
-      box-shadow: 0 9px 18px rgba(10, 102, 194, 0.22);
-      transition: transform .14s ease, box-shadow .14s ease, filter .14s ease;
-    }}
-    .onboarding-submit:hover:not(:disabled) {{
-      transform: translateY(-1px);
-      filter: brightness(1.04);
-      box-shadow: 0 12px 22px rgba(10, 102, 194, 0.27);
-    }}
-    .onboarding-submit:disabled {{
-      opacity: .65;
-      cursor: default;
-      box-shadow: none;
-    }}
-    .rating-box {{
-      border-top: 1px solid var(--line);
-      padding: 10px 14px;
-      background: rgba(255, 255, 255, 0.93);
-      display: grid;
-      gap: 8px;
-    }}
-    .rating-text {{
-      color: var(--text);
-      font-size: 13px;
-      line-height: 1.4;
-    }}
-    .rating-actions {{
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-    }}
-    .rating-btn {{
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      min-width: 40px;
-      height: 34px;
-      padding: 0 10px;
-      background: #fff;
-      color: var(--text);
-      font: 700 12px/1 "Space Grotesk", "Manrope", sans-serif;
-      cursor: pointer;
-      transition: border-color .14s ease, transform .14s ease, box-shadow .14s ease;
-    }}
-    .rating-btn:hover:not(:disabled) {{
-      border-color: var(--accent);
-      transform: translateY(-1px);
-      box-shadow: 0 8px 14px rgba(10, 102, 194, 0.14);
-    }}
-    .rating-btn.active {{
-      background: var(--accent);
-      color: #fff;
-      border-color: var(--accent);
-    }}
-    .rating-btn:disabled {{
-      opacity: .55;
-      cursor: default;
-      box-shadow: none;
-      transform: none;
-    }}
-    .composer {{
-      display: grid;
-      grid-template-columns: auto 1fr auto;
-      gap: 10px;
-      align-items: end;
-      border-top: 1px solid var(--line);
-      padding: 14px 16px;
-      background: linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(248, 251, 255, 0.92) 100%);
-    }}
-    .attach-btn {{
-      border: 1px solid var(--line);
-      border-radius: 13px;
-      width: 42px;
-      height: 42px;
-      padding: 0;
-      background: #fff;
-      color: var(--muted);
-      font: 700 20px/1 "Space Grotesk", "Manrope", sans-serif;
-      cursor: pointer;
-      transition: border-color .14s ease, color .14s ease, transform .14s ease, box-shadow .14s ease;
-    }}
-    .attach-btn:hover:not(:disabled) {{
-      border-color: var(--accent);
-      color: var(--accent);
-      transform: translateY(-1px);
-      box-shadow: 0 8px 16px rgba(10, 102, 194, 0.12);
-    }}
-    .attach-btn:disabled {{
-      opacity: .5;
-      cursor: default;
-      transform: none;
-      box-shadow: none;
-    }}
-    .composer textarea {{
-      grid-column: 2;
-      width: 100%;
-      min-height: 44px;
-      max-height: 126px;
-      resize: vertical;
-      border: 1px solid var(--line);
-      border-radius: 13px;
-      padding: 11px 12px;
-      font: inherit;
-      color: var(--text);
-      background: rgba(255, 255, 255, 0.95);
-      transition: border-color .18s ease, box-shadow .18s ease, background-color .18s ease;
-    }}
-    .composer textarea:focus {{
-      outline: none;
-      border-color: var(--accent);
-      box-shadow: 0 0 0 3px rgba(10, 102, 194, 0.14);
-      background: #fff;
-    }}
-    .send-btn {{
-      grid-column: 3;
-      border: 0;
-      border-radius: 13px;
-      min-width: 110px;
-      padding: 0 18px;
-      background: var(--accent);
-      color: #fff;
-      font: 700 13px/1 "Space Grotesk", "Manrope", sans-serif;
-      letter-spacing: 0.2px;
-      cursor: pointer;
-      box-shadow: 0 10px 20px rgba(10, 102, 194, 0.24);
-      transition: transform .14s ease, box-shadow .14s ease, filter .14s ease;
-    }}
-    .send-btn:hover:not(:disabled) {{
-      transform: translateY(-1px);
-      filter: brightness(1.04);
-      box-shadow: 0 13px 24px rgba(10, 102, 194, 0.28);
-    }}
-    .send-btn:active:not(:disabled) {{
-      transform: translateY(0);
-    }}
-    .send-btn:disabled {{
-      opacity: .5;
-      cursor: default;
-      box-shadow: none;
-    }}
-    .attach-note {{
-      grid-column: 1 / -1;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-      border: 1px solid var(--line);
-      border-radius: 11px;
-      padding: 7px 10px;
-      color: var(--muted);
-      font-size: 12px;
-      background: rgba(255, 255, 255, 0.9);
-    }}
-    .attach-note-text {{
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      min-width: 0;
-    }}
-    .attach-clear {{
-      border: 0;
-      border-radius: 8px;
-      min-height: 24px;
-      padding: 0 8px;
-      background: rgba(19, 32, 51, 0.08);
-      color: var(--text);
-      font: 700 11px/1 "Manrope", sans-serif;
-      cursor: pointer;
-    }}
-    .attach-clear:disabled {{
-      opacity: .5;
-      cursor: default;
-    }}
-    @keyframes rise {{
-      from {{ transform: translateY(10px) scale(.985); opacity: .32; }}
-      to {{ transform: translateY(0) scale(1); opacity: 1; }}
-    }}
-    @media (max-width: 700px) {{
-      body {{ padding: 10px; }}
-      .wrap {{
-        border-radius: 16px;
-        min-height: calc(100vh - 20px);
-      }}
-      .head {{
-        padding: 13px 14px;
-      }}
-      .title {{
-        font-size: 15px;
-      }}
-      .history {{
-        padding: 14px;
-      }}
-      .history {{ max-height: 56vh; }}
-      .composer {{
-        padding: 10px 12px;
-      }}
-      .send-btn {{
-        min-width: 96px;
-      }}
-      .attach-note {{
-        font-size: 11px;
-      }}
-    }}
-  </style>
+  {style_block}
 </head>
 <body>
   <div class="wrap">
     <div class="head">
       <div class="title">{safe_title}</div>
-      <div class="status" id="status">connecting...</div>
+      <div class="head-right">
+        <select id="languageSelect" class="lang-select" aria-label="Language">
+          <option value="ru">RU</option>
+          <option value="uz">UZ</option>
+          <option value="en">EN</option>
+        </select>
+        <div class="status" id="status">connecting...</div>
+      </div>
     </div>
     <div class="history" id="history"></div>
     <div class="rating-box" id="ratingBox" hidden>
@@ -455,10 +36,12 @@
     </form>
   </div>
   <script>
+    const I18N_BUNDLE = {safe_i18n_bundle};
     const CONFIG = {{
       ci: "{safe_ci}",
       profileKey: "webchat:profile:{safe_ci}",
       visitorKey: "webchat:visitor:{safe_ci}",
+      langKey: "webchat:lang:{safe_ci}",
       maxUploadBytes: {ExternalChatCrmChannelConfig.MAX_UPLOAD_FILE_SIZE_BYTES},
       required: {{
         display_name: {safe_require_display_name},
@@ -467,22 +50,9 @@
       }},
     }};
     const REQUIRED_ORDER = ["display_name", "phone", "email"];
-    const FIELD_LABELS = {{
-      display_name: "name",
-      phone: "phone",
-      email: "email",
-    }};
-    const FIELD_PLACEHOLDERS = {{
-      display_name: "John Smith",
-      phone: "+998 90 123 45 67",
-      email: "name@example.com",
-    }};
-    const FIELD_INVALID = {{
-      display_name: "Please enter a valid name.",
-      phone: "Please enter a valid phone number.",
-      email: "Please enter a valid email address.",
-    }};
+    const LANGUAGES = ["ru", "uz", "en"];
 
+    const languageSelectEl = document.getElementById("languageSelect");
     const statusEl = document.getElementById("status");
     const historyEl = document.getElementById("history");
     const ratingBoxEl = document.getElementById("ratingBox");
@@ -496,9 +66,10 @@
     const textEl = document.getElementById("text");
     const formEl = document.getElementById("composer");
     const sendButtonEl = formEl.querySelector(".send-btn");
-    statusEl.textContent = "initializing...";
+    statusEl.textContent = "...";
 
     const state = {{
+      lang: "en",
       chatReady: false,
       ticketClosed: false,
       chatRevision: 0,
@@ -520,6 +91,7 @@
       pendingFile: null,
       fileReading: false,
       lastHistoryFingerprint: "",
+      lastHistoryItems: [],
     }};
 
     function storageGet(key) {{
@@ -536,6 +108,85 @@
       }} catch (_) {{
         return false;
       }}
+    }}
+    function normalizeLanguageCode(value) {{
+      const raw = String(value || "").trim().toLowerCase().replace("_", "-");
+      if (!raw) {{
+        return "";
+      }}
+      const direct = raw.split("-", 1)[0];
+      if (LANGUAGES.indexOf(direct) >= 0) {{
+        return direct;
+      }}
+      return "";
+    }}
+    function getBrowserLanguage() {{
+      const lang = normalizeLanguageCode(
+        (navigator && (navigator.language || (navigator.languages && navigator.languages[0]))) || ""
+      );
+      return lang || "en";
+    }}
+    function getCurrentLocaleDict() {{
+      return (
+        (I18N_BUNDLE && I18N_BUNDLE[state.lang])
+        || (I18N_BUNDLE && I18N_BUNDLE.en)
+        || {{}}
+      );
+    }}
+    function t(key, params) {{
+      const dict = getCurrentLocaleDict();
+      const fallback = (I18N_BUNDLE && I18N_BUNDLE.en) || {{}};
+      let text = String(dict[key] || fallback[key] || key);
+      const vars = params && typeof params === "object" ? params : {{}};
+      for (const [name, value] of Object.entries(vars)) {{
+        const token = "{{" + String(name) + "}}";
+        text = text.split(token).join(String(value));
+      }}
+      return text;
+    }}
+    function renderLanguageSwitcher() {{
+      if (!languageSelectEl) {{
+        return;
+      }}
+      const current = state.lang || "en";
+      const labels = {{
+        ru: t("language_ru"),
+        uz: t("language_uz"),
+        en: t("language_en"),
+      }};
+      languageSelectEl.innerHTML = "";
+      for (const code of LANGUAGES) {{
+        const option = document.createElement("option");
+        option.value = code;
+        option.textContent = labels[code] || code.toUpperCase();
+        languageSelectEl.appendChild(option);
+      }}
+      languageSelectEl.value = current;
+      languageSelectEl.title = t("language_label");
+      languageSelectEl.setAttribute("aria-label", t("language_label"));
+    }}
+    function setLanguage(value, persist = true) {{
+      const normalized = normalizeLanguageCode(value) || "en";
+      state.lang = normalized;
+      document.documentElement.lang = normalized;
+      if (persist) {{
+        storageSet(CONFIG.langKey, normalized);
+      }}
+      renderLanguageSwitcher();
+      updateComposerState();
+      renderRatingPanel();
+      if (state.chatReady && Array.isArray(state.lastHistoryItems) && state.lastHistoryItems.length) {{
+        renderHistory(state.lastHistoryItems, true);
+      }}
+      if (isOnboardingRequired()) {{
+        renderOnboarding();
+      }}
+    }}
+    function initLanguage() {{
+      const queryLang = normalizeLanguageCode(getFirstQueryValue(["lang", "locale", "language", "hl"]));
+      const storedLang = normalizeLanguageCode(storageGet(CONFIG.langKey) || "");
+      const resolved = queryLang || storedLang || getBrowserLanguage();
+      setLanguage(resolved, true);
     }}
 
     function normalizeText(value, maxLen = 120) {{
@@ -624,7 +275,7 @@
       return new Promise((resolve, reject) => {{
         const reader = new FileReader();
         reader.onload = () => resolve(String(reader.result || ""));
-        reader.onerror = () => reject(new Error("Failed to read file"));
+        reader.onerror = () => reject(new Error(t("error_file_read_failed")));
         reader.readAsDataURL(file);
       }});
     }}
@@ -721,13 +372,13 @@
       return !state.chatReady && getMissingRequiredFields().length > 0;
     }}
     function fieldLabel(field) {{
-      return FIELD_LABELS[field] || field;
+      return t("field_label_" + field);
     }}
     function fieldPlaceholder(field) {{
-      return FIELD_PLACEHOLDERS[field] || "";
+      return t("field_placeholder_" + field);
     }}
     function fieldInvalid(field) {{
-      return FIELD_INVALID[field] || ("Invalid " + fieldLabel(field) + ".");
+      return t("field_invalid_" + field) || t("field_invalid_generic", {{ field: fieldLabel(field) }});
     }}
     function fieldInputType(field) {{
       if (field === "email") {{
@@ -782,15 +433,16 @@
 
       const meta = document.createElement("div");
       meta.className = "meta";
-      const who = type === "System" ? "system" : (item.mine ? "you" : "operator");
+      const who = type === "System" ? t("meta_system") : (item.mine ? t("meta_you") : t("meta_operator"));
       const stamp = toTime(item.created_date);
-      meta.textContent = who + (stamp ? ("  " + stamp) : "") + (item.edited ? " (edited)" : "");
+      meta.textContent = who + (stamp ? ("  " + stamp) : "") + (item.edited ? (" (" + t("meta_edited") + ")") : "");
       box.appendChild(meta);
 
       return box;
     }}
     function renderHistory(items, force = false) {{
       const list = Array.isArray(items) ? items : [];
+      state.lastHistoryItems = list;
       const fingerprint = historyFingerprint(list);
       if (!force && fingerprint === state.lastHistoryFingerprint) {{
         return;
@@ -827,12 +479,12 @@
       if (state.ratingSubmitted) {{
         const savedRating = normalizeRating(state.ticketRating);
         ratingTextEl.textContent = savedRating !== null
-          ? ("Thanks for your feedback. Rating: " + savedRating + "/5")
-          : "Thanks for your feedback.";
+          ? t("rating_thanks_with_value", {{ rating: savedRating }})
+          : t("rating_thanks");
         return;
       }}
 
-      ratingTextEl.textContent = String(state.ratingMessage || "").trim() || "Please rate this chat.";
+      ratingTextEl.textContent = String(state.ratingMessage || "").trim() || t("rating_prompt_default");
       for (let rating = 1; rating <= 5; rating += 1) {{
         const btn = document.createElement("button");
         btn.type = "button";
@@ -853,7 +505,7 @@
         return;
       }}
       state.ratingSubmitting = true;
-      statusEl.textContent = "saving rating...";
+      statusEl.textContent = t("status_saving_rating");
       renderRatingPanel();
       updateComposerState();
       try {{
@@ -866,7 +518,7 @@
         }});
         applyWriteState(result);
         await refreshHistory(true);
-        statusEl.textContent = "thanks for your feedback";
+        statusEl.textContent = t("status_thanks_feedback");
       }} finally {{
         state.ratingSubmitting = false;
         renderRatingPanel();
@@ -902,7 +554,7 @@
       state.onboardingErrors = errors;
       if (Object.keys(errors).length) {{
         const firstField = requiredFields.find((field) => errors[field]);
-        statusEl.textContent = firstField ? errors[firstField] : "please fill required fields";
+        statusEl.textContent = firstField ? errors[firstField] : t("status_fill_required_fields");
         renderOnboarding();
         updateComposerState();
         return;
@@ -911,7 +563,7 @@
       state.profile = updatedProfile;
       persistProfile();
       state.onboardingSubmitBusy = true;
-      statusEl.textContent = "connecting...";
+      statusEl.textContent = t("status_connecting");
       renderOnboarding();
       updateComposerState();
       try {{
@@ -940,12 +592,12 @@
 
       const title = document.createElement("h3");
       title.className = "onboarding-title";
-      title.textContent = "Before we start, please fill the form";
+      title.textContent = t("onboarding_title");
       card.appendChild(title);
 
       const note = document.createElement("p");
       note.className = "onboarding-note";
-      note.textContent = "These details are required to open a support conversation.";
+      note.textContent = t("onboarding_note");
       card.appendChild(note);
 
       const form = document.createElement("form");
@@ -988,7 +640,7 @@
       submit.type = "submit";
       submit.className = "onboarding-submit";
       submit.disabled = state.onboardingSubmitBusy;
-      submit.textContent = state.onboardingSubmitBusy ? "Connecting..." : "Start chat";
+      submit.textContent = state.onboardingSubmitBusy ? t("onboarding_connecting") : t("onboarding_start");
       form.appendChild(submit);
 
       card.appendChild(form);
@@ -999,21 +651,23 @@
     function updateComposerState() {{
       const onboardingMode = isOnboardingRequired() || state.onboardingSubmitBusy;
       const hardDisabled = onboardingMode;
+      attachButtonEl.title = t("attach_title");
+      attachClearEl.textContent = t("attach_clear");
       attachButtonEl.disabled = hardDisabled || state.fileReading;
       fileInputEl.disabled = hardDisabled || state.fileReading;
       attachClearEl.disabled = hardDisabled || state.fileReading;
       if (onboardingMode) {{
         textEl.disabled = true;
         sendButtonEl.disabled = true;
-        sendButtonEl.textContent = "Locked";
-        textEl.placeholder = "Fill the form above to start";
+        sendButtonEl.textContent = t("composer_locked");
+        textEl.placeholder = t("composer_placeholder_fill");
         renderPendingFile();
         return;
       }}
       textEl.disabled = false;
       sendButtonEl.disabled = state.fileReading;
-      sendButtonEl.textContent = state.pendingFile ? "Send file" : "Send";
-      textEl.placeholder = state.pendingFile ? "Add message (optional)" : "Type your message";
+      sendButtonEl.textContent = state.pendingFile ? t("composer_send_file") : t("composer_send");
+      textEl.placeholder = state.pendingFile ? t("composer_placeholder_optional") : t("composer_placeholder_type");
       renderPendingFile();
       autoSizeTextarea();
     }}
@@ -1062,12 +716,12 @@
       }}
       const missing = getMissingRequiredFields();
       if (missing.length) {{
-        statusEl.textContent = "fill required fields";
+        statusEl.textContent = t("status_fill_required_fields");
         renderOnboarding();
         updateComposerState();
         return;
       }}
-      statusEl.textContent = "connecting...";
+      statusEl.textContent = t("status_connecting");
       const result = await callApi("init", {{
         visitor_id: state.visitorId,
         display_name: state.profile.display_name,
@@ -1082,7 +736,7 @@
       state.onboardingErrors = {{}};
       applyWriteState(result);
       renderHistory(result.history || [], true);
-      statusEl.textContent = "online";
+      statusEl.textContent = t("status_online");
     }}
 
     async function refreshHistory(forceFull = false) {{
@@ -1102,7 +756,7 @@
       if (result.history_changed !== false) {{
         renderHistory(result.history || []);
       }}
-      statusEl.textContent = "online";
+      statusEl.textContent = t("status_online");
     }}
     async function sendChatMessage(text) {{
       if (!state.chatReady) {{
@@ -1154,7 +808,7 @@
       if (hasTicketState) {{
         applyWriteState(payload);
       }}
-      statusEl.textContent = "error: " + (error && error.message ? error.message : "unexpected error");
+      statusEl.textContent = t("status_error_prefix") + (error && error.message ? error.message : t("error_unexpected"));
     }}
 
     formEl.addEventListener("submit", async (event) => {{
@@ -1188,6 +842,11 @@
         updateComposerState();
       }}
     }});
+    if (languageSelectEl) {{
+      languageSelectEl.addEventListener("change", () => {{
+        setLanguage(languageSelectEl.value, true);
+      }});
+    }}
     attachButtonEl.addEventListener("click", () => {{
       if (attachButtonEl.disabled || state.fileReading) {{
         return;
@@ -1209,7 +868,7 @@
       const maxUploadBytes = Number(CONFIG.maxUploadBytes || 0);
       if (maxUploadBytes > 0 && Number(file.size || 0) > maxUploadBytes) {{
         clearPendingFile();
-        statusEl.textContent = "file is too large (max " + formatBytes(maxUploadBytes) + ")";
+        statusEl.textContent = t("status_file_too_large", {{ max: formatBytes(maxUploadBytes) }});
         updateComposerState();
         return;
       }}
@@ -1219,7 +878,7 @@
         const dataUrl = await readFileAsDataURL(file);
         const base64Payload = String(dataUrl || "").split(",", 2)[1] || "";
         if (!base64Payload) {{
-          throw new Error("Failed to read file");
+          throw new Error(t("error_file_read_failed"));
         }}
         const fileName = normalizeFileName(file.name || "file.bin");
         const extension = normalizeFileExtension(getExtensionFromFileName(fileName)) || "bin";
@@ -1229,10 +888,10 @@
           data: base64Payload,
           size: Number(file.size || 0),
         }};
-        statusEl.textContent = "file attached";
+        statusEl.textContent = t("status_file_attached");
       }} catch (error) {{
         clearPendingFile();
-        statusEl.textContent = "file error: " + (error && error.message ? error.message : "unexpected error");
+        statusEl.textContent = t("status_file_error_prefix") + (error && error.message ? error.message : t("error_unexpected"));
       }} finally {{
         state.fileReading = false;
         updateComposerState();
@@ -1254,9 +913,11 @@
 
     async function bootstrapChat() {{
       if (!window.fetch) {{
-        throw new Error("Fetch API is not available in this browser");
+        throw new Error(t("error_fetch_unavailable"));
       }}
 
+      initLanguage();
+      statusEl.textContent = t("status_initializing");
       loadProfile();
       applyQueryProfileOverrides();
       persistProfile();
@@ -1266,7 +927,7 @@
 
       if (isOnboardingRequired()) {{
         renderOnboarding();
-        statusEl.textContent = "fill required fields";
+        statusEl.textContent = t("status_fill_required_fields");
       }} else {{
         await initChat();
       }}
@@ -1295,7 +956,7 @@
 
     bootstrapChat().catch((error) => {{
       state.chatReady = false;
-      statusEl.textContent = "startup error";
+      statusEl.textContent = t("status_startup_error");
       console.error("[external_chat] bootstrap failed:", error);
       handleActionError(error);
       updateComposerState();
@@ -1303,4 +964,5 @@
   </script>
 </body>
 </html>
+
 

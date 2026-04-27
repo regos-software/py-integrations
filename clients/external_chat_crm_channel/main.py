@@ -5,7 +5,6 @@ import base64
 import binascii
 import html
 import json
-import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -63,7 +62,7 @@ class ExternalChatCrmChannelConfig:
     MAX_FILE_NAME_LENGTH = 160
     MAX_FILE_EXTENSION_LENGTH = 20
     DEFAULT_CHAT_TITLE = "Support Chat"
-    DEFAULT_SUBJECT_TEMPLATE = "Web chat {visitor_id}"
+    DEFAULT_SUBJECT_TEMPLATE = "{channel_name} {display_name}"
     CLOSED_ENTITY_ERROR_CODE = 1220
     CHAT_REVISION_DEFAULT = 1
     WEBHOOK_DEDUPE_TTL_SEC = 10 * 60
@@ -75,17 +74,6 @@ class ExternalChatCrmChannelConfig:
         "TicketStatusSet",
         "TicketClosed",
     }
-    DEFAULT_THEME_VARS = {
-        "--bg": "#f5f7fb",
-        "--card": "#ffffff",
-        "--line": "#dde3ef",
-        "--text": "#132033",
-        "--muted": "#6d7d95",
-        "--accent": "#0a66c2",
-        "--mine": "#e8f3ff",
-        "--other": "#f1f4f9",
-        "--system": "#fff6d8",
-    }
 
 
 @dataclass
@@ -94,6 +82,7 @@ class RuntimeConfig:
     channel_id: int
     ticket_subject_template: str
     default_responsible_user_id: Optional[int]
+    channel_name: str
     chat_title: str
     channel_start_message: Optional[str]
     channel_end_message: Optional[str]
@@ -104,7 +93,7 @@ class RuntimeConfig:
     require_display_name: bool
     require_phone: bool
     require_email: bool
-    chat_theme_vars: Dict[str, str]
+    chat_css_url: Optional[str]
 
 
 @dataclass
@@ -214,78 +203,26 @@ def _extract_base64_payload(value: Any) -> str:
     return raw
 
 
-_ALLOWED_THEME_KEYS = set(ExternalChatCrmChannelConfig.DEFAULT_THEME_VARS.keys())
-_THEME_KEY_ALIASES = {
-    "bg": "--bg",
-    "card": "--card",
-    "line": "--line",
-    "text": "--text",
-    "muted": "--muted",
-    "accent": "--accent",
-    "mine": "--mine",
-    "other": "--other",
-    "system": "--system",
-}
-_THEME_VALUE_RE = re.compile(r"^[a-zA-Z0-9#(),.%\-\s/+]*$")
-
-
-def _normalize_theme_key(value: Any) -> Optional[str]:
-    key = str(value or "").strip().lower()
-    if not key:
-        return None
-    if key in _THEME_KEY_ALIASES:
-        return _THEME_KEY_ALIASES[key]
-    if key.startswith("--") and key in _ALLOWED_THEME_KEYS:
-        return key
-    if not key.startswith("--"):
-        alias = f"--{key}"
-        if alias in _ALLOWED_THEME_KEYS:
-            return alias
-    return None
-
-
-def _sanitize_theme_value(value: Any) -> Optional[str]:
-    text = str(value or "").strip()
-    if not text or len(text) > 120:
-        return None
-    lowered = text.lower()
-    forbidden_tokens = ("javascript:", "expression(", "@import", "</style")
-    if any(token in lowered for token in forbidden_tokens):
-        return None
-    if not _THEME_VALUE_RE.fullmatch(text):
-        return None
-    return text
-
-
-def _parse_chat_theme_vars(raw: Any) -> Dict[str, str]:
+def _parse_chat_css_url(raw: Any) -> Optional[str]:
     if raw is None:
-        return {}
-    if isinstance(raw, str):
-        payload_raw = raw.strip()
-        if not payload_raw:
-            return {}
-        try:
-            payload = _json_loads(payload_raw)
-        except Exception as error:
-            raise ValueError("chat_theme_vars must be valid JSON object") from error
-    elif isinstance(raw, dict):
-        payload = raw
-    else:
-        raise ValueError("chat_theme_vars must be JSON object")
-
-    if not isinstance(payload, dict):
-        raise ValueError("chat_theme_vars must be JSON object")
-
-    parsed: Dict[str, str] = {}
-    for raw_key, raw_value in payload.items():
-        key = _normalize_theme_key(raw_key)
-        if not key:
-            continue
-        safe_value = _sanitize_theme_value(raw_value)
-        if not safe_value:
-            continue
-        parsed[key] = safe_value
-    return parsed
+        return None
+    value = str(raw).strip()
+    if not value:
+        return None
+    if len(value) > 500:
+        raise ValueError("chat_css_url is too long")
+    lowered = value.lower()
+    if lowered.startswith(("javascript:", "data:", "vbscript:")):
+        raise ValueError("chat_css_url has unsupported scheme")
+    if any(ch.isspace() for ch in value):
+        raise ValueError("chat_css_url must not contain spaces")
+    if any(ch in value for ch in {'"', "'", "<", ">", "`"}):
+        raise ValueError("chat_css_url contains unsupported characters")
+    if lowered.startswith(("http://", "https://")):
+        return value
+    if value.startswith(("/", "./", "../")):
+        return value
+    raise ValueError("chat_css_url must be http(s) URL or relative path")
 
 
 def _redis_enabled() -> bool:
@@ -357,7 +294,11 @@ class ChatMessageAddClosedEntityError(RuntimeError):
 class ExternalChatCrmChannelIntegration(ClientBase):
     _ACTIVE_CACHE: Dict[str, Tuple[bool, float]] = {}
     _UI_TEMPLATE_CACHE: Optional[str] = None
+    _UI_CSS_TEMPLATE_CACHE: Optional[str] = None
+    _UI_I18N_CACHE: Optional[Dict[str, Dict[str, str]]] = None
     _UI_TEMPLATE_PATH = Path(__file__).with_name("ui_template.html")
+    _UI_CSS_TEMPLATE_PATH = Path(__file__).with_name("ui_template.css")
+    _UI_I18N_DIR_PATH = Path(__file__).with_name("i18n")
 
     _ACTIVE_CACHE_LOCK = asyncio.Lock()
 
@@ -606,7 +547,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             settings_map.get("require_email_on_open"),
             False,
         )
-        chat_theme_vars = _parse_chat_theme_vars(settings_map.get("chat_theme_vars"))
+        chat_css_url = _parse_chat_css_url(settings_map.get("chat_css_url"))
         channel = await cls._get_channel(connected_integration_id, int(channel_id))
         channel_name = _normalize_text(getattr(channel, "name", None), 80)
         chat_title = (
@@ -638,6 +579,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             default_responsible_user_id=_parse_int(
                 settings_map.get("default_responsible_user_id"), None
             ),
+            channel_name=channel_name or chat_title,
             chat_title=chat_title,
             channel_start_message=channel_start_message,
             channel_end_message=channel_end_message,
@@ -648,7 +590,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             require_display_name=require_display_name,
             require_phone=require_phone,
             require_email=require_email,
-            chat_theme_vars=chat_theme_vars,
+            chat_css_url=chat_css_url,
         )
 
     @staticmethod
@@ -678,19 +620,26 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         return normalized[:120]
 
     @staticmethod
-    def _build_subject(template: str, visitor_id: str, profile: Dict[str, Any]) -> str:
+    def _build_subject(
+        template: str,
+        channel_name: str,
+        visitor_id: str,
+        profile: Dict[str, Any],
+    ) -> str:
+        safe_channel_name = _normalize_text(channel_name, 80) or "Support Chat"
         display_name = _normalize_text(profile.get("display_name"), 120) or "Guest"
         current_date = time.strftime("%Y-%m-%d")
         try:
             subject = str(template or "").format(
+                channel_name=safe_channel_name,
                 visitor_id=visitor_id,
                 display_name=display_name,
                 current_date=current_date,
             )
         except Exception:
-            subject = f"Web chat {visitor_id}"
+            subject = f"{safe_channel_name} {display_name}"
         normalized = _normalize_text(subject, 200)
-        return normalized or f"Web chat {visitor_id}"
+        return normalized or f"{safe_channel_name} {display_name}"
 
     @staticmethod
     def _default_ticket_state() -> Dict[str, Any]:
@@ -1220,7 +1169,12 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 or not getattr(ticket, "chat_id", None)
                 or (require_writable and ticket_closed)
             ):
-                subject = cls._build_subject(runtime.ticket_subject_template, visitor_id, profile)
+                subject = cls._build_subject(
+                    runtime.ticket_subject_template,
+                    runtime.channel_name,
+                    visitor_id,
+                    profile,
+                )
                 ticket = await cls._create_ticket(
                     api,
                     runtime=runtime,
@@ -1754,6 +1708,68 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             cls._UI_TEMPLATE_CACHE = "<!doctype html><html><body><h1>UI template is unavailable</h1></body></html>"
         return cls._UI_TEMPLATE_CACHE
 
+    @classmethod
+    def _load_ui_css_template(cls) -> str:
+        if cls._UI_CSS_TEMPLATE_CACHE is not None:
+            return cls._UI_CSS_TEMPLATE_CACHE
+
+        try:
+            cls._UI_CSS_TEMPLATE_CACHE = cls._UI_CSS_TEMPLATE_PATH.read_text(encoding="utf-8")
+        except Exception as error:
+            logger.exception("Failed to load UI CSS template: %s", error)
+            cls._UI_CSS_TEMPLATE_CACHE = (
+                ":root {\n"
+                "  --bg: #c2d2df;\n"
+                "  --card: #f7f9fc;\n"
+                "  --line: #d7dfea;\n"
+                "  --text: #243247;\n"
+                "  --muted: #6f7d95;\n"
+                "  --accent: #3a6fa6;\n"
+                "  --mine: #ffffff;\n"
+                "  --other: #f7f9fc;\n"
+                "  --system: #f2f5fa;\n"
+                "}\n"
+                "body { margin: 0; font-family: Manrope, sans-serif; }\n"
+            )
+        return cls._UI_CSS_TEMPLATE_CACHE
+
+    @classmethod
+    def _load_ui_i18n_bundle(cls) -> Dict[str, Dict[str, str]]:
+        if cls._UI_I18N_CACHE is not None:
+            return cls._UI_I18N_CACHE
+
+        bundle: Dict[str, Dict[str, str]] = {}
+        for lang in ("ru", "uz", "en"):
+            file_path = cls._UI_I18N_DIR_PATH / f"{lang}.json"
+            try:
+                payload_raw = file_path.read_text(encoding="utf-8")
+                payload = _json_loads(payload_raw)
+                if not isinstance(payload, dict):
+                    raise ValueError("i18n payload must be an object")
+                normalized: Dict[str, str] = {}
+                for raw_key, raw_value in payload.items():
+                    key = str(raw_key or "").strip()
+                    if not key:
+                        continue
+                    normalized[key] = str(raw_value or "")
+                bundle[lang] = normalized
+            except Exception as error:
+                logger.exception("Failed to load UI i18n file: %s (%s)", file_path, error)
+                bundle[lang] = {}
+
+        if "en" not in bundle or not bundle["en"]:
+            bundle["en"] = {
+                "status_connecting": "connecting...",
+                "status_online": "online",
+                "status_initializing": "initializing...",
+            }
+        for lang in ("ru", "uz"):
+            if lang not in bundle or not bundle[lang]:
+                bundle[lang] = dict(bundle["en"])
+
+        cls._UI_I18N_CACHE = bundle
+        return bundle
+
     @staticmethod
     def _ui_html(
         *,
@@ -1762,21 +1778,22 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         require_display_name: bool,
         require_phone: bool,
         require_email: bool,
-        chat_theme_vars: Dict[str, str],
+        chat_css_url: Optional[str],
+        i18n_bundle: Dict[str, Dict[str, str]],
     ) -> str:
         safe_title = html.escape(title)
         safe_ci = html.escape(connected_integration_id)
         safe_require_display_name = "true" if require_display_name else "false"
         safe_require_phone = "true" if require_phone else "false"
         safe_require_email = "true" if require_email else "false"
+        safe_i18n_bundle = _json_dumps(i18n_bundle or {}).replace("</", "<\\/")
 
-        theme_vars = dict(ExternalChatCrmChannelConfig.DEFAULT_THEME_VARS)
-        for key, value in (chat_theme_vars or {}).items():
-            if key in _ALLOWED_THEME_KEYS:
-                theme_vars[key] = value
-        theme_vars_css = "\n".join(
-            f"      {key}: {value};" for key, value in theme_vars.items()
-        )
+        if chat_css_url:
+            safe_css_url = html.escape(chat_css_url, quote=True)
+            style_block = f'  <link rel="stylesheet" href="{safe_css_url}">'
+        else:
+            css_template = ExternalChatCrmChannelIntegration._load_ui_css_template()
+            style_block = f"  <style>\n{css_template}\n  </style>"
 
         template = ExternalChatCrmChannelIntegration._load_ui_template()
         prepared_template = template.replace(
@@ -1795,7 +1812,8 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             safe_require_display_name=safe_require_display_name,
             safe_require_phone=safe_require_phone,
             safe_require_email=safe_require_email,
-            theme_vars_css=theme_vars_css,
+            style_block=style_block,
+            safe_i18n_bundle=safe_i18n_bundle,
         )
 
     @classmethod
@@ -1843,7 +1861,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             "status": "connected",
             "channel_id": runtime.channel_id,
             "chat_title": runtime.chat_title,
-            "chat_theme_vars": runtime.chat_theme_vars,
+            "chat_css_url": runtime.chat_css_url,
             "required_profile_fields": {
                 "display_name": runtime.require_display_name,
                 "phone": runtime.require_phone,
@@ -2120,7 +2138,8 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 require_display_name=runtime.require_display_name,
                 require_phone=runtime.require_phone,
                 require_email=runtime.require_email,
-                chat_theme_vars=runtime.chat_theme_vars,
+                chat_css_url=runtime.chat_css_url,
+                i18n_bundle=self._load_ui_i18n_bundle(),
             ),
             status_code=200,
         )
@@ -2223,7 +2242,6 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     "status": "ok",
                     "visitor_id": visitor_id,
                     "chat_title": runtime.chat_title,
-                    "chat_theme_vars": runtime.chat_theme_vars,
                     "required_profile_fields": {
                         "display_name": runtime.require_display_name,
                         "phone": runtime.require_phone,
