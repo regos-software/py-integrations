@@ -7,6 +7,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi.responses import HTMLResponse
@@ -31,10 +32,12 @@ from schemas.api.crm.ticket import (
     TicketAddRequest,
     TicketDirectionEnum,
     TicketGetRequest,
-    TicketSetStatusRequest,
     TicketStatusEnum,
 )
-from schemas.api.integrations.connected_integration import ConnectedIntegrationGetRequest
+from schemas.api.integrations.connected_integration import (
+    ConnectedIntegrationEditRequest,
+    ConnectedIntegrationGetRequest,
+)
 from schemas.api.integrations.connected_integration_setting import (
     ConnectedIntegrationSettingRequest,
 )
@@ -55,6 +58,15 @@ class ExternalChatCrmChannelConfig:
     DEFAULT_CHAT_TITLE = "Support Chat"
     DEFAULT_SUBJECT_TEMPLATE = "Web chat {visitor_id}"
     CLOSED_ENTITY_ERROR_CODE = 1220
+    CHAT_REVISION_DEFAULT = 1
+    WEBHOOK_DEDUPE_TTL_SEC = 10 * 60
+    SUPPORTED_INBOUND_WEBHOOKS = {
+        "ChatMessageAdded",
+        "ChatMessageEdited",
+        "ChatMessageDeleted",
+        "TicketStatusSet",
+        "TicketClosed",
+    }
     DEFAULT_THEME_VARS = {
         "--bg": "#f5f7fb",
         "--card": "#ffffff",
@@ -284,6 +296,9 @@ class ChatMessageAddClosedEntityError(RuntimeError):
 
 class ExternalChatCrmChannelIntegration(ClientBase):
     _ACTIVE_CACHE: Dict[str, Tuple[bool, float]] = {}
+    _UI_TEMPLATE_CACHE: Optional[str] = None
+    _UI_TEMPLATE_PATH = Path(__file__).with_name("ui_template.html")
+
     _ACTIVE_CACHE_LOCK = asyncio.Lock()
 
     @staticmethod
@@ -309,6 +324,18 @@ class ExternalChatCrmChannelIntegration(ClientBase):
     def _context_cache_key(cls, connected_integration_id: str, visitor_id: str) -> str:
         return cls._redis_key("context", connected_integration_id, visitor_id)
 
+    @classmethod
+    def _chat_revision_key(cls, connected_integration_id: str, chat_id: str) -> str:
+        return cls._redis_key("chat_revision", connected_integration_id, chat_id)
+
+    @classmethod
+    def _ticket_state_cache_key(cls, connected_integration_id: str, ticket_id: int) -> str:
+        return cls._redis_key("ticket_state", connected_integration_id, ticket_id)
+
+    @classmethod
+    def _ticket_chat_index_key(cls, connected_integration_id: str, ticket_id: int) -> str:
+        return cls._redis_key("ticket_chat", connected_integration_id, ticket_id)
+
     @staticmethod
     async def _redis_get(key: str) -> Optional[str]:
         if not _redis_enabled():
@@ -320,6 +347,26 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         if not _redis_enabled():
             return
         await redis_client.set(key, value, ex=max(int(ttl_sec or 1), 1))
+
+    @staticmethod
+    async def _redis_set_nx(key: str, value: str, ttl_sec: int) -> bool:
+        if not _redis_enabled():
+            return False
+        inserted = await redis_client.set(
+            key,
+            value,
+            ex=max(int(ttl_sec or 1), 1),
+            nx=True,
+        )
+        return bool(inserted)
+
+    @staticmethod
+    async def _redis_incr(key: str, ttl_sec: int) -> int:
+        if not _redis_enabled():
+            return 0
+        value = await redis_client.incr(key)
+        await redis_client.expire(key, max(int(ttl_sec or 1), 1))
+        return int(value or 0)
 
     @staticmethod
     async def _redis_delete(*keys: str) -> None:
@@ -553,6 +600,186 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         normalized = _normalize_text(subject, 200)
         return normalized or f"Web chat {visitor_id}"
 
+    @staticmethod
+    def _default_ticket_state() -> Dict[str, Any]:
+        return {
+            "ticket_status": "",
+            "ticket_closed": False,
+            "can_write": True,
+        }
+
+    @classmethod
+    def _normalize_ticket_state(cls, payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        normalized = cls._default_ticket_state()
+        if not isinstance(payload, dict):
+            return normalized
+
+        status_value = _enum_value(payload.get("ticket_status")).strip()
+        ticket_closed = bool(payload.get("ticket_closed"))
+        if status_value == TicketStatusEnum.Closed.value:
+            ticket_closed = True
+        can_write_raw = payload.get("can_write")
+        can_write = bool(can_write_raw) if can_write_raw is not None else not ticket_closed
+        if ticket_closed:
+            can_write = False
+
+        if status_value:
+            normalized["ticket_status"] = status_value
+        normalized["ticket_closed"] = ticket_closed
+        normalized["can_write"] = can_write
+        return normalized
+
+    @classmethod
+    async def _set_ticket_chat_index(
+        cls,
+        connected_integration_id: str,
+        ticket_id: int,
+        chat_id: str,
+    ) -> None:
+        if not ticket_id or not chat_id:
+            return
+        if not _redis_enabled():
+            return
+        ttl = ExternalChatCrmChannelConfig.CONTEXT_TTL_SEC
+        await cls._redis_set(
+            cls._ticket_chat_index_key(connected_integration_id, int(ticket_id)),
+            str(chat_id),
+            ttl,
+        )
+
+    @classmethod
+    async def _get_ticket_chat_index(
+        cls,
+        connected_integration_id: str,
+        ticket_id: int,
+    ) -> Optional[str]:
+        if not ticket_id:
+            return None
+        if not _redis_enabled():
+            return None
+        value = await cls._redis_get(
+            cls._ticket_chat_index_key(connected_integration_id, int(ticket_id))
+        )
+        text = str(value or "").strip()
+        return text or None
+
+    @classmethod
+    async def _ensure_chat_revision_exists(
+        cls,
+        connected_integration_id: str,
+        chat_id: str,
+    ) -> int:
+        chat_id_raw = str(chat_id or "").strip()
+        if not chat_id_raw:
+            return 0
+        if not _redis_enabled():
+            return 0
+
+        key = cls._chat_revision_key(connected_integration_id, chat_id_raw)
+        current = await cls._redis_get(key)
+        parsed = _parse_int(current, None)
+        if parsed and parsed > 0:
+            return int(parsed)
+        await cls._redis_set(
+            key,
+            str(ExternalChatCrmChannelConfig.CHAT_REVISION_DEFAULT),
+            ExternalChatCrmChannelConfig.CONTEXT_TTL_SEC,
+        )
+        return int(ExternalChatCrmChannelConfig.CHAT_REVISION_DEFAULT)
+
+    @classmethod
+    async def _get_chat_revision(
+        cls,
+        connected_integration_id: str,
+        chat_id: str,
+    ) -> int:
+        chat_id_raw = str(chat_id or "").strip()
+        if not chat_id_raw:
+            return 0
+        if not _redis_enabled():
+            return 0
+
+        current = await cls._redis_get(
+            cls._chat_revision_key(connected_integration_id, chat_id_raw)
+        )
+        parsed = _parse_int(current, None)
+        if parsed and parsed > 0:
+            return int(parsed)
+        return await cls._ensure_chat_revision_exists(connected_integration_id, chat_id_raw)
+
+    @classmethod
+    async def _bump_chat_revision(
+        cls,
+        connected_integration_id: str,
+        chat_id: str,
+    ) -> int:
+        chat_id_raw = str(chat_id or "").strip()
+        if not chat_id_raw:
+            return 0
+        if not _redis_enabled():
+            return 0
+
+        key = cls._chat_revision_key(connected_integration_id, chat_id_raw)
+        try:
+            value = await cls._redis_incr(
+                key,
+                ExternalChatCrmChannelConfig.CONTEXT_TTL_SEC,
+            )
+            return int(value or 0)
+        except Exception:
+            # Redis value may contain invalid data from old versions. Reset and retry.
+            await cls._redis_set(
+                key,
+                str(ExternalChatCrmChannelConfig.CHAT_REVISION_DEFAULT),
+                ExternalChatCrmChannelConfig.CONTEXT_TTL_SEC,
+            )
+            value = await cls._redis_incr(
+                key,
+                ExternalChatCrmChannelConfig.CONTEXT_TTL_SEC,
+            )
+            return int(value or 0)
+
+    @classmethod
+    async def _cache_ticket_state(
+        cls,
+        connected_integration_id: str,
+        ticket_id: int,
+        state: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        normalized = cls._normalize_ticket_state(state)
+        if not ticket_id:
+            return normalized
+        if not _redis_enabled():
+            return normalized
+
+        await cls._redis_set(
+            cls._ticket_state_cache_key(connected_integration_id, int(ticket_id)),
+            _json_dumps(normalized),
+            ExternalChatCrmChannelConfig.CONTEXT_TTL_SEC,
+        )
+        return normalized
+
+    @classmethod
+    async def _get_cached_ticket_state(
+        cls,
+        connected_integration_id: str,
+        ticket_id: int,
+    ) -> Optional[Dict[str, Any]]:
+        if not ticket_id:
+            return None
+        if not _redis_enabled():
+            return None
+        raw = await cls._redis_get(
+            cls._ticket_state_cache_key(connected_integration_id, int(ticket_id))
+        )
+        if not raw:
+            return None
+        try:
+            parsed = _json_loads(raw)
+        except Exception:
+            return None
+        return cls._normalize_ticket_state(parsed if isinstance(parsed, dict) else {})
+
     @classmethod
     async def _load_cached_context(
         cls, connected_integration_id: str, visitor_id: str
@@ -597,6 +824,15 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             payload,
             ExternalChatCrmChannelConfig.CONTEXT_TTL_SEC,
         )
+        await cls._set_ticket_chat_index(
+            connected_integration_id,
+            int(context.ticket_id),
+            str(context.chat_id),
+        )
+        await cls._ensure_chat_revision_exists(
+            connected_integration_id,
+            str(context.chat_id),
+        )
 
     @classmethod
     async def _find_client_by_external_id(
@@ -636,6 +872,61 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         ]
         source = open_rows if open_rows else rows
         return max(source, key=lambda item: int(getattr(item, "id", 0) or 0))
+
+    @classmethod
+    async def _load_ticket_by_id(
+        cls,
+        api: RegosAPI,
+        ticket_id: int,
+    ) -> Optional[Ticket]:
+        response = await api.crm.ticket.get(
+            TicketGetRequest(ids=[int(ticket_id)], limit=1, offset=0)
+        )
+        rows = response.result if response.ok and isinstance(response.result, list) else []
+        return rows[0] if rows else None
+
+    @classmethod
+    async def _get_ticket_write_state(
+        cls,
+        connected_integration_id: str,
+        ticket_id: int,
+        *,
+        force_refresh: bool = False,
+    ) -> Dict[str, Any]:
+        state = cls._default_ticket_state()
+        if not force_refresh:
+            cached_state = await cls._get_cached_ticket_state(connected_integration_id, int(ticket_id))
+            if cached_state:
+                return cls._normalize_ticket_state(cached_state)
+
+        try:
+            async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+                ticket = await cls._load_ticket_by_id(api, int(ticket_id))
+        except Exception as error:
+            logger.warning(
+                "Ticket/Get failed for write-state check: ci=%s ticket_id=%s error=%s",
+                connected_integration_id,
+                ticket_id,
+                error,
+            )
+            cached_state = await cls._get_cached_ticket_state(connected_integration_id, int(ticket_id))
+            return cls._normalize_ticket_state(cached_state) if cached_state else state
+
+        if not ticket:
+            return state
+
+        status_value = _enum_value(getattr(ticket, "status", None)).strip()
+        ticket_closed = status_value == TicketStatusEnum.Closed.value
+        resolved_state = {
+            "ticket_status": status_value,
+            "ticket_closed": ticket_closed,
+            "can_write": not ticket_closed,
+        }
+        return await cls._cache_ticket_state(
+            connected_integration_id,
+            int(ticket_id),
+            resolved_state,
+        )
 
     @classmethod
     async def _create_client(
@@ -746,6 +1037,15 @@ class ExternalChatCrmChannelIntegration(ClientBase):
     ) -> ChatContext:
         cached = await cls._load_cached_context(connected_integration_id, visitor_id)
         if cached:
+            await cls._set_ticket_chat_index(
+                connected_integration_id,
+                int(cached.ticket_id),
+                str(cached.chat_id),
+            )
+            await cls._ensure_chat_revision_exists(
+                connected_integration_id,
+                str(cached.chat_id),
+            )
             return cached
 
         external_client_id = cls._build_client_external_id(connected_integration_id, visitor_id)
@@ -767,23 +1067,6 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 external_dialog_id,
                 runtime.channel_id,
             )
-            if ticket and ticket.id:
-                status_value = _enum_value(getattr(ticket, "status", None)).strip()
-                if status_value == TicketStatusEnum.Closed.value:
-                    await api.crm.ticket.set_status(
-                        TicketSetStatusRequest(
-                            id=int(ticket.id),
-                            status=TicketStatusEnum.Open,
-                        )
-                    )
-                    refreshed = await api.crm.ticket.get(
-                        TicketGetRequest(ids=[int(ticket.id)], limit=1, offset=0)
-                    )
-                    refreshed_rows = (
-                        refreshed.result if refreshed.ok and isinstance(refreshed.result, list) else []
-                    )
-                    if refreshed_rows:
-                        ticket = refreshed_rows[0]
 
             if not ticket or not ticket.id or not getattr(ticket, "chat_id", None):
                 subject = cls._build_subject(runtime.ticket_subject_template, visitor_id, profile)
@@ -819,6 +1102,16 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                         error,
                     )
 
+        ticket_status = _enum_value(getattr(ticket, "status", None)).strip()
+        await cls._cache_ticket_state(
+            connected_integration_id,
+            int(ticket.id),
+            {
+                "ticket_status": ticket_status,
+                "ticket_closed": ticket_status == TicketStatusEnum.Closed.value,
+                "can_write": ticket_status != TicketStatusEnum.Closed.value,
+            },
+        )
         context = ChatContext(
             visitor_id=visitor_id,
             client_id=int(client.id),
@@ -849,6 +1142,10 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             )
         if response.ok:
             new_uuid = str(_result_get(response.result, "new_uuid") or "").strip()
+            await cls._bump_chat_revision(
+                connected_integration_id,
+                str(context.chat_id),
+            )
             return new_uuid
 
         payload = _result_to_dict(response.result)
@@ -963,6 +1260,18 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     return value
         return None
 
+    @classmethod
+    def _load_ui_template(cls) -> str:
+        if cls._UI_TEMPLATE_CACHE is not None:
+            return cls._UI_TEMPLATE_CACHE
+
+        try:
+            cls._UI_TEMPLATE_CACHE = cls._UI_TEMPLATE_PATH.read_text(encoding="utf-8")
+        except Exception as error:
+            logger.exception("Failed to load UI template: %s", error)
+            cls._UI_TEMPLATE_CACHE = "<!doctype html><html><body><h1>UI template is unavailable</h1></body></html>"
+        return cls._UI_TEMPLATE_CACHE
+
     @staticmethod
     def _ui_html(
         *,
@@ -978,6 +1287,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         safe_require_display_name = "true" if require_display_name else "false"
         safe_require_phone = "true" if require_phone else "false"
         safe_require_email = "true" if require_email else "false"
+
         theme_vars = dict(ExternalChatCrmChannelConfig.DEFAULT_THEME_VARS)
         for key, value in (chat_theme_vars or {}).items():
             if key in _ALLOWED_THEME_KEYS:
@@ -985,408 +1295,53 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         theme_vars_css = "\n".join(
             f"      {key}: {value};" for key, value in theme_vars.items()
         )
-        return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{safe_title}</title>
-  <style>
-    :root {{
-{theme_vars_css}
-    }}
-    * {{ box-sizing: border-box; }}
-    body {{
-      margin: 0;
-      background: linear-gradient(180deg, #f8fbff 0%, #eef3f8 100%);
-      color: var(--text);
-      font: 14px/1.45 "Segoe UI", Tahoma, sans-serif;
-      min-height: 100vh;
-      display: flex;
-      justify-content: center;
-      padding: 16px;
-    }}
-    .wrap {{
-      width: 100%;
-      max-width: 860px;
-      display: grid;
-      grid-template-rows: auto auto 1fr auto;
-      background: var(--card);
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      overflow: hidden;
-      box-shadow: 0 8px 24px rgba(16, 38, 70, 0.08);
-    }}
-    .head {{
-      padding: 14px 16px;
-      border-bottom: 1px solid var(--line);
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 12px;
-    }}
-    .title {{
-      font-size: 16px;
-      font-weight: 600;
-    }}
-    .status {{
-      color: var(--muted);
-      font-size: 12px;
-    }}
-    .profile {{
-      padding: 12px 16px;
-      border-bottom: 1px solid var(--line);
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 8px;
-    }}
-    .profile.hidden {{
-      display: none;
-    }}
-    .field {{
-      display: grid;
-      gap: 4px;
-    }}
-    .field.hidden {{
-      display: none;
-    }}
-    .field label {{
-      color: var(--muted);
-      font-size: 11px;
-    }}
-    .profile input {{
-      width: 100%;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 8px 10px;
-      color: var(--text);
-      background: #fff;
-    }}
-    .history {{
-      padding: 14px 16px;
-      overflow-y: auto;
-      background: var(--bg);
-      min-height: 360px;
-      max-height: 60vh;
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }}
-    .msg {{
-      max-width: 80%;
-      padding: 8px 10px;
-      border-radius: 10px;
-      border: 1px solid var(--line);
-      white-space: pre-wrap;
-      word-break: break-word;
-      animation: rise .12s ease-out;
-    }}
-    .msg.mine {{ margin-left: auto; background: var(--mine); }}
-    .msg.other {{ margin-right: auto; background: var(--other); }}
-    .msg.system {{ margin: 0 auto; background: var(--system); max-width: 94%; }}
-    .meta {{
-      margin-top: 4px;
-      color: var(--muted);
-      font-size: 11px;
-    }}
-    .composer {{
-      display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 8px;
-      border-top: 1px solid var(--line);
-      padding: 12px 16px;
-      background: #fff;
-    }}
-    .composer textarea {{
-      width: 100%;
-      min-height: 42px;
-      max-height: 120px;
-      resize: vertical;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 10px;
-      font: inherit;
-      color: var(--text);
-    }}
-    .composer button {{
-      border: 0;
-      border-radius: 8px;
-      padding: 0 16px;
-      background: var(--accent);
-      color: #fff;
-      font-weight: 600;
-      cursor: pointer;
-    }}
-    @keyframes rise {{
-      from {{ transform: translateY(4px); opacity: .6; }}
-      to {{ transform: translateY(0); opacity: 1; }}
-    }}
-    @media (max-width: 700px) {{
-      .profile {{ grid-template-columns: 1fr; }}
-      .history {{ max-height: 56vh; }}
-    }}
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <div class="head">
-      <div class="title">{safe_title}</div>
-      <div class="status" id="status">connecting...</div>
-    </div>
-    <div class="profile" id="profile">
-      <div class="field" id="display_name_wrap">
-        <label for="display_name">Name</label>
-        <input id="display_name" placeholder="Name">
-      </div>
-      <div class="field" id="email_wrap">
-        <label for="email">Email</label>
-        <input id="email" placeholder="Email">
-      </div>
-      <div class="field" id="phone_wrap">
-        <label for="phone">Phone</label>
-        <input id="phone" placeholder="Phone">
-      </div>
-    </div>
-    <div class="history" id="history"></div>
-    <form class="composer" id="composer">
-      <textarea id="text" maxlength="{ExternalChatCrmChannelConfig.MAX_MESSAGE_LENGTH}" placeholder="Type your message"></textarea>
-      <button type="submit">Send</button>
-    </form>
-  </div>
-  <script>
-    const CONFIG = {{
-      ci: "{safe_ci}",
-      profileKey: "webchat:profile:{safe_ci}",
-      visitorKey: "webchat:visitor:{safe_ci}",
-      required: {{
-        display_name: {safe_require_display_name},
-        phone: {safe_require_phone},
-        email: {safe_require_email},
-      }},
-    }};
-    const statusEl = document.getElementById("status");
-    const profileEl = document.getElementById("profile");
-    const displayNameWrapEl = document.getElementById("display_name_wrap");
-    const emailWrapEl = document.getElementById("email_wrap");
-    const phoneWrapEl = document.getElementById("phone_wrap");
-    const historyEl = document.getElementById("history");
-    const textEl = document.getElementById("text");
-    const formEl = document.getElementById("composer");
-    const displayNameEl = document.getElementById("display_name");
-    const emailEl = document.getElementById("email");
-    const phoneEl = document.getElementById("phone");
 
-    let chatReady = false;
-    let visitorId = localStorage.getItem(CONFIG.visitorKey) || "";
-    if (!visitorId) {{
-      visitorId = (window.crypto && window.crypto.randomUUID) ? window.crypto.randomUUID() : ("v" + Date.now() + Math.random().toString(16).slice(2));
-      localStorage.setItem(CONFIG.visitorKey, visitorId);
-    }}
+        template = ExternalChatCrmChannelIntegration._load_ui_template()
+        prepared_template = template.replace(
+            "{ExternalChatCrmChannelConfig.MAX_MESSAGE_LENGTH}",
+            str(ExternalChatCrmChannelConfig.MAX_MESSAGE_LENGTH),
+        ).replace(
+            "{ExternalChatCrmChannelConfig.DEFAULT_HISTORY_LIMIT}",
+            str(ExternalChatCrmChannelConfig.DEFAULT_HISTORY_LIMIT),
+        )
+        return prepared_template.format(
+            safe_title=safe_title,
+            safe_ci=safe_ci,
+            safe_require_display_name=safe_require_display_name,
+            safe_require_phone=safe_require_phone,
+            safe_require_email=safe_require_email,
+            theme_vars_css=theme_vars_css,
+        )
 
-    function setupProfileRequirements() {{
-      const req = CONFIG.required || {{}};
-      displayNameWrapEl.classList.toggle("hidden", !req.display_name);
-      emailWrapEl.classList.toggle("hidden", !req.email);
-      phoneWrapEl.classList.toggle("hidden", !req.phone);
-
-      displayNameEl.required = !!req.display_name;
-      emailEl.required = !!req.email;
-      phoneEl.required = !!req.phone;
-
-      displayNameEl.placeholder = req.display_name ? "Name (required)" : "Name";
-      emailEl.placeholder = req.email ? "Email (required)" : "Email";
-      phoneEl.placeholder = req.phone ? "Phone (required)" : "Phone";
-
-      const anyRequired = !!(req.display_name || req.email || req.phone);
-      profileEl.classList.toggle("hidden", !anyRequired);
-    }}
-
-    function loadProfile() {{
-      try {{
-        const raw = localStorage.getItem(CONFIG.profileKey);
-        if (!raw) return;
-        const data = JSON.parse(raw);
-        displayNameEl.value = data.display_name || "";
-        emailEl.value = data.email || "";
-        phoneEl.value = data.phone || "";
-      }} catch (_) {{}}
-    }}
-    function saveProfile() {{
-      const payload = {{
-        display_name: (displayNameEl.value || "").trim(),
-        email: (emailEl.value || "").trim(),
-        phone: (phoneEl.value || "").trim(),
-      }};
-      localStorage.setItem(CONFIG.profileKey, JSON.stringify(payload));
-      return payload;
-    }}
-
-    function validateRequiredProfile(showStatus = false) {{
-      const profile = saveProfile();
-      const req = CONFIG.required || {{}};
-      const missing = [];
-      if (req.display_name && !profile.display_name) missing.push("Name");
-      if (req.phone && !profile.phone) missing.push("Phone");
-      if (req.email && !profile.email) missing.push("Email");
-      if (missing.length > 0 && showStatus) {{
-        statusEl.textContent = `fill required fields: ${{missing.join(", ")}}`;
-      }}
-      return {{ ok: missing.length === 0, profile, missing }};
-    }}
-
-    const basePath = window.location.pathname.replace(/\\/+$/g, "").replace(/\\/+/g, "/");
-    const externalUrl = `${{basePath}}/external?ci=${{encodeURIComponent(CONFIG.ci)}}`;
-
-    async function callApi(action, data) {{
-      const resp = await fetch(externalUrl, {{
-        method: "POST",
-        headers: {{ "Content-Type": "application/json" }},
-        body: JSON.stringify({{ action, data }})
-      }});
-      const payload = await resp.json().catch(() => ({{}}));
-      if (!resp.ok) {{
-        const message = payload?.result?.description || payload?.description || `HTTP ${{resp.status}}`;
-        throw new Error(message);
-      }}
-      return payload;
-    }}
-
-    function toTime(ts) {{
-      const value = Number(ts || 0);
-      if (!value) return "";
-      return new Date(value * 1000).toLocaleTimeString([], {{ hour: "2-digit", minute: "2-digit" }});
-    }}
-
-    function renderHistory(items) {{
-      historyEl.innerHTML = "";
-      for (const item of items || []) {{
-        const type = (item.message_type || "Regular");
-        const box = document.createElement("div");
-        box.className = "msg " + (type === "System" ? "system" : (item.mine ? "mine" : "other"));
-        const text = document.createElement("div");
-        text.textContent = item.text || "";
-        box.appendChild(text);
-
-        const meta = document.createElement("div");
-        meta.className = "meta";
-        const who = type === "System" ? "system" : (item.mine ? "you" : (item.author_name || "operator"));
-        meta.textContent = `${{who}}  ${{toTime(item.created_date)}}${{item.edited ? " (edited)" : ""}}`;
-        box.appendChild(meta);
-
-        historyEl.appendChild(box);
-      }}
-      historyEl.scrollTop = historyEl.scrollHeight;
-    }}
-
-    async function initChat() {{
-      if (chatReady) return;
-      const check = validateRequiredProfile(true);
-      if (!check.ok) {{
-        chatReady = false;
-        return;
-      }}
-      statusEl.textContent = "connecting...";
-      const profile = check.profile;
-      const result = await callApi("init", {{
-        visitor_id: visitorId,
-        display_name: profile.display_name,
-        email: profile.email,
-        phone: profile.phone
-      }});
-      if (result.visitor_id && result.visitor_id !== visitorId) {{
-        visitorId = result.visitor_id;
-        localStorage.setItem(CONFIG.visitorKey, visitorId);
-      }}
-      renderHistory(result.history || []);
-      chatReady = true;
-      statusEl.textContent = "online";
-    }}
-
-    async function refreshHistory() {{
-      if (!chatReady) return;
-      const check = validateRequiredProfile(false);
-      if (!check.ok) {{
-        chatReady = false;
-        return;
-      }}
-      const profile = check.profile;
-      const result = await callApi("history", {{
-        visitor_id: visitorId,
-        display_name: profile.display_name,
-        email: profile.email,
-        phone: profile.phone,
-        limit: {ExternalChatCrmChannelConfig.DEFAULT_HISTORY_LIMIT}
-      }});
-      renderHistory(result.history || []);
-    }}
-
-    formEl.addEventListener("submit", async (event) => {{
-      event.preventDefault();
-      const text = (textEl.value || "").trim();
-      if (!text) return;
-      try {{
-        formEl.querySelector("button").disabled = true;
-        if (!chatReady) {{
-          await initChat();
-        }}
-        if (!chatReady) {{
-          return;
-        }}
-        const check = validateRequiredProfile(true);
-        if (!check.ok) {{
-          chatReady = false;
-          return;
-        }}
-        const profile = check.profile;
-        await callApi("send_message", {{
-          visitor_id: visitorId,
-          text,
-          display_name: profile.display_name,
-          email: profile.email,
-          phone: profile.phone
-        }});
-        textEl.value = "";
-        await refreshHistory();
-      }} catch (error) {{
-        statusEl.textContent = `error: ${{error.message}}`;
-      }} finally {{
-        formEl.querySelector("button").disabled = false;
-      }}
-    }});
-
-    for (const el of [displayNameEl, emailEl, phoneEl]) {{
-      el.addEventListener("change", () => {{
-        saveProfile();
-        if (!chatReady) {{
-          initChat().catch((error) => {{
-            statusEl.textContent = `error: ${{error.message}}`;
-          }});
-        }}
-      }});
-    }}
-
-    setupProfileRequirements();
-    loadProfile();
-    initChat().catch((error) => {{
-      chatReady = false;
-      statusEl.textContent = `error: ${{error.message}}`;
-    }});
-    setInterval(() => {{
-      if (chatReady) {{
-        refreshHistory().catch((error) => {{
-          chatReady = false;
-          statusEl.textContent = `error: ${{error.message}}`;
-        }});
-      }} else {{
-        initChat().catch((error) => {{
-          chatReady = false;
-          statusEl.textContent = `error: ${{error.message}}`;
-        }});
-      }}
-    }}, 3000);
-  </script>
-</body>
-</html>"""
+    @classmethod
+    async def _subscribe_required_webhooks(
+        cls,
+        connected_integration_id: str,
+    ) -> Dict[str, Any]:
+        required = sorted(ExternalChatCrmChannelConfig.SUPPORTED_INBOUND_WEBHOOKS)
+        try:
+            async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+                response = await api.integrations.connected_integration.edit(
+                    ConnectedIntegrationEditRequest(
+                        connected_integration_id=connected_integration_id,
+                        webhooks=required,
+                    )
+                )
+            if not response.ok:
+                logger.warning(
+                    "Webhook subscription rejected for %s: %s",
+                    connected_integration_id,
+                    response.result,
+                )
+                return {"status": "failed", "error": str(response.result), "webhooks": required}
+            return {"status": "ok", "webhooks": required}
+        except Exception as error:
+            logger.warning(
+                "Webhook subscription failed for %s: %s",
+                connected_integration_id,
+                error,
+            )
+            return {"status": "failed", "error": str(error), "webhooks": required}
 
     async def connect(self, **_: Any) -> Any:
         if not self.connected_integration_id:
@@ -1398,6 +1353,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             runtime = await self._load_runtime(ci)
         except Exception as error:
             return self._error_response(1002, str(error)).dict()
+        webhook_subscribe = await self._subscribe_required_webhooks(ci)
         return {
             "status": "connected",
             "channel_id": runtime.channel_id,
@@ -1408,6 +1364,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 "phone": runtime.require_phone,
                 "email": runtime.require_email,
             },
+            "webhooks_subscription": webhook_subscribe,
         }
 
     async def disconnect(self, **_: Any) -> Any:
@@ -1429,14 +1386,204 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         await self._redis_delete(self._settings_cache_key(ci), self._active_cache_key(ci))
         return {"status": "settings updated", "reconnect": await self.reconnect()}
 
+    @staticmethod
+    def _normalize_regos_webhook_payload(
+        action: Optional[str],
+        data: Optional[Dict[str, Any]],
+        extra: Dict[str, Any],
+    ) -> Tuple[Optional[str], Dict[str, Any], Optional[str]]:
+        event_id = str(extra.get("event_id") or "").strip() or None
+
+        if isinstance(action, str) and action in ExternalChatCrmChannelConfig.SUPPORTED_INBOUND_WEBHOOKS:
+            return action, data or {}, event_id
+
+        if action == "HandleWebhook":
+            payload = data if isinstance(data, dict) else {}
+            nested = payload.get("data")
+            wrapped_event_id = str(payload.get("event_id") or event_id or "").strip() or None
+            if not isinstance(nested, dict):
+                return None, {}, wrapped_event_id
+            nested_action = nested.get("action")
+            nested_data = nested.get("data")
+            if not isinstance(nested_action, str) or not isinstance(nested_data, dict):
+                return None, {}, wrapped_event_id
+            return nested_action, nested_data, wrapped_event_id
+
+        return None, {}, event_id
+
+    @staticmethod
+    def _build_webhook_event_key(
+        webhook_action: str,
+        payload: Dict[str, Any],
+        event_id: Optional[str],
+    ) -> str:
+        event_id_value = str(event_id or "").strip()
+        if event_id_value:
+            return f"event:{event_id_value}"
+
+        ticket_id = _parse_int(payload.get("id"), None)
+        chat_id = str(payload.get("chat_id") or "").strip()
+        if chat_id and ticket_id:
+            return f"{webhook_action}:chat:{chat_id}:ticket:{ticket_id}"
+        if chat_id:
+            return f"{webhook_action}:chat:{chat_id}"
+        if ticket_id:
+            return f"{webhook_action}:ticket:{ticket_id}"
+        try:
+            payload_key = _json_dumps(payload)
+        except Exception:
+            payload_key = str(payload or "")
+        return f"{webhook_action}:{payload_key}"
+
+    async def _is_duplicate_webhook_event(
+        self,
+        connected_integration_id: str,
+        event_key: str,
+    ) -> bool:
+        if not _redis_enabled():
+            return False
+        ttl = ExternalChatCrmChannelConfig.WEBHOOK_DEDUPE_TTL_SEC
+        inserted = await self._redis_set_nx(
+            self._redis_key("webhook_dedupe", connected_integration_id, event_key),
+            "1",
+            ttl,
+        )
+        return not inserted
+
+    @classmethod
+    async def _apply_chat_message_webhook(
+        cls,
+        connected_integration_id: str,
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        chat_id = str(payload.get("chat_id") or "").strip()
+        if not chat_id:
+            return {"status": "ignored", "reason": "invalid_payload:chat_id"}
+
+        revision = await cls._bump_chat_revision(connected_integration_id, chat_id)
+        return {"status": "processed", "chat_id": chat_id, "chat_revision": revision}
+
+    @classmethod
+    async def _apply_ticket_webhook(
+        cls,
+        connected_integration_id: str,
+        webhook_action: str,
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        ticket_id = _parse_int(payload.get("id"), None)
+        if not ticket_id:
+            return {"status": "ignored", "reason": "invalid_payload:id"}
+
+        status_value = _enum_value(payload.get("status")).strip()
+        if webhook_action == "TicketClosed" and not status_value:
+            status_value = TicketStatusEnum.Closed.value
+        ticket_closed = status_value == TicketStatusEnum.Closed.value
+
+        state = await cls._cache_ticket_state(
+            connected_integration_id,
+            int(ticket_id),
+            {
+                "ticket_status": status_value,
+                "ticket_closed": ticket_closed,
+                "can_write": not ticket_closed,
+            },
+        )
+
+        chat_id = str(payload.get("chat_id") or "").strip()
+        if not chat_id:
+            chat_id = await cls._get_ticket_chat_index(connected_integration_id, int(ticket_id)) or ""
+        else:
+            await cls._set_ticket_chat_index(
+                connected_integration_id,
+                int(ticket_id),
+                chat_id,
+            )
+
+        if not status_value or not chat_id:
+            try:
+                async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+                    ticket = await cls._load_ticket_by_id(api, int(ticket_id))
+            except Exception:
+                ticket = None
+            if ticket:
+                if not status_value:
+                    status_value = _enum_value(getattr(ticket, "status", None)).strip()
+                    ticket_closed = status_value == TicketStatusEnum.Closed.value
+                    state = await cls._cache_ticket_state(
+                        connected_integration_id,
+                        int(ticket_id),
+                        {
+                            "ticket_status": status_value,
+                            "ticket_closed": ticket_closed,
+                            "can_write": not ticket_closed,
+                        },
+                    )
+                if not chat_id:
+                    chat_id = str(getattr(ticket, "chat_id", "") or "").strip()
+                    if chat_id:
+                        await cls._set_ticket_chat_index(
+                            connected_integration_id,
+                            int(ticket_id),
+                            chat_id,
+                        )
+
+        revision = 0
+        if chat_id:
+            revision = await cls._bump_chat_revision(connected_integration_id, chat_id)
+
+        return {
+            "status": "processed",
+            "ticket_id": int(ticket_id),
+            "chat_id": chat_id or None,
+            "chat_revision": revision,
+            **state,
+        }
+
     async def handle_webhook(
         self,
         action: Optional[str] = None,
         data: Optional[Dict[str, Any]] = None,
         **extra: Any,
     ) -> Dict[str, Any]:
-        _ = data, extra
-        return {"status": "ignored", "reason": "webhook_not_used", "action": action}
+        if not self.connected_integration_id:
+            return self._error_response(1000, "connected_integration_id is required").dict()
+
+        ci = str(self.connected_integration_id).strip()
+        if not await self._is_connected_integration_active(ci):
+            return {"status": "ignored", "reason": "connected_integration_inactive"}
+
+        webhook_action, payload, event_id = self._normalize_regos_webhook_payload(
+            action=action,
+            data=data,
+            extra=extra,
+        )
+        if webhook_action not in ExternalChatCrmChannelConfig.SUPPORTED_INBOUND_WEBHOOKS:
+            return {"status": "ignored", "reason": f"unsupported_action:{webhook_action}"}
+
+        event_key = self._build_webhook_event_key(webhook_action, payload, event_id)
+        if await self._is_duplicate_webhook_event(ci, event_key):
+            return {"status": "ignored", "reason": "duplicate_event"}
+
+        try:
+            if webhook_action in {"ChatMessageAdded", "ChatMessageEdited", "ChatMessageDeleted"}:
+                result = await self._apply_chat_message_webhook(ci, payload)
+            else:
+                result = await self._apply_ticket_webhook(ci, webhook_action, payload)
+        except Exception as error:
+            logger.exception(
+                "Webhook processing failed: ci=%s action=%s payload=%s",
+                ci,
+                webhook_action,
+                payload,
+            )
+            return self._error_response(1002, str(error)).dict()
+
+        return {
+            "status": result.get("status", "processed"),
+            "action": webhook_action,
+            "event_id": event_id,
+            **{key: value for key, value in result.items() if key != "status"},
+        }
 
     async def handle_ui(self, envelope: Dict[str, Any]) -> Any:
         if str(envelope.get("method") or "").upper() != "GET":
@@ -1552,6 +1699,12 @@ class ExternalChatCrmChannelIntegration(ClientBase):
 
         try:
             if action == "init":
+                ticket_state = await self._get_ticket_write_state(
+                    ci,
+                    int(context.ticket_id),
+                    force_refresh=True,
+                )
+                chat_revision = await self._get_chat_revision(ci, str(context.chat_id))
                 history = await self._read_history(
                     ci,
                     context,
@@ -1567,14 +1720,38 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                         "phone": runtime.require_phone,
                         "email": runtime.require_email,
                     },
+                    "chat_revision": chat_revision,
+                    "history_changed": True,
+                    **ticket_state,
                     "history": history,
                 }
 
             if action == "history":
+                force_full = _parse_bool(data.get("force_full"), False)
+                ticket_state = await self._get_ticket_write_state(
+                    ci,
+                    int(context.ticket_id),
+                    force_refresh=force_full,
+                )
+                chat_revision = await self._get_chat_revision(ci, str(context.chat_id))
+                known_revision = _parse_int(data.get("known_revision"), None)
                 limit = _parse_int(
                     data.get("limit"),
                     ExternalChatCrmChannelConfig.DEFAULT_HISTORY_LIMIT,
                 )
+                if (
+                    not force_full
+                    and known_revision is not None
+                    and int(chat_revision) > 0
+                    and int(known_revision) == int(chat_revision)
+                ):
+                    return {
+                        "status": "ok",
+                        "visitor_id": visitor_id,
+                        "chat_revision": chat_revision,
+                        "history_changed": False,
+                        **ticket_state,
+                    }
                 history = await self._read_history(
                     ci,
                     context,
@@ -1583,6 +1760,9 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 return {
                     "status": "ok",
                     "visitor_id": visitor_id,
+                    "chat_revision": chat_revision,
+                    "history_changed": True,
+                    **ticket_state,
                     "history": history,
                 }
 
@@ -1596,6 +1776,23 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                         status_code=400,
                         content={"error": 400, "description": "text is required"},
                     )
+                ticket_state = await self._get_ticket_write_state(ci, int(context.ticket_id))
+                if not ticket_state.get("can_write", True):
+                    ticket_state = await self._get_ticket_write_state(
+                        ci,
+                        int(context.ticket_id),
+                        force_refresh=True,
+                    )
+                if not ticket_state.get("can_write", True):
+                    return JSONResponse(
+                        status_code=409,
+                        content={
+                            "error": 409,
+                            "description": "Ticket is closed",
+                            "visitor_id": visitor_id,
+                            **ticket_state,
+                        },
+                    )
                 ext_id = f"webchat:msg:{visitor_id}:{uuid.uuid4().hex[:12]}"
                 try:
                     message_id = await self._add_message_from_visitor(
@@ -1605,29 +1802,44 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                         external_message_id=ext_id,
                     )
                 except ChatMessageAddClosedEntityError:
-                    await self._redis_delete(self._context_cache_key(ci, visitor_id))
-                    context = await self._ensure_chat_context(
-                        connected_integration_id=ci,
-                        runtime=runtime,
-                        visitor_id=visitor_id,
-                        profile=profile,
+                    closed_state = await self._cache_ticket_state(
+                        ci,
+                        int(context.ticket_id),
+                        {
+                            "ticket_status": TicketStatusEnum.Closed.value,
+                            "ticket_closed": True,
+                            "can_write": False,
+                        },
                     )
-                    message_id = await self._add_message_from_visitor(
-                        connected_integration_id=ci,
-                        context=context,
-                        text=text,
-                        external_message_id=ext_id,
+                    return JSONResponse(
+                        status_code=409,
+                        content={
+                            "error": 409,
+                            "description": "Ticket is closed",
+                            "visitor_id": visitor_id,
+                            **closed_state,
+                        },
                     )
                 await self._mark_read(ci, context)
+                chat_revision = await self._get_chat_revision(ci, str(context.chat_id))
                 return {
                     "status": "ok",
                     "visitor_id": visitor_id,
                     "message_id": message_id,
+                    "chat_revision": chat_revision,
+                    **ticket_state,
                 }
 
             if action == "mark_read":
                 await self._mark_read(ci, context)
-                return {"status": "ok", "visitor_id": visitor_id}
+                ticket_state = await self._get_ticket_write_state(ci, int(context.ticket_id))
+                chat_revision = await self._get_chat_revision(ci, str(context.chat_id))
+                return {
+                    "status": "ok",
+                    "visitor_id": visitor_id,
+                    "chat_revision": chat_revision,
+                    **ticket_state,
+                }
 
             return JSONResponse(
                 status_code=400,

@@ -1,0 +1,730 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{safe_title}</title>
+  <style>
+    @import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700&family=Space+Grotesk:wght@600;700&display=swap");
+    :root {{
+{theme_vars_css}
+      --shell: #f2f6fb;
+      --shadow-strong: 0 28px 60px rgba(13, 31, 55, 0.16);
+      --shadow-soft: 0 10px 26px rgba(13, 31, 55, 0.1);
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      background:
+        radial-gradient(circle at 12% -8%, #d7e8ff 0%, rgba(215, 232, 255, 0) 38%),
+        radial-gradient(circle at 92% 112%, #d7ffe9 0%, rgba(215, 255, 233, 0) 34%),
+        linear-gradient(180deg, #f8fbff 0%, #eef3f8 100%);
+      color: var(--text);
+      font: 14px/1.52 "Manrope", "Trebuchet MS", "Verdana", sans-serif;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      isolation: isolate;
+      padding: 16px;
+    }}
+    body::before {{
+      content: "";
+      position: fixed;
+      inset: 0;
+      z-index: -1;
+      pointer-events: none;
+      background-image:
+        linear-gradient(rgba(255, 255, 255, 0.35) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.35) 1px, transparent 1px);
+      background-size: 36px 36px;
+      opacity: 0.38;
+    }}
+    .wrap {{
+      width: 100%;
+      max-width: 860px;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      overflow: hidden;
+      box-shadow: var(--shadow-strong);
+      position: relative;
+      backdrop-filter: blur(8px);
+    }}
+    .wrap::before {{
+      content: "";
+      position: absolute;
+      inset: 0 0 auto 0;
+      height: 84px;
+      pointer-events: none;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.45) 0%, rgba(255, 255, 255, 0) 100%);
+    }}
+    .head {{
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.92) 0%, rgba(245, 249, 255, 0.76) 100%);
+      backdrop-filter: blur(10px);
+    }}
+    .title {{
+      font: 700 17px/1.2 "Space Grotesk", "Manrope", sans-serif;
+      letter-spacing: 0.2px;
+    }}
+    .status {{
+      color: var(--muted);
+      font-size: 11px;
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.74);
+      text-transform: uppercase;
+      letter-spacing: 0.35px;
+    }}
+    .status::before {{
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #35c76b;
+      box-shadow: 0 0 0 3px rgba(53, 199, 107, 0.2);
+    }}
+    .history {{
+      padding: 18px 18px;
+      overflow-y: auto;
+      background:
+        radial-gradient(circle at 10% 0%, rgba(255, 255, 255, 0.82) 0%, rgba(255, 255, 255, 0) 38%),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.35) 0%, rgba(255, 255, 255, 0.08) 100%),
+        var(--bg);
+      min-height: 360px;
+      max-height: 60vh;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      scroll-behavior: smooth;
+    }}
+    .history::-webkit-scrollbar {{
+      width: 10px;
+    }}
+    .history::-webkit-scrollbar-track {{
+      background: transparent;
+    }}
+    .history::-webkit-scrollbar-thumb {{
+      background: rgba(52, 75, 102, 0.22);
+      border-radius: 999px;
+      border: 2px solid transparent;
+      background-clip: padding-box;
+    }}
+    .msg {{
+      max-width: 82%;
+      padding: 10px 12px;
+      border-radius: 16px;
+      border: 1px solid var(--line);
+      white-space: pre-wrap;
+      word-break: break-word;
+      animation: rise .18s cubic-bezier(0.2, 0.8, 0.2, 1);
+      box-shadow: var(--shadow-soft);
+      line-height: 1.45;
+    }}
+    .msg.mine {{
+      margin-left: auto;
+      background: var(--mine);
+      border-bottom-right-radius: 6px;
+    }}
+    .msg.other {{
+      margin-right: auto;
+      background: var(--other);
+      border-bottom-left-radius: 6px;
+    }}
+    .msg.system {{
+      margin: 0 auto;
+      background: var(--system);
+      max-width: 96%;
+      border-style: dashed;
+      text-align: center;
+    }}
+    .meta {{
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 10px;
+      letter-spacing: 0.28px;
+      text-transform: uppercase;
+    }}
+    .composer {{
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 10px;
+      border-top: 1px solid var(--line);
+      padding: 14px 16px;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(248, 251, 255, 0.92) 100%);
+    }}
+    .composer textarea {{
+      width: 100%;
+      min-height: 44px;
+      max-height: 126px;
+      resize: vertical;
+      border: 1px solid var(--line);
+      border-radius: 13px;
+      padding: 11px 12px;
+      font: inherit;
+      color: var(--text);
+      background: rgba(255, 255, 255, 0.95);
+      transition: border-color .18s ease, box-shadow .18s ease, background-color .18s ease;
+    }}
+    .composer textarea:focus {{
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(10, 102, 194, 0.14);
+      background: #fff;
+    }}
+    .composer button {{
+      border: 0;
+      border-radius: 13px;
+      min-width: 110px;
+      padding: 0 18px;
+      background: var(--accent);
+      color: #fff;
+      font: 700 13px/1 "Space Grotesk", "Manrope", sans-serif;
+      letter-spacing: 0.2px;
+      cursor: pointer;
+      box-shadow: 0 10px 20px rgba(10, 102, 194, 0.24);
+      transition: transform .14s ease, box-shadow .14s ease, filter .14s ease;
+    }}
+    .composer button:hover:not(:disabled) {{
+      transform: translateY(-1px);
+      filter: brightness(1.04);
+      box-shadow: 0 13px 24px rgba(10, 102, 194, 0.28);
+    }}
+    .composer button:active:not(:disabled) {{
+      transform: translateY(0);
+    }}
+    .composer button:disabled {{
+      opacity: .5;
+      cursor: default;
+      box-shadow: none;
+    }}
+    @keyframes rise {{
+      from {{ transform: translateY(10px) scale(.985); opacity: .32; }}
+      to {{ transform: translateY(0) scale(1); opacity: 1; }}
+    }}
+    @media (max-width: 700px) {{
+      body {{ padding: 10px; }}
+      .wrap {{
+        border-radius: 16px;
+        min-height: calc(100vh - 20px);
+      }}
+      .head {{
+        padding: 13px 14px;
+      }}
+      .title {{
+        font-size: 15px;
+      }}
+      .history {{
+        padding: 14px;
+      }}
+      .history {{ max-height: 56vh; }}
+      .composer {{
+        padding: 10px 12px;
+      }}
+      .composer button {{
+        min-width: 96px;
+      }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="head">
+      <div class="title">{safe_title}</div>
+      <div class="status" id="status">connecting...</div>
+    </div>
+    <div class="history" id="history"></div>
+    <form class="composer" id="composer">
+      <textarea id="text" maxlength="{ExternalChatCrmChannelConfig.MAX_MESSAGE_LENGTH}" placeholder="Type your message"></textarea>
+      <button type="submit">Send</button>
+    </form>
+  </div>
+  <script>
+    const CONFIG = {{
+      ci: "{safe_ci}",
+      profileKey: "webchat:profile:{safe_ci}",
+      visitorKey: "webchat:visitor:{safe_ci}",
+      required: {{
+        display_name: {safe_require_display_name},
+        phone: {safe_require_phone},
+        email: {safe_require_email},
+      }},
+    }};
+    const REQUIRED_ORDER = ["display_name", "phone", "email"];
+    const FIELD_LABELS = {{
+      display_name: "name",
+      phone: "phone",
+      email: "email",
+    }};
+    const FIELD_PROMPTS = {{
+      display_name: "Before we start, please tell us your name.",
+      phone: "Please share your phone number.",
+      email: "Please share your email address.",
+    }};
+    const FIELD_INVALID = {{
+      display_name: "Please enter a valid name.",
+      phone: "Please enter a valid phone number.",
+      email: "Please enter a valid email address.",
+    }};
+
+    const statusEl = document.getElementById("status");
+    const historyEl = document.getElementById("history");
+    const textEl = document.getElementById("text");
+    const formEl = document.getElementById("composer");
+    const sendButtonEl = formEl.querySelector("button");
+
+    const state = {{
+      chatReady: false,
+      chatWritable: true,
+      chatRevision: 0,
+      pollTick: 0,
+      visitorId: "",
+      profile: {{
+        display_name: "",
+        phone: "",
+        email: "",
+      }},
+      onboardingLog: [],
+      lastHistoryFingerprint: "",
+    }};
+
+    function normalizeText(value, maxLen = 120) {{
+      return String(value || "").trim().slice(0, maxLen);
+    }}
+    function normalizePhone(value) {{
+      const digits = String(value || "").replace(/\\D/g, "");
+      return digits;
+    }}
+    function normalizeEmail(value) {{
+      const email = String(value || "").trim().toLowerCase();
+      if (!email || email.indexOf("@") < 1 || email.indexOf(" ") >= 0) {{
+        return "";
+      }}
+      return email;
+    }}
+    function normalizeVisitorId(value) {{
+      const raw = String(value || "").trim();
+      if (!raw) {{
+        return "";
+      }}
+      const cleaned = raw.replace(/[^0-9a-zA-Z:_-]/g, "").replace(/^[:_-]+|[:_-]+$/g, "");
+      return cleaned.slice(0, 120);
+    }}
+    function getFirstQueryValue(keys) {{
+      const params = new URLSearchParams(window.location.search || "");
+      for (const key of keys) {{
+        const value = String(params.get(key) || "").trim();
+        if (value) {{
+          return value;
+        }}
+      }}
+      return "";
+    }}
+    function loadProfile() {{
+      try {{
+        const raw = localStorage.getItem(CONFIG.profileKey);
+        if (!raw) {{
+          return;
+        }}
+        const payload = JSON.parse(raw);
+        if (!payload || typeof payload !== "object") {{
+          return;
+        }}
+        state.profile.display_name = normalizeText(payload.display_name, 120);
+        state.profile.phone = normalizePhone(payload.phone);
+        state.profile.email = normalizeEmail(payload.email);
+      }} catch (_) {{}}
+    }}
+    function persistProfile() {{
+      localStorage.setItem(CONFIG.profileKey, JSON.stringify(state.profile));
+    }}
+    function applyQueryProfileOverrides() {{
+      const queryDisplayName = normalizeText(getFirstQueryValue(["display_name", "name", "full_name"]), 120);
+      const queryPhone = normalizePhone(getFirstQueryValue(["phone", "phone_number", "tel"]));
+      const queryEmail = normalizeEmail(getFirstQueryValue(["email", "mail"]));
+      if (queryDisplayName) {{
+        state.profile.display_name = queryDisplayName;
+      }}
+      if (queryPhone) {{
+        state.profile.phone = queryPhone;
+      }}
+      if (queryEmail) {{
+        state.profile.email = queryEmail;
+      }}
+    }}
+    function initVisitorId() {{
+      const queryVisitorId = normalizeVisitorId(
+        getFirstQueryValue(["visitor_id", "visitor", "visitorId", "vid"])
+      );
+      const storedVisitorId = normalizeVisitorId(localStorage.getItem(CONFIG.visitorKey) || "");
+      let visitorId = queryVisitorId || storedVisitorId;
+      if (!visitorId) {{
+        visitorId = normalizeVisitorId(
+          (window.crypto && window.crypto.randomUUID)
+            ? window.crypto.randomUUID()
+            : ("v" + Date.now() + Math.random().toString(16).slice(2))
+        );
+      }}
+      state.visitorId = visitorId;
+      localStorage.setItem(CONFIG.visitorKey, visitorId);
+    }}
+    function getMissingRequiredFields() {{
+      const required = CONFIG.required || {{}};
+      const missing = [];
+      for (const field of REQUIRED_ORDER) {{
+        if (!required[field]) {{
+          continue;
+        }}
+        if (!state.profile[field]) {{
+          missing.push(field);
+        }}
+      }}
+      return missing;
+    }}
+    function getCurrentOnboardingField() {{
+      const missing = getMissingRequiredFields();
+      return missing.length ? missing[0] : "";
+    }}
+    function fieldLabel(field) {{
+      return FIELD_LABELS[field] || field;
+    }}
+    function fieldPrompt(field) {{
+      return FIELD_PROMPTS[field] || ("Please provide " + fieldLabel(field) + ".");
+    }}
+    function fieldInvalid(field) {{
+      return FIELD_INVALID[field] || ("Invalid " + fieldLabel(field) + ".");
+    }}
+    function normalizeProfileValue(field, value) {{
+      if (field === "display_name") {{
+        return normalizeText(value, 120);
+      }}
+      if (field === "phone") {{
+        return normalizePhone(value);
+      }}
+      if (field === "email") {{
+        return normalizeEmail(value);
+      }}
+      return normalizeText(value, 120);
+    }}
+    function toTime(ts) {{
+      const value = Number(ts || 0);
+      if (!value) return "";
+      return new Date(value * 1000).toLocaleTimeString([], {{ hour: "2-digit", minute: "2-digit" }});
+    }}
+    function historyFingerprint(items) {{
+      const list = Array.isArray(items) ? items : [];
+      const chunks = [];
+      for (const item of list) {{
+        const id = String(item.id || "");
+        const text = String(item.text || "");
+        const edited = item.edited ? "1" : "0";
+        const type = String(item.message_type || "");
+        chunks.push(id + "|" + type + "|" + edited + "|" + text);
+      }}
+      return chunks.join("||");
+    }}
+    function isHistoryNearBottom() {{
+      const delta = historyEl.scrollHeight - historyEl.scrollTop - historyEl.clientHeight;
+      return delta <= 48;
+    }}
+    function buildMessageNode(item) {{
+      const type = item.message_type || "Regular";
+      const box = document.createElement("div");
+      box.className = "msg " + (type === "System" ? "system" : (item.mine ? "mine" : "other"));
+
+      const text = document.createElement("div");
+      text.textContent = item.text || "";
+      box.appendChild(text);
+
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      const who = type === "System" ? "system" : (item.mine ? "you" : (item.author_name || "operator"));
+      const stamp = toTime(item.created_date);
+      meta.textContent = who + (stamp ? ("  " + stamp) : "") + (item.edited ? " (edited)" : "");
+      box.appendChild(meta);
+
+      return box;
+    }}
+    function renderHistory(items, force = false) {{
+      const list = Array.isArray(items) ? items : [];
+      const fingerprint = historyFingerprint(list);
+      if (!force && fingerprint === state.lastHistoryFingerprint) {{
+        return;
+      }}
+      const stickToBottom = state.lastHistoryFingerprint === "" || isHistoryNearBottom();
+      const prevTop = historyEl.scrollTop;
+      historyEl.innerHTML = "";
+      for (const item of list) {{
+        historyEl.appendChild(buildMessageNode(item));
+      }}
+      if (stickToBottom) {{
+        historyEl.scrollTop = historyEl.scrollHeight;
+      }} else {{
+        historyEl.scrollTop = prevTop;
+      }}
+      state.lastHistoryFingerprint = fingerprint;
+    }}
+    function pushOnboardingMessage(item) {{
+      state.onboardingLog.push({{
+        id: "local:" + Date.now().toString(36) + ":" + Math.random().toString(16).slice(2),
+        text: String(item.text || "").trim(),
+        message_type: item.message_type || "System",
+        mine: !!item.mine,
+        edited: false,
+        author_name: item.author_name || (item.mine ? "you" : "system"),
+        created_date: 0,
+      }});
+    }}
+    function buildOnboardingItems() {{
+      const items = state.onboardingLog.slice();
+      const field = getCurrentOnboardingField();
+      if (field) {{
+        items.push({{
+          id: "local:ask:" + field,
+          text: fieldPrompt(field),
+          message_type: "System",
+          mine: false,
+          edited: false,
+          author_name: "system",
+          created_date: 0,
+        }});
+      }}
+      return items;
+    }}
+    function renderOnboarding() {{
+      renderHistory(buildOnboardingItems());
+    }}
+    function updateComposerState() {{
+      const onboardingField = getCurrentOnboardingField();
+      const onboardingMode = !state.chatReady && !!onboardingField;
+      if (state.chatReady && !state.chatWritable) {{
+        textEl.disabled = true;
+        sendButtonEl.disabled = true;
+        sendButtonEl.textContent = "Closed";
+        textEl.placeholder = "Conversation is closed";
+        return;
+      }}
+      textEl.disabled = false;
+      sendButtonEl.disabled = false;
+      sendButtonEl.textContent = onboardingMode ? "Next" : "Send";
+      textEl.placeholder = onboardingMode
+        ? ("Enter " + fieldLabel(onboardingField))
+        : "Type your message";
+    }}
+
+    const basePath = window.location.pathname.replace(/\\/+$/g, "").replace(/\\/+/g, "/");
+    const externalUrl = basePath + "/external?ci=" + encodeURIComponent(CONFIG.ci);
+
+    async function callApi(action, data) {{
+      const resp = await fetch(externalUrl, {{
+        method: "POST",
+        headers: {{ "Content-Type": "application/json" }},
+        body: JSON.stringify({{ action, data }})
+      }});
+      const payload = await resp.json().catch(() => ({{}}));
+      if (!resp.ok) {{
+        const message = payload?.result?.description || payload?.description || ("HTTP " + resp.status);
+        const error = new Error(message);
+        error.status = resp.status;
+        error.payload = payload || {{}};
+        throw error;
+      }}
+      return payload;
+    }}
+    function applyWriteState(payload) {{
+      const canWrite = !(payload && (payload.ticket_closed === true || payload.can_write === false));
+      if (payload && Number(payload.chat_revision) > 0) {{
+        state.chatRevision = Number(payload.chat_revision);
+      }}
+      state.chatWritable = canWrite;
+      if (!canWrite) {{
+        statusEl.textContent = "ticket is closed";
+      }}
+      updateComposerState();
+    }}
+
+    async function initChat() {{
+      if (state.chatReady) {{
+        return;
+      }}
+      const missing = getMissingRequiredFields();
+      if (missing.length) {{
+        statusEl.textContent = "need " + fieldLabel(missing[0]);
+        renderOnboarding();
+        updateComposerState();
+        return;
+      }}
+      statusEl.textContent = "connecting...";
+      const result = await callApi("init", {{
+        visitor_id: state.visitorId,
+        display_name: state.profile.display_name,
+        email: state.profile.email,
+        phone: state.profile.phone
+      }});
+      if (result.visitor_id && result.visitor_id !== state.visitorId) {{
+        state.visitorId = normalizeVisitorId(result.visitor_id);
+        localStorage.setItem(CONFIG.visitorKey, state.visitorId);
+      }}
+      state.chatReady = true;
+      state.onboardingLog = [];
+      applyWriteState(result);
+      renderHistory(result.history || [], true);
+      if (state.chatWritable) {{
+        statusEl.textContent = "online";
+      }}
+    }}
+
+    async function refreshHistory(forceFull = false) {{
+      if (!state.chatReady) {{
+        return;
+      }}
+      const result = await callApi("history", {{
+        visitor_id: state.visitorId,
+        display_name: state.profile.display_name,
+        email: state.profile.email,
+        phone: state.profile.phone,
+        known_revision: state.chatRevision,
+        force_full: !!forceFull,
+        limit: {ExternalChatCrmChannelConfig.DEFAULT_HISTORY_LIMIT}
+      }});
+      applyWriteState(result);
+      if (result.history_changed !== false) {{
+        renderHistory(result.history || []);
+      }}
+      if (state.chatWritable) {{
+        statusEl.textContent = "online";
+      }}
+    }}
+    async function processOnboardingInput(value) {{
+      const field = getCurrentOnboardingField();
+      if (!field) {{
+        return false;
+      }}
+      const normalized = normalizeProfileValue(field, value);
+      if (!normalized) {{
+        statusEl.textContent = fieldInvalid(field);
+        return true;
+      }}
+      pushOnboardingMessage({{
+        message_type: "Regular",
+        mine: true,
+        author_name: "you",
+        text: value,
+      }});
+      state.profile[field] = normalized;
+      persistProfile();
+      pushOnboardingMessage({{
+        message_type: "System",
+        mine: false,
+        author_name: "system",
+        text: "Saved " + fieldLabel(field) + ".",
+      }});
+      renderOnboarding();
+      updateComposerState();
+
+      const missing = getMissingRequiredFields();
+      if (missing.length) {{
+        statusEl.textContent = "need " + fieldLabel(missing[0]);
+        return true;
+      }}
+
+      await initChat();
+      return true;
+    }}
+    async function sendChatMessage(text) {{
+      if (!state.chatReady) {{
+        await initChat();
+      }}
+      if (!state.chatReady || !state.chatWritable) {{
+        return;
+      }}
+      const result = await callApi("send_message", {{
+        visitor_id: state.visitorId,
+        text: text,
+        display_name: state.profile.display_name,
+        email: state.profile.email,
+        phone: state.profile.phone
+      }});
+      applyWriteState(result);
+      await refreshHistory(true);
+    }}
+    function handleActionError(error) {{
+      const payload = error && error.payload ? error.payload : {{}};
+      if (error && error.status === 409 && (payload.ticket_closed || payload.can_write === false)) {{
+        applyWriteState(payload);
+        refreshHistory().catch(() => {{}});
+        return;
+      }}
+      statusEl.textContent = "error: " + (error && error.message ? error.message : "unexpected error");
+    }}
+
+    formEl.addEventListener("submit", async (event) => {{
+      event.preventDefault();
+      const text = (textEl.value || "").trim();
+      if (!text) return;
+      try {{
+        sendButtonEl.disabled = true;
+        if (!state.chatReady && getCurrentOnboardingField()) {{
+          await processOnboardingInput(text);
+          textEl.value = "";
+          return;
+        }}
+        await sendChatMessage(text);
+        textEl.value = "";
+      }} catch (error) {{
+        handleActionError(error);
+      }} finally {{
+        updateComposerState();
+      }}
+    }});
+
+    loadProfile();
+    applyQueryProfileOverrides();
+    persistProfile();
+    initVisitorId();
+    updateComposerState();
+
+    if (getCurrentOnboardingField()) {{
+      renderOnboarding();
+      statusEl.textContent = "need " + fieldLabel(getCurrentOnboardingField());
+    }} else {{
+      initChat().catch((error) => {{
+        state.chatReady = false;
+        handleActionError(error);
+      }});
+    }}
+
+    setInterval(() => {{
+      state.pollTick += 1;
+      if (state.chatReady) {{
+        const forceFull = state.pollTick % 20 === 0;
+        refreshHistory(forceFull).catch((error) => {{
+          handleActionError(error);
+        }});
+      }} else if (getCurrentOnboardingField()) {{
+        renderOnboarding();
+      }} else {{
+        initChat().catch((error) => {{
+          state.chatReady = false;
+          handleActionError(error);
+        }});
+      }}
+      updateComposerState();
+    }}, 3000);
+    updateComposerState();
+  </script>
+</body>
+</html>
