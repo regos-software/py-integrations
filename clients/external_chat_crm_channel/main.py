@@ -285,23 +285,69 @@ def _normalize_message_markup(value: Any, max_len: int = 500) -> str:
     return _normalize_text(normalized, max_len)
 
 
+def _is_meaningful_system_text(value: str) -> bool:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return False
+    if normalized.lower().startswith(("http://", "https://")):
+        return True
+    if re.search(r"[^\W\d_]", normalized, flags=re.UNICODE):
+        return True
+    return False
+
+
 def _extract_system_message_payload_text(value: Any, max_len: int = 500) -> str:
-    """Best-effort extraction for system message text stored in payload-like structures."""
+    """Extract displayable text from structured system payloads without falling back to IDs."""
     if value is None:
         return ""
 
     if isinstance(value, dict):
-        preferred_keys = ("text", "message", "title", "description", "body", "comment", "value")
-        for key in preferred_keys:
-            if key not in value:
+        preferred_value_candidates: List[Any] = []
+        nested_payload_candidates: List[Any] = []
+        direct_text_candidates: List[str] = []
+        for raw_key, raw_value in value.items():
+            key = str(raw_key or "").strip().lower()
+            if not key:
                 continue
-            extracted = _extract_system_message_payload_text(value.get(key), max_len)
+
+            if key in {
+                "text",
+                "message",
+                "title",
+                "description",
+                "body",
+                "comment",
+                "content",
+                "caption",
+                "value",
+                "status_text",
+            } or any(
+                token in key for token in ("text", "message", "title", "description", "comment", "content", "caption")
+            ):
+                preferred_value_candidates.append(raw_value)
+                continue
+
+            if key in {"payload", "data", "details", "meta", "result", "context", "extra"}:
+                nested_payload_candidates.append(raw_value)
+                continue
+
+            if isinstance(raw_value, str):
+                normalized = _normalize_message_markup(raw_value, max_len)
+                if _is_meaningful_system_text(normalized):
+                    direct_text_candidates.append(normalized)
+
+        for candidate in preferred_value_candidates:
+            extracted = _extract_system_message_payload_text(candidate, max_len)
             if extracted:
                 return extracted
-        for nested in value.values():
-            extracted = _extract_system_message_payload_text(nested, max_len)
+
+        for candidate in nested_payload_candidates:
+            extracted = _extract_system_message_payload_text(candidate, max_len)
             if extracted:
                 return extracted
+
+        if direct_text_candidates:
+            return max(direct_text_candidates, key=len)
         return ""
 
     if isinstance(value, (list, tuple)):
@@ -311,7 +357,11 @@ def _extract_system_message_payload_text(value: Any, max_len: int = 500) -> str:
                 return extracted
         return ""
 
+    if not isinstance(value, str):
+        return ""
     text = _normalize_message_markup(value, max_len)
+    if not _is_meaningful_system_text(text):
+        return ""
     return text
 
 
