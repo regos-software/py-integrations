@@ -6,7 +6,7 @@ import json
 import time
 import uuid
 import logging
-from typing import Any, Dict, Type, TypeVar
+from typing import Any, Dict, Optional, Type, TypeVar
 
 import httpx
 from pydantic import BaseModel
@@ -43,7 +43,8 @@ class APIClient:
 
     def __init__(self, connected_integration_id: str, timeout: int = 90) -> None:
         self.integration_id = connected_integration_id
-        self.client = httpx.AsyncClient(timeout=timeout)
+        self._timeout = timeout
+        self.client = self._build_http_client()
 
         self._limiter = get_shared_limiter(
             self.integration_id,
@@ -91,6 +92,24 @@ class APIClient:
             n //= 1024
         return f"{n}GB"
 
+    def _build_http_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(timeout=self._timeout)
+
+    async def _reset_http_client(self, reason: Optional[Exception] = None) -> None:
+        old_client = self.client
+        self.client = self._build_http_client()
+        self._oauth = RegosOAuthProvider(http_client=self.client)
+        try:
+            await old_client.aclose()
+        except Exception:
+            pass
+        if reason is not None:
+            logger.warning(
+                "Reset API HTTP client after transport error: integration_id=%s error=%s",
+                self.integration_id,
+                reason,
+            )
+
     @staticmethod
     def _serialize_payload(data: Any) -> Any:
         if isinstance(data, BaseModel):
@@ -104,15 +123,23 @@ class APIClient:
             return data
         raise TypeError(f"Unsupported data type for POST: {type(data)}")
 
-    async def _auth_headers(self, *, trace_id: str, force_refresh: bool = False) -> Dict[str, str]:
+    async def _auth_headers(
+        self,
+        *,
+        trace_id: str,
+        force_refresh: bool = False,
+        with_json_content_type: bool = True,
+    ) -> Dict[str, str]:
         token = await self._oauth.get_access_token(force_refresh=force_refresh)
-        return {
-            "Content-Type": "application/json",
+        headers = {
             "Accept": "application/json",
             "Accept-Encoding": "gzip",
             "Authorization": f"Bearer {token}",
             "X-Request-Id": trace_id,
         }
+        if with_json_content_type:
+            headers["Content-Type"] = "application/json"
+        return headers
 
     # ------------------------- POST ---------------------------
 
@@ -133,7 +160,11 @@ class APIClient:
         payload = self._serialize_payload(data)
 
         async def send_once(*, force_refresh: bool) -> httpx.Response:
-            headers = await self._auth_headers(trace_id=trace_id, force_refresh=force_refresh)
+            headers = await self._auth_headers(
+                trace_id=trace_id,
+                force_refresh=force_refresh,
+                with_json_content_type=True,
+            )
             req = self.client.build_request("POST", url, json=payload, headers=headers)
 
             # INFO: кратко
@@ -150,15 +181,19 @@ class APIClient:
                 logger.debug("Request body (%dB, preview): %s", len(body_bytes), preview)
 
             # отправляем
-            t0 = time.perf_counter()
-            resp = await self.client.send(req)
-            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            try:
+                t0 = time.perf_counter()
+                resp = await self.client.send(req)
+                elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
-            # читаем тело
-            await resp.aread()
-            raw = resp.content or b""
-            raw_dec, gz = self._decompress_if_gzip(raw)
-            text = raw_dec.decode("utf-8", errors="replace")
+                # читаем тело
+                await resp.aread()
+                raw = resp.content or b""
+                raw_dec, gz = self._decompress_if_gzip(raw)
+                text = raw_dec.decode("utf-8", errors="replace")
+            except httpx.RequestError as error:
+                await self._reset_http_client(reason=error)
+                raise
 
             # INFO: кратко
             logger.info("← [trace:%s] %s -> %s in %.1fms | recv=%s | gz=%s",
@@ -179,13 +214,139 @@ class APIClient:
 
         # Повтор при 401
         if resp.status_code == 401:
-            logger.warning("[trace:%s] 401 Unauthorized. Refreshing token and retrying…", trace_id)
+            logger.warning("[trace:%s] 401 Unauthorized. Refreshing token and retrying...", trace_id)
             resp = await send_once(force_refresh=True)
+            if resp.status_code == 401:
+                logger.warning(
+                    "[trace:%s] 401 persists after token refresh. Resetting transport and retrying once more...",
+                    trace_id,
+                )
+                await self._reset_http_client()
+                resp = await send_once(force_refresh=True)
 
         # Ошибки статуса
         resp.raise_for_status()
 
         # Парс JSON
+        text = getattr(resp, "_decoded_text", None)
+        if text is None:
+            raw = resp.content or b""
+            raw_dec, _ = self._decompress_if_gzip(raw)
+            text = raw_dec.decode("utf-8", errors="replace")
+
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as e:
+            logger.error("[trace:%s] Некорректный JSON в ответе: %s", trace_id, e)
+            raise
+
+        return response_model(**parsed)
+
+    async def post_multipart(
+        self,
+        method_path: str,
+        data: Dict[str, Any],
+        files: Dict[str, tuple[str, bytes] | tuple[str, bytes, str]],
+        response_model: Type[TResponse] = APIBaseResponse,
+    ) -> TResponse:
+        """
+        POST multipart/form-data
+        {BASE_URL}/gateway/out/{integration_id}/v1/{method_path}
+        """
+        await self._limiter.acquire()
+
+        url = f"{self.BASE_URL}/gateway/out/{self.integration_id}/v1/{method_path.lstrip('/')}"
+        trace_id = self._new_trace_id()
+        form_data = {k: str(v) for k, v in data.items() if v is not None}
+
+        async def send_once(*, force_refresh: bool) -> httpx.Response:
+            headers = await self._auth_headers(
+                trace_id=trace_id,
+                force_refresh=force_refresh,
+                with_json_content_type=False,
+            )
+            req = self.client.build_request(
+                "POST",
+                url,
+                data=form_data,
+                files=files,
+                headers=headers,
+            )
+
+            body_bytes = req.content or b""
+            logger.info(
+                "→ [trace:%s] POST %s (multipart) | send=%s",
+                trace_id,
+                url,
+                self._fmt_size(len(body_bytes)),
+            )
+
+            if logger.isEnabledFor(logging.DEBUG):
+                masked_headers = dict(headers)
+                masked_headers["Authorization"] = self._mask_bearer(
+                    headers.get("Authorization", "")
+                )
+                files_meta: Dict[str, Dict[str, Any]] = {}
+                for key, file_tuple in files.items():
+                    filename = file_tuple[0]
+                    content = file_tuple[1]
+                    content_type = file_tuple[2] if len(file_tuple) > 2 else None
+                    files_meta[key] = {
+                        "filename": filename,
+                        "size": len(content) if isinstance(content, (bytes, bytearray)) else None,
+                        "content_type": content_type,
+                    }
+                logger.debug("Request headers: %s", masked_headers)
+                logger.debug("Multipart fields: %s", form_data)
+                logger.debug("Multipart files: %s", files_meta)
+
+            try:
+                t0 = time.perf_counter()
+                resp = await self.client.send(req)
+                elapsed_ms = (time.perf_counter() - t0) * 1000.0
+
+                await resp.aread()
+                raw = resp.content or b""
+                raw_dec, gz = self._decompress_if_gzip(raw)
+                text = raw_dec.decode("utf-8", errors="replace")
+            except httpx.RequestError as error:
+                await self._reset_http_client(reason=error)
+                raise
+
+            logger.info(
+                "← [trace:%s] %s -> %s in %.1fms | recv=%s | gz=%s",
+                trace_id,
+                url,
+                resp.status_code,
+                elapsed_ms,
+                self._fmt_size(len(raw)),
+                "yes" if gz else "no",
+            )
+
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("Response headers: %s", dict(resp.headers))
+                if resp.status_code >= 400:
+                    logger.debug("Response body (preview): %s", text[: self.RESP_PREVIEW_LIMIT])
+
+            resp._decoded_text = text
+            return resp
+
+        resp = await send_once(force_refresh=False)
+        if resp.status_code == 401:
+            logger.warning(
+                "[trace:%s] 401 Unauthorized. Refreshing token and retrying...", trace_id
+            )
+            resp = await send_once(force_refresh=True)
+            if resp.status_code == 401:
+                logger.warning(
+                    "[trace:%s] 401 persists after token refresh. Resetting transport and retrying once more...",
+                    trace_id,
+                )
+                await self._reset_http_client()
+                resp = await send_once(force_refresh=True)
+
+        resp.raise_for_status()
+
         text = getattr(resp, "_decoded_text", None)
         if text is None:
             raw = resp.content or b""

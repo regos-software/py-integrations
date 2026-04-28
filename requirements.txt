@@ -1,5 +1,6 @@
 fastapi
 httpx
+aiohttp
 requests
 uvicorn
 python-dotenv

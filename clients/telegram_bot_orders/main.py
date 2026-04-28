@@ -20,7 +20,6 @@ from config.settings import settings as app_settings
 from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
 from core.redis import redis_client
-from schemas.api.base import APIBaseResponse
 from schemas.api.integrations.connected_integration_setting import (
     ConnectedIntegrationSettingEditRequest,
     ConnectedIntegrationSettingRequest,
@@ -41,7 +40,7 @@ from schemas.api.docs.order_delivery import (
     Location,
 )
 from schemas.api.references.item import ItemExt, ItemGetExtImageSize, ItemGetExtRequest
-from schemas.api.references.delivery_type import DeliveryType
+from schemas.api.references.delivery_type import DeliveryType, DeliveryTypeGetRequest
 from schemas.api.references.item_group import ItemGroup, ItemGroupGetRequest
 from schemas.api.references.retail_card import RetailCardGetRequest
 from schemas.api.references.fields import FieldValueAdd, FieldValueEdit
@@ -150,7 +149,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             settings_response = (
                 await api.integrations.connected_integration_setting.get(
                     ConnectedIntegrationSettingRequest(
-                        integration_key=TelegramBotOrdersConfig.INTEGRATION_KEY
+                        connected_integration_id=self.connected_integration_id,
                     )
                 )
             ).result
@@ -1738,13 +1737,13 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                 return [DeliveryType.model_validate(entry) for entry in raw_types]
 
         async with RegosAPI(connected_integration_id=self.connected_integration_id) as api:
-            resp = await api.call(
-                "DeliveryType/Get",
-                {"limit": 10000, "offset": 0},
-                APIBaseResponse[List[DeliveryType]],
+            resp = await api.references.delivery_type.get(
+                DeliveryTypeGetRequest(limit=10000, offset=0)
             )
-            result = resp.result or []
-            types_list = [entry for entry in result if entry.name]
+            if not resp.ok:
+                raise RuntimeError(f"DeliveryType/Get rejected: {resp.result}")
+            result = resp.result if isinstance(resp.result, list) else []
+            types_list = [entry for entry in result if getattr(entry, "name", None)]
             types_list.sort(key=lambda entry: entry.name.lower())
             if app_settings.redis_enabled and redis_client:
                 try:

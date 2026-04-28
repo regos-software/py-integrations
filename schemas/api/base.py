@@ -1,15 +1,15 @@
-"""Базовые схемы API по конвенциям проекта."""
+"""Base API schemas used across integration modules."""
 
 from __future__ import annotations
 
 from decimal import Decimal
 from typing import Generic, Optional, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field as PydField
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field as PydField
 
 
 class BaseSchema(BaseModel):
-    """Базовая модель со стандартными JSON-энкодерами."""
+    """Base model with shared JSON encoders."""
 
     model_config = ConfigDict(json_encoders={Decimal: float})
 
@@ -18,63 +18,64 @@ T = TypeVar("T")
 
 
 class APIBaseResponse(BaseSchema, Generic[T]):
-    """Универсальный ответ REST-эндпоинта REGOS."""
+    """Generic REGOS REST response envelope."""
 
     model_config = ConfigDict(extra="ignore")
 
-    ok: bool = PydField(..., description="Признак успешного ответа.")
-    result: Optional[T] = PydField(
-        default=None,
-        description="Полезная нагрузка ответа (dict, list, scalar и др.).",
-    )
+    ok: bool = PydField(..., description="Success flag.")
+    result: Optional[T] = PydField(default=None, description="Response payload.")
     next_offset: Optional[int] = PydField(
         default=None,
         ge=0,
-        description="Следующий offset для постраничной выборки.",
+        description="Next page offset.",
     )
     total: Optional[int] = PydField(
         default=None,
         ge=0,
-        description="Общее количество записей в выборке.",
+        description="Total record count.",
     )
 
 
 class APIErrorResult(BaseSchema):
-    """Структура ошибки, возвращаемой REST-эндпоинтом."""
+    """Error payload returned by API."""
 
     model_config = ConfigDict(extra="ignore")
 
-    error: int = PydField(..., description="Код ошибки.")
-    description: str = PydField(..., description="Описание ошибки.")
+    error: int = PydField(..., description="Error code.")
+    description: str = PydField(..., description="Error description.")
 
 
 class ArrayResult(BaseSchema):
-    """Ответ методов Add/Edit/Delete с массивом идентификаторов."""
+    """Result payload for update/delete-like operations."""
 
     model_config = ConfigDict(extra="ignore")
 
     row_affected: int = PydField(
-        ..., ge=0, description="Количество обработанных записей."
+        ...,
+        ge=0,
+        validation_alias=AliasChoices("row_affected", "affected"),
+        description="Affected rows count.",
     )
     ids: Optional[list[int]] = PydField(
-        default_factory=list, description="Идентификаторы затронутых сущностей."
+        default_factory=list,
+        description="Affected entity ids.",
     )
 
 
 class AddResult(BaseSchema):
-    """Ответ методов Add с идентификатором добавленной записи."""
+    """Result payload for create operations."""
 
     model_config = ConfigDict(extra="ignore")
 
-    new_id: int = PydField(..., ge=1, description="Идентификатор добавленной записи.")
+    new_id: int = PydField(..., ge=1, description="Created entity id.")
 
 
 class IDRequest(BaseSchema):
-    """Запрос на работу с одной записью по идентификатору."""
+    """Simple request with single positive identifier."""
 
     model_config = ConfigDict(extra="forbid")
 
-    id: int = PydField(..., ge=1, description="ID записи.")
+    id: int = PydField(..., ge=1, description="Record id.")
 
 
 __all__ = [

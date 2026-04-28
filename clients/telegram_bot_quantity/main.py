@@ -229,9 +229,7 @@ class TelegramBotMinQuantityIntegration(IntegrationTelegramBase, ClientBase):
                 settings_response = (
                     await api.integrations.connected_integration_setting.get(
                         ConnectedIntegrationSettingRequest(
-                            integration_key=str(
-                                TelegramBotMinQuantityConfig.INTEGRATION_KEY
-                            )
+                            connected_integration_id=self.connected_integration_id,
                         )
                     )
                 ).result
@@ -274,9 +272,7 @@ class TelegramBotMinQuantityIntegration(IntegrationTelegramBase, ClientBase):
                                 ConnectedIntegrationSettingEditItem(
                                     key=TelegramSettings.CHAT_IDS.value,
                                     value=json.dumps(subscribers),
-                                    integration_key=str(
-                                        TelegramBotMinQuantityConfig.INTEGRATION_KEY
-                                    ),
+                                    connected_integration_id=self.connected_integration_id,
                                 )
                             ]
                         )
@@ -312,9 +308,7 @@ class TelegramBotMinQuantityIntegration(IntegrationTelegramBase, ClientBase):
                                 ConnectedIntegrationSettingEditItem(
                                     key=TelegramSettings.CHAT_IDS.value,
                                     value=json.dumps(subscribers),
-                                    integration_key=str(
-                                        TelegramBotMinQuantityConfig.INTEGRATION_KEY
-                                    ),
+                                    connected_integration_id=self.connected_integration_id,
                                 )
                             ]
                         )

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import ConfigDict, Field as PydField, field_validator
 
@@ -37,6 +37,9 @@ class User(BaseSchema):
     id: int = PydField(..., ge=1, description="ID пользователя.")
     full_name: Optional[str] = PydField(default=None, description="Полное имя.")
     main_phone: Optional[str] = PydField(default=None, description="Основной телефон.")
+    internal_phone: Optional[str] = PydField(
+        default=None, description="Internal extension."
+    )
     user_group: Optional[UserGroup] = PydField(
         default=None, description="Группа пользователя."
     )
@@ -84,6 +87,7 @@ class User(BaseSchema):
         "last_name",
         "middle_name",
         "main_phone",
+        "internal_phone",
         "address",
         "phones",
         "email",
@@ -119,6 +123,9 @@ class UserGetRequest(BaseSchema):
         default=None,
         description="Поиск по ФИО, логину, телефону или email.",
     )
+    internal_phone: Optional[str] = PydField(
+        default=None, description="Internal extension filter."
+    )
     sort_orders: Optional[SortOrders] = PydField(
         default=None, description="Набор правил сортировки результата."
     )
@@ -133,13 +140,13 @@ class UserGetRequest(BaseSchema):
         description="Смещение для пагинации.",
     )
 
-    @field_validator("search", mode="before")
+    @field_validator("search", "internal_phone", mode="before")
     @classmethod
     def _strip_search(cls, value: Optional[str]) -> Optional[str]:
         return value.strip() if isinstance(value, str) else value
 
 
-class UserGetResponse(APIBaseResponse[List[User]]):
+class UserGetResponse(APIBaseResponse[List[User] | Dict[str, Any]]):
     """Ответ на запрос списка пользователей."""
 
     model_config = ConfigDict(extra="ignore")

@@ -1,17 +1,21 @@
 import asyncio
 import re
-from typing import Optional, Union, Any, Dict
+import time
+from typing import Optional, Union, Any, Dict, Tuple
 
+import httpx
 from fastapi import APIRouter, Header, Request, Path, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from starlette.responses import JSONResponse
 
+from core.api.regos_api import RegosAPI
 from schemas.integration.base import (
     IntegrationRequest,
     IntegrationSuccessResponse,
     IntegrationErrorResponse,
     IntegrationErrorModel,
 )
+from schemas.api.integrations.connected_integration import ConnectedIntegrationGetRequest
 from core.logger import setup_logger
 
 # Импорт доступных интеграций (класс, не модуль)
@@ -21,6 +25,11 @@ from clients.email_sender.main import EmailSenderIntegration
 from clients.telegram_bot_notification.main import TelegramBotNotificationIntegration
 from clients.telegram_bot_quantity.main import TelegramBotMinQuantityIntegration
 from clients.telegram_bot_orders.main import TelegramBotOrdersIntegration
+from clients.telegram_bot_crm_channel.main import TelegramBotCrmChannelIntegration
+from clients.asterisk_crm_channel.main import AsteriskCrmChannelIntegration
+from clients.instagram_crm_channel.main import InstagramCrmChannelIntegration
+from clients.external_chat_crm_channel.main import ExternalChatCrmChannelIntegration
+from clients.gpt_crm_chat_assistant.main import GptCrmChatAssistantIntegration
 from clients.tsd.main import TsdIntegration
 
 router = APIRouter()
@@ -34,6 +43,11 @@ INTEGRATION_CLASSES = {
     "regos_telegram_notifier": TelegramBotNotificationIntegration,
     "regos_telegram_minquantity": TelegramBotMinQuantityIntegration,
     "telegram_bot_orders": TelegramBotOrdersIntegration,
+    "telegram_bot_crm_channel": TelegramBotCrmChannelIntegration,
+    "asterisk_crm_channel": AsteriskCrmChannelIntegration,
+    "instagram_crm_channel": InstagramCrmChannelIntegration,
+    "external_chat_crm_channel": ExternalChatCrmChannelIntegration,
+    "gpt_crm_chat_assistant": GptCrmChatAssistantIntegration,
     "tsd": TsdIntegration,
 }
 
@@ -44,6 +58,89 @@ EXCLUDED_SERVICE_HEADERS = {
     "content-length",
     "accept-encoding",
 }
+
+CONNECTED_INTEGRATION_ACTIVE_CACHE_TTL_SEC = 60
+_CONNECTED_INTEGRATION_ACTIVE_CACHE: Dict[str, Tuple[bool, float]] = {}
+_CONNECTED_INTEGRATION_ACTIVE_CACHE_LOCK = asyncio.Lock()
+
+
+async def _is_connected_integration_active(
+    connected_integration_id: Optional[str],
+    *,
+    force_refresh: bool = False,
+) -> bool:
+    ci = str(connected_integration_id or "").strip()
+    if not ci:
+        return True
+
+    now = time.monotonic()
+    if not force_refresh:
+        async with _CONNECTED_INTEGRATION_ACTIVE_CACHE_LOCK:
+            cached = _CONNECTED_INTEGRATION_ACTIVE_CACHE.get(ci)
+        if cached and cached[1] > now:
+            return cached[0]
+
+    detected: Optional[bool] = None
+    last_error: Optional[Exception] = None
+    try:
+        async with RegosAPI(connected_integration_id=ci) as api:
+            response = await api.integrations.connected_integration.get(
+                ConnectedIntegrationGetRequest(
+                    connected_integration_ids=[ci],
+                    include_name=False,
+                    include_schedule=False,
+                )
+            )
+        if response.ok and isinstance(response.result, list):
+            for row in response.result:
+                row_ci = str(getattr(row, "connected_integration_id", "") or "").strip()
+                if row_ci and row_ci != ci:
+                    continue
+                row_active = getattr(row, "is_active", None)
+                if row_active is None:
+                    continue
+                detected = bool(row_active)
+                break
+    except httpx.HTTPStatusError as error:
+        last_error = error
+        status_code = (
+            int(error.response.status_code)
+            if error.response is not None
+            else None
+        )
+        if status_code in {401, 403, 404}:
+            detected = False
+    except Exception as error:
+        last_error = error
+
+    if detected is None:
+        if last_error is not None:
+            logger.warning(
+                "ConnectedIntegration/Get failed for active check, fallback active=true: ci=%s error=%s",
+                ci,
+                last_error,
+            )
+        detected = True
+
+    active = bool(detected)
+    async with _CONNECTED_INTEGRATION_ACTIVE_CACHE_LOCK:
+        _CONNECTED_INTEGRATION_ACTIVE_CACHE[ci] = (
+            active,
+            now + CONNECTED_INTEGRATION_ACTIVE_CACHE_TTL_SEC,
+        )
+    return active
+
+
+def _inactive_integration_error(connected_integration_id: Optional[str]) -> IntegrationErrorResponse:
+    ci = str(connected_integration_id or "").strip()
+    description = (
+        f"ConnectedIntegration '{ci}' is inactive"
+        if ci
+        else "ConnectedIntegration is inactive"
+    )
+    return IntegrationErrorResponse(
+        result=IntegrationErrorModel(error=403, description=description)
+    )
 
 
 async def _cleanup_integration(
@@ -103,6 +200,28 @@ async def _cleanup_integration(
 def camel_to_snake(name: str) -> str:
     """Преобразует CamelCase → snake_case."""
     return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+
+
+def _resolve_action_method(integration_instance: Any, action: str):
+    """
+    Resolve action method tolerant to variants:
+    Reconnect / ReConnect / re_connect / reconnect.
+    """
+    primary_name = camel_to_snake(action)
+    method = getattr(integration_instance, primary_name, None)
+    if callable(method):
+        return primary_name, method
+
+    compact_action = re.sub(r"[^a-z0-9]", "", str(action).lower())
+    for attr_name in dir(integration_instance):
+        candidate = getattr(integration_instance, attr_name, None)
+        if not callable(candidate):
+            continue
+        compact_attr = re.sub(r"[^a-z0-9]", "", str(attr_name).lower())
+        if compact_attr == compact_action:
+            return attr_name, candidate
+
+    return primary_name, None
 
 
 def _sanitize_headers(headers) -> Dict[str, str]:
@@ -179,10 +298,10 @@ async def handle_integration(
             )
         )
 
-    action_name = camel_to_snake(request_body.action)
+    action_name, action_method = _resolve_action_method(
+        integration_instance, request_body.action
+    )
     logger.debug(f"Action '{request_body.action}' → метод '{action_name}'")
-
-    action_method = getattr(integration_instance, action_name, None)
     if not callable(action_method):
         await _cleanup_integration(integration_instance)
         logger.warning(f"Метод '{action_name}' не найден в интеграции '{client}'")
@@ -192,6 +311,16 @@ async def handle_integration(
                 description=f"Метод '{request_body.action}' не реализован в '{client}'",
             )
         )
+
+    action_key = camel_to_snake(request_body.action)
+    if connected_integration_id and action_key not in {"disconnect"}:
+        is_active = await _is_connected_integration_active(
+            connected_integration_id,
+            force_refresh=action_key in {"connect", "reconnect", "update_settings"},
+        )
+        if not is_active:
+            await _cleanup_integration(integration_instance)
+            return _inactive_integration_error(connected_integration_id)
 
     try:
         logger.info(
@@ -264,6 +393,14 @@ async def handel_ui(
             status_code=500,
             content={"error": 500, "description": "Ошибка инициализации интеграции"},
         )
+
+    if connected_integration_id:
+        is_active = await _is_connected_integration_active(connected_integration_id)
+        if not is_active:
+            await _cleanup_integration(integration_instance)
+            inactive = _inactive_integration_error(connected_integration_id)
+            payload = inactive.model_dump(mode="json", exclude_none=True)
+            return JSONResponse(status_code=403, content=payload)
 
     # 3) Envelope (GET без тела)
     headers = _sanitize_headers(request.headers)
@@ -394,6 +531,18 @@ async def handle_external(
             status_code=500,
             content={"error": 500, "description": "Ошибка инициализации интеграции"},
         )
+
+    if connected_integration_id:
+        is_active = await _is_connected_integration_active(connected_integration_id)
+        if not is_active:
+            await _cleanup_integration(integration_instance)
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "status": "ignored",
+                    "reason": "connected_integration_inactive",
+                },
+            )
 
     # 3) Envelope: заголовки (без служебных) + Connected-Integration-Id, тело, query, и т.п.
     headers = _sanitize_headers(request.headers)

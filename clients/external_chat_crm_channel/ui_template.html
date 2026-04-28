@@ -1,0 +1,2022 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>{safe_title}</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+  {style_block}
+</head>
+<body>
+  <div class="wrap">
+    <div class="head">
+      <div class="head-title">
+        <div class="title">{safe_title}</div>
+        <div class="status" id="status" title="connecting..." aria-label="connecting..." data-tone="pending"></div>
+      </div>
+      <div class="head-right">
+        <select id="languageSelect" class="lang-select" aria-label="Language">
+          <option value="ru">RU</option>
+          <option value="uz">UZ</option>
+          <option value="en">EN</option>
+        </select>
+      </div>
+    </div>
+    <div class="history" id="history">
+      <div class="rating-box" id="ratingBox" hidden>
+        <div class="rating-text" id="ratingText"></div>
+        <div class="rating-actions" id="ratingActions"></div>
+      </div>
+      <div class="composer-spacer" id="composerSpacer" aria-hidden="true"></div>
+      <form class="composer" id="composer">
+        <div class="composer-main">
+          <button type="button" class="attach-btn" id="attachButton" title="Attach file">+</button>
+          <textarea id="text" maxlength="{ExternalChatCrmChannelConfig.MAX_MESSAGE_LENGTH}" placeholder="Type your message"></textarea>
+        </div>
+        <div class="composer-tools" id="composerTools">
+          <div class="format-tools">
+            <button type="button" class="format-btn" data-format="list"><i class="fa-solid fa-list-ul"></i></button>
+            <button type="button" class="format-btn" data-format="bold"><i class="fa-solid fa-bold"></i></button>
+            <button type="button" class="format-btn" data-format="italic"><i class="fa-solid fa-italic"></i></button>
+            <button type="button" class="format-btn" data-format="strike"><i class="fa-solid fa-strikethrough"></i></button>
+            <button type="button" class="format-btn" data-format="code"><i class="fa-solid fa-code"></i></button>
+            <button type="button" class="format-btn" data-format="quote"><i class="fa-solid fa-quote-right"></i></button>
+          </div>
+          <button type="button" class="emoji-btn" id="emojiButton"><i class="fa-regular fa-face-smile"></i></button>
+          <button type="submit" class="send-btn"><i class="fa-solid fa-paper-plane"></i></button>
+          <div class="emoji-panel" id="emojiPanel" hidden></div>
+        </div>
+        <input type="file" id="fileInput" hidden multiple>
+      </form>
+    </div>
+  </div>
+  <script>
+    const I18N_BUNDLE = {safe_i18n_bundle};
+    const CONFIG = {{
+      ci: "{safe_ci}",
+      profileKey: "webchat:profile:{safe_ci}",
+      visitorKey: "webchat:visitor:{safe_ci}",
+      langKey: "webchat:lang:{safe_ci}",
+      maxUploadBytes: {ExternalChatCrmChannelConfig.MAX_UPLOAD_FILE_SIZE_BYTES},
+      required: {{
+        display_name: {safe_require_display_name},
+        phone: {safe_require_phone},
+        email: {safe_require_email},
+      }},
+    }};
+    const REQUIRED_ORDER = ["display_name", "phone", "email"];
+    const LANGUAGES = ["ru", "uz", "en"];
+    const COMPOSER_SCROLL_RESERVE_EXTRA_PX = 28;
+    const MARKDOWN_TAG_MARKERS = [
+      ["**", "strong"],
+      ["++", "u"],
+      ["~~", "s"],
+      ["__", "strong"],
+      ["*", "em"],
+      ["_", "em"],
+    ];
+    const MOBILE_BREAKPOINT = 700;
+
+    const languageSelectEl = document.getElementById("languageSelect");
+    const statusEl = document.getElementById("status");
+    const historyEl = document.getElementById("history");
+    const ratingBoxEl = document.getElementById("ratingBox");
+    const ratingTextEl = document.getElementById("ratingText");
+    const ratingActionsEl = document.getElementById("ratingActions");
+    const composerSpacerEl = document.getElementById("composerSpacer");
+    const attachButtonEl = document.getElementById("attachButton");
+    const fileInputEl = document.getElementById("fileInput");
+    const emojiButtonEl = document.getElementById("emojiButton");
+    const emojiPanelEl = document.getElementById("emojiPanel");
+    const formatButtons = Array.from(document.querySelectorAll(".format-btn"));
+    const textEl = document.getElementById("text");
+    const formEl = document.getElementById("composer");
+    const sendButtonEl = formEl.querySelector(".send-btn");
+    const COMPOSER_TOOL_LABELS = {{
+      list: "List",
+      bold: "Bold",
+      italic: "Italic",
+      strike: "Strikethrough",
+      code: "Code",
+      quote: "Quote",
+      emoji: "Emoji",
+    }};
+    const EMOJI_PANEL_ITEMS = [
+      "\uD83D\uDE00", "\uD83D\uDE01", "\uD83D\uDE02", "\uD83E\uDD23", "\uD83D\uDE0A",
+      "\uD83D\uDE09", "\uD83D\uDE0D", "\uD83D\uDE18", "\uD83D\uDE0E", "\uD83E\uDD17",
+      "\uD83E\uDD14", "\uD83D\uDE34", "\uD83D\uDE4C", "\uD83D\uDC4F", "\uD83D\uDC4D",
+      "\uD83D\uDC4E", "\uD83E\uDD1D", "\uD83D\uDE4F", "\uD83C\uDF89", "\uD83D\uDD25",
+      "\u2728", "\uD83D\uDCAF", "\u2764\uFE0F", "\uD83D\uDC99", "\uD83D\uDC9A",
+      "\uD83E\uDDE1", "\uD83D\uDC9B", "\uD83D\uDCAC", "\uD83D\uDCCE", "\u2705",
+      "\u2757", "\u2753", "\uD83D\uDE42", "\uD83D\uDE43", "\uD83E\uDD29",
+      "\uD83D\uDE07", "\uD83D\uDE22", "\uD83D\uDE21", "\uD83E\uDD2F", "\uD83E\uDD0D",
+    ];
+    function setStatus(text, tone = "ok") {{
+      const safeText = String(text || "").trim() || "...";
+      const safeTone = ["ok", "pending", "warning", "error"].indexOf(String(tone || "")) >= 0
+        ? String(tone)
+        : "ok";
+      statusEl.textContent = "";
+      statusEl.dataset.tone = safeTone;
+      statusEl.title = safeText;
+      statusEl.setAttribute("aria-label", safeText);
+    }}
+    setStatus("...", "pending");
+
+    const state = {{
+      lang: "en",
+      chatReady: false,
+      ticketClosed: false,
+      chatRevision: 0,
+      visitorId: "",
+      profile: {{
+        display_name: "",
+        phone: "",
+        email: "",
+      }},
+      onboardingErrors: {{}},
+      onboardingSubmitBusy: false,
+      ratingEnabled: false,
+      ratingRequired: false,
+      ratingSubmitted: false,
+      ticketRating: null,
+      ratingMessage: "",
+      ratingSubmitting: false,
+      pendingFiles: [],
+      fileReading: false,
+      lastHistoryFingerprint: "",
+      lastHistoryItems: [],
+    }};
+
+    function storageGet(key) {{
+      try {{
+        return localStorage.getItem(key);
+      }} catch (_) {{
+        return null;
+      }}
+    }}
+    function storageSet(key, value) {{
+      try {{
+        localStorage.setItem(key, value);
+        return true;
+      }} catch (_) {{
+        return false;
+      }}
+    }}
+    function normalizeLanguageCode(value) {{
+      const raw = String(value || "").trim().toLowerCase().replace("_", "-");
+      if (!raw) {{
+        return "";
+      }}
+      const direct = raw.split("-", 1)[0];
+      if (LANGUAGES.indexOf(direct) >= 0) {{
+        return direct;
+      }}
+      return "";
+    }}
+    function getBrowserLanguage() {{
+      const lang = normalizeLanguageCode(
+        (navigator && (navigator.language || (navigator.languages && navigator.languages[0]))) || ""
+      );
+      return lang || "en";
+    }}
+    function getCurrentLocaleDict() {{
+      return (
+        (I18N_BUNDLE && I18N_BUNDLE[state.lang])
+        || (I18N_BUNDLE && I18N_BUNDLE.en)
+        || {{}}
+      );
+    }}
+    function t(key, params) {{
+      const dict = getCurrentLocaleDict();
+      const fallback = (I18N_BUNDLE && I18N_BUNDLE.en) || {{}};
+      let text = String(dict[key] || fallback[key] || key);
+      const vars = params && typeof params === "object" ? params : {{}};
+      for (const [name, value] of Object.entries(vars)) {{
+        const token = "{{" + String(name) + "}}";
+        text = text.split(token).join(String(value));
+      }}
+      return text;
+    }}
+    function renderLanguageSwitcher() {{
+      if (!languageSelectEl) {{
+        return;
+      }}
+      const current = state.lang || "en";
+      const labels = {{
+        ru: t("language_ru"),
+        uz: t("language_uz"),
+        en: t("language_en"),
+      }};
+      languageSelectEl.innerHTML = "";
+      for (const code of LANGUAGES) {{
+        const option = document.createElement("option");
+        option.value = code;
+        option.textContent = labels[code] || code.toUpperCase();
+        languageSelectEl.appendChild(option);
+      }}
+      languageSelectEl.value = current;
+      languageSelectEl.title = t("language_label");
+      languageSelectEl.setAttribute("aria-label", t("language_label"));
+    }}
+    function setLanguage(value, persist = true) {{
+      const normalized = normalizeLanguageCode(value) || "en";
+      state.lang = normalized;
+      document.documentElement.lang = normalized;
+      if (persist) {{
+        storageSet(CONFIG.langKey, normalized);
+      }}
+      renderLanguageSwitcher();
+      renderComposerToolLabels();
+      updateComposerState();
+      renderRatingPanel();
+      if (state.chatReady && Array.isArray(state.lastHistoryItems) && state.lastHistoryItems.length) {{
+        renderHistory(state.lastHistoryItems, true);
+      }}
+      if (isOnboardingRequired()) {{
+        renderOnboarding();
+      }}
+    }}
+    function initLanguage() {{
+      const queryLang = normalizeLanguageCode(getFirstQueryValue(["lang", "locale", "language", "hl"]));
+      const storedLang = normalizeLanguageCode(storageGet(CONFIG.langKey) || "");
+      const resolved = queryLang || storedLang || getBrowserLanguage();
+      setLanguage(resolved, true);
+    }}
+
+    function normalizeText(value, maxLen = 120) {{
+      return String(value || "").trim().slice(0, maxLen);
+    }}
+    function normalizePhone(value) {{
+      const digits = String(value || "").replace(/\D/g, "");
+      return digits;
+    }}
+    function normalizeEmail(value) {{
+      const email = String(value || "").trim().toLowerCase();
+      if (!email || email.indexOf("@") < 1 || email.indexOf(" ") >= 0) {{
+        return "";
+      }}
+      return email;
+    }}
+    function normalizeRating(value) {{
+      const num = Number(value);
+      if (!Number.isInteger(num) || num < 1 || num > 5) {{
+        return null;
+      }}
+      return num;
+    }}
+    function normalizeFileName(value) {{
+      const raw = String(value || "").trim();
+      if (!raw) {{
+        return "file.bin";
+      }}
+      const parts = raw.replace(/\\/g, "/").split("/");
+      const name = String(parts[parts.length - 1] || "").trim();
+      return name || "file.bin";
+    }}
+    function normalizeFileExtension(value) {{
+      const raw = String(value || "").trim().toLowerCase().replace(/^\./, "");
+      const cleaned = raw.replace(/[^a-z0-9]/g, "");
+      return cleaned.slice(0, 20);
+    }}
+    function getExtensionFromFileName(fileName) {{
+      const name = String(fileName || "");
+      const idx = name.lastIndexOf(".");
+      if (idx < 1 || idx >= name.length - 1) {{
+        return "";
+      }}
+      return normalizeFileExtension(name.slice(idx + 1));
+    }}
+    function formatBytes(size) {{
+      const value = Number(size || 0);
+      if (!value) {{
+        return "0 B";
+      }}
+      if (value < 1024) {{
+        return value + " B";
+      }}
+      if (value < 1024 * 1024) {{
+        return (value / 1024).toFixed(1) + " KB";
+      }}
+      return (value / (1024 * 1024)).toFixed(1) + " MB";
+    }}
+    function syncComposerSpacer(force = false) {{
+      if (!composerSpacerEl || !formEl) {{
+        return;
+      }}
+      const nextReserve = (
+        Math.max(Number(formEl.offsetHeight || 0), 0)
+        + COMPOSER_SCROLL_RESERVE_EXTRA_PX
+      );
+      const currentReserve = Number(composerSpacerEl.dataset.reserve || "0");
+      if (!force && Math.abs(nextReserve - currentReserve) < 1) {{
+        return;
+      }}
+      composerSpacerEl.style.height = nextReserve + "px";
+      composerSpacerEl.dataset.reserve = String(nextReserve);
+    }}
+    function autoSizeTextarea() {{
+      const minHeight = 44;
+      const maxHeight = 136;
+      textEl.style.height = "0px";
+      const nextHeight = Math.min(Math.max(textEl.scrollHeight, minHeight), maxHeight);
+      textEl.style.height = nextHeight + "px";
+      syncComposerSpacer();
+    }}
+    function setComposerSelection(start, end) {{
+      if (typeof textEl.setSelectionRange !== "function") {{
+        return;
+      }}
+      const length = String(textEl.value || "").length;
+      const safeStart = Math.max(0, Math.min(Number(start || 0), length));
+      const safeEnd = Math.max(safeStart, Math.min(Number(end || safeStart), length));
+      textEl.setSelectionRange(safeStart, safeEnd);
+    }}
+    function replaceComposerRange(start, end, replacement, selectionMode = "end") {{
+      const value = String(textEl.value || "");
+      const safeStart = Math.max(0, Math.min(Number(start || 0), value.length));
+      const safeEnd = Math.max(safeStart, Math.min(Number(end || safeStart), value.length));
+      const text = String(replacement || "");
+      if (typeof textEl.setRangeText === "function") {{
+        textEl.setRangeText(text, safeStart, safeEnd, selectionMode);
+      }} else {{
+        textEl.value = value.slice(0, safeStart) + text + value.slice(safeEnd);
+        const caret = safeStart + text.length;
+        setComposerSelection(caret, caret);
+      }}
+    }}
+    function focusComposerInput() {{
+      textEl.focus();
+      autoSizeTextarea();
+      scheduleViewportCssUpdate(0);
+    }}
+    function wrapComposerSelection(prefix, suffix, placeholder) {{
+      const value = String(textEl.value || "");
+      const start = Number(textEl.selectionStart || 0);
+      const end = Number(textEl.selectionEnd || start);
+      const safeStart = Math.max(0, Math.min(start, value.length));
+      const safeEnd = Math.max(safeStart, Math.min(end, value.length));
+      const hasSelection = safeEnd > safeStart;
+      const selectedText = value.slice(safeStart, safeEnd);
+      const seed = hasSelection ? selectedText : String(placeholder || "");
+      const left = String(prefix || "");
+      const right = String(suffix || "");
+      replaceComposerRange(safeStart, safeEnd, left + seed + right, "end");
+      if (!hasSelection && seed) {{
+        const cursorStart = safeStart + left.length;
+        setComposerSelection(cursorStart, cursorStart + seed.length);
+      }}
+      focusComposerInput();
+    }}
+    function prefixComposerSelectionLines(prefix) {{
+      const value = String(textEl.value || "");
+      const start = Number(textEl.selectionStart || 0);
+      const end = Number(textEl.selectionEnd || start);
+      const safeStart = Math.max(0, Math.min(start, value.length));
+      const safeEnd = Math.max(safeStart, Math.min(end, value.length));
+      const blockStart = Math.max(value.lastIndexOf("\n", Math.max(safeStart - 1, 0)) + 1, 0);
+      let blockEnd = value.indexOf("\n", safeEnd);
+      if (blockEnd < 0) {{
+        blockEnd = value.length;
+      }}
+      const blockText = value.slice(blockStart, blockEnd);
+      const lines = String(blockText || "").split("\n");
+      const marker = String(prefix || "");
+      const prefixed = lines.map((line) => marker + line).join("\n");
+      replaceComposerRange(blockStart, blockEnd, prefixed, "preserve");
+      setComposerSelection(blockStart, blockStart + prefixed.length);
+      focusComposerInput();
+    }}
+    function insertComposerText(insertText) {{
+      const value = String(textEl.value || "");
+      const start = Number(textEl.selectionStart || 0);
+      const end = Number(textEl.selectionEnd || start);
+      const safeStart = Math.max(0, Math.min(start, value.length));
+      const safeEnd = Math.max(safeStart, Math.min(end, value.length));
+      const text = String(insertText || "");
+      replaceComposerRange(safeStart, safeEnd, text, "end");
+      focusComposerInput();
+    }}
+    function applyComposerTool(action) {{
+      if (!action || textEl.disabled || sendButtonEl.disabled) {{
+        return;
+      }}
+      if (action === "bold") {{
+        wrapComposerSelection("**", "**", "bold");
+        return;
+      }}
+      if (action === "italic") {{
+        wrapComposerSelection("*", "*", "italic");
+        return;
+      }}
+      if (action === "strike") {{
+        wrapComposerSelection("~~", "~~", "text");
+        return;
+      }}
+      if (action === "code") {{
+        const selected = String(textEl.value || "").slice(
+          Number(textEl.selectionStart || 0),
+          Number(textEl.selectionEnd || 0)
+        );
+        if (selected.indexOf("\n") >= 0) {{
+          wrapComposerSelection("```\n", "\n```", "code");
+        }} else {{
+          wrapComposerSelection("`", "`", "code");
+        }}
+        return;
+      }}
+      if (action === "quote") {{
+        prefixComposerSelectionLines("> ");
+        return;
+      }}
+      if (action === "list") {{
+        prefixComposerSelectionLines("- ");
+      }}
+    }}
+    function insertComposerEmoji(emoji) {{
+      if (textEl.disabled || sendButtonEl.disabled) {{
+        return;
+      }}
+      const icon = String(emoji || "").trim();
+      if (!icon) {{
+        return;
+      }}
+      const value = String(textEl.value || "");
+      const start = Number(textEl.selectionStart || 0);
+      const end = Number(textEl.selectionEnd || start);
+      const leftChar = start > 0 ? value[start - 1] : "";
+      const rightChar = end < value.length ? value[end] : "";
+      const leftSpacer = leftChar && !/\s/.test(leftChar) ? " " : "";
+      const rightSpacer = rightChar && !/\s/.test(rightChar) ? " " : "";
+      insertComposerText(leftSpacer + icon + rightSpacer);
+    }}
+    function closeEmojiPanel() {{
+      if (!emojiPanelEl || emojiPanelEl.hidden) {{
+        return;
+      }}
+      emojiPanelEl.hidden = true;
+      if (emojiButtonEl) {{
+        emojiButtonEl.setAttribute("aria-expanded", "false");
+      }}
+    }}
+    function ensureEmojiPanelContent() {{
+      if (!emojiPanelEl || emojiPanelEl.childElementCount > 0) {{
+        return;
+      }}
+      for (const item of EMOJI_PANEL_ITEMS) {{
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "emoji-item";
+        btn.textContent = item;
+        btn.setAttribute("aria-label", item);
+        btn.addEventListener("click", () => {{
+          insertComposerEmoji(item);
+          closeEmojiPanel();
+        }});
+        emojiPanelEl.appendChild(btn);
+      }}
+    }}
+    function toggleEmojiPanel() {{
+      if (!emojiPanelEl || !emojiButtonEl) {{
+        return;
+      }}
+      if (emojiButtonEl.disabled || textEl.disabled || sendButtonEl.disabled) {{
+        closeEmojiPanel();
+        return;
+      }}
+      ensureEmojiPanelContent();
+      const shouldOpen = !!emojiPanelEl.hidden;
+      emojiPanelEl.hidden = !shouldOpen;
+      emojiButtonEl.setAttribute("aria-expanded", shouldOpen ? "true" : "false");
+      if (shouldOpen) {{
+        focusComposerInput();
+      }}
+    }}
+    function renderComposerToolLabels() {{
+      for (const button of formatButtons) {{
+        const action = String((button && button.dataset && button.dataset.format) || "");
+        const label = COMPOSER_TOOL_LABELS[action] || action || "Tool";
+        button.title = label;
+        button.setAttribute("aria-label", label);
+      }}
+      if (emojiButtonEl) {{
+        const emojiLabel = COMPOSER_TOOL_LABELS.emoji || "Emoji";
+        emojiButtonEl.title = emojiLabel;
+        emojiButtonEl.setAttribute("aria-label", emojiLabel);
+        emojiButtonEl.setAttribute("aria-haspopup", "true");
+        emojiButtonEl.setAttribute("aria-expanded", "false");
+      }}
+    }}
+    let viewportRafId = 0;
+    let viewportTimerId = 0;
+    let viewportBindingsReady = false;
+    let lastViewportHeightCss = "";
+    let lastKeyboardOffsetCss = "";
+    function isMobileLayoutActive() {{
+      if (window.matchMedia) {{
+        return window.matchMedia("(max-width: " + MOBILE_BREAKPOINT + "px)").matches;
+      }}
+      return window.innerWidth <= MOBILE_BREAKPOINT;
+    }}
+    function isChatFieldFocused() {{
+      const active = document.activeElement;
+      if (!active || !active.closest) {{
+        return false;
+      }}
+      if (active.tagName !== "INPUT" && active.tagName !== "TEXTAREA") {{
+        return false;
+      }}
+      return !!active.closest(".wrap");
+    }}
+    function applyViewportCssVars(force = false) {{
+      const root = document.documentElement;
+      if (!root || !root.style) {{
+        return;
+      }}
+
+      const layoutHeightRaw = Number(window.innerHeight || root.clientHeight || 0);
+      const layoutHeight = Math.max(Math.round(layoutHeightRaw), 320);
+      const vv = window.visualViewport || null;
+      let viewportHeight = layoutHeight;
+      let keyboardOffset = 0;
+
+      if (vv && Number(vv.height) > 0) {{
+        const visualHeight = Math.max(Math.round(Number(vv.height || 0)), 320);
+        viewportHeight = visualHeight;
+        const visualBottom = Number(vv.height || 0) + Number(vv.offsetTop || 0);
+        const overlap = Math.max(Math.round(layoutHeight - visualBottom), 0);
+
+        if (isMobileLayoutActive() && isChatFieldFocused() && overlap > 0 && Math.abs(layoutHeight - viewportHeight) <= 2) {{
+          keyboardOffset = overlap;
+        }}
+      }}
+
+      const nextViewportCss = viewportHeight + "px";
+      const nextKeyboardCss = keyboardOffset + "px";
+      if (force || nextViewportCss !== lastViewportHeightCss) {{
+        root.style.setProperty("--app-vh", nextViewportCss);
+        lastViewportHeightCss = nextViewportCss;
+      }}
+      if (force || nextKeyboardCss !== lastKeyboardOffsetCss) {{
+        root.style.setProperty("--keyboard-offset", nextKeyboardCss);
+        lastKeyboardOffsetCss = nextKeyboardCss;
+      }}
+    }}
+    function scheduleViewportCssUpdate(delayMs = 0) {{
+      if (viewportTimerId) {{
+        clearTimeout(viewportTimerId);
+        viewportTimerId = 0;
+      }}
+      const queueUpdate = () => {{
+        if (viewportRafId) {{
+          return;
+        }}
+        viewportRafId = window.requestAnimationFrame(() => {{
+          viewportRafId = 0;
+          applyViewportCssVars(false);
+        }});
+      }};
+      if (delayMs > 0) {{
+        viewportTimerId = window.setTimeout(() => {{
+          viewportTimerId = 0;
+          queueUpdate();
+        }}, delayMs);
+        return;
+      }}
+      queueUpdate();
+    }}
+    function keepComposerVisibleOnMobile() {{
+      if (!isMobileLayoutActive()) {{
+        return;
+      }}
+      if (!formEl || !isChatFieldFocused()) {{
+        return;
+      }}
+      if (typeof formEl.scrollIntoView === "function") {{
+        formEl.scrollIntoView({{ block: "end", inline: "nearest" }});
+      }}
+    }}
+    function bindViewportHandlers() {{
+      if (viewportBindingsReady) {{
+        return;
+      }}
+      viewportBindingsReady = true;
+
+      const onViewportChange = () => {{
+        scheduleViewportCssUpdate(0);
+      }};
+      window.addEventListener("resize", onViewportChange, {{ passive: true }});
+      window.addEventListener("orientationchange", () => {{
+        scheduleViewportCssUpdate(120);
+      }}, {{ passive: true }});
+      document.addEventListener("focusin", () => {{
+        scheduleViewportCssUpdate(80);
+        keepComposerVisibleOnMobile();
+      }}, true);
+      document.addEventListener("focusout", () => {{
+        scheduleViewportCssUpdate(140);
+      }}, true);
+      if (window.visualViewport) {{
+        window.visualViewport.addEventListener("resize", onViewportChange, {{ passive: true }});
+        window.visualViewport.addEventListener("scroll", onViewportChange, {{ passive: true }});
+      }}
+      applyViewportCssVars(true);
+    }}
+    let pendingFileSeq = 0;
+    function buildPendingFileId() {{
+      pendingFileSeq += 1;
+      return "pf_" + Date.now() + "_" + pendingFileSeq;
+    }}
+    function isImageFileMeta(extension, mimeType) {{
+      const ext = normalizeFileExtension(extension);
+      const mime = String(mimeType || "").trim().toLowerCase();
+      if (mime.startsWith("image/")) {{
+        return true;
+      }}
+      return ["apng", "avif", "bmp", "gif", "heic", "heif", "ico", "jpeg", "jpg", "png", "svg", "webp"].indexOf(ext) >= 0;
+    }}
+    function revokePendingPreview(fileItem) {{
+      if (!fileItem || !fileItem.preview_url || !window.URL || !window.URL.revokeObjectURL) {{
+        return;
+      }}
+      try {{
+        window.URL.revokeObjectURL(fileItem.preview_url);
+      }} catch (_) {{}}
+    }}
+    function queuePendingFile(file) {{
+      if (!file) {{
+        return;
+      }}
+      const name = normalizeFileName(file.name || "file.bin");
+      const extension = normalizeFileExtension(getExtensionFromFileName(name)) || "bin";
+      const mimeType = String(file.type || "").trim().toLowerCase();
+      const isImage = isImageFileMeta(extension, mimeType);
+      let previewUrl = "";
+      if (isImage && window.URL && window.URL.createObjectURL) {{
+        try {{
+          previewUrl = window.URL.createObjectURL(file);
+        }} catch (_) {{
+          previewUrl = "";
+        }}
+      }}
+      state.pendingFiles.push({{
+        id: buildPendingFileId(),
+        name: name,
+        extension: extension,
+        size: Number(file.size || 0),
+        mime_type: mimeType,
+        is_image: isImage,
+        preview_url: previewUrl,
+        file: file,
+      }});
+    }}
+    function readFileAsDataURL(file) {{
+      return new Promise((resolve, reject) => {{
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(new Error(t("error_file_read_failed")));
+        reader.readAsDataURL(file);
+      }});
+    }}
+    function normalizeVisitorId(value) {{
+      const raw = String(value || "").trim();
+      if (!raw) {{
+        return "";
+      }}
+      const cleaned = raw.replace(/[^0-9a-zA-Z:_-]/g, "").replace(/^[:_-]+|[:_-]+$/g, "");
+      return cleaned.slice(0, 120);
+    }}
+    function getFirstQueryValue(keys) {{
+      const params = new URLSearchParams(window.location.search || "");
+      for (const key of keys) {{
+        const value = String(params.get(key) || "").trim();
+        if (value) {{
+          return value;
+        }}
+      }}
+      return "";
+    }}
+    function loadProfile() {{
+      try {{
+        const raw = storageGet(CONFIG.profileKey);
+        if (!raw) {{
+          return;
+        }}
+        const payload = JSON.parse(raw);
+        if (!payload || typeof payload !== "object") {{
+          return;
+        }}
+        state.profile.display_name = normalizeText(payload.display_name, 120);
+        state.profile.phone = normalizePhone(payload.phone);
+        state.profile.email = normalizeEmail(payload.email);
+      }} catch (_) {{}}
+    }}
+    function persistProfile() {{
+      storageSet(CONFIG.profileKey, JSON.stringify(state.profile));
+    }}
+    function applyQueryProfileOverrides() {{
+      const queryDisplayName = normalizeText(getFirstQueryValue(["display_name", "name", "full_name"]), 120);
+      const queryPhone = normalizePhone(getFirstQueryValue(["phone", "phone_number", "tel"]));
+      const queryEmail = normalizeEmail(getFirstQueryValue(["email", "mail"]));
+      if (queryDisplayName) {{
+        state.profile.display_name = queryDisplayName;
+      }}
+      if (queryPhone) {{
+        state.profile.phone = queryPhone;
+      }}
+      if (queryEmail) {{
+        state.profile.email = queryEmail;
+      }}
+    }}
+    function initVisitorId() {{
+      const queryVisitorId = normalizeVisitorId(
+        getFirstQueryValue(["visitor_id", "visitor", "visitorId", "vid"])
+      );
+      const storedVisitorId = normalizeVisitorId(storageGet(CONFIG.visitorKey) || "");
+      let visitorId = queryVisitorId || storedVisitorId;
+      if (!visitorId) {{
+        visitorId = normalizeVisitorId(
+          (window.crypto && window.crypto.randomUUID)
+            ? window.crypto.randomUUID()
+            : ("v" + Date.now() + Math.random().toString(16).slice(2))
+        );
+      }}
+      state.visitorId = visitorId;
+      storageSet(CONFIG.visitorKey, visitorId);
+    }}
+    function getMissingRequiredFields() {{
+      const required = CONFIG.required || {{}};
+      const missing = [];
+      for (const field of REQUIRED_ORDER) {{
+        if (!required[field]) {{
+          continue;
+        }}
+        if (!state.profile[field]) {{
+          missing.push(field);
+        }}
+      }}
+      return missing;
+    }}
+    function getRequiredProfileFields() {{
+      const required = CONFIG.required || {{}};
+      const fields = [];
+      for (const field of REQUIRED_ORDER) {{
+        if (required[field]) {{
+          fields.push(field);
+        }}
+      }}
+      return fields;
+    }}
+    function isOnboardingRequired() {{
+      return !state.chatReady && getMissingRequiredFields().length > 0;
+    }}
+    function fieldLabel(field) {{
+      return t("field_label_" + field);
+    }}
+    function fieldPlaceholder(field) {{
+      return t("field_placeholder_" + field);
+    }}
+    function fieldInvalid(field) {{
+      return t("field_invalid_" + field) || t("field_invalid_generic", {{ field: fieldLabel(field) }});
+    }}
+    function fieldInputType(field) {{
+      if (field === "email") {{
+        return "email";
+      }}
+      if (field === "phone") {{
+        return "tel";
+      }}
+      return "text";
+    }}
+    function normalizeProfileValue(field, value) {{
+      if (field === "display_name") {{
+        return normalizeText(value, 120);
+      }}
+      if (field === "phone") {{
+        return normalizePhone(value);
+      }}
+      if (field === "email") {{
+        return normalizeEmail(value);
+      }}
+      return normalizeText(value, 120);
+    }}
+    function escapeHtml(text) {{
+      const source = String(text || "");
+      return source
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }}
+    function unescapeMarkdownText(text) {{
+      const source = String(text || "");
+      if (source.indexOf("\\\\") < 0 && source.indexOf("\\") < 0) {{
+        return source;
+      }}
+      const chunks = [];
+      for (let idx = 0; idx < source.length; idx += 1) {{
+        const char = source[idx];
+        if (char === "\\" && idx + 1 < source.length) {{
+          chunks.push(source[idx + 1]);
+          idx += 1;
+          continue;
+        }}
+        chunks.push(char);
+      }}
+      return chunks.join("");
+    }}
+    function findUnescapedToken(text, token, start) {{
+      const source = String(text || "");
+      const marker = String(token || "");
+      if (!marker) {{
+        return -1;
+      }}
+      let idx = source.indexOf(marker, Math.max(Number(start || 0), 0));
+      const step = Math.max(marker.length, 1);
+      while (idx >= 0) {{
+        let slashCount = 0;
+        let probe = idx - 1;
+        while (probe >= 0 && source[probe] === "\\") {{
+          slashCount += 1;
+          probe -= 1;
+        }}
+        if (slashCount % 2 === 0) {{
+          return idx;
+        }}
+        idx = source.indexOf(marker, idx + step);
+      }}
+      return -1;
+    }}
+    function findMarkdownLinkUrlEnd(text, start) {{
+      const source = String(text || "");
+      let depth = 1;
+      let idx = Math.max(Number(start || 0), 0);
+      while (idx < source.length) {{
+        const char = source[idx];
+        if (char === "\\" && idx + 1 < source.length) {{
+          idx += 2;
+          continue;
+        }}
+        if (char === "(") {{
+          depth += 1;
+        }} else if (char === ")") {{
+          depth -= 1;
+          if (depth === 0) {{
+            return idx;
+          }}
+        }}
+        idx += 1;
+      }}
+      return -1;
+    }}
+    function isAsciiWordChar(ch) {{
+      return /^[0-9A-Za-z]$/.test(String(ch || ""));
+    }}
+    function isValidSingleMarkerBounds(text, openIdx, closeIdx) {{
+      const source = String(text || "");
+      if (closeIdx <= openIdx + 1) {{
+        return false;
+      }}
+      if (/^\s$/.test(source[openIdx + 1] || "") || /^\s$/.test(source[closeIdx - 1] || "")) {{
+        return false;
+      }}
+      const prev = openIdx > 0 ? source[openIdx - 1] : "";
+      const next = closeIdx + 1 < source.length ? source[closeIdx + 1] : "";
+      if (prev && isAsciiWordChar(prev)) {{
+        return false;
+      }}
+      if (next && isAsciiWordChar(next)) {{
+        return false;
+      }}
+      return true;
+    }}
+    function sanitizeLinkHref(rawUrl) {{
+      const url = String(rawUrl || "").trim();
+      if (!url) {{
+        return "";
+      }}
+      if (url.startsWith("/") || url.startsWith("./") || url.startsWith("../")) {{
+        return url;
+      }}
+      try {{
+        const parsed = new URL(url, window.location.origin);
+        const protocol = String(parsed.protocol || "").toLowerCase();
+        if (["http:", "https:", "mailto:", "tel:", "blob:"].indexOf(protocol) >= 0) {{
+          return parsed.href;
+        }}
+      }} catch (_) {{
+        return "";
+      }}
+      return "";
+    }}
+    function renderMarkdownCodeBlock(rawBlock) {{
+      const block = String(rawBlock || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+      let language = "";
+      let codeText = block;
+      const newlineIdx = block.indexOf("\n");
+      if (newlineIdx >= 0) {{
+        const candidate = block.slice(0, newlineIdx).trim();
+        if (/^[A-Za-z0-9][A-Za-z0-9_+\-]{{0,31}}$/.test(candidate)) {{
+          language = candidate;
+          codeText = block.slice(newlineIdx + 1);
+        }}
+      }}
+      const safeCode = escapeHtml(codeText);
+      if (language) {{
+        return '<pre><code class="language-' + escapeHtml(language) + '">' + safeCode + "</code></pre>";
+      }}
+      return "<pre>" + safeCode + "</pre>";
+    }}
+    function parseMarkdownSegment(text) {{
+      const source = String(text || "");
+      let idx = 0;
+      const size = source.length;
+      const chunks = [];
+      while (idx < size) {{
+        if (source.startsWith("\\", idx)) {{
+          if (idx + 1 < size) {{
+            chunks.push(escapeHtml(source[idx + 1]));
+            idx += 2;
+            continue;
+          }}
+          chunks.push("\\");
+          idx += 1;
+          continue;
+        }}
+        if (source.startsWith("```", idx)) {{
+          const closeIdx = findUnescapedToken(source, "```", idx + 3);
+          if (closeIdx >= 0) {{
+            chunks.push(renderMarkdownCodeBlock(source.slice(idx + 3, closeIdx)));
+            idx = closeIdx + 3;
+            continue;
+          }}
+        }}
+        if (source.startsWith("`", idx)) {{
+          const closeIdx = findUnescapedToken(source, "`", idx + 1);
+          if (closeIdx >= 0) {{
+            const inlineCode = source.slice(idx + 1, closeIdx);
+            chunks.push("<code>" + escapeHtml(unescapeMarkdownText(inlineCode)) + "</code>");
+            idx = closeIdx + 1;
+            continue;
+          }}
+        }}
+        if (source.startsWith("[", idx)) {{
+          const closeLabel = findUnescapedToken(source, "]", idx + 1);
+          if (closeLabel >= 0 && closeLabel + 1 < size && source[closeLabel + 1] === "(") {{
+            const closeUrl = findMarkdownLinkUrlEnd(source, closeLabel + 2);
+            if (closeUrl >= 0) {{
+              const labelRaw = source.slice(idx + 1, closeLabel);
+              const urlRaw = source.slice(closeLabel + 2, closeUrl);
+              const href = sanitizeLinkHref(unescapeMarkdownText(urlRaw));
+              if (href) {{
+                const labelHtml = parseMarkdownSegment(labelRaw);
+                chunks.push(
+                  '<a href="' + escapeHtml(href) + '" target="_blank" rel="noopener noreferrer">' + labelHtml + "</a>"
+                );
+                idx = closeUrl + 1;
+                continue;
+              }}
+            }}
+          }}
+        }}
+        let markerHandled = false;
+        for (const [marker, tag] of MARKDOWN_TAG_MARKERS) {{
+          if (!source.startsWith(marker, idx)) {{
+            continue;
+          }}
+          const closeIdx = findUnescapedToken(source, marker, idx + marker.length);
+          if (closeIdx < 0) {{
+            continue;
+          }}
+          if (marker.length === 1 && !isValidSingleMarkerBounds(source, idx, closeIdx)) {{
+            continue;
+          }}
+          const innerRaw = source.slice(idx + marker.length, closeIdx);
+          if (!innerRaw) {{
+            continue;
+          }}
+          const innerHtml = parseMarkdownSegment(innerRaw);
+          chunks.push("<" + tag + ">" + innerHtml + "</" + tag + ">");
+          idx = closeIdx + marker.length;
+          markerHandled = true;
+          break;
+        }}
+        if (markerHandled) {{
+          continue;
+        }}
+        chunks.push(escapeHtml(source[idx]));
+        idx += 1;
+      }}
+      return chunks.join("");
+    }}
+    function extractQuoteLine(line) {{
+      const raw = String(line || "");
+      const stripped = raw.replace(/^\s+/, "");
+      if (!stripped || stripped.startsWith("\\>") || !stripped.startsWith(">")) {{
+        return null;
+      }}
+      let idx = 0;
+      while (idx < stripped.length && stripped[idx] === ">") {{
+        idx += 1;
+      }}
+      let content = stripped.slice(idx);
+      if (content.startsWith(" ")) {{
+        content = content.slice(1);
+      }}
+      return content;
+    }}
+    function bbCodeToMarkdown(text) {{
+      const source = String(text || "");
+      if (!source || source.indexOf("[") < 0) {{
+        return source;
+      }}
+      let next = source;
+      next = next.replace(/\[br\s*\/?\]/gi, "\n");
+      next = next.replace(/\[(b|strong)\]([\s\S]*?)\[\/\1\]/gi, "**$2**");
+      next = next.replace(/\[(i|em)\]([\s\S]*?)\[\/\1\]/gi, "*$2*");
+      next = next.replace(/\[(u|ins)\]([\s\S]*?)\[\/\1\]/gi, "++$2++");
+      next = next.replace(/\[(s|strike|del)\]([\s\S]*?)\[\/\1\]/gi, "~~$2~~");
+      next = next.replace(/\[quote\]([\s\S]*?)\[\/quote\]/gi, (_, block) => {{
+        const lines = String(block || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+        return lines.map((line) => "> " + line).join("\n");
+      }});
+      next = next.replace(/\[code\]([\s\S]*?)\[\/code\]/gi, (_, codeRaw) => {{
+        const code = String(codeRaw || "");
+        if (code.indexOf("\n") >= 0) {{
+          return "```\n" + code + "\n```";
+        }}
+        return "`" + code.replace(/`/g, "\\`") + "`";
+      }});
+      next = next.replace(/\[url=([^\]]+)\]([\s\S]*?)\[\/url\]/gi, (_, hrefRaw, labelRaw) => {{
+        const href = String(hrefRaw || "").trim();
+        const label = String(labelRaw || "").trim();
+        if (!href || !label) {{
+          return label || href;
+        }}
+        return "[" + label + "](" + href + ")";
+      }});
+      next = next.replace(/\[url\]([\s\S]*?)\[\/url\]/gi, (_, hrefRaw) => {{
+        const href = String(hrefRaw || "").trim();
+        if (!href) {{
+          return "";
+        }}
+        return "[" + href + "](" + href + ")";
+      }});
+      return next;
+    }}
+    function markdownToSafeHtml(text) {{
+      const source = String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+      if (!source) {{
+        return "";
+      }}
+      if (source.indexOf(">") < 0) {{
+        return parseMarkdownSegment(source);
+      }}
+      const blocks = [];
+      const plainLines = [];
+      const quoteLines = [];
+      const flushPlain = () => {{
+        if (!plainLines.length) {{
+          return;
+        }}
+        blocks.push(parseMarkdownSegment(plainLines.join("\n")));
+        plainLines.length = 0;
+      }};
+      const flushQuote = () => {{
+        if (!quoteLines.length) {{
+          return;
+        }}
+        blocks.push("<blockquote>" + parseMarkdownSegment(quoteLines.join("\n")) + "</blockquote>");
+        quoteLines.length = 0;
+      }};
+      for (const line of source.split("\n")) {{
+        const quoteContent = extractQuoteLine(line);
+        if (quoteContent === null) {{
+          flushQuote();
+          plainLines.push(line);
+          continue;
+        }}
+        flushPlain();
+        quoteLines.push(quoteContent);
+      }}
+      flushQuote();
+      flushPlain();
+      return blocks.join("\n");
+    }}
+    function renderFormattedText(rawText) {{
+      const normalized = String(rawText || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+      if (!normalized) {{
+        return "";
+      }}
+      return markdownToSafeHtml(bbCodeToMarkdown(normalized));
+    }}
+    function setFormattedNodeContent(node, rawText) {{
+      if (!node) {{
+        return false;
+      }}
+      const normalized = String(rawText || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+      if (!normalized) {{
+        node.textContent = "";
+        return false;
+      }}
+      const formatted = renderFormattedText(normalized);
+      if (formatted) {{
+        node.innerHTML = formatted;
+      }} else {{
+        node.textContent = normalized;
+      }}
+      return true;
+    }}
+    function toTime(ts) {{
+      const value = Number(ts || 0);
+      if (!value) return "";
+      return new Date(value * 1000).toLocaleTimeString([], {{ hour: "2-digit", minute: "2-digit" }});
+    }}
+    function historyFingerprint(items) {{
+      const list = Array.isArray(items) ? items : [];
+      const chunks = [];
+      for (const item of list) {{
+        const id = String(item.id || "");
+        const text = String(item.text || "");
+        const edited = item.edited ? "1" : "0";
+        const type = String(item.message_type || "");
+        const mine = item.mine ? "1" : "0";
+        const createdDate = String(Number(item.created_date || 0) || 0);
+        const authorName = String(item.author_name || "");
+        const files = Array.isArray(item.files) ? item.files : [];
+        const filesChunk = files.map((file) => {{
+          const fileId = String((file && file.id) || "");
+          const fileUrl = String((file && file.url) || "");
+          const fileName = String((file && file.name) || "");
+          return fileId + ":" + fileName + ":" + fileUrl;
+        }}).join(",");
+        chunks.push(
+          id + "|" + type + "|" + mine + "|" + edited + "|" + createdDate + "|" + authorName + "|" + text + "|" + filesChunk
+        );
+      }}
+      return chunks.join("||");
+    }}
+    function isHistoryNearBottom() {{
+      const delta = historyEl.scrollHeight - historyEl.scrollTop - historyEl.clientHeight;
+      return delta <= 48;
+    }}
+    function normalizeHistoryFiles(value) {{
+      return Array.isArray(value) ? value.filter((row) => row && typeof row === "object") : [];
+    }}
+    function fileIconClass(file) {{
+      const extension = normalizeFileExtension(file && file.extension);
+      const mimeType = String((file && file.mime_type) || "").trim().toLowerCase();
+      if ((file && file.is_image) || isImageFileMeta(extension, mimeType)) {{
+        return "fa-regular fa-image";
+      }}
+      if (mimeType.startsWith("audio/") || ["mp3", "wav", "ogg", "m4a", "flac"].indexOf(extension) >= 0) {{
+        return "fa-regular fa-file-audio";
+      }}
+      if (mimeType.startsWith("video/") || ["mp4", "mov", "avi", "mkv", "webm"].indexOf(extension) >= 0) {{
+        return "fa-regular fa-file-video";
+      }}
+      if (mimeType.indexOf("pdf") >= 0 || extension === "pdf") {{
+        return "fa-regular fa-file-pdf";
+      }}
+      if (["doc", "docx", "odt", "rtf", "txt"].indexOf(extension) >= 0) {{
+        return "fa-regular fa-file-lines";
+      }}
+      if (["xls", "xlsx", "csv"].indexOf(extension) >= 0) {{
+        return "fa-regular fa-file-excel";
+      }}
+      if (["zip", "rar", "7z", "tar", "gz"].indexOf(extension) >= 0) {{
+        return "fa-regular fa-file-zipper";
+      }}
+      return "fa-regular fa-file";
+    }}
+    function buildMessageFileNode(file) {{
+      const href = sanitizeLinkHref(file && file.url);
+      const name = normalizeFileName((file && file.name) || "file.bin");
+      const size = Number((file && file.size) || 0);
+      const mimeType = String((file && file.mime_type) || "").trim().toLowerCase();
+      const extension = normalizeFileExtension(file && file.extension);
+      const isImage = !!((file && file.is_image) || isImageFileMeta(extension, mimeType));
+
+      const item = document.createElement(href ? "a" : "div");
+      item.className = "msg-file" + (isImage ? " image" : "");
+      if (href) {{
+        item.href = href;
+        item.target = "_blank";
+        item.rel = "noopener noreferrer";
+      }}
+      if (isImage && href) {{
+        const image = document.createElement("img");
+        image.className = "msg-file-image";
+        image.src = href;
+        image.alt = name;
+        image.loading = "lazy";
+        item.appendChild(image);
+      }} else {{
+        const icon = document.createElement("span");
+        icon.className = "msg-file-icon";
+        icon.innerHTML = '<i class="' + fileIconClass(file) + '"></i>';
+        item.appendChild(icon);
+      }}
+      const content = document.createElement("span");
+      content.className = "msg-file-content";
+      const title = document.createElement("span");
+      title.className = "msg-file-name";
+      title.textContent = name;
+      const meta = document.createElement("span");
+      meta.className = "msg-file-meta";
+      const sizeLabel = size > 0 ? formatBytes(size) : t("file_meta_no_size");
+      meta.textContent = isImage ? t("file_meta_image", {{ size: sizeLabel }}) : sizeLabel;
+      content.appendChild(title);
+      content.appendChild(meta);
+      item.appendChild(content);
+      return item;
+    }}
+    function buildMessageFilesNode(files) {{
+      const list = normalizeHistoryFiles(files);
+      if (!list.length) {{
+        return null;
+      }}
+      const box = document.createElement("div");
+      box.className = "msg-files";
+      for (const file of list) {{
+        box.appendChild(buildMessageFileNode(file));
+      }}
+      return box;
+    }}
+    function buildMessageNode(item) {{
+      const type = item.message_type || "Regular";
+      const box = document.createElement("div");
+      box.className = "msg " + (type === "System" ? "system" : (item.mine ? "mine" : "other"));
+
+      const text = document.createElement("div");
+      text.className = "msg-text";
+      if (setFormattedNodeContent(text, item.text || "")) {{
+        box.appendChild(text);
+      }}
+
+      const filesNode = buildMessageFilesNode(item.files);
+      if (filesNode) {{
+        box.appendChild(filesNode);
+      }}
+
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      const who = type === "System" ? t("meta_system") : (item.mine ? t("meta_you") : t("meta_operator"));
+      const stamp = toTime(item.created_date);
+      meta.textContent = who + (stamp ? ("  " + stamp) : "") + (item.edited ? (" (" + t("meta_edited") + ")") : "");
+      box.appendChild(meta);
+
+      return box;
+    }}
+    function renderHistory(items, force = false) {{
+      const list = Array.isArray(items) ? items : [];
+      state.lastHistoryItems = list;
+      const fingerprint = historyFingerprint(list);
+      if (!force && fingerprint === state.lastHistoryFingerprint) {{
+        return;
+      }}
+      const stickToBottom = state.lastHistoryFingerprint === "" || isHistoryNearBottom();
+      const prevTop = historyEl.scrollTop;
+      historyEl.innerHTML = "";
+      for (const item of list) {{
+        historyEl.appendChild(buildMessageNode(item));
+      }}
+      historyEl.appendChild(ratingBoxEl);
+      historyEl.appendChild(composerSpacerEl);
+      historyEl.appendChild(formEl);
+      syncComposerSpacer(true);
+      if (stickToBottom) {{
+        historyEl.scrollTop = historyEl.scrollHeight;
+      }} else {{
+        historyEl.scrollTop = prevTop;
+      }}
+      state.lastHistoryFingerprint = fingerprint;
+    }}
+    function renderRatingPanel() {{
+      const visible = (
+        state.chatReady
+        && state.ticketClosed
+        && !isOnboardingRequired()
+        && (
+          state.ratingRequired
+          || (state.ratingSubmitted && normalizeRating(state.ticketRating) !== null)
+        )
+      );
+      ratingActionsEl.innerHTML = "";
+      ratingTextEl.textContent = "";
+      if (!visible) {{
+        ratingBoxEl.hidden = true;
+        return;
+      }}
+
+      if (state.ratingSubmitted) {{
+        const savedRating = normalizeRating(state.ticketRating);
+        setFormattedNodeContent(
+          ratingTextEl,
+          savedRating !== null
+          ? t("rating_thanks_with_value", {{ rating: savedRating }})
+          : t("rating_thanks")
+        );
+      }} else {{
+        const ratingPrompt = String(state.ratingMessage || "").trim();
+        if (setFormattedNodeContent(ratingTextEl, ratingPrompt)) {{
+          for (let rating = 1; rating <= 5; rating += 1) {{
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "rating-btn";
+            btn.textContent = String(rating);
+            btn.disabled = state.ratingSubmitting;
+            btn.addEventListener("click", () => {{
+              submitRating(rating).catch((error) => {{
+                handleActionError(error);
+              }});
+            }});
+            ratingActionsEl.appendChild(btn);
+          }}
+        }}
+      }}
+      const hasText = String(ratingTextEl.textContent || "").trim().length > 0;
+      const hasActions = ratingActionsEl.childElementCount > 0;
+      ratingBoxEl.hidden = !(hasText || hasActions);
+    }}
+    async function submitRating(rating) {{
+      const normalized = normalizeRating(rating);
+      if (normalized === null || !state.chatReady || state.ratingSubmitting) {{
+        return;
+      }}
+      state.ratingSubmitting = true;
+      setStatus(t("status_saving_rating"), "pending");
+      renderRatingPanel();
+      updateComposerState();
+      try {{
+        const result = await callApi("set_rating", {{
+          visitor_id: state.visitorId,
+          rating: normalized,
+          display_name: state.profile.display_name,
+          email: state.profile.email,
+          phone: state.profile.phone
+        }});
+        applyWriteState(result);
+        await refreshHistory(true);
+        setStatus(t("status_thanks_feedback"), "ok");
+      }} finally {{
+        state.ratingSubmitting = false;
+        renderRatingPanel();
+        updateComposerState();
+      }}
+    }}
+    async function submitOnboardingForm(event) {{
+      event.preventDefault();
+      if (state.onboardingSubmitBusy || state.chatReady) {{
+        return;
+      }}
+
+      const form = event.currentTarget;
+      const formData = new FormData(form);
+      const requiredFields = getRequiredProfileFields();
+      const errors = {{}};
+      const updatedProfile = {{
+        display_name: state.profile.display_name,
+        phone: state.profile.phone,
+        email: state.profile.email,
+      }};
+
+      for (const field of requiredFields) {{
+        const rawValue = formData.get(field);
+        const normalized = normalizeProfileValue(field, rawValue);
+        if (!normalized) {{
+          errors[field] = fieldInvalid(field);
+          continue;
+        }}
+        updatedProfile[field] = normalized;
+      }}
+
+      state.onboardingErrors = errors;
+      if (Object.keys(errors).length) {{
+        const firstField = requiredFields.find((field) => errors[field]);
+        setStatus(firstField ? errors[firstField] : t("status_fill_required_fields"), "warning");
+        renderOnboarding();
+        updateComposerState();
+        return;
+      }}
+
+      state.profile = updatedProfile;
+      persistProfile();
+      state.onboardingSubmitBusy = true;
+      setStatus(t("status_connecting"), "pending");
+      renderOnboarding();
+      updateComposerState();
+      try {{
+        await initChat();
+      }} catch (error) {{
+        state.chatReady = false;
+        handleActionError(error);
+      }} finally {{
+        state.onboardingSubmitBusy = false;
+        updateComposerState();
+        if (isOnboardingRequired()) {{
+          renderOnboarding();
+        }}
+      }}
+    }}
+    function renderOnboarding() {{
+      if (!isOnboardingRequired()) {{
+        return;
+      }}
+
+      const fields = getRequiredProfileFields();
+      historyEl.innerHTML = "";
+
+      const card = document.createElement("div");
+      card.className = "onboarding-card";
+
+      const title = document.createElement("h3");
+      title.className = "onboarding-title";
+      title.textContent = t("onboarding_title");
+      card.appendChild(title);
+
+      const note = document.createElement("p");
+      note.className = "onboarding-note";
+      note.textContent = t("onboarding_note");
+      card.appendChild(note);
+
+      const form = document.createElement("form");
+      form.className = "onboarding-form";
+      form.noValidate = true;
+      form.addEventListener("submit", submitOnboardingForm);
+
+      for (const field of fields) {{
+        const fieldWrap = document.createElement("label");
+        fieldWrap.className = "onboarding-field";
+
+        const label = document.createElement("span");
+        label.className = "onboarding-label";
+        label.textContent = fieldLabel(field);
+        fieldWrap.appendChild(label);
+
+        const input = document.createElement("input");
+        input.name = field;
+        input.type = fieldInputType(field);
+        input.autocomplete = field === "display_name" ? "name" : (field === "phone" ? "tel" : "email");
+        input.placeholder = fieldPlaceholder(field);
+        input.value = String(state.profile[field] || "");
+        input.required = true;
+        if (state.onboardingErrors[field]) {{
+          input.classList.add("input-error");
+        }}
+        fieldWrap.appendChild(input);
+
+        const error = state.onboardingErrors[field];
+        if (error) {{
+          const errorEl = document.createElement("div");
+          errorEl.className = "onboarding-error";
+          errorEl.textContent = error;
+          fieldWrap.appendChild(errorEl);
+        }}
+        form.appendChild(fieldWrap);
+      }}
+
+      const submit = document.createElement("button");
+      submit.type = "submit";
+      submit.className = "onboarding-submit";
+      submit.disabled = state.onboardingSubmitBusy;
+      submit.textContent = state.onboardingSubmitBusy ? t("onboarding_connecting") : t("onboarding_start");
+      form.appendChild(submit);
+
+      card.appendChild(form);
+      historyEl.appendChild(card);
+      historyEl.appendChild(composerSpacerEl);
+      historyEl.appendChild(formEl);
+      syncComposerSpacer(true);
+      historyEl.scrollTop = historyEl.scrollHeight;
+      state.lastHistoryFingerprint = "__onboarding__";
+    }}
+    function updateComposerState() {{
+      const onboardingMode = isOnboardingRequired() || state.onboardingSubmitBusy;
+      const hardDisabled = onboardingMode;
+      attachButtonEl.title = t("attach_title");
+      attachButtonEl.innerHTML = '<i class="fa-solid fa-paperclip"></i>';
+      attachButtonEl.disabled = hardDisabled || state.fileReading;
+      fileInputEl.disabled = hardDisabled || state.fileReading;
+      for (const button of formatButtons) {{
+        button.disabled = hardDisabled || state.fileReading;
+      }}
+      if (emojiButtonEl) {{
+        emojiButtonEl.disabled = hardDisabled || state.fileReading;
+      }}
+      if (hardDisabled || state.fileReading) {{
+        closeEmojiPanel();
+      }}
+      const pendingCount = Array.isArray(state.pendingFiles) ? state.pendingFiles.length : 0;
+      if (onboardingMode) {{
+        textEl.disabled = true;
+        sendButtonEl.disabled = true;
+        sendButtonEl.innerHTML = '<i class="fa-solid fa-lock"></i>';
+        sendButtonEl.removeAttribute("data-count");
+        sendButtonEl.title = t("composer_locked");
+        sendButtonEl.setAttribute("aria-label", t("composer_locked"));
+        textEl.placeholder = t("composer_placeholder_fill");
+        syncComposerSpacer();
+        return;
+      }}
+      textEl.disabled = false;
+      sendButtonEl.disabled = state.fileReading;
+      sendButtonEl.innerHTML = '<i class="fa-solid fa-paper-plane"></i>';
+      if (pendingCount > 0) {{
+        sendButtonEl.setAttribute("data-count", String(pendingCount));
+        const sendLabelWithCount = t("composer_send_files", {{ count: pendingCount }});
+        sendButtonEl.title = sendLabelWithCount;
+        sendButtonEl.setAttribute("aria-label", sendLabelWithCount);
+        textEl.placeholder = t("composer_placeholder_optional");
+      }} else {{
+        sendButtonEl.removeAttribute("data-count");
+        const sendLabel = t("composer_send");
+        sendButtonEl.title = sendLabel;
+        sendButtonEl.setAttribute("aria-label", sendLabel);
+        textEl.placeholder = t("composer_placeholder_type");
+      }}
+      autoSizeTextarea();
+      syncComposerSpacer();
+    }}
+
+    const basePath = window.location.pathname.replace(/\/+$/g, "").replace(/\/+/g, "/");
+    const externalUrl = basePath + "/external?ci=" + encodeURIComponent(CONFIG.ci);
+    console.info("[external_chat] externalUrl:", externalUrl);
+
+    async function callApi(action, data) {{
+      const resp = await fetch(externalUrl, {{
+        method: "POST",
+        headers: {{ "Content-Type": "application/json" }},
+        body: JSON.stringify({{ action, data }})
+      }});
+      const payload = await resp.json().catch(() => ({{}}));
+      if (!resp.ok) {{
+        const message = (
+          (payload && payload.result && payload.result.description)
+          || (payload && payload.description)
+          || ("HTTP " + resp.status)
+        );
+        const error = new Error(message);
+        error.status = resp.status;
+        error.payload = payload || {{}};
+        throw error;
+      }}
+      return payload;
+    }}
+    function applyWriteState(payload) {{
+      if (payload && Number(payload.chat_revision) > 0) {{
+        state.chatRevision = Number(payload.chat_revision);
+      }}
+      state.ratingEnabled = !!(payload && payload.rating_enabled === true);
+      state.ratingRequired = !!(payload && payload.rating_required === true);
+      state.ratingSubmitted = !!(payload && payload.rating_submitted === true);
+      state.ticketRating = normalizeRating(payload && payload.ticket_rating);
+      state.ratingMessage = String((payload && payload.rating_message) || "");
+      state.ticketClosed = !!(payload && payload.ticket_closed === true);
+      renderRatingPanel();
+      updateComposerState();
+    }}
+
+    function delayMs(ms) {{
+      const timeout = Math.max(Number(ms || 0), 0);
+      return new Promise((resolve) => {{
+        window.setTimeout(resolve, timeout);
+      }});
+    }}
+
+    let eventLoopRunning = false;
+    let eventLoopBackoffMs = 1000;
+    let eventLoopTickTs = 0;
+    let eventLoopWatchdogId = 0;
+    const EVENT_POLL_INTERVAL_MS = 3000;
+
+    function safeUpdateComposerState() {{
+      try {{
+        updateComposerState();
+      }} catch (error) {{
+        console.error("[external_chat] updateComposerState failed:", error);
+      }}
+    }}
+
+    async function runEventLoop() {{
+      if (eventLoopRunning) {{
+        return;
+      }}
+      eventLoopRunning = true;
+      try {{
+        while (eventLoopRunning) {{
+          eventLoopTickTs = Date.now();
+          try {{
+            if (isOnboardingRequired()) {{
+              if (!historyEl.querySelector(".onboarding-card")) {{
+                renderOnboarding();
+              }}
+              safeUpdateComposerState();
+              await delayMs(800);
+              continue;
+            }}
+
+            if (!state.chatReady) {{
+              try {{
+                await initChat();
+                eventLoopBackoffMs = 1000;
+              }} catch (error) {{
+                state.chatReady = false;
+                handleActionError(error);
+                await delayMs(eventLoopBackoffMs);
+                eventLoopBackoffMs = Math.min(eventLoopBackoffMs * 2, 10000);
+              }}
+              safeUpdateComposerState();
+              continue;
+            }}
+
+            try {{
+              const result = await callApi("getupdates", {{
+                visitor_id: state.visitorId,
+                display_name: state.profile.display_name,
+                email: state.profile.email,
+                phone: state.profile.phone,
+                known_revision: state.chatRevision,
+                max_events: 20,
+              }});
+              applyWriteState(result);
+              const events = Array.isArray(result && result.events) ? result.events : [];
+              let shouldRefreshHistory = false;
+              let forceFullHistory = false;
+              for (const event of events) {{
+                const apiAction = String((event && event.api_action) || "").trim().toLowerCase();
+                if (apiAction === "history") {{
+                  const eventType = String((event && event.type) || "").trim().toLowerCase();
+                  const isRevisionSync = eventType === "chat_revision_changed";
+                  shouldRefreshHistory = true;
+                  forceFullHistory = (
+                    forceFullHistory
+                    || !!(event && event.force_full === true)
+                    || isRevisionSync
+                  );
+                }}
+              }}
+              if (shouldRefreshHistory) {{
+                await refreshHistory(forceFullHistory);
+              }}
+              await delayMs(EVENT_POLL_INTERVAL_MS);
+              eventLoopBackoffMs = 1000;
+            }} catch (error) {{
+              handleActionError(error);
+              await delayMs(eventLoopBackoffMs);
+              eventLoopBackoffMs = Math.min(eventLoopBackoffMs * 2, 10000);
+            }}
+            safeUpdateComposerState();
+          }} catch (loopError) {{
+            console.error("[external_chat] event loop iteration failed:", loopError);
+            await delayMs(eventLoopBackoffMs);
+            eventLoopBackoffMs = Math.min(eventLoopBackoffMs * 2, 10000);
+            safeUpdateComposerState();
+          }}
+        }}
+      }} finally {{
+        eventLoopRunning = false;
+      }}
+    }}
+
+    function ensureEventLoopAlive() {{
+      const nowTs = Date.now();
+      if (!eventLoopRunning) {{
+        runEventLoop().catch((error) => {{
+          console.error("[external_chat] event loop restart failed:", error);
+        }});
+        return;
+      }}
+      if (eventLoopTickTs > 0 && (nowTs - eventLoopTickTs) > 90000) {{
+        console.warn("[external_chat] event loop watchdog restart");
+        eventLoopRunning = false;
+        runEventLoop().catch((error) => {{
+          console.error("[external_chat] event loop watchdog restart failed:", error);
+        }});
+      }}
+    }}
+
+    async function initChat() {{
+      if (state.chatReady) {{
+        return;
+      }}
+      const missing = getMissingRequiredFields();
+      if (missing.length) {{
+        setStatus(t("status_fill_required_fields"), "warning");
+        renderOnboarding();
+        updateComposerState();
+        return;
+      }}
+      setStatus(t("status_connecting"), "pending");
+      const result = await callApi("init", {{
+        visitor_id: state.visitorId,
+        display_name: state.profile.display_name,
+        email: state.profile.email,
+        phone: state.profile.phone
+      }});
+      if (result.visitor_id && result.visitor_id !== state.visitorId) {{
+        state.visitorId = normalizeVisitorId(result.visitor_id);
+        storageSet(CONFIG.visitorKey, state.visitorId);
+      }}
+      state.chatReady = true;
+      state.onboardingErrors = {{}};
+      applyWriteState(result);
+      renderHistory(result.history || [], true);
+      setStatus(t("status_online"), "ok");
+    }}
+
+    async function refreshHistory(forceFull = false) {{
+      if (!state.chatReady) {{
+        return;
+      }}
+      const result = await callApi("history", {{
+        visitor_id: state.visitorId,
+        display_name: state.profile.display_name,
+        email: state.profile.email,
+        phone: state.profile.phone,
+        known_revision: state.chatRevision,
+        force_full: !!forceFull,
+        limit: {ExternalChatCrmChannelConfig.DEFAULT_HISTORY_LIMIT}
+      }});
+      applyWriteState(result);
+      if (result.history_changed !== false) {{
+        renderHistory(result.history || []);
+      }}
+      setStatus(t("status_online"), "ok");
+    }}
+    async function sendChatMessage(text) {{
+      if (!state.chatReady) {{
+        await initChat();
+      }}
+      if (!state.chatReady) {{
+        return;
+      }}
+      const normalizedText = String(text || "").trim();
+      if (!normalizedText) {{
+        return;
+      }}
+      const result = await callApi("send_message", {{
+        visitor_id: state.visitorId,
+        text: normalizedText,
+        display_name: state.profile.display_name,
+        email: state.profile.email,
+        phone: state.profile.phone
+      }});
+      applyWriteState(result);
+      await refreshHistory(true);
+    }}
+    async function buildUploadPayload(pendingFile) {{
+      if (!pendingFile || !pendingFile.file) {{
+        throw new Error(t("error_file_read_failed"));
+      }}
+      const dataUrl = await readFileAsDataURL(pendingFile.file);
+      const base64Payload = String(dataUrl || "").split(",", 2)[1] || "";
+      if (!base64Payload) {{
+        throw new Error(t("error_file_read_failed"));
+      }}
+      return {{
+        name: pendingFile.name || "file.bin",
+        extension: pendingFile.extension || "bin",
+        data: base64Payload,
+      }};
+    }}
+    async function sendChatFile(payload, options = {{}}) {{
+      if (!payload) {{
+        return;
+      }}
+      const refresh = options.refresh !== false;
+      if (!state.chatReady) {{
+        await initChat();
+      }}
+      if (!state.chatReady) {{
+        return;
+      }}
+      const result = await callApi("send_file", {{
+        visitor_id: state.visitorId,
+        text: String(payload.text || "").trim(),
+        file_name: payload.name,
+        extension: payload.extension,
+        data: payload.data,
+        display_name: state.profile.display_name,
+        email: state.profile.email,
+        phone: state.profile.phone
+      }});
+      applyWriteState(result);
+      if (refresh) {{
+        await refreshHistory(true);
+      }}
+    }}
+    async function sendPendingFilesQueue(text) {{
+      const pendingFiles = Array.isArray(state.pendingFiles) ? state.pendingFiles : [];
+      if (!pendingFiles.length) {{
+        return 0;
+      }}
+      let caption = String(text || "").trim();
+      let sentCount = 0;
+      const total = pendingFiles.length;
+      while (state.pendingFiles.length > 0) {{
+        const pending = state.pendingFiles[0];
+        setStatus(t("status_sending_files_progress", {{
+          current: sentCount + 1,
+          total: total,
+        }}), "pending");
+        const upload = await buildUploadPayload(pending);
+        await sendChatFile({{
+          text: caption,
+          name: upload.name,
+          extension: upload.extension,
+          data: upload.data,
+        }}, {{ refresh: false }});
+        caption = "";
+        revokePendingPreview(pending);
+        state.pendingFiles.shift();
+        sentCount += 1;
+      }}
+      fileInputEl.value = "";
+      if (sentCount > 0) {{
+        await refreshHistory(true);
+        setStatus(t("status_files_sent", {{ count: sentCount }}), "ok");
+      }}
+      return sentCount;
+    }}
+    function handleActionError(error) {{
+      const payload = error && error.payload ? error.payload : {{}};
+      const hasTicketState =
+        payload
+        && (Object.prototype.hasOwnProperty.call(payload, "ticket_closed")
+          || Object.prototype.hasOwnProperty.call(payload, "can_write")
+          || Object.prototype.hasOwnProperty.call(payload, "rating_enabled"));
+      if (hasTicketState) {{
+        applyWriteState(payload);
+      }}
+      setStatus(t("status_error_prefix") + (error && error.message ? error.message : t("error_unexpected")), "error");
+    }}
+
+    formEl.addEventListener("submit", async (event) => {{
+      event.preventDefault();
+      closeEmojiPanel();
+      if (isOnboardingRequired() || state.onboardingSubmitBusy) {{
+        return;
+      }}
+      const text = (textEl.value || "").trim();
+      const pendingCount = Array.isArray(state.pendingFiles) ? state.pendingFiles.length : 0;
+      if (!text && pendingCount === 0) {{
+        return;
+      }}
+      try {{
+        state.fileReading = true;
+        sendButtonEl.disabled = true;
+        if (pendingCount > 0) {{
+          await sendPendingFilesQueue(text);
+        }} else {{
+          await sendChatMessage(text);
+        }}
+        textEl.value = "";
+        autoSizeTextarea();
+      }} catch (error) {{
+        handleActionError(error);
+      }} finally {{
+        state.fileReading = false;
+        updateComposerState();
+      }}
+    }});
+    if (languageSelectEl) {{
+      languageSelectEl.addEventListener("change", () => {{
+        setLanguage(languageSelectEl.value, true);
+      }});
+    }}
+    attachButtonEl.addEventListener("click", () => {{
+      if (attachButtonEl.disabled || state.fileReading) {{
+        return;
+      }}
+      closeEmojiPanel();
+      fileInputEl.click();
+    }});
+    for (const button of formatButtons) {{
+      button.addEventListener("click", () => {{
+        const action = String((button && button.dataset && button.dataset.format) || "");
+        closeEmojiPanel();
+        applyComposerTool(action);
+      }});
+    }}
+    if (emojiButtonEl) {{
+      emojiButtonEl.addEventListener("click", (event) => {{
+        event.preventDefault();
+        event.stopPropagation();
+        toggleEmojiPanel();
+      }});
+    }}
+    document.addEventListener("click", (event) => {{
+      if (!emojiPanelEl || emojiPanelEl.hidden) {{
+        return;
+      }}
+      const target = event.target;
+      const clickedInsidePanel = !!(target && target.closest && target.closest("#emojiPanel"));
+      const clickedToggle = !!(target && target.closest && target.closest("#emojiButton"));
+      if (!clickedInsidePanel && !clickedToggle) {{
+        closeEmojiPanel();
+      }}
+    }});
+    document.addEventListener("keydown", (event) => {{
+      if (event.key === "Escape") {{
+        closeEmojiPanel();
+      }}
+    }});
+    fileInputEl.addEventListener("change", async () => {{
+      const files = Array.from(fileInputEl.files || []);
+      if (!files.length) {{
+        return;
+      }}
+      const maxUploadBytes = Number(CONFIG.maxUploadBytes || 0);
+      let addedCount = 0;
+      let skippedCount = 0;
+      for (const file of files) {{
+        if (maxUploadBytes > 0 && Number(file.size || 0) > maxUploadBytes) {{
+          skippedCount += 1;
+          continue;
+        }}
+        queuePendingFile(file);
+        addedCount += 1;
+      }}
+      if (addedCount > 0 && skippedCount > 0) {{
+        setStatus(t("status_files_attached_partial", {{ added: addedCount, skipped: skippedCount }}), "warning");
+      }} else if (addedCount > 0) {{
+        setStatus(t("status_files_attached", {{ count: addedCount }}), "ok");
+      }} else if (skippedCount > 0) {{
+        setStatus(t("status_file_too_large", {{ max: formatBytes(maxUploadBytes) }}), "warning");
+      }}
+      fileInputEl.value = "";
+      updateComposerState();
+    }});
+    textEl.addEventListener("input", () => {{
+      autoSizeTextarea();
+      scheduleViewportCssUpdate(0);
+    }});
+    textEl.addEventListener("focus", () => {{
+      scheduleViewportCssUpdate(70);
+      window.setTimeout(() => {{
+        keepComposerVisibleOnMobile();
+      }}, 90);
+    }});
+    textEl.addEventListener("blur", () => {{
+      scheduleViewportCssUpdate(140);
+    }});
+    textEl.addEventListener("keydown", (event) => {{
+      if (event.key !== "Enter") {{
+        return;
+      }}
+      if (event.shiftKey || event.ctrlKey || event.metaKey || event.altKey || event.isComposing) {{
+        return;
+      }}
+      event.preventDefault();
+      formEl.requestSubmit();
+    }});
+
+    async function bootstrapChat() {{
+      if (!window.fetch) {{
+        throw new Error(t("error_fetch_unavailable"));
+      }}
+
+      initLanguage();
+      setStatus(t("status_initializing"), "pending");
+      bindViewportHandlers();
+      renderComposerToolLabels();
+      loadProfile();
+      applyQueryProfileOverrides();
+      persistProfile();
+      initVisitorId();
+      updateComposerState();
+      autoSizeTextarea();
+
+      if (isOnboardingRequired()) {{
+        renderOnboarding();
+        setStatus(t("status_fill_required_fields"), "warning");
+      }} else {{
+        try {{
+          await initChat();
+        }} catch (error) {{
+          state.chatReady = false;
+          handleActionError(error);
+        }}
+      }}
+      runEventLoop();
+      if (!eventLoopWatchdogId) {{
+        eventLoopWatchdogId = window.setInterval(ensureEventLoopAlive, 15000);
+      }}
+      updateComposerState();
+    }}
+
+    bootstrapChat().catch((error) => {{
+      state.chatReady = false;
+      setStatus(t("status_startup_error"), "error");
+      console.error("[external_chat] bootstrap failed:", error);
+      handleActionError(error);
+      updateComposerState();
+    }});
+  </script>
+</body>
+</html>
+
+
+
