@@ -26,9 +26,26 @@
       <div class="rating-actions" id="ratingActions"></div>
     </div>
     <form class="composer" id="composer">
-      <button type="button" class="attach-btn" id="attachButton" title="Attach file">+</button>
-      <textarea id="text" maxlength="{ExternalChatCrmChannelConfig.MAX_MESSAGE_LENGTH}" placeholder="Type your message"></textarea>
-      <button type="submit" class="send-btn">Send</button>
+      <div class="composer-surface">
+        <div class="composer-main">
+          <button type="button" class="attach-btn" id="attachButton" title="Attach file">+</button>
+          <textarea id="text" maxlength="{ExternalChatCrmChannelConfig.MAX_MESSAGE_LENGTH}" placeholder="Type your message"></textarea>
+        </div>
+        <div class="composer-tools" id="composerTools">
+          <div class="format-tools">
+            <button type="button" class="format-btn" data-format="list"><i class="fa-solid fa-list-ul"></i></button>
+            <button type="button" class="format-btn" data-format="bold"><i class="fa-solid fa-bold"></i></button>
+            <button type="button" class="format-btn" data-format="italic"><i class="fa-solid fa-italic"></i></button>
+            <button type="button" class="format-btn" data-format="strike"><i class="fa-solid fa-strikethrough"></i></button>
+            <button type="button" class="format-btn" data-format="code"><i class="fa-solid fa-code"></i></button>
+            <button type="button" class="format-btn" data-format="quote"><i class="fa-solid fa-quote-right"></i></button>
+          </div>
+          <div class="composer-actions">
+            <button type="button" class="emoji-btn" id="emojiButton"><i class="fa-regular fa-face-smile"></i></button>
+            <button type="submit" class="send-btn"><i class="fa-solid fa-paper-plane"></i></button>
+          </div>
+        </div>
+      </div>
       <input type="file" id="fileInput" hidden multiple>
       <div class="attach-note" id="attachNote" hidden>
         <div class="attach-list" id="attachList"></div>
@@ -73,9 +90,20 @@
     const attachNoteEl = document.getElementById("attachNote");
     const attachListEl = document.getElementById("attachList");
     const attachClearEl = document.getElementById("attachClear");
+    const emojiButtonEl = document.getElementById("emojiButton");
+    const formatButtons = Array.from(document.querySelectorAll(".format-btn"));
     const textEl = document.getElementById("text");
     const formEl = document.getElementById("composer");
     const sendButtonEl = formEl.querySelector(".send-btn");
+    const COMPOSER_TOOL_LABELS = {{
+      list: "List",
+      bold: "Bold",
+      italic: "Italic",
+      strike: "Strikethrough",
+      code: "Code",
+      quote: "Quote",
+      emoji: "Emoji",
+    }};
     statusEl.textContent = "...";
 
     const state = {{
@@ -183,6 +211,7 @@
         storageSet(CONFIG.langKey, normalized);
       }}
       renderLanguageSwitcher();
+      renderComposerToolLabels();
       updateComposerState();
       renderRatingPanel();
       if (state.chatReady && Array.isArray(state.lastHistoryItems) && state.lastHistoryItems.length) {{
@@ -261,6 +290,142 @@
       textEl.style.height = "0px";
       const nextHeight = Math.min(Math.max(textEl.scrollHeight, minHeight), maxHeight);
       textEl.style.height = nextHeight + "px";
+    }}
+    function setComposerSelection(start, end) {{
+      if (typeof textEl.setSelectionRange !== "function") {{
+        return;
+      }}
+      const length = String(textEl.value || "").length;
+      const safeStart = Math.max(0, Math.min(Number(start || 0), length));
+      const safeEnd = Math.max(safeStart, Math.min(Number(end || safeStart), length));
+      textEl.setSelectionRange(safeStart, safeEnd);
+    }}
+    function replaceComposerRange(start, end, replacement, selectionMode = "end") {{
+      const value = String(textEl.value || "");
+      const safeStart = Math.max(0, Math.min(Number(start || 0), value.length));
+      const safeEnd = Math.max(safeStart, Math.min(Number(end || safeStart), value.length));
+      const text = String(replacement || "");
+      if (typeof textEl.setRangeText === "function") {{
+        textEl.setRangeText(text, safeStart, safeEnd, selectionMode);
+      }} else {{
+        textEl.value = value.slice(0, safeStart) + text + value.slice(safeEnd);
+        const caret = safeStart + text.length;
+        setComposerSelection(caret, caret);
+      }}
+    }}
+    function focusComposerInput() {{
+      textEl.focus();
+      autoSizeTextarea();
+      scheduleViewportCssUpdate(0);
+    }}
+    function wrapComposerSelection(prefix, suffix, placeholder) {{
+      const value = String(textEl.value || "");
+      const start = Number(textEl.selectionStart || 0);
+      const end = Number(textEl.selectionEnd || start);
+      const safeStart = Math.max(0, Math.min(start, value.length));
+      const safeEnd = Math.max(safeStart, Math.min(end, value.length));
+      const hasSelection = safeEnd > safeStart;
+      const selectedText = value.slice(safeStart, safeEnd);
+      const seed = hasSelection ? selectedText : String(placeholder || "");
+      const left = String(prefix || "");
+      const right = String(suffix || "");
+      replaceComposerRange(safeStart, safeEnd, left + seed + right, "end");
+      if (!hasSelection && seed) {{
+        const cursorStart = safeStart + left.length;
+        setComposerSelection(cursorStart, cursorStart + seed.length);
+      }}
+      focusComposerInput();
+    }}
+    function prefixComposerSelectionLines(prefix) {{
+      const value = String(textEl.value || "");
+      const start = Number(textEl.selectionStart || 0);
+      const end = Number(textEl.selectionEnd || start);
+      const safeStart = Math.max(0, Math.min(start, value.length));
+      const safeEnd = Math.max(safeStart, Math.min(end, value.length));
+      const blockStart = Math.max(value.lastIndexOf("\n", Math.max(safeStart - 1, 0)) + 1, 0);
+      let blockEnd = value.indexOf("\n", safeEnd);
+      if (blockEnd < 0) {{
+        blockEnd = value.length;
+      }}
+      const blockText = value.slice(blockStart, blockEnd);
+      const lines = String(blockText || "").split("\n");
+      const marker = String(prefix || "");
+      const prefixed = lines.map((line) => marker + line).join("\n");
+      replaceComposerRange(blockStart, blockEnd, prefixed, "preserve");
+      setComposerSelection(blockStart, blockStart + prefixed.length);
+      focusComposerInput();
+    }}
+    function insertComposerText(insertText) {{
+      const value = String(textEl.value || "");
+      const start = Number(textEl.selectionStart || 0);
+      const end = Number(textEl.selectionEnd || start);
+      const safeStart = Math.max(0, Math.min(start, value.length));
+      const safeEnd = Math.max(safeStart, Math.min(end, value.length));
+      const text = String(insertText || "");
+      replaceComposerRange(safeStart, safeEnd, text, "end");
+      focusComposerInput();
+    }}
+    function applyComposerTool(action) {{
+      if (!action || textEl.disabled || sendButtonEl.disabled) {{
+        return;
+      }}
+      if (action === "bold") {{
+        wrapComposerSelection("**", "**", "bold");
+        return;
+      }}
+      if (action === "italic") {{
+        wrapComposerSelection("*", "*", "italic");
+        return;
+      }}
+      if (action === "strike") {{
+        wrapComposerSelection("~~", "~~", "text");
+        return;
+      }}
+      if (action === "code") {{
+        const selected = String(textEl.value || "").slice(
+          Number(textEl.selectionStart || 0),
+          Number(textEl.selectionEnd || 0)
+        );
+        if (selected.indexOf("\n") >= 0) {{
+          wrapComposerSelection("```\n", "\n```", "code");
+        }} else {{
+          wrapComposerSelection("`", "`", "code");
+        }}
+        return;
+      }}
+      if (action === "quote") {{
+        prefixComposerSelectionLines("> ");
+        return;
+      }}
+      if (action === "list") {{
+        prefixComposerSelectionLines("- ");
+      }}
+    }}
+    function applyComposerEmoji() {{
+      if (textEl.disabled || sendButtonEl.disabled) {{
+        return;
+      }}
+      const value = String(textEl.value || "");
+      const start = Number(textEl.selectionStart || 0);
+      const end = Number(textEl.selectionEnd || start);
+      const leftChar = start > 0 ? value[start - 1] : "";
+      const rightChar = end < value.length ? value[end] : "";
+      const leftSpacer = leftChar && !/\s/.test(leftChar) ? " " : "";
+      const rightSpacer = rightChar && !/\s/.test(rightChar) ? " " : "";
+      insertComposerText(leftSpacer + "😊" + rightSpacer);
+    }}
+    function renderComposerToolLabels() {{
+      for (const button of formatButtons) {{
+        const action = String((button && button.dataset && button.dataset.format) || "");
+        const label = COMPOSER_TOOL_LABELS[action] || action || "Tool";
+        button.title = label;
+        button.setAttribute("aria-label", label);
+      }}
+      if (emojiButtonEl) {{
+        const emojiLabel = COMPOSER_TOOL_LABELS.emoji || "Emoji";
+        emojiButtonEl.title = emojiLabel;
+        emojiButtonEl.setAttribute("aria-label", emojiLabel);
+      }}
     }}
     let viewportRafId = 0;
     let viewportTimerId = 0;
@@ -1263,22 +1428,38 @@
       attachButtonEl.disabled = hardDisabled || state.fileReading;
       fileInputEl.disabled = hardDisabled || state.fileReading;
       attachClearEl.disabled = hardDisabled || state.fileReading;
+      for (const button of formatButtons) {{
+        button.disabled = hardDisabled || state.fileReading;
+      }}
+      if (emojiButtonEl) {{
+        emojiButtonEl.disabled = hardDisabled || state.fileReading;
+      }}
       const pendingCount = Array.isArray(state.pendingFiles) ? state.pendingFiles.length : 0;
       if (onboardingMode) {{
         textEl.disabled = true;
         sendButtonEl.disabled = true;
-        sendButtonEl.textContent = t("composer_locked");
+        sendButtonEl.innerHTML = '<i class="fa-solid fa-lock"></i>';
+        sendButtonEl.removeAttribute("data-count");
+        sendButtonEl.title = t("composer_locked");
+        sendButtonEl.setAttribute("aria-label", t("composer_locked"));
         textEl.placeholder = t("composer_placeholder_fill");
         renderPendingFiles();
         return;
       }}
       textEl.disabled = false;
       sendButtonEl.disabled = state.fileReading;
+      sendButtonEl.innerHTML = '<i class="fa-solid fa-paper-plane"></i>';
       if (pendingCount > 0) {{
-        sendButtonEl.innerHTML = '<i class="fa-solid fa-paper-plane"></i><span>' + t("composer_send_files", {{ count: pendingCount }}) + "</span>";
+        sendButtonEl.setAttribute("data-count", String(pendingCount));
+        const sendLabelWithCount = t("composer_send_files", {{ count: pendingCount }});
+        sendButtonEl.title = sendLabelWithCount;
+        sendButtonEl.setAttribute("aria-label", sendLabelWithCount);
         textEl.placeholder = t("composer_placeholder_optional");
       }} else {{
-        sendButtonEl.innerHTML = '<i class="fa-solid fa-paper-plane"></i><span>' + t("composer_send") + "</span>";
+        sendButtonEl.removeAttribute("data-count");
+        const sendLabel = t("composer_send");
+        sendButtonEl.title = sendLabel;
+        sendButtonEl.setAttribute("aria-label", sendLabel);
         textEl.placeholder = t("composer_placeholder_type");
       }}
       renderPendingFiles();
@@ -1527,6 +1708,17 @@
       clearPendingFiles();
       updateComposerState();
     }});
+    for (const button of formatButtons) {{
+      button.addEventListener("click", () => {{
+        const action = String((button && button.dataset && button.dataset.format) || "");
+        applyComposerTool(action);
+      }});
+    }}
+    if (emojiButtonEl) {{
+      emojiButtonEl.addEventListener("click", () => {{
+        applyComposerEmoji();
+      }});
+    }}
     fileInputEl.addEventListener("change", async () => {{
       const files = Array.from(fileInputEl.files || []);
       if (!files.length) {{
@@ -1587,6 +1779,7 @@
       initLanguage();
       statusEl.textContent = t("status_initializing");
       bindViewportHandlers();
+      renderComposerToolLabels();
       loadProfile();
       applyQueryProfileOverrides();
       persistProfile();

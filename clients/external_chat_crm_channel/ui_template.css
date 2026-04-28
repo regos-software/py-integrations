@@ -420,96 +420,168 @@
     }
     .composer {
       display: grid;
-      grid-template-columns: auto 1fr auto;
-      gap: 10px;
-      align-items: end;
+      gap: 8px;
       border-top: 1px solid #d7dfea;
       padding: 10px 12px;
       background: #f7f9fc;
     }
+    .composer-surface {
+      width: 100%;
+      border: 1px solid #cfd8e4;
+      border-radius: 18px;
+      background: #ffffff;
+      box-shadow: 0 2px 6px rgba(34, 61, 95, 0.08);
+      overflow: hidden;
+    }
+    .composer-main {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      align-items: end;
+      gap: 4px;
+      padding: 8px 10px 6px 10px;
+      min-height: 52px;
+    }
     .attach-btn {
-      border: 1px solid #d1d9e5;
-      border-radius: 12px;
-      width: 38px;
-      height: 38px;
+      border: 0;
+      border-radius: 10px;
+      width: 34px;
+      height: 34px;
       padding: 0;
-      background: #fff;
-      color: #6f7d95;
+      background: transparent;
+      color: #71819c;
       font-size: 15px;
       display: inline-flex;
       align-items: center;
       justify-content: center;
       cursor: pointer;
-      transition: border-color .14s ease, color .14s ease, transform .14s ease, box-shadow .14s ease;
+      transition: color .14s ease, transform .14s ease, background-color .14s ease;
     }
     .attach-btn:hover:not(:disabled) {
-      border-color: var(--accent);
       color: var(--accent);
+      background: rgba(58, 111, 166, 0.1);
       transform: translateY(-1px);
-      box-shadow: 0 8px 16px rgba(10, 102, 194, 0.12);
     }
     .attach-btn:disabled {
       opacity: .5;
       cursor: default;
       transform: none;
-      box-shadow: none;
     }
     .composer textarea {
-      grid-column: 2;
       width: 100%;
-      min-height: 46px;
-      max-height: 132px;
+      min-height: 36px;
+      max-height: 120px;
       resize: none;
-      border: 1px solid #cfd8e4;
-      border-radius: 16px;
-      padding: 12px 14px;
+      border: 0;
+      border-radius: 0;
+      padding: 8px 6px 8px 4px;
       font: inherit;
       color: var(--text);
-      background: #ffffff;
-      transition: border-color .18s ease, box-shadow .18s ease, background-color .18s ease;
+      background: transparent;
+      transition: color .18s ease;
     }
     .composer textarea:focus {
       outline: none;
-      border-color: var(--accent);
-      box-shadow: 0 0 0 2px rgba(10, 102, 194, 0.12);
-      background: #fff;
+    }
+    .composer textarea::placeholder {
+      color: #7d8ca3;
+    }
+    .composer-tools {
+      min-height: 38px;
+      padding: 4px 8px 6px 8px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      border-top: 1px solid #edf1f7;
+      background: #ffffff;
+    }
+    .format-tools {
+      min-width: 0;
+      display: inline-flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 2px;
+    }
+    .format-btn,
+    .emoji-btn {
+      border: 0;
+      border-radius: 8px;
+      width: 30px;
+      height: 30px;
+      padding: 0;
+      background: transparent;
+      color: #6f7d95;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      cursor: pointer;
+      transition: color .14s ease, background-color .14s ease;
+    }
+    .format-btn:hover:not(:disabled),
+    .emoji-btn:hover:not(:disabled) {
+      color: #48678d;
+      background: rgba(69, 98, 136, 0.12);
+    }
+    .format-btn:disabled,
+    .emoji-btn:disabled {
+      opacity: .45;
+      cursor: default;
+    }
+    .composer-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
     }
     .send-btn {
-      grid-column: 3;
       border: 0;
-      border-radius: 12px;
-      min-width: 92px;
-      height: 38px;
-      padding: 0 14px;
-      background: #7f92af;
+      border-radius: 11px;
+      width: 34px;
+      min-width: 34px;
+      height: 34px;
+      padding: 0;
+      background: #8b99b2;
       color: #fff;
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      gap: 7px;
       font: 700 12px/1 "Manrope", "Trebuchet MS", "Verdana", sans-serif;
       cursor: pointer;
       box-shadow: none;
-      transition: transform .14s ease, box-shadow .14s ease, filter .14s ease;
+      transition: transform .14s ease, filter .14s ease, background-color .14s ease;
     }
     .send-btn i {
-      font-size: 12px;
-    }
-    .send-btn span {
-      white-space: nowrap;
+      font-size: 13px;
     }
     .send-btn:hover:not(:disabled) {
       transform: translateY(-1px);
-      filter: brightness(1.03);
-      box-shadow: none;
+      filter: brightness(1.05);
     }
     .send-btn:active:not(:disabled) {
       transform: translateY(0);
     }
+    .send-btn[data-count] {
+      position: relative;
+    }
+    .send-btn[data-count]::after {
+      content: attr(data-count);
+      position: absolute;
+      top: -6px;
+      right: -6px;
+      min-width: 16px;
+      height: 16px;
+      padding: 0 4px;
+      border-radius: 999px;
+      background: #2f5f92;
+      color: #fff;
+      font: 700 10px/16px "Manrope", "Trebuchet MS", "Verdana", sans-serif;
+      text-align: center;
+      box-shadow: 0 0 0 2px #ffffff;
+      pointer-events: none;
+    }
     .send-btn:disabled {
       opacity: .5;
       cursor: default;
-      box-shadow: none;
     }
     .attach-note {
       grid-column: 1 / -1;
@@ -662,8 +734,27 @@
       .composer {
         padding: 8px 10px calc(8px + env(safe-area-inset-bottom, 0px));
       }
+      .composer-surface {
+        border-radius: 16px;
+      }
+      .composer-main {
+        padding: 6px 8px 4px 8px;
+        min-height: 48px;
+      }
+      .composer-tools {
+        min-height: 34px;
+        padding: 3px 6px 5px 6px;
+      }
+      .format-btn,
+      .emoji-btn,
       .send-btn {
-        min-width: 78px;
+        width: 28px;
+        min-width: 28px;
+        height: 28px;
+        border-radius: 9px;
+      }
+      .send-btn {
+        font-size: 11px;
       }
       .attach-note {
         font-size: 11px;
