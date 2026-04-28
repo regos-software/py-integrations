@@ -73,6 +73,12 @@
       background: #f7f9fc;
       backdrop-filter: none;
     }
+    .head-title {
+      min-width: 0;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
     .head-right {
       display: inline-flex;
       align-items: center;
@@ -98,25 +104,27 @@
       letter-spacing: 0;
     }
     .status {
-      color: #6f7d95;
-      font-size: 12px;
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 0;
-      border-radius: 0;
-      border: 0;
-      background: transparent;
-      text-transform: none;
-      letter-spacing: 0;
-    }
-    .status::before {
-      content: "";
-      width: 7px;
-      height: 7px;
+      width: 10px;
+      min-width: 10px;
+      height: 10px;
       border-radius: 50%;
+      display: inline-block;
+      border: 1px solid rgba(60, 86, 118, 0.26);
+      background: transparent;
+      box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.82);
+      cursor: help;
+    }
+    .status[data-tone="ok"] {
       background: #2abf6a;
-      box-shadow: none;
+    }
+    .status[data-tone="pending"] {
+      background: #6f7d95;
+    }
+    .status[data-tone="warning"] {
+      background: #e6a23c;
+    }
+    .status[data-tone="error"] {
+      background: #dd4b39;
     }
     .history {
       padding: 12px 12px;
@@ -489,7 +497,6 @@
       align-items: center;
       justify-content: flex-end;
       gap: 6px;
-      border-top: 1px solid #edf1f7;
       border-left: 1px solid #cfd8e4;
       border-right: 1px solid #cfd8e4;
       border-bottom: 1px solid #cfd8e4;
@@ -616,20 +623,17 @@
       opacity: .5;
       cursor: default;
     }
-    .attach-panel {
+    .attach-list {
       grid-column: 1 / -1;
-      display: block;
+      min-width: 0;
+      display: grid;
+      gap: 6px;
       border: 1px solid #d1d9e5;
       border-radius: 11px;
       padding: 7px 10px;
       color: #6f7d95;
       font-size: 12px;
       background: rgba(255, 255, 255, 0.96);
-    }
-    .attach-list {
-      min-width: 0;
-      display: grid;
-      gap: 6px;
     }
     .attach-item {
       display: grid;
@@ -776,7 +780,7 @@
       .send-btn {
         font-size: 11px;
       }
-      .attach-panel {
+      .attach-list {
         font-size: 11px;
       }
       .msg {

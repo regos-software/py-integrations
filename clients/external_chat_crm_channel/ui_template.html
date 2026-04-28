@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -10,14 +10,16 @@
 <body>
   <div class="wrap">
     <div class="head">
-      <div class="title">{safe_title}</div>
+      <div class="head-title">
+        <div class="title">{safe_title}</div>
+        <div class="status" id="status" title="connecting..." aria-label="connecting..." data-tone="pending"></div>
+      </div>
       <div class="head-right">
         <select id="languageSelect" class="lang-select" aria-label="Language">
           <option value="ru">RU</option>
           <option value="uz">UZ</option>
           <option value="en">EN</option>
         </select>
-        <div class="status" id="status">connecting...</div>
       </div>
     </div>
     <div class="history" id="history"></div>
@@ -44,9 +46,7 @@
         <div class="emoji-panel" id="emojiPanel" hidden></div>
       </div>
       <input type="file" id="fileInput" hidden multiple>
-      <div class="attach-panel" id="attachPanel" hidden>
-        <div class="attach-list" id="attachList"></div>
-      </div>
+      <div class="attach-list" id="attachList" hidden></div>
     </form>
   </div>
   <script>
@@ -83,7 +83,6 @@
     const ratingActionsEl = document.getElementById("ratingActions");
     const attachButtonEl = document.getElementById("attachButton");
     const fileInputEl = document.getElementById("fileInput");
-    const attachPanelEl = document.getElementById("attachPanel");
     const attachListEl = document.getElementById("attachList");
     const emojiButtonEl = document.getElementById("emojiButton");
     const emojiPanelEl = document.getElementById("emojiPanel");
@@ -101,12 +100,22 @@
       emoji: "Emoji",
     }};
     const EMOJI_PANEL_ITEMS = [
-      "😀", "😁", "😂", "🤣", "😊", "😉", "😍", "😘", "😎", "🤗",
-      "🤔", "😴", "🙌", "👏", "👍", "👎", "🤝", "🙏", "🎉", "🔥",
-      "✨", "💯", "❤️", "💙", "💚", "🧡", "💛", "💬", "📎", "✅",
-      "❗", "❓", "🙂", "🙃", "🤩", "😇", "😢", "😡", "🤯", "🤍",
+      "рџЂ", "рџЃ", "рџ‚", "рџ¤Ј", "рџЉ", "рџ‰", "рџЌ", "рџ", "рџЋ", "рџ¤—",
+      "рџ¤”", "рџґ", "рџ™Њ", "рџ‘Џ", "рџ‘Ќ", "рџ‘Ћ", "рџ¤ќ", "рџ™Џ", "рџЋ‰", "рџ”Ґ",
+      "вњЁ", "рџ’Ї", "вќ¤пёЏ", "рџ’™", "рџ’љ", "рџ§Ў", "рџ’›", "рџ’¬", "рџ“Ћ", "вњ…",
+      "вќ—", "вќ“", "рџ™‚", "рџ™ѓ", "рџ¤©", "рџ‡", "рџў", "рџЎ", "рџ¤Ї", "рџ¤Ќ",
     ];
-    statusEl.textContent = "...";
+    function setStatus(text, tone = "ok") {{
+      const safeText = String(text || "").trim() || "...";
+      const safeTone = ["ok", "pending", "warning", "error"].indexOf(String(tone || "")) >= 0
+        ? String(tone)
+        : "ok";
+      statusEl.textContent = "";
+      statusEl.dataset.tone = safeTone;
+      statusEl.title = safeText;
+      statusEl.setAttribute("aria-label", safeText);
+    }}
+    setStatus("...", "pending");
 
     const state = {{
       lang: "en",
@@ -656,11 +665,11 @@
     function renderPendingFiles() {{
       const pendingFiles = Array.isArray(state.pendingFiles) ? state.pendingFiles : [];
       if (!pendingFiles.length) {{
-        attachPanelEl.hidden = true;
+        attachListEl.hidden = true;
         attachListEl.innerHTML = "";
         return;
       }}
-      attachPanelEl.hidden = false;
+      attachListEl.hidden = false;
       attachListEl.innerHTML = "";
       for (const pending of pendingFiles) {{
         const row = document.createElement("div");
@@ -1313,7 +1322,7 @@
         return;
       }}
       state.ratingSubmitting = true;
-      statusEl.textContent = t("status_saving_rating");
+      setStatus(t("status_saving_rating"), "pending");
       renderRatingPanel();
       updateComposerState();
       try {{
@@ -1326,7 +1335,7 @@
         }});
         applyWriteState(result);
         await refreshHistory(true);
-        statusEl.textContent = t("status_thanks_feedback");
+        setStatus(t("status_thanks_feedback"), "ok");
       }} finally {{
         state.ratingSubmitting = false;
         renderRatingPanel();
@@ -1362,7 +1371,7 @@
       state.onboardingErrors = errors;
       if (Object.keys(errors).length) {{
         const firstField = requiredFields.find((field) => errors[field]);
-        statusEl.textContent = firstField ? errors[firstField] : t("status_fill_required_fields");
+        setStatus(firstField ? errors[firstField] : t("status_fill_required_fields"), "warning");
         renderOnboarding();
         updateComposerState();
         return;
@@ -1371,7 +1380,7 @@
       state.profile = updatedProfile;
       persistProfile();
       state.onboardingSubmitBusy = true;
-      statusEl.textContent = t("status_connecting");
+      setStatus(t("status_connecting"), "pending");
       renderOnboarding();
       updateComposerState();
       try {{
@@ -1548,12 +1557,12 @@
       }}
       const missing = getMissingRequiredFields();
       if (missing.length) {{
-        statusEl.textContent = t("status_fill_required_fields");
+        setStatus(t("status_fill_required_fields"), "warning");
         renderOnboarding();
         updateComposerState();
         return;
       }}
-      statusEl.textContent = t("status_connecting");
+      setStatus(t("status_connecting"), "pending");
       const result = await callApi("init", {{
         visitor_id: state.visitorId,
         display_name: state.profile.display_name,
@@ -1568,7 +1577,7 @@
       state.onboardingErrors = {{}};
       applyWriteState(result);
       renderHistory(result.history || [], true);
-      statusEl.textContent = t("status_online");
+      setStatus(t("status_online"), "ok");
     }}
 
     async function refreshHistory(forceFull = false) {{
@@ -1588,7 +1597,7 @@
       if (result.history_changed !== false) {{
         renderHistory(result.history || []);
       }}
-      statusEl.textContent = t("status_online");
+      setStatus(t("status_online"), "ok");
     }}
     async function sendChatMessage(text) {{
       if (!state.chatReady) {{
@@ -1662,10 +1671,10 @@
       const total = pendingFiles.length;
       while (state.pendingFiles.length > 0) {{
         const pending = state.pendingFiles[0];
-        statusEl.textContent = t("status_sending_files_progress", {{
+        setStatus(t("status_sending_files_progress", {{
           current: sentCount + 1,
           total: total,
-        }});
+        }}), "pending");
         const upload = await buildUploadPayload(pending);
         await sendChatFile({{
           text: caption,
@@ -1684,7 +1693,7 @@
       }}
       if (sentCount > 0) {{
         await refreshHistory(true);
-        statusEl.textContent = t("status_files_sent", {{ count: sentCount }});
+        setStatus(t("status_files_sent", {{ count: sentCount }}), "ok");
       }}
       return sentCount;
     }}
@@ -1698,7 +1707,7 @@
       if (hasTicketState) {{
         applyWriteState(payload);
       }}
-      statusEl.textContent = t("status_error_prefix") + (error && error.message ? error.message : t("error_unexpected"));
+      setStatus(t("status_error_prefix") + (error && error.message ? error.message : t("error_unexpected")), "error");
     }}
 
     formEl.addEventListener("submit", async (event) => {{
@@ -1788,11 +1797,11 @@
         addedCount += 1;
       }}
       if (addedCount > 0 && skippedCount > 0) {{
-        statusEl.textContent = t("status_files_attached_partial", {{ added: addedCount, skipped: skippedCount }});
+        setStatus(t("status_files_attached_partial", {{ added: addedCount, skipped: skippedCount }}), "warning");
       }} else if (addedCount > 0) {{
-        statusEl.textContent = t("status_files_attached", {{ count: addedCount }});
+        setStatus(t("status_files_attached", {{ count: addedCount }}), "ok");
       }} else if (skippedCount > 0) {{
-        statusEl.textContent = t("status_file_too_large", {{ max: formatBytes(maxUploadBytes) }});
+        setStatus(t("status_file_too_large", {{ max: formatBytes(maxUploadBytes) }}), "warning");
       }}
       if (fileInputEl) {{
         fileInputEl.value = "";
@@ -1829,7 +1838,7 @@
       }}
 
       initLanguage();
-      statusEl.textContent = t("status_initializing");
+      setStatus(t("status_initializing"), "pending");
       bindViewportHandlers();
       renderComposerToolLabels();
       loadProfile();
@@ -1841,7 +1850,7 @@
 
       if (isOnboardingRequired()) {{
         renderOnboarding();
-        statusEl.textContent = t("status_fill_required_fields");
+        setStatus(t("status_fill_required_fields"), "warning");
       }} else {{
         await initChat();
       }}
@@ -1870,7 +1879,7 @@
 
     bootstrapChat().catch((error) => {{
       state.chatReady = false;
-      statusEl.textContent = t("status_startup_error");
+      setStatus(t("status_startup_error"), "error");
       console.error("[external_chat] bootstrap failed:", error);
       handleActionError(error);
       updateComposerState();
@@ -1878,5 +1887,6 @@
   </script>
 </body>
 </html>
+
 
 
