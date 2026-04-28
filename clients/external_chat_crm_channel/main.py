@@ -285,6 +285,63 @@ def _normalize_message_markup(value: Any, max_len: int = 500) -> str:
     return _normalize_text(normalized, max_len)
 
 
+def _extract_system_message_payload_text(value: Any, max_len: int = 500) -> str:
+    """Best-effort extraction for system message text stored in payload-like structures."""
+    if value is None:
+        return ""
+
+    if isinstance(value, dict):
+        preferred_keys = ("text", "message", "title", "description", "body", "comment", "value")
+        for key in preferred_keys:
+            if key not in value:
+                continue
+            extracted = _extract_system_message_payload_text(value.get(key), max_len)
+            if extracted:
+                return extracted
+        for nested in value.values():
+            extracted = _extract_system_message_payload_text(nested, max_len)
+            if extracted:
+                return extracted
+        return ""
+
+    if isinstance(value, (list, tuple)):
+        for nested in value:
+            extracted = _extract_system_message_payload_text(nested, max_len)
+            if extracted:
+                return extracted
+        return ""
+
+    text = _normalize_message_markup(value, max_len)
+    return text
+
+
+def _resolve_history_message_text(
+    row: Any,
+    message_type: str,
+    *,
+    max_len: int,
+) -> str:
+    text = _normalize_message_markup(getattr(row, "text", ""), max_len)
+    if text or message_type != ChatMessageTypeEnum.System.value:
+        return text
+
+    payload_raw = getattr(row, "action_payload", None)
+    payload_candidate: Any = payload_raw
+    if isinstance(payload_raw, str):
+        payload_text = payload_raw.strip()
+        if payload_text:
+            try:
+                payload_candidate = _json_loads(payload_text)
+            except Exception:
+                payload_candidate = payload_text
+
+    for candidate in (payload_candidate, getattr(row, "replay_text", None)):
+        extracted = _extract_system_message_payload_text(candidate, max_len)
+        if extracted:
+            return extracted
+    return ""
+
+
 def _parse_file_ids(value: Any) -> List[int]:
     if not isinstance(value, list):
         return []
@@ -2148,9 +2205,10 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 if payload:
                     files.append(payload)
 
-            text = _normalize_message_markup(
-                getattr(row, "text", ""),
-                ExternalChatCrmChannelConfig.MAX_MESSAGE_LENGTH,
+            text = _resolve_history_message_text(
+                row,
+                message_type,
+                max_len=ExternalChatCrmChannelConfig.MAX_MESSAGE_LENGTH,
             )
             if not text and files:
                 text = ""
