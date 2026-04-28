@@ -22,10 +22,11 @@
         </select>
       </div>
     </div>
-    <div class="history" id="history"></div>
-    <div class="rating-box" id="ratingBox" hidden>
-      <div class="rating-text" id="ratingText"></div>
-      <div class="rating-actions" id="ratingActions"></div>
+    <div class="history" id="history">
+      <div class="rating-box" id="ratingBox" hidden>
+        <div class="rating-text" id="ratingText"></div>
+        <div class="rating-actions" id="ratingActions"></div>
+      </div>
     </div>
     <form class="composer" id="composer">
       <div class="composer-main">
@@ -46,7 +47,6 @@
         <div class="emoji-panel" id="emojiPanel" hidden></div>
       </div>
       <input type="file" id="fileInput" hidden multiple>
-      <div class="attach-list" id="attachList" hidden></div>
     </form>
   </div>
   <script>
@@ -83,7 +83,6 @@
     const ratingActionsEl = document.getElementById("ratingActions");
     const attachButtonEl = document.getElementById("attachButton");
     const fileInputEl = document.getElementById("fileInput");
-    const attachListEl = document.getElementById("attachList");
     const emojiButtonEl = document.getElementById("emojiButton");
     const emojiPanelEl = document.getElementById("emojiPanel");
     const formatButtons = Array.from(document.querySelectorAll(".format-btn"));
@@ -100,10 +99,14 @@
       emoji: "Emoji",
     }};
     const EMOJI_PANEL_ITEMS = [
-      "рџЂ", "рџЃ", "рџ‚", "рџ¤Ј", "рџЉ", "рџ‰", "рџЌ", "рџ", "рџЋ", "рџ¤—",
-      "рџ¤”", "рџґ", "рџ™Њ", "рџ‘Џ", "рџ‘Ќ", "рџ‘Ћ", "рџ¤ќ", "рџ™Џ", "рџЋ‰", "рџ”Ґ",
-      "вњЁ", "рџ’Ї", "вќ¤пёЏ", "рџ’™", "рџ’љ", "рџ§Ў", "рџ’›", "рџ’¬", "рџ“Ћ", "вњ…",
-      "вќ—", "вќ“", "рџ™‚", "рџ™ѓ", "рџ¤©", "рџ‡", "рџў", "рџЎ", "рџ¤Ї", "рџ¤Ќ",
+      "\uD83D\uDE00", "\uD83D\uDE01", "\uD83D\uDE02", "\uD83E\uDD23", "\uD83D\uDE0A",
+      "\uD83D\uDE09", "\uD83D\uDE0D", "\uD83D\uDE18", "\uD83D\uDE0E", "\uD83E\uDD17",
+      "\uD83E\uDD14", "\uD83D\uDE34", "\uD83D\uDE4C", "\uD83D\uDC4F", "\uD83D\uDC4D",
+      "\uD83D\uDC4E", "\uD83E\uDD1D", "\uD83D\uDE4F", "\uD83C\uDF89", "\uD83D\uDD25",
+      "\u2728", "\uD83D\uDCAF", "\u2764\uFE0F", "\uD83D\uDC99", "\uD83D\uDC9A",
+      "\uD83E\uDDE1", "\uD83D\uDC9B", "\uD83D\uDCAC", "\uD83D\uDCCE", "\u2705",
+      "\u2757", "\u2753", "\uD83D\uDE42", "\uD83D\uDE43", "\uD83E\uDD29",
+      "\uD83D\uDE07", "\uD83D\uDE22", "\uD83D\uDE21", "\uD83E\uDD2F", "\uD83E\uDD0D",
     ];
     function setStatus(text, tone = "ok") {{
       const safeText = String(text || "").trim() || "...";
@@ -622,19 +625,6 @@
         window.URL.revokeObjectURL(fileItem.preview_url);
       }} catch (_) {{}}
     }}
-    function removePendingFileById(fileId) {{
-      const current = Array.isArray(state.pendingFiles) ? state.pendingFiles : [];
-      const next = [];
-      for (const fileItem of current) {{
-        if (String(fileItem.id || "") === String(fileId || "")) {{
-          revokePendingPreview(fileItem);
-          continue;
-        }}
-        next.push(fileItem);
-      }}
-      state.pendingFiles = next;
-      renderPendingFiles();
-    }}
     function queuePendingFile(file) {{
       if (!file) {{
         return;
@@ -661,61 +651,6 @@
         preview_url: previewUrl,
         file: file,
       }});
-    }}
-    function renderPendingFiles() {{
-      const pendingFiles = Array.isArray(state.pendingFiles) ? state.pendingFiles : [];
-      if (!pendingFiles.length) {{
-        attachListEl.hidden = true;
-        attachListEl.innerHTML = "";
-        return;
-      }}
-      attachListEl.hidden = false;
-      attachListEl.innerHTML = "";
-      for (const pending of pendingFiles) {{
-        const row = document.createElement("div");
-        row.className = "attach-item";
-
-        if (pending.is_image && pending.preview_url) {{
-          const preview = document.createElement("img");
-          preview.className = "attach-item-preview";
-          preview.src = pending.preview_url;
-          preview.alt = pending.name || "";
-          row.appendChild(preview);
-        }} else {{
-          const icon = document.createElement("span");
-          icon.className = "attach-item-icon";
-          icon.innerHTML = '<i class="fa-regular fa-file"></i>';
-          row.appendChild(icon);
-        }}
-
-        const info = document.createElement("div");
-        info.className = "attach-item-info";
-        const nameEl = document.createElement("div");
-        nameEl.className = "attach-item-name";
-        nameEl.textContent = pending.name || "file.bin";
-        const sizeEl = document.createElement("div");
-        sizeEl.className = "attach-item-size";
-        sizeEl.textContent = formatBytes(pending.size);
-        info.appendChild(nameEl);
-        info.appendChild(sizeEl);
-        row.appendChild(info);
-
-        const removeBtn = document.createElement("button");
-        removeBtn.type = "button";
-        removeBtn.className = "attach-item-remove";
-        removeBtn.disabled = state.fileReading;
-        removeBtn.title = t("attach_remove");
-        removeBtn.innerHTML = '<i class="fa-solid fa-xmark"></i>';
-        removeBtn.addEventListener("click", () => {{
-          if (state.fileReading) {{
-            return;
-          }}
-          removePendingFileById(pending.id);
-          updateComposerState();
-        }});
-        row.appendChild(removeBtn);
-        attachListEl.appendChild(row);
-      }}
     }}
     function readFileAsDataURL(file) {{
       return new Promise((resolve, reject) => {{
@@ -1270,6 +1205,7 @@
       for (const item of list) {{
         historyEl.appendChild(buildMessageNode(item));
       }}
+      historyEl.appendChild(ratingBoxEl);
       if (stickToBottom) {{
         historyEl.scrollTop = historyEl.scrollHeight;
       }} else {{
@@ -1287,9 +1223,10 @@
           || (state.ratingSubmitted && normalizeRating(state.ticketRating) !== null)
         )
       );
-      ratingBoxEl.hidden = !visible;
       ratingActionsEl.innerHTML = "";
+      ratingTextEl.textContent = "";
       if (!visible) {{
+        ratingBoxEl.hidden = true;
         return;
       }}
 
@@ -1298,23 +1235,25 @@
         ratingTextEl.textContent = savedRating !== null
           ? t("rating_thanks_with_value", {{ rating: savedRating }})
           : t("rating_thanks");
-        return;
-      }}
-
-      ratingTextEl.textContent = String(state.ratingMessage || "").trim() || t("rating_prompt_default");
-      for (let rating = 1; rating <= 5; rating += 1) {{
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.className = "rating-btn";
-        btn.textContent = String(rating);
-        btn.disabled = state.ratingSubmitting;
-        btn.addEventListener("click", () => {{
-          submitRating(rating).catch((error) => {{
-            handleActionError(error);
+      }} else {{
+        ratingTextEl.textContent = String(state.ratingMessage || "").trim() || t("rating_prompt_default");
+        for (let rating = 1; rating <= 5; rating += 1) {{
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "rating-btn";
+          btn.textContent = String(rating);
+          btn.disabled = state.ratingSubmitting;
+          btn.addEventListener("click", () => {{
+            submitRating(rating).catch((error) => {{
+              handleActionError(error);
+            }});
           }});
-        }});
-        ratingActionsEl.appendChild(btn);
+          ratingActionsEl.appendChild(btn);
+        }}
       }}
+      const hasText = String(ratingTextEl.textContent || "").trim().length > 0;
+      const hasActions = ratingActionsEl.childElementCount > 0;
+      ratingBoxEl.hidden = !(hasText || hasActions);
     }}
     async function submitRating(rating) {{
       const normalized = normalizeRating(rating);
@@ -1490,7 +1429,6 @@
         sendButtonEl.title = t("composer_locked");
         sendButtonEl.setAttribute("aria-label", t("composer_locked"));
         textEl.placeholder = t("composer_placeholder_fill");
-        renderPendingFiles();
         return;
       }}
       textEl.disabled = false;
@@ -1509,7 +1447,6 @@
         sendButtonEl.setAttribute("aria-label", sendLabel);
         textEl.placeholder = t("composer_placeholder_type");
       }}
-      renderPendingFiles();
       autoSizeTextarea();
     }}
 
@@ -1686,11 +1623,8 @@
         revokePendingPreview(pending);
         state.pendingFiles.shift();
         sentCount += 1;
-        renderPendingFiles();
       }}
-      if (fileInputEl) {{
-        fileInputEl.value = "";
-      }}
+      fileInputEl.value = "";
       if (sentCount > 0) {{
         await refreshHistory(true);
         setStatus(t("status_files_sent", {{ count: sentCount }}), "ok");
@@ -1803,9 +1737,7 @@
       }} else if (skippedCount > 0) {{
         setStatus(t("status_file_too_large", {{ max: formatBytes(maxUploadBytes) }}), "warning");
       }}
-      if (fileInputEl) {{
-        fileInputEl.value = "";
-      }}
+      fileInputEl.value = "";
       updateComposerState();
     }});
     textEl.addEventListener("input", () => {{

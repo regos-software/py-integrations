@@ -382,9 +382,14 @@
       box-shadow: none;
     }
     .rating-box {
-      border-top: 1px solid #d7dfea;
-      padding: 10px 14px;
-      background: #f7f9fc;
+      align-self: center;
+      width: min(100%, 640px);
+      max-width: 96%;
+      padding: 10px 12px;
+      border: 1px solid #cfd8e4;
+      border-radius: 14px;
+      background: rgba(247, 249, 252, 0.96);
+      box-shadow: var(--shadow-soft);
       display: grid;
       gap: 8px;
     }
@@ -428,7 +433,7 @@
     }
     .composer {
       display: grid;
-      gap: 8px;
+      gap: 0;
       border-top: 0;
       padding: 8px 12px 12px 12px;
       background: linear-gradient(180deg, #d9e2ea 0%, #eceff4 100%);
@@ -519,6 +524,9 @@
       grid-template-columns: repeat(8, minmax(0, 1fr));
       gap: 4px;
       z-index: 20;
+    }
+    .emoji-panel[hidden] {
+      display: none;
     }
     .emoji-item {
       border: 0;
@@ -623,88 +631,6 @@
       opacity: .5;
       cursor: default;
     }
-    .attach-list {
-      grid-column: 1 / -1;
-      min-width: 0;
-      display: grid;
-      gap: 6px;
-      border: 1px solid #d1d9e5;
-      border-radius: 11px;
-      padding: 7px 10px;
-      color: #6f7d95;
-      font-size: 12px;
-      background: rgba(255, 255, 255, 0.96);
-    }
-    .attach-item {
-      display: grid;
-      grid-template-columns: auto 1fr auto;
-      align-items: center;
-      gap: 8px;
-      min-height: 36px;
-      border: 1px solid #d9e1ec;
-      border-radius: 10px;
-      padding: 5px 7px;
-      background: #fbfcff;
-    }
-    .attach-item-preview {
-      width: 26px;
-      height: 26px;
-      border-radius: 7px;
-      object-fit: cover;
-      border: 1px solid #d0dbe8;
-      background: #e7edf6;
-    }
-    .attach-item-icon {
-      width: 26px;
-      height: 26px;
-      border-radius: 7px;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      color: #55779f;
-      background: rgba(83, 118, 160, 0.14);
-      font-size: 12px;
-    }
-    .attach-item-info {
-      min-width: 0;
-      display: grid;
-      gap: 1px;
-    }
-    .attach-item-name {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      font-weight: 600;
-      color: #334a66;
-      font-size: 12px;
-    }
-    .attach-item-size {
-      color: #7d8ca3;
-      font-size: 11px;
-      line-height: 1.1;
-    }
-    .attach-item-remove {
-      border: 0;
-      width: 24px;
-      height: 24px;
-      border-radius: 8px;
-      padding: 0;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      background: rgba(80, 102, 134, 0.12);
-      color: #526682;
-      cursor: pointer;
-      transition: background-color .14s ease, color .14s ease;
-    }
-    .attach-item-remove:hover:not(:disabled) {
-      background: rgba(77, 109, 152, 0.2);
-      color: #2f4f74;
-    }
-    .attach-item-remove:disabled {
-      opacity: .45;
-      cursor: default;
-    }
     @keyframes rise {
       from { transform: translateY(10px) scale(.985); opacity: .32; }
       to { transform: translateY(0) scale(1); opacity: 1; }
@@ -741,8 +667,6 @@
       }
       .history {
         padding: 10px;
-      }
-      .history {
         max-height: none;
         min-height: 0;
       }
@@ -778,9 +702,6 @@
         border-radius: 9px;
       }
       .send-btn {
-        font-size: 11px;
-      }
-      .attach-list {
         font-size: 11px;
       }
       .msg {
