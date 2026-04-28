@@ -66,6 +66,7 @@
     }};
     const REQUIRED_ORDER = ["display_name", "phone", "email"];
     const LANGUAGES = ["ru", "uz", "en"];
+    const COMPOSER_SCROLL_RESERVE_EXTRA_PX = 28;
     const MARKDOWN_TAG_MARKERS = [
       ["**", "strong"],
       ["++", "u"],
@@ -303,7 +304,10 @@
       if (!composerSpacerEl || !formEl) {{
         return;
       }}
-      const nextReserve = Math.max(Number(formEl.offsetHeight || 0), 0) + 8;
+      const nextReserve = (
+        Math.max(Number(formEl.offsetHeight || 0), 0)
+        + COMPOSER_SCROLL_RESERVE_EXTRA_PX
+      );
       const currentReserve = Number(composerSpacerEl.dataset.reserve || "0");
       if (!force && Math.abs(nextReserve - currentReserve) < 1) {{
         return;
@@ -1137,6 +1141,9 @@
         const text = String(item.text || "");
         const edited = item.edited ? "1" : "0";
         const type = String(item.message_type || "");
+        const mine = item.mine ? "1" : "0";
+        const createdDate = String(Number(item.created_date || 0) || 0);
+        const authorName = String(item.author_name || "");
         const files = Array.isArray(item.files) ? item.files : [];
         const filesChunk = files.map((file) => {{
           const fileId = String((file && file.id) || "");
@@ -1144,7 +1151,9 @@
           const fileName = String((file && file.name) || "");
           return fileId + ":" + fileName + ":" + fileUrl;
         }}).join(",");
-        chunks.push(id + "|" + type + "|" + edited + "|" + text + "|" + filesChunk);
+        chunks.push(
+          id + "|" + type + "|" + mine + "|" + edited + "|" + createdDate + "|" + authorName + "|" + text + "|" + filesChunk
+        );
       }}
       return chunks.join("||");
     }}
@@ -1638,8 +1647,14 @@
               for (const event of events) {{
                 const apiAction = String((event && event.api_action) || "").trim().toLowerCase();
                 if (apiAction === "history") {{
+                  const eventType = String((event && event.type) || "").trim().toLowerCase();
+                  const isRevisionSync = eventType === "chat_revision_changed";
                   shouldRefreshHistory = true;
-                  forceFullHistory = forceFullHistory || !!(event && event.force_full === true);
+                  forceFullHistory = (
+                    forceFullHistory
+                    || !!(event && event.force_full === true)
+                    || isRevisionSync
+                  );
                 }}
               }}
               if (shouldRefreshHistory) {{

@@ -131,8 +131,8 @@
       overflow-y: auto;
       overscroll-behavior: contain;
       background: linear-gradient(180deg, #c2d2df 0%, #d9e2ea 58%, #eceff4 100%);
-      min-height: 400px;
-      max-height: 62vh;
+      min-height: 520px;
+      max-height: 74vh;
       display: flex;
       flex-direction: column;
       gap: 8px;
@@ -449,7 +449,7 @@
       z-index: 6;
       border-top: 0;
       padding: 8px 12px 12px 12px;
-      background: linear-gradient(180deg, #d9e2ea 0%, #eceff4 100%);
+      background: transparent;
     }
     .composer-main {
       display: grid;

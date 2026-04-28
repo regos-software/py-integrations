@@ -2768,6 +2768,8 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             return JSONResponse(status_code=405, content={"error": 405, "description": "Method not allowed"})
 
         action = _normalize_text(body.get("action"), 64).lower()
+        if action == "events":
+            action = "getupdates"
         data = body.get("data")
         data = data if isinstance(data, dict) else {}
 
