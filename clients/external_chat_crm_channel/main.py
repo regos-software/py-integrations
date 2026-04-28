@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import hashlib
 import html
 import json
 import re
@@ -101,6 +102,11 @@ class ExternalChatCrmChannelConfig:
     CLOSED_ENTITY_ERROR_CODE = 1220
     CHAT_REVISION_DEFAULT = 1
     WEBHOOK_DEDUPE_TTL_SEC = 10 * 60
+    EVENT_QUEUE_TTL_SEC = 6 * 60 * 60
+    EVENT_QUEUE_MAX_ITEMS = 500
+    EVENT_BATCH_MAX_ITEMS = 30
+    EVENT_LONGPOLL_TIMEOUT_SEC = 25
+    EVENT_LONGPOLL_TIMEOUT_MAX_SEC = 30
     RATING_POSITIVE_THRESHOLD = 4
     SUPPORTED_INBOUND_WEBHOOKS = {
         "ChatMessageAdded",
@@ -370,6 +376,15 @@ def _result_to_dict(result: Any) -> Dict[str, Any]:
     return {}
 
 
+def _payload_fingerprint(payload: Any) -> str:
+    try:
+        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except Exception:
+        raw = str(payload or "")
+    digest = hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()
+    return digest[:24]
+
+
 def _extract_add_new_id(result: Any) -> Optional[int]:
     direct = _parse_int(str(result), None)
     if direct and direct > 0:
@@ -379,6 +394,25 @@ def _extract_add_new_id(result: Any) -> Optional[int]:
         if value and value > 0:
             return int(value)
     return None
+
+
+def _looks_like_duplicate_error(payload: Dict[str, Any]) -> bool:
+    description = str(payload.get("description") or "").strip().lower()
+    if not description:
+        return False
+    return any(
+        token in description
+        for token in (
+            "duplicate",
+            "already",
+            "exists",
+            "unique",
+            "external_id",
+            "external_message_id",
+            "external dialog",
+            "external_dialog",
+        )
+    )
 
 
 def _enum_value(value: Any) -> str:
@@ -433,6 +467,19 @@ class ExternalChatCrmChannelIntegration(ClientBase):
     @classmethod
     def _chat_revision_key(cls, connected_integration_id: str, chat_id: str) -> str:
         return cls._redis_key("chat_revision", connected_integration_id, chat_id)
+
+    @classmethod
+    def _chat_events_stream_key(cls, connected_integration_id: str, chat_id: str) -> str:
+        return cls._redis_key("events_stream", connected_integration_id, chat_id)
+
+    @classmethod
+    def _chat_events_revision_dedupe_key(
+        cls,
+        connected_integration_id: str,
+        chat_id: str,
+        chat_revision: int,
+    ) -> str:
+        return cls._redis_key("events_stream_dedupe", connected_integration_id, chat_id, int(chat_revision))
 
     @classmethod
     def _ticket_state_cache_key(cls, connected_integration_id: str, ticket_id: int) -> str:
@@ -496,6 +543,126 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         if not valid:
             return
         await redis_client.delete(*valid)
+
+    @classmethod
+    async def _publish_chat_event(
+        cls,
+        connected_integration_id: str,
+        *,
+        chat_id: str,
+        event_type: str,
+        source_action: Optional[str] = None,
+        chat_revision: Optional[int] = None,
+        ticket_id: Optional[int] = None,
+        force_full: bool = False,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        safe_chat_id = str(chat_id or "").strip()
+        if not safe_chat_id or not _redis_enabled():
+            return
+        safe_revision = int(chat_revision or 0)
+        if safe_revision > 0:
+            dedupe_key = cls._chat_events_revision_dedupe_key(
+                connected_integration_id,
+                safe_chat_id,
+                safe_revision,
+            )
+            is_first = await cls._redis_set_nx(
+                dedupe_key,
+                "1",
+                max(int(ExternalChatCrmChannelConfig.WEBHOOK_DEDUPE_TTL_SEC or 1), 1),
+            )
+            if not is_first:
+                return
+
+        stream_key = cls._chat_events_stream_key(connected_integration_id, safe_chat_id)
+        ttl_sec = max(int(ExternalChatCrmChannelConfig.EVENT_QUEUE_TTL_SEC or 1), 1)
+        max_items = max(int(ExternalChatCrmChannelConfig.EVENT_QUEUE_MAX_ITEMS or 1), 1)
+
+        event: Dict[str, Any] = {
+            "type": str(event_type or "").strip() or "chat_event",
+            "source_action": str(source_action or "").strip() or None,
+            "chat_id": safe_chat_id,
+            "ticket_id": int(ticket_id) if ticket_id else None,
+            "chat_revision": safe_revision if safe_revision > 0 else None,
+            "api_action": "history",
+            "force_full": bool(force_full),
+            "created_at": int(time.time()),
+            "payload": payload if isinstance(payload, dict) else {},
+        }
+        serialized = _json_dumps(event)
+        await redis_client.xadd(
+            stream_key,
+            {"payload": serialized},
+            maxlen=max_items,
+            approximate=True,
+        )
+        await redis_client.expire(stream_key, ttl_sec)
+
+    @classmethod
+    async def _poll_chat_events(
+        cls,
+        connected_integration_id: str,
+        *,
+        chat_id: str,
+        last_event_id: str,
+        timeout_sec: int,
+        max_items: int,
+    ) -> List[Dict[str, Any]]:
+        safe_chat_id = str(chat_id or "").strip()
+        if not safe_chat_id or not _redis_enabled():
+            return []
+
+        stream_key = cls._chat_events_stream_key(connected_integration_id, safe_chat_id)
+        resolved_timeout = min(
+            max(int(timeout_sec or ExternalChatCrmChannelConfig.EVENT_LONGPOLL_TIMEOUT_SEC), 1),
+            int(ExternalChatCrmChannelConfig.EVENT_LONGPOLL_TIMEOUT_MAX_SEC),
+        )
+        resolved_max_items = min(
+            max(int(max_items or 1), 1),
+            int(ExternalChatCrmChannelConfig.EVENT_BATCH_MAX_ITEMS),
+        )
+        cursor = str(last_event_id or "").strip()
+        if not re.fullmatch(r"\d+-\d+|\$", cursor):
+            cursor = "$"
+        stream_rows = await redis_client.xread(
+            {stream_key: cursor},
+            count=resolved_max_items,
+            block=resolved_timeout * 1000,
+        )
+        if not stream_rows:
+            return []
+
+        events: List[Dict[str, Any]] = []
+        for stream_row in stream_rows:
+            if not isinstance(stream_row, (tuple, list)) or len(stream_row) != 2:
+                continue
+            entries = stream_row[1]
+            if not isinstance(entries, list):
+                continue
+            for item in entries:
+                if not isinstance(item, (tuple, list)) or len(item) != 2:
+                    continue
+                event_id = str(item[0] or "").strip()
+                fields = item[1] if isinstance(item[1], dict) else {}
+                raw = str(fields.get("payload") or "")
+                if not raw:
+                    continue
+                try:
+                    payload = _json_loads(raw)
+                except Exception:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                payload["id"] = event_id
+                events.append(payload)
+
+        if events:
+            await redis_client.expire(
+                stream_key,
+                max(int(ExternalChatCrmChannelConfig.EVENT_QUEUE_TTL_SEC or 1), 1),
+            )
+        return events
 
     @classmethod
     async def _is_connected_integration_active(
@@ -996,12 +1163,21 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         parsed = _parse_int(current, None)
         if parsed and parsed > 0:
             return int(parsed)
-        await cls._redis_set(
+        default_revision = int(ExternalChatCrmChannelConfig.CHAT_REVISION_DEFAULT)
+        inserted = await cls._redis_set_nx(
             key,
-            str(ExternalChatCrmChannelConfig.CHAT_REVISION_DEFAULT),
+            str(default_revision),
             ExternalChatCrmChannelConfig.CONTEXT_TTL_SEC,
         )
-        return int(ExternalChatCrmChannelConfig.CHAT_REVISION_DEFAULT)
+        if inserted:
+            return default_revision
+
+        current = await cls._redis_get(key)
+        parsed = _parse_int(current, None)
+        if parsed and parsed > 0:
+            await redis_client.expire(key, max(int(ExternalChatCrmChannelConfig.CONTEXT_TTL_SEC or 1), 1))
+            return int(parsed)
+        return default_revision
 
     @classmethod
     async def _get_chat_revision(
@@ -1267,6 +1443,10 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         )
         if not add_response.ok:
             payload = _result_to_dict(add_response.result)
+            if _looks_like_duplicate_error(payload):
+                existing = await cls._find_client_by_external_id(api, external_id)
+                if existing and getattr(existing, "id", None):
+                    return existing
             raise RuntimeError(
                 "Client/Add rejected: "
                 f"error={payload.get('error')} description={payload.get('description')}"
@@ -1328,6 +1508,14 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         )
         if not add_response.ok:
             payload = _result_to_dict(add_response.result)
+            if _looks_like_duplicate_error(payload):
+                existing = await cls._find_ticket_by_external_dialog_id(
+                    api,
+                    external_dialog_id,
+                    int(runtime.channel_id),
+                )
+                if existing and getattr(existing, "id", None) and getattr(existing, "chat_id", None):
+                    return existing
             raise RuntimeError(
                 "Ticket/Add rejected: "
                 f"error={payload.get('error')} description={payload.get('description')}"
@@ -1632,9 +1820,21 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             )
         if response.ok:
             new_uuid = str(_result_get(response.result, "new_uuid") or "").strip()
-            await cls._bump_chat_revision(
+            revision = await cls._bump_chat_revision(
                 connected_integration_id,
                 str(context.chat_id),
+            )
+            await cls._publish_chat_event(
+                connected_integration_id,
+                chat_id=str(context.chat_id),
+                event_type="chat_message_changed",
+                source_action="local_send_message",
+                chat_revision=int(revision or 0),
+                ticket_id=int(context.ticket_id),
+                force_full=False,
+                payload={
+                    "message_id": new_uuid or None,
+                },
             )
             return new_uuid
 
@@ -1738,21 +1938,28 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             if not message_id:
                 raise RuntimeError("ChatMessage/Add did not return new_uuid")
 
-        await cls._bump_chat_revision(
+        revision = await cls._bump_chat_revision(
             connected_integration_id,
             str(context.chat_id),
+        )
+        await cls._publish_chat_event(
+            connected_integration_id,
+            chat_id=str(context.chat_id),
+            event_type="chat_message_changed",
+            source_action="local_send_file",
+            chat_revision=int(revision or 0),
+            ticket_id=int(context.ticket_id),
+            force_full=False,
+            payload={
+                "message_id": message_id,
+                "file_id": int(file_id),
+            },
         )
         return message_id, int(file_id)
 
     @staticmethod
     def _is_duplicate_external_message_error(payload: Dict[str, Any]) -> bool:
-        description = str(payload.get("description") or "").strip().lower()
-        if not description:
-            return False
-        return any(
-            token in description
-            for token in ("duplicate", "already", "exists", "external_message_id")
-        )
+        return _looks_like_duplicate_error(payload)
 
     @classmethod
     async def _mark_ticket_once_flag(
@@ -1790,15 +1997,24 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             response = await api.chat.chat_message.add(
                 ChatMessageAddRequest(
                     chat_id=safe_chat_id,
-                    message_type=ChatMessageTypeEnum.Regular,
+                    message_type=ChatMessageTypeEnum.System,
                     text=safe_text,
                     external_message_id=safe_external_message_id,
                 )
             )
         if response.ok:
-            await cls._bump_chat_revision(
+            revision = await cls._bump_chat_revision(
                 connected_integration_id,
                 safe_chat_id,
+            )
+            await cls._publish_chat_event(
+                connected_integration_id,
+                chat_id=safe_chat_id,
+                event_type="chat_message_changed",
+                source_action="local_system_message",
+                chat_revision=int(revision or 0),
+                force_full=False,
+                payload={},
             )
             return True
 
@@ -1900,10 +2116,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     _enum_value(getattr(row, "message_type", None)).strip()
                     or ChatMessageTypeEnum.Regular.value
                 )
-                if message_type in {
-                    ChatMessageTypeEnum.Private.value,
-                    ChatMessageTypeEnum.System.value,
-                }:
+                if message_type == ChatMessageTypeEnum.Private.value:
                     continue
                 author_type = _enum_value(getattr(row, "author_entity_type", None)).strip().lower()
                 author_id = _parse_int(getattr(row, "author_entity_id", None), None)
@@ -2236,19 +2449,22 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         if event_id_value:
             return f"event:{event_id_value}"
 
+        fingerprint = _payload_fingerprint(payload if isinstance(payload, dict) else {})
         ticket_id = _parse_int(payload.get("id"), None)
+        message_id = str(payload.get("id") or "").strip()
         chat_id = str(payload.get("chat_id") or "").strip()
+        if webhook_action.startswith("ChatMessage"):
+            if chat_id and message_id:
+                return f"{webhook_action}:chat:{chat_id}:message:{message_id}:{fingerprint}"
+            if chat_id:
+                return f"{webhook_action}:chat:{chat_id}:{fingerprint}"
         if chat_id and ticket_id:
-            return f"{webhook_action}:chat:{chat_id}:ticket:{ticket_id}"
+            return f"{webhook_action}:chat:{chat_id}:ticket:{ticket_id}:{fingerprint}"
         if chat_id:
-            return f"{webhook_action}:chat:{chat_id}"
+            return f"{webhook_action}:chat:{chat_id}:{fingerprint}"
         if ticket_id:
-            return f"{webhook_action}:ticket:{ticket_id}"
-        try:
-            payload_key = _json_dumps(payload)
-        except Exception:
-            payload_key = str(payload or "")
-        return f"{webhook_action}:{payload_key}"
+            return f"{webhook_action}:ticket:{ticket_id}:{fingerprint}"
+        return f"{webhook_action}:{fingerprint}"
 
     async def _is_duplicate_webhook_event(
         self,
@@ -2269,6 +2485,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
     async def _apply_chat_message_webhook(
         cls,
         connected_integration_id: str,
+        webhook_action: str,
         payload: Dict[str, Any],
     ) -> Dict[str, Any]:
         chat_id = str(payload.get("chat_id") or "").strip()
@@ -2276,6 +2493,17 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             return {"status": "ignored", "reason": "invalid_payload:chat_id"}
 
         revision = await cls._bump_chat_revision(connected_integration_id, chat_id)
+        await cls._publish_chat_event(
+            connected_integration_id,
+            chat_id=chat_id,
+            event_type="chat_message_changed",
+            source_action=webhook_action,
+            chat_revision=int(revision or 0),
+            force_full=False,
+            payload={
+                "message_id": str(payload.get("id") or "").strip() or None,
+            },
+        )
         return {"status": "processed", "chat_id": chat_id, "chat_revision": revision}
 
     @classmethod
@@ -2367,6 +2595,21 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                         chat_id,
                         error,
                     )
+            revision = await cls._get_chat_revision(connected_integration_id, chat_id)
+            await cls._publish_chat_event(
+                connected_integration_id,
+                chat_id=chat_id,
+                event_type="ticket_state_changed",
+                source_action=webhook_action,
+                chat_revision=int(revision or 0),
+                ticket_id=int(ticket_id),
+                force_full=True,
+                payload={
+                    "ticket_status": status_value or None,
+                    "ticket_closed": bool(ticket_closed),
+                    "ticket_rating": ticket_rating,
+                },
+            )
 
         return {
             "status": "processed",
@@ -2403,7 +2646,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
 
         try:
             if webhook_action in {"ChatMessageAdded", "ChatMessageEdited", "ChatMessageDeleted"}:
-                result = await self._apply_chat_message_webhook(ci, payload)
+                result = await self._apply_chat_message_webhook(ci, webhook_action, payload)
             else:
                 result = await self._apply_ticket_webhook(ci, webhook_action, payload)
         except Exception as error:
@@ -2612,6 +2855,75 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     "history": history,
                 }
 
+            if action == "events":
+                timeout_sec = _parse_int(
+                    data.get("timeout_sec"),
+                    ExternalChatCrmChannelConfig.EVENT_LONGPOLL_TIMEOUT_SEC,
+                )
+                max_events = _parse_int(
+                    data.get("max_events"),
+                    ExternalChatCrmChannelConfig.EVENT_BATCH_MAX_ITEMS,
+                )
+                last_event_id = str(data.get("last_event_id") or "").strip() or "$"
+                chat_revision = await self._get_chat_revision(ci, str(context.chat_id))
+                known_revision = _parse_int(data.get("known_revision"), None)
+                if (
+                    known_revision is not None
+                    and int(chat_revision) > 0
+                    and int(known_revision) != int(chat_revision)
+                ):
+                    ticket_view = await self._compose_context_ticket_view(
+                        ci,
+                        runtime,
+                        context,
+                    )
+                    return {
+                        "status": "ok",
+                        "visitor_id": visitor_id,
+                        "chat_revision": chat_revision,
+                        "last_event_id": last_event_id,
+                        "events": [
+                            {
+                                "id": str(last_event_id),
+                                "type": "chat_revision_changed",
+                                "source_action": "revision_sync",
+                                "chat_id": str(context.chat_id),
+                                "ticket_id": int(context.ticket_id),
+                                "chat_revision": int(chat_revision),
+                                "api_action": "history",
+                                "force_full": False,
+                                "created_at": int(time.time()),
+                                "payload": {},
+                            }
+                        ],
+                        **ticket_view,
+                    }
+
+                events = await self._poll_chat_events(
+                    ci,
+                    chat_id=str(context.chat_id),
+                    last_event_id=last_event_id,
+                    timeout_sec=int(timeout_sec or ExternalChatCrmChannelConfig.EVENT_LONGPOLL_TIMEOUT_SEC),
+                    max_items=int(max_events or ExternalChatCrmChannelConfig.EVENT_BATCH_MAX_ITEMS),
+                )
+                if events:
+                    last_event_id = str(events[-1].get("id") or last_event_id)
+                if events:
+                    chat_revision = await self._get_chat_revision(ci, str(context.chat_id))
+                ticket_view = await self._compose_context_ticket_view(
+                    ci,
+                    runtime,
+                    context,
+                )
+                return {
+                    "status": "ok",
+                    "visitor_id": visitor_id,
+                    "chat_revision": chat_revision,
+                    "last_event_id": last_event_id,
+                    "events": events,
+                    **ticket_view,
+                }
+
             if action == "send_message":
                 text = _normalize_message_markup(
                     data.get("text"),
@@ -2784,6 +3096,19 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                         ),
                     )
                 chat_revision = await self._get_chat_revision(ci, str(context.chat_id))
+                await self._publish_chat_event(
+                    ci,
+                    chat_id=str(context.chat_id),
+                    event_type="ticket_state_changed",
+                    source_action="local_set_rating",
+                    chat_revision=int(chat_revision or 0),
+                    ticket_id=int(context.ticket_id),
+                    force_full=True,
+                    payload={
+                        "ticket_rating": int(rating),
+                        "ticket_closed": True,
+                    },
+                )
                 saved_view = self._compose_ticket_view_state(runtime, saved_state)
                 return {
                     "status": "ok",

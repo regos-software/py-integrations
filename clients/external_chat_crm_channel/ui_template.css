@@ -45,7 +45,7 @@
       width: 100%;
       max-width: 900px;
       display: grid;
-      grid-template-rows: auto 1fr auto;
+      grid-template-rows: auto 1fr;
       min-height: 0;
       background: #f7f9fc;
       border: 1px solid #d7dfea;
@@ -393,6 +393,9 @@
       display: grid;
       gap: 8px;
     }
+    .rating-box[hidden] {
+      display: none;
+    }
     .rating-text {
       color: var(--text);
       font-size: 13px;
@@ -434,6 +437,10 @@
     .composer {
       display: grid;
       gap: 0;
+      margin-top: auto;
+      position: sticky;
+      bottom: 0;
+      z-index: 6;
       border-top: 0;
       padding: 8px 12px 12px 12px;
       background: linear-gradient(180deg, #d9e2ea 0%, #eceff4 100%);

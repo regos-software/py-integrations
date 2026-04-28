@@ -27,27 +27,27 @@
         <div class="rating-text" id="ratingText"></div>
         <div class="rating-actions" id="ratingActions"></div>
       </div>
-    </div>
-    <form class="composer" id="composer">
-      <div class="composer-main">
-        <button type="button" class="attach-btn" id="attachButton" title="Attach file">+</button>
-        <textarea id="text" maxlength="{ExternalChatCrmChannelConfig.MAX_MESSAGE_LENGTH}" placeholder="Type your message"></textarea>
-      </div>
-      <div class="composer-tools" id="composerTools">
-        <div class="format-tools">
-          <button type="button" class="format-btn" data-format="list"><i class="fa-solid fa-list-ul"></i></button>
-          <button type="button" class="format-btn" data-format="bold"><i class="fa-solid fa-bold"></i></button>
-          <button type="button" class="format-btn" data-format="italic"><i class="fa-solid fa-italic"></i></button>
-          <button type="button" class="format-btn" data-format="strike"><i class="fa-solid fa-strikethrough"></i></button>
-          <button type="button" class="format-btn" data-format="code"><i class="fa-solid fa-code"></i></button>
-          <button type="button" class="format-btn" data-format="quote"><i class="fa-solid fa-quote-right"></i></button>
+      <form class="composer" id="composer">
+        <div class="composer-main">
+          <button type="button" class="attach-btn" id="attachButton" title="Attach file">+</button>
+          <textarea id="text" maxlength="{ExternalChatCrmChannelConfig.MAX_MESSAGE_LENGTH}" placeholder="Type your message"></textarea>
         </div>
-        <button type="button" class="emoji-btn" id="emojiButton"><i class="fa-regular fa-face-smile"></i></button>
-        <button type="submit" class="send-btn"><i class="fa-solid fa-paper-plane"></i></button>
-        <div class="emoji-panel" id="emojiPanel" hidden></div>
-      </div>
-      <input type="file" id="fileInput" hidden multiple>
-    </form>
+        <div class="composer-tools" id="composerTools">
+          <div class="format-tools">
+            <button type="button" class="format-btn" data-format="list"><i class="fa-solid fa-list-ul"></i></button>
+            <button type="button" class="format-btn" data-format="bold"><i class="fa-solid fa-bold"></i></button>
+            <button type="button" class="format-btn" data-format="italic"><i class="fa-solid fa-italic"></i></button>
+            <button type="button" class="format-btn" data-format="strike"><i class="fa-solid fa-strikethrough"></i></button>
+            <button type="button" class="format-btn" data-format="code"><i class="fa-solid fa-code"></i></button>
+            <button type="button" class="format-btn" data-format="quote"><i class="fa-solid fa-quote-right"></i></button>
+          </div>
+          <button type="button" class="emoji-btn" id="emojiButton"><i class="fa-regular fa-face-smile"></i></button>
+          <button type="submit" class="send-btn"><i class="fa-solid fa-paper-plane"></i></button>
+          <div class="emoji-panel" id="emojiPanel" hidden></div>
+        </div>
+        <input type="file" id="fileInput" hidden multiple>
+      </form>
+    </div>
   </div>
   <script>
     const I18N_BUNDLE = {safe_i18n_bundle};
@@ -125,7 +125,7 @@
       chatReady: false,
       ticketClosed: false,
       chatRevision: 0,
-      pollTick: 0,
+      lastEventId: "$",
       visitorId: "",
       profile: {{
         display_name: "",
@@ -1008,6 +1008,45 @@
       }}
       return content;
     }}
+    function bbCodeToMarkdown(text) {{
+      const source = String(text || "");
+      if (!source || source.indexOf("[") < 0) {{
+        return source;
+      }}
+      let next = source;
+      next = next.replace(/\[br\s*\/?\]/gi, "\n");
+      next = next.replace(/\[(b|strong)\]([\s\S]*?)\[\/\1\]/gi, "**$2**");
+      next = next.replace(/\[(i|em)\]([\s\S]*?)\[\/\1\]/gi, "*$2*");
+      next = next.replace(/\[(u|ins)\]([\s\S]*?)\[\/\1\]/gi, "++$2++");
+      next = next.replace(/\[(s|strike|del)\]([\s\S]*?)\[\/\1\]/gi, "~~$2~~");
+      next = next.replace(/\[quote\]([\s\S]*?)\[\/quote\]/gi, (_, block) => {{
+        const lines = String(block || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+        return lines.map((line) => "> " + line).join("\n");
+      }});
+      next = next.replace(/\[code\]([\s\S]*?)\[\/code\]/gi, (_, codeRaw) => {{
+        const code = String(codeRaw || "");
+        if (code.indexOf("\n") >= 0) {{
+          return "```\n" + code + "\n```";
+        }}
+        return "`" + code.replace(/`/g, "\\`") + "`";
+      }});
+      next = next.replace(/\[url=([^\]]+)\]([\s\S]*?)\[\/url\]/gi, (_, hrefRaw, labelRaw) => {{
+        const href = String(hrefRaw || "").trim();
+        const label = String(labelRaw || "").trim();
+        if (!href || !label) {{
+          return label || href;
+        }}
+        return "[" + label + "](" + href + ")";
+      }});
+      next = next.replace(/\[url\]([\s\S]*?)\[\/url\]/gi, (_, hrefRaw) => {{
+        const href = String(hrefRaw || "").trim();
+        if (!href) {{
+          return "";
+        }}
+        return "[" + href + "](" + href + ")";
+      }});
+      return next;
+    }}
     function markdownToSafeHtml(text) {{
       const source = String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
       if (!source) {{
@@ -1052,7 +1091,24 @@
       if (!normalized) {{
         return "";
       }}
-      return markdownToSafeHtml(normalized);
+      return markdownToSafeHtml(bbCodeToMarkdown(normalized));
+    }}
+    function setFormattedNodeContent(node, rawText) {{
+      if (!node) {{
+        return false;
+      }}
+      const normalized = String(rawText || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+      if (!normalized) {{
+        node.textContent = "";
+        return false;
+      }}
+      const formatted = renderFormattedText(normalized);
+      if (formatted) {{
+        node.innerHTML = formatted;
+      }} else {{
+        node.textContent = normalized;
+      }}
+      return true;
     }}
     function toTime(ts) {{
       const value = Number(ts || 0);
@@ -1172,9 +1228,7 @@
 
       const text = document.createElement("div");
       text.className = "msg-text";
-      const formattedText = renderFormattedText(item.text || "");
-      text.innerHTML = formattedText || escapeHtml(String(item.text || ""));
-      if (formattedText || String(item.text || "").trim()) {{
+      if (setFormattedNodeContent(text, item.text || "")) {{
         box.appendChild(text);
       }}
 
@@ -1206,6 +1260,7 @@
         historyEl.appendChild(buildMessageNode(item));
       }}
       historyEl.appendChild(ratingBoxEl);
+      historyEl.appendChild(formEl);
       if (stickToBottom) {{
         historyEl.scrollTop = historyEl.scrollHeight;
       }} else {{
@@ -1232,23 +1287,28 @@
 
       if (state.ratingSubmitted) {{
         const savedRating = normalizeRating(state.ticketRating);
-        ratingTextEl.textContent = savedRating !== null
+        setFormattedNodeContent(
+          ratingTextEl,
+          savedRating !== null
           ? t("rating_thanks_with_value", {{ rating: savedRating }})
-          : t("rating_thanks");
+          : t("rating_thanks")
+        );
       }} else {{
-        ratingTextEl.textContent = String(state.ratingMessage || "").trim() || t("rating_prompt_default");
-        for (let rating = 1; rating <= 5; rating += 1) {{
-          const btn = document.createElement("button");
-          btn.type = "button";
-          btn.className = "rating-btn";
-          btn.textContent = String(rating);
-          btn.disabled = state.ratingSubmitting;
-          btn.addEventListener("click", () => {{
-            submitRating(rating).catch((error) => {{
-              handleActionError(error);
+        const ratingPrompt = String(state.ratingMessage || "").trim();
+        if (setFormattedNodeContent(ratingTextEl, ratingPrompt)) {{
+          for (let rating = 1; rating <= 5; rating += 1) {{
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.className = "rating-btn";
+            btn.textContent = String(rating);
+            btn.disabled = state.ratingSubmitting;
+            btn.addEventListener("click", () => {{
+              submitRating(rating).catch((error) => {{
+                handleActionError(error);
+              }});
             }});
-          }});
-          ratingActionsEl.appendChild(btn);
+            ratingActionsEl.appendChild(btn);
+          }}
         }}
       }}
       const hasText = String(ratingTextEl.textContent || "").trim().length > 0;
@@ -1401,6 +1461,7 @@
 
       card.appendChild(form);
       historyEl.appendChild(card);
+      historyEl.appendChild(formEl);
       historyEl.scrollTop = historyEl.scrollHeight;
       state.lastHistoryFingerprint = "__onboarding__";
     }}
@@ -1488,6 +1549,85 @@
       updateComposerState();
     }}
 
+    function delayMs(ms) {{
+      const timeout = Math.max(Number(ms || 0), 0);
+      return new Promise((resolve) => {{
+        window.setTimeout(resolve, timeout);
+      }});
+    }}
+
+    let eventLoopRunning = false;
+    let eventLoopBackoffMs = 1000;
+
+    async function runEventLoop() {{
+      if (eventLoopRunning) {{
+        return;
+      }}
+      eventLoopRunning = true;
+      while (eventLoopRunning) {{
+        if (isOnboardingRequired()) {{
+          if (!historyEl.querySelector(".onboarding-card")) {{
+            renderOnboarding();
+          }}
+          updateComposerState();
+          await delayMs(800);
+          continue;
+        }}
+
+        if (!state.chatReady) {{
+          try {{
+            await initChat();
+            eventLoopBackoffMs = 1000;
+          }} catch (error) {{
+            state.chatReady = false;
+            handleActionError(error);
+            await delayMs(eventLoopBackoffMs);
+            eventLoopBackoffMs = Math.min(eventLoopBackoffMs * 2, 10000);
+          }}
+          updateComposerState();
+          continue;
+        }}
+
+        try {{
+          const result = await callApi("events", {{
+            visitor_id: state.visitorId,
+            display_name: state.profile.display_name,
+            email: state.profile.email,
+            phone: state.profile.phone,
+            known_revision: state.chatRevision,
+            last_event_id: state.lastEventId,
+            timeout_sec: 25,
+            max_events: 20,
+          }});
+          applyWriteState(result);
+          if (result && typeof result.last_event_id === "string" && result.last_event_id.trim()) {{
+            state.lastEventId = result.last_event_id.trim();
+          }}
+          const events = Array.isArray(result && result.events) ? result.events : [];
+          let shouldRefreshHistory = false;
+          let forceFullHistory = false;
+          for (const event of events) {{
+            const apiAction = String((event && event.api_action) || "").trim().toLowerCase();
+            if (apiAction === "history") {{
+              shouldRefreshHistory = true;
+              forceFullHistory = forceFullHistory || !!(event && event.force_full === true);
+            }}
+          }}
+          if (shouldRefreshHistory) {{
+            await refreshHistory(forceFullHistory);
+          }} else if (!events.length) {{
+            await delayMs(120);
+          }}
+          eventLoopBackoffMs = 1000;
+        }} catch (error) {{
+          handleActionError(error);
+          await delayMs(eventLoopBackoffMs);
+          eventLoopBackoffMs = Math.min(eventLoopBackoffMs * 2, 10000);
+        }}
+        updateComposerState();
+      }}
+    }}
+
     async function initChat() {{
       if (state.chatReady) {{
         return;
@@ -1513,6 +1653,7 @@
       state.chatReady = true;
       state.onboardingErrors = {{}};
       applyWriteState(result);
+      state.lastEventId = "$";
       renderHistory(result.history || [], true);
       setStatus(t("status_online"), "ok");
     }}
@@ -1784,28 +1925,14 @@
         renderOnboarding();
         setStatus(t("status_fill_required_fields"), "warning");
       }} else {{
-        await initChat();
-      }}
-
-      setInterval(() => {{
-        state.pollTick += 1;
-        if (state.chatReady) {{
-          const forceFull = state.pollTick % 20 === 0;
-          refreshHistory(forceFull).catch((error) => {{
-            handleActionError(error);
-          }});
-        }} else if (isOnboardingRequired()) {{
-          if (!historyEl.querySelector(".onboarding-card")) {{
-            renderOnboarding();
-          }}
-        }} else {{
-          initChat().catch((error) => {{
-            state.chatReady = false;
-            handleActionError(error);
-          }});
+        try {{
+          await initChat();
+        }} catch (error) {{
+          state.chatReady = false;
+          handleActionError(error);
         }}
-        updateComposerState();
-      }}, 3000);
+      }}
+      runEventLoop();
       updateComposerState();
     }}
 
