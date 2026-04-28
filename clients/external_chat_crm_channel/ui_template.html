@@ -1581,6 +1581,7 @@
     let eventLoopBackoffMs = 1000;
     let eventLoopTickTs = 0;
     let eventLoopWatchdogId = 0;
+    const EVENT_EMPTY_DELAY_MS = 15;
 
     function safeUpdateComposerState() {{
       try {{
@@ -1650,7 +1651,7 @@
               if (shouldRefreshHistory) {{
                 await refreshHistory(forceFullHistory);
               }} else if (!events.length) {{
-                await delayMs(120);
+                await delayMs(EVENT_EMPTY_DELAY_MS);
               }}
               eventLoopBackoffMs = 1000;
             }} catch (error) {{
