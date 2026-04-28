@@ -127,7 +127,6 @@
       chatReady: false,
       ticketClosed: false,
       chatRevision: 0,
-      lastEventId: "$",
       visitorId: "",
       profile: {{
         display_name: "",
@@ -1581,7 +1580,7 @@
     let eventLoopBackoffMs = 1000;
     let eventLoopTickTs = 0;
     let eventLoopWatchdogId = 0;
-    const EVENT_EMPTY_DELAY_MS = 15;
+    const EVENT_POLL_INTERVAL_MS = 3000;
 
     function safeUpdateComposerState() {{
       try {{
@@ -1624,20 +1623,15 @@
             }}
 
             try {{
-              const result = await callApi("events", {{
+              const result = await callApi("getupdates", {{
                 visitor_id: state.visitorId,
                 display_name: state.profile.display_name,
                 email: state.profile.email,
                 phone: state.profile.phone,
                 known_revision: state.chatRevision,
-                last_event_id: state.lastEventId,
-                timeout_sec: 25,
                 max_events: 20,
               }});
               applyWriteState(result);
-              if (result && typeof result.last_event_id === "string" && result.last_event_id.trim()) {{
-                state.lastEventId = result.last_event_id.trim();
-              }}
               const events = Array.isArray(result && result.events) ? result.events : [];
               let shouldRefreshHistory = false;
               let forceFullHistory = false;
@@ -1650,9 +1644,8 @@
               }}
               if (shouldRefreshHistory) {{
                 await refreshHistory(forceFullHistory);
-              }} else if (!events.length) {{
-                await delayMs(EVENT_EMPTY_DELAY_MS);
               }}
+              await delayMs(EVENT_POLL_INTERVAL_MS);
               eventLoopBackoffMs = 1000;
             }} catch (error) {{
               handleActionError(error);
@@ -1714,7 +1707,6 @@
       state.chatReady = true;
       state.onboardingErrors = {{}};
       applyWriteState(result);
-      state.lastEventId = "$";
       renderHistory(result.history || [], true);
       setStatus(t("status_online"), "ok");
     }}

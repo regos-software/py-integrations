@@ -105,8 +105,6 @@ class ExternalChatCrmChannelConfig:
     EVENT_QUEUE_TTL_SEC = 6 * 60 * 60
     EVENT_QUEUE_MAX_ITEMS = 500
     EVENT_BATCH_MAX_ITEMS = 30
-    EVENT_LONGPOLL_TIMEOUT_SEC = 25
-    EVENT_LONGPOLL_TIMEOUT_MAX_SEC = 30
     RATING_POSITIVE_THRESHOLD = 4
     SUPPORTED_INBOUND_WEBHOOKS = {
         "ChatMessageAdded",
@@ -440,6 +438,16 @@ class ExternalChatCrmChannelIntegration(ClientBase):
 
     _ACTIVE_CACHE_LOCK = asyncio.Lock()
     _FILE_META_CACHE_LOCK = asyncio.Lock()
+    _EVENTS_DEQUEUE_LUA = (
+        "local count = tonumber(ARGV[1]) or 1 "
+        "if count < 1 then count = 1 end "
+        "local items = redis.call('LRANGE', KEYS[1], 0, count - 1) "
+        "if #items > 0 then "
+        "  redis.call('LTRIM', KEYS[1], count, -1) "
+        "  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]) or 1) "
+        "end "
+        "return items"
+    )
 
     @staticmethod
     def _error_response(code: int, description: str) -> IntegrationErrorResponse:
@@ -469,8 +477,8 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         return cls._redis_key("chat_revision", connected_integration_id, chat_id)
 
     @classmethod
-    def _chat_events_stream_key(cls, connected_integration_id: str, chat_id: str) -> str:
-        return cls._redis_key("events_stream", connected_integration_id, chat_id)
+    def _chat_events_queue_key(cls, connected_integration_id: str, chat_id: str) -> str:
+        return cls._redis_key("events_queue", connected_integration_id, chat_id)
 
     @classmethod
     def _chat_events_revision_dedupe_key(
@@ -479,7 +487,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         chat_id: str,
         chat_revision: int,
     ) -> str:
-        return cls._redis_key("events_stream_dedupe", connected_integration_id, chat_id, int(chat_revision))
+        return cls._redis_key("events_queue_dedupe", connected_integration_id, chat_id, int(chat_revision))
 
     @classmethod
     def _ticket_state_cache_key(cls, connected_integration_id: str, ticket_id: int) -> str:
@@ -575,7 +583,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             if not is_first:
                 return
 
-        stream_key = cls._chat_events_stream_key(connected_integration_id, safe_chat_id)
+        queue_key = cls._chat_events_queue_key(connected_integration_id, safe_chat_id)
         ttl_sec = max(int(ExternalChatCrmChannelConfig.EVENT_QUEUE_TTL_SEC or 1), 1)
         max_items = max(int(ExternalChatCrmChannelConfig.EVENT_QUEUE_MAX_ITEMS or 1), 1)
 
@@ -590,14 +598,35 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             "created_at": int(time.time()),
             "payload": payload if isinstance(payload, dict) else {},
         }
+        event["id"] = f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
         serialized = _json_dumps(event)
-        await redis_client.xadd(
-            stream_key,
-            {"payload": serialized},
-            maxlen=max_items,
-            approximate=True,
-        )
-        await redis_client.expire(stream_key, ttl_sec)
+        async with redis_client.pipeline(transaction=True) as pipe:
+            await pipe.rpush(queue_key, serialized)
+            await pipe.ltrim(queue_key, -max_items, -1)
+            await pipe.expire(queue_key, ttl_sec)
+            await pipe.execute()
+
+    @staticmethod
+    def _build_revision_sync_event(
+        *,
+        chat_id: str,
+        ticket_id: int,
+        chat_revision: int,
+        source_action: str,
+    ) -> Dict[str, Any]:
+        safe_revision = int(chat_revision or 0)
+        return {
+            "id": f"{int(time.time() * 1000)}-sync",
+            "type": "chat_revision_changed",
+            "source_action": str(source_action or "").strip() or "revision_sync",
+            "chat_id": str(chat_id or ""),
+            "ticket_id": int(ticket_id or 0),
+            "chat_revision": safe_revision,
+            "api_action": "history",
+            "force_full": False,
+            "created_at": int(time.time()),
+            "payload": {},
+        }
 
     @classmethod
     async def _poll_chat_events(
@@ -605,63 +634,39 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         connected_integration_id: str,
         *,
         chat_id: str,
-        last_event_id: str,
-        timeout_sec: int,
         max_items: int,
     ) -> List[Dict[str, Any]]:
         safe_chat_id = str(chat_id or "").strip()
         if not safe_chat_id or not _redis_enabled():
             return []
 
-        stream_key = cls._chat_events_stream_key(connected_integration_id, safe_chat_id)
-        resolved_timeout = min(
-            max(int(timeout_sec or ExternalChatCrmChannelConfig.EVENT_LONGPOLL_TIMEOUT_SEC), 1),
-            int(ExternalChatCrmChannelConfig.EVENT_LONGPOLL_TIMEOUT_MAX_SEC),
-        )
+        queue_key = cls._chat_events_queue_key(connected_integration_id, safe_chat_id)
         resolved_max_items = min(
             max(int(max_items or 1), 1),
             int(ExternalChatCrmChannelConfig.EVENT_BATCH_MAX_ITEMS),
         )
-        cursor = str(last_event_id or "").strip()
-        if not re.fullmatch(r"\d+-\d+|\$", cursor):
-            cursor = "$"
-        stream_rows = await redis_client.xread(
-            {stream_key: cursor},
-            count=resolved_max_items,
-            block=resolved_timeout * 1000,
+        ttl_sec = max(int(ExternalChatCrmChannelConfig.EVENT_QUEUE_TTL_SEC or 1), 1)
+        rows = await redis_client.eval(
+            cls._EVENTS_DEQUEUE_LUA,
+            1,
+            queue_key,
+            resolved_max_items,
+            ttl_sec,
         )
-        if not stream_rows:
+        if not isinstance(rows, list) or not rows:
             return []
 
         events: List[Dict[str, Any]] = []
-        for stream_row in stream_rows:
-            if not isinstance(stream_row, (tuple, list)) or len(stream_row) != 2:
+        for raw in rows:
+            text = str(raw or "")
+            if not text:
                 continue
-            entries = stream_row[1]
-            if not isinstance(entries, list):
+            try:
+                payload = _json_loads(text)
+            except Exception:
                 continue
-            for item in entries:
-                if not isinstance(item, (tuple, list)) or len(item) != 2:
-                    continue
-                event_id = str(item[0] or "").strip()
-                fields = item[1] if isinstance(item[1], dict) else {}
-                raw = str(fields.get("payload") or "")
-                if not raw:
-                    continue
-                try:
-                    payload = _json_loads(raw)
-                except Exception:
-                    continue
-                if not isinstance(payload, dict):
-                    continue
-                payload["id"] = event_id
+            if isinstance(payload, dict):
                 events.append(payload)
-
-        if events:
-            await redis_client.expire(
-                stream_key,
-                max(int(ExternalChatCrmChannelConfig.EVENT_QUEUE_TTL_SEC or 1), 1),
-            )
         return events
 
     @classmethod
@@ -2884,16 +2889,11 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     "history": history,
                 }
 
-            if action == "events":
-                timeout_sec = _parse_int(
-                    data.get("timeout_sec"),
-                    ExternalChatCrmChannelConfig.EVENT_LONGPOLL_TIMEOUT_SEC,
-                )
+            if action == "getupdates":
                 max_events = _parse_int(
                     data.get("max_events"),
                     ExternalChatCrmChannelConfig.EVENT_BATCH_MAX_ITEMS,
                 )
-                last_event_id = str(data.get("last_event_id") or "").strip() or "$"
                 chat_revision = await self._get_chat_revision(ci, str(context.chat_id))
                 known_revision = _parse_int(data.get("known_revision"), None)
                 if (
@@ -2910,35 +2910,47 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                         "status": "ok",
                         "visitor_id": visitor_id,
                         "chat_revision": chat_revision,
-                        "last_event_id": last_event_id,
-                        "events": [
-                            {
-                                "id": str(last_event_id),
-                                "type": "chat_revision_changed",
-                                "source_action": "revision_sync",
-                                "chat_id": str(context.chat_id),
-                                "ticket_id": int(context.ticket_id),
-                                "chat_revision": int(chat_revision),
-                                "api_action": "history",
-                                "force_full": False,
-                                "created_at": int(time.time()),
-                                "payload": {},
-                            }
-                        ],
+                        "events": [self._build_revision_sync_event(
+                            chat_id=str(context.chat_id),
+                            ticket_id=int(context.ticket_id),
+                            chat_revision=int(chat_revision),
+                            source_action="revision_sync",
+                        )],
                         **ticket_view,
                     }
 
                 events = await self._poll_chat_events(
                     ci,
                     chat_id=str(context.chat_id),
-                    last_event_id=last_event_id,
-                    timeout_sec=int(timeout_sec or ExternalChatCrmChannelConfig.EVENT_LONGPOLL_TIMEOUT_SEC),
                     max_items=int(max_events or ExternalChatCrmChannelConfig.EVENT_BATCH_MAX_ITEMS),
                 )
                 if events:
-                    last_event_id = str(events[-1].get("id") or last_event_id)
-                if events:
                     chat_revision = await self._get_chat_revision(ci, str(context.chat_id))
+                elif (
+                    known_revision is not None
+                    and int(chat_revision) > 0
+                    and int(known_revision) == int(chat_revision)
+                ):
+                    latest_chat_revision = await self._get_chat_revision(ci, str(context.chat_id))
+                    chat_revision = int(latest_chat_revision or 0)
+                    if int(chat_revision) > 0 and int(known_revision) != int(chat_revision):
+                        ticket_view = await self._compose_context_ticket_view(
+                            ci,
+                            runtime,
+                            context,
+                        )
+                        return {
+                            "status": "ok",
+                            "visitor_id": visitor_id,
+                            "chat_revision": chat_revision,
+                            "events": [self._build_revision_sync_event(
+                                chat_id=str(context.chat_id),
+                                ticket_id=int(context.ticket_id),
+                                chat_revision=int(chat_revision),
+                                source_action="revision_sync_after_poll",
+                            )],
+                            **ticket_view,
+                        }
                 ticket_view = await self._compose_context_ticket_view(
                     ci,
                     runtime,
@@ -2948,7 +2960,6 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     "status": "ok",
                     "visitor_id": visitor_id,
                     "chat_revision": chat_revision,
-                    "last_event_id": last_event_id,
                     "events": events,
                     **ticket_view,
                 }
