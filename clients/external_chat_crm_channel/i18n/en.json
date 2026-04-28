@@ -17,7 +17,6 @@
   "status_files_sent": "{count} file(s) sent",
   "status_startup_error": "startup error",
   "attach_title": "Attach file",
-  "attach_clear": "Clear",
   "attach_remove": "Remove",
   "composer_send": "Send",
   "composer_send_files": "Send ({count})",

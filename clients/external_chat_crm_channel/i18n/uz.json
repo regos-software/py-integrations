@@ -17,7 +17,6 @@
   "status_files_sent": "{count} ta fayl yuborildi",
   "status_startup_error": "ishga tushirish xatosi",
   "attach_title": "Fayl biriktirish",
-  "attach_clear": "Tozalash",
   "attach_remove": "O'chirish",
   "composer_send": "Yuborish",
   "composer_send_files": "Yuborish ({count})",

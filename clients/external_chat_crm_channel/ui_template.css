@@ -421,17 +421,9 @@
     .composer {
       display: grid;
       gap: 8px;
-      border-top: 1px solid #d7dfea;
-      padding: 10px 12px;
-      background: #f7f9fc;
-    }
-    .composer-surface {
-      width: 100%;
-      border: 1px solid #cfd8e4;
-      border-radius: 18px;
-      background: #ffffff;
-      box-shadow: 0 2px 6px rgba(34, 61, 95, 0.08);
-      overflow: hidden;
+      border-top: 0;
+      padding: 8px 12px 12px 12px;
+      background: linear-gradient(180deg, #d9e2ea 0%, #eceff4 100%);
     }
     .composer-main {
       display: grid;
@@ -440,6 +432,10 @@
       gap: 4px;
       padding: 8px 10px 6px 10px;
       min-height: 52px;
+      border: 1px solid #cfd8e4;
+      border-bottom: 0;
+      border-radius: 16px 16px 0 0;
+      background: #ffffff;
     }
     .attach-btn {
       border: 0;
@@ -486,17 +482,59 @@
       color: #7d8ca3;
     }
     .composer-tools {
+      position: relative;
       min-height: 38px;
       padding: 4px 8px 6px 8px;
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      gap: 8px;
+      justify-content: flex-end;
+      gap: 6px;
       border-top: 1px solid #edf1f7;
+      border-left: 1px solid #cfd8e4;
+      border-right: 1px solid #cfd8e4;
+      border-bottom: 1px solid #cfd8e4;
+      border-radius: 0 0 16px 16px;
       background: #ffffff;
+    }
+    .emoji-panel {
+      position: absolute;
+      right: 42px;
+      bottom: calc(100% + 8px);
+      width: 228px;
+      max-height: 184px;
+      overflow-y: auto;
+      border: 1px solid #cfd8e4;
+      border-radius: 12px;
+      background: #ffffff;
+      box-shadow: 0 10px 24px rgba(39, 63, 93, 0.18);
+      padding: 6px;
+      display: grid;
+      grid-template-columns: repeat(8, minmax(0, 1fr));
+      gap: 4px;
+      z-index: 20;
+    }
+    .emoji-item {
+      border: 0;
+      border-radius: 8px;
+      height: 26px;
+      padding: 0;
+      background: transparent;
+      font-size: 16px;
+      line-height: 1;
+      cursor: pointer;
+      transition: background-color .14s ease, transform .14s ease;
+    }
+    .emoji-item:hover {
+      background: rgba(69, 98, 136, 0.14);
+      transform: translateY(-1px);
+    }
+    .emoji-item:focus {
+      outline: none;
+      background: rgba(69, 98, 136, 0.18);
     }
     .format-tools {
       min-width: 0;
+      margin-right: auto;
       display: inline-flex;
       flex-wrap: wrap;
       align-items: center;
@@ -527,11 +565,6 @@
     .emoji-btn:disabled {
       opacity: .45;
       cursor: default;
-    }
-    .composer-actions {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
     }
     .send-btn {
       border: 0;
@@ -583,18 +616,15 @@
       opacity: .5;
       cursor: default;
     }
-    .attach-note {
+    .attach-panel {
       grid-column: 1 / -1;
-      display: grid;
-      grid-template-columns: 1fr auto;
-      align-items: start;
-      gap: 10px;
+      display: block;
       border: 1px solid #d1d9e5;
       border-radius: 11px;
       padding: 7px 10px;
       color: #6f7d95;
       font-size: 12px;
-      background: #ffffff;
+      background: rgba(255, 255, 255, 0.96);
     }
     .attach-list {
       min-width: 0;
@@ -671,25 +701,6 @@
       opacity: .45;
       cursor: default;
     }
-    .attach-clear {
-      border: 0;
-      border-radius: 8px;
-      min-height: 30px;
-      min-width: 32px;
-      padding: 0 9px;
-      background: rgba(71, 94, 128, 0.12);
-      color: var(--text);
-      font: 700 11px/1 "Manrope", sans-serif;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      gap: 6px;
-      cursor: pointer;
-    }
-    .attach-clear:disabled {
-      opacity: .5;
-      cursor: default;
-    }
     @keyframes rise {
       from { transform: translateY(10px) scale(.985); opacity: .32; }
       to { transform: translateY(0) scale(1); opacity: 1; }
@@ -734,16 +745,25 @@
       .composer {
         padding: 8px 10px calc(8px + env(safe-area-inset-bottom, 0px));
       }
-      .composer-surface {
-        border-radius: 16px;
-      }
       .composer-main {
         padding: 6px 8px 4px 8px;
         min-height: 48px;
+        border-radius: 14px 14px 0 0;
       }
       .composer-tools {
         min-height: 34px;
         padding: 3px 6px 5px 6px;
+        border-radius: 0 0 14px 14px;
+      }
+      .emoji-panel {
+        right: 34px;
+        width: 204px;
+        max-height: 164px;
+        grid-template-columns: repeat(7, minmax(0, 1fr));
+      }
+      .emoji-item {
+        height: 24px;
+        font-size: 15px;
       }
       .format-btn,
       .emoji-btn,
@@ -756,12 +776,8 @@
       .send-btn {
         font-size: 11px;
       }
-      .attach-note {
+      .attach-panel {
         font-size: 11px;
-        grid-template-columns: 1fr;
-      }
-      .attach-clear {
-        justify-self: end;
       }
       .msg {
         max-width: 88%;

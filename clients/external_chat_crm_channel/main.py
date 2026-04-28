@@ -1389,6 +1389,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         external_client_id = cls._build_client_external_id(connected_integration_id, visitor_id)
         external_dialog_id = cls._build_ticket_external_dialog_id(connected_integration_id, visitor_id)
 
+        start_message_for_new_ticket: Optional[str] = None
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
             created_ticket_now = False
             client = None
@@ -1433,28 +1434,8 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 )
                 created_ticket_now = True
 
-            if (
-                created_ticket_now
-                and runtime.channel_start_message
-                and getattr(ticket, "chat_id", None)
-            ):
-                try:
-                    await api.chat.chat_message.add(
-                        ChatMessageAddRequest(
-                            chat_id=str(ticket.chat_id),
-                            message_type=ChatMessageTypeEnum.Regular,
-                            text=runtime.channel_start_message,
-                            external_message_id=f"webchat:channel_start:{visitor_id}:{int(ticket.id)}",
-                        )
-                    )
-                except Exception as error:
-                    logger.warning(
-                        "Failed to send channel start message: ci=%s ticket_id=%s visitor_id=%s error=%s",
-                        connected_integration_id,
-                        getattr(ticket, "id", None),
-                        visitor_id,
-                        error,
-                    )
+            if created_ticket_now and runtime.channel_start_message and getattr(ticket, "chat_id", None):
+                start_message_for_new_ticket = runtime.channel_start_message
 
         ticket_status = _enum_value(getattr(ticket, "status", None)).strip()
         await cls._cache_ticket_state(
@@ -1474,6 +1455,24 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             chat_id=str(ticket.chat_id),
         )
         await cls._save_cached_context(connected_integration_id, context)
+        if start_message_for_new_ticket:
+            try:
+                await cls._send_channel_auto_message_if_needed(
+                    connected_integration_id,
+                    ticket_id=int(context.ticket_id),
+                    chat_id=str(context.chat_id),
+                    text=start_message_for_new_ticket,
+                    once_flag="start_message_sent",
+                    external_message_id=f"webchat:channel_start:{int(context.ticket_id)}",
+                )
+            except Exception as error:
+                logger.warning(
+                    "Failed to send channel start message: ci=%s ticket_id=%s visitor_id=%s error=%s",
+                    connected_integration_id,
+                    int(context.ticket_id),
+                    visitor_id,
+                    error,
+                )
         return context
 
     @classmethod
@@ -1816,7 +1815,34 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         return False
 
     @classmethod
-    async def _send_ticket_closed_message_if_needed(
+    async def _send_channel_auto_message_if_needed(
+        cls,
+        connected_integration_id: str,
+        *,
+        ticket_id: int,
+        chat_id: str,
+        text: Optional[str],
+        once_flag: str,
+        external_message_id: str,
+    ) -> bool:
+        safe_text = _normalize_message_markup(text, 300)
+        if not safe_text:
+            return False
+        if not await cls._mark_ticket_once_flag(
+            connected_integration_id,
+            int(ticket_id),
+            once_flag,
+        ):
+            return False
+        return await cls._add_system_message(
+            connected_integration_id,
+            chat_id=chat_id,
+            text=safe_text,
+            external_message_id=external_message_id,
+        )
+
+    @classmethod
+    async def _send_ticket_closed_auto_messages_if_needed(
         cls,
         connected_integration_id: str,
         *,
@@ -1824,20 +1850,27 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         ticket_id: int,
         chat_id: str,
     ) -> bool:
-        if not runtime.channel_end_message:
-            return False
-        if not await cls._mark_ticket_once_flag(
+        sent_any = False
+        sent_end = await cls._send_channel_auto_message_if_needed(
             connected_integration_id,
-            int(ticket_id),
-            "end_message_sent",
-        ):
-            return False
-        return await cls._add_system_message(
-            connected_integration_id,
+            ticket_id=int(ticket_id),
             chat_id=chat_id,
             text=runtime.channel_end_message,
+            once_flag="end_message_sent",
             external_message_id=f"webchat:channel_end:{int(ticket_id)}",
         )
+        sent_any = sent_any or sent_end
+        if runtime.channel_rating_enabled and runtime.channel_rating_message:
+            sent_rating_prompt = await cls._send_channel_auto_message_if_needed(
+                connected_integration_id,
+                ticket_id=int(ticket_id),
+                chat_id=chat_id,
+                text=runtime.channel_rating_message,
+                once_flag="rating_prompt_sent",
+                external_message_id=f"webchat:channel_rating_prompt:{int(ticket_id)}",
+            )
+            sent_any = sent_any or sent_rating_prompt
+        return sent_any
 
     @classmethod
     async def _read_history(
@@ -2320,7 +2353,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             if ticket_closed:
                 try:
                     runtime = await cls._load_runtime(connected_integration_id)
-                    await cls._send_ticket_closed_message_if_needed(
+                    await cls._send_ticket_closed_auto_messages_if_needed(
                         connected_integration_id,
                         runtime=runtime,
                         ticket_id=int(ticket_id),

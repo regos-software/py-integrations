@@ -17,7 +17,6 @@
   "status_files_sent": "отправлено файлов: {count}",
   "status_startup_error": "ошибка запуска",
   "attach_title": "Прикрепить файл",
-  "attach_clear": "Очистить",
   "attach_remove": "Удалить",
   "composer_send": "Отправить",
   "composer_send_files": "Отправить ({count})",

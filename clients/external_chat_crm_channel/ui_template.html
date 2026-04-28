@@ -26,30 +26,26 @@
       <div class="rating-actions" id="ratingActions"></div>
     </div>
     <form class="composer" id="composer">
-      <div class="composer-surface">
-        <div class="composer-main">
-          <button type="button" class="attach-btn" id="attachButton" title="Attach file">+</button>
-          <textarea id="text" maxlength="{ExternalChatCrmChannelConfig.MAX_MESSAGE_LENGTH}" placeholder="Type your message"></textarea>
+      <div class="composer-main">
+        <button type="button" class="attach-btn" id="attachButton" title="Attach file">+</button>
+        <textarea id="text" maxlength="{ExternalChatCrmChannelConfig.MAX_MESSAGE_LENGTH}" placeholder="Type your message"></textarea>
+      </div>
+      <div class="composer-tools" id="composerTools">
+        <div class="format-tools">
+          <button type="button" class="format-btn" data-format="list"><i class="fa-solid fa-list-ul"></i></button>
+          <button type="button" class="format-btn" data-format="bold"><i class="fa-solid fa-bold"></i></button>
+          <button type="button" class="format-btn" data-format="italic"><i class="fa-solid fa-italic"></i></button>
+          <button type="button" class="format-btn" data-format="strike"><i class="fa-solid fa-strikethrough"></i></button>
+          <button type="button" class="format-btn" data-format="code"><i class="fa-solid fa-code"></i></button>
+          <button type="button" class="format-btn" data-format="quote"><i class="fa-solid fa-quote-right"></i></button>
         </div>
-        <div class="composer-tools" id="composerTools">
-          <div class="format-tools">
-            <button type="button" class="format-btn" data-format="list"><i class="fa-solid fa-list-ul"></i></button>
-            <button type="button" class="format-btn" data-format="bold"><i class="fa-solid fa-bold"></i></button>
-            <button type="button" class="format-btn" data-format="italic"><i class="fa-solid fa-italic"></i></button>
-            <button type="button" class="format-btn" data-format="strike"><i class="fa-solid fa-strikethrough"></i></button>
-            <button type="button" class="format-btn" data-format="code"><i class="fa-solid fa-code"></i></button>
-            <button type="button" class="format-btn" data-format="quote"><i class="fa-solid fa-quote-right"></i></button>
-          </div>
-          <div class="composer-actions">
-            <button type="button" class="emoji-btn" id="emojiButton"><i class="fa-regular fa-face-smile"></i></button>
-            <button type="submit" class="send-btn"><i class="fa-solid fa-paper-plane"></i></button>
-          </div>
-        </div>
+        <button type="button" class="emoji-btn" id="emojiButton"><i class="fa-regular fa-face-smile"></i></button>
+        <button type="submit" class="send-btn"><i class="fa-solid fa-paper-plane"></i></button>
+        <div class="emoji-panel" id="emojiPanel" hidden></div>
       </div>
       <input type="file" id="fileInput" hidden multiple>
-      <div class="attach-note" id="attachNote" hidden>
+      <div class="attach-panel" id="attachPanel" hidden>
         <div class="attach-list" id="attachList"></div>
-        <button type="button" class="attach-clear" id="attachClear">Clear</button>
       </div>
     </form>
   </div>
@@ -87,10 +83,10 @@
     const ratingActionsEl = document.getElementById("ratingActions");
     const attachButtonEl = document.getElementById("attachButton");
     const fileInputEl = document.getElementById("fileInput");
-    const attachNoteEl = document.getElementById("attachNote");
+    const attachPanelEl = document.getElementById("attachPanel");
     const attachListEl = document.getElementById("attachList");
-    const attachClearEl = document.getElementById("attachClear");
     const emojiButtonEl = document.getElementById("emojiButton");
+    const emojiPanelEl = document.getElementById("emojiPanel");
     const formatButtons = Array.from(document.querySelectorAll(".format-btn"));
     const textEl = document.getElementById("text");
     const formEl = document.getElementById("composer");
@@ -104,6 +100,12 @@
       quote: "Quote",
       emoji: "Emoji",
     }};
+    const EMOJI_PANEL_ITEMS = [
+      "😀", "😁", "😂", "🤣", "😊", "😉", "😍", "😘", "😎", "🤗",
+      "🤔", "😴", "🙌", "👏", "👍", "👎", "🤝", "🙏", "🎉", "🔥",
+      "✨", "💯", "❤️", "💙", "💚", "🧡", "💛", "💬", "📎", "✅",
+      "❗", "❓", "🙂", "🙃", "🤩", "😇", "😢", "😡", "🤯", "🤍",
+    ];
     statusEl.textContent = "...";
 
     const state = {{
@@ -401,8 +403,12 @@
         prefixComposerSelectionLines("- ");
       }}
     }}
-    function applyComposerEmoji() {{
+    function insertComposerEmoji(emoji) {{
       if (textEl.disabled || sendButtonEl.disabled) {{
+        return;
+      }}
+      const icon = String(emoji || "").trim();
+      if (!icon) {{
         return;
       }}
       const value = String(textEl.value || "");
@@ -412,7 +418,49 @@
       const rightChar = end < value.length ? value[end] : "";
       const leftSpacer = leftChar && !/\s/.test(leftChar) ? " " : "";
       const rightSpacer = rightChar && !/\s/.test(rightChar) ? " " : "";
-      insertComposerText(leftSpacer + "😊" + rightSpacer);
+      insertComposerText(leftSpacer + icon + rightSpacer);
+    }}
+    function closeEmojiPanel() {{
+      if (!emojiPanelEl || emojiPanelEl.hidden) {{
+        return;
+      }}
+      emojiPanelEl.hidden = true;
+      if (emojiButtonEl) {{
+        emojiButtonEl.setAttribute("aria-expanded", "false");
+      }}
+    }}
+    function ensureEmojiPanelContent() {{
+      if (!emojiPanelEl || emojiPanelEl.childElementCount > 0) {{
+        return;
+      }}
+      for (const item of EMOJI_PANEL_ITEMS) {{
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "emoji-item";
+        btn.textContent = item;
+        btn.setAttribute("aria-label", item);
+        btn.addEventListener("click", () => {{
+          insertComposerEmoji(item);
+          closeEmojiPanel();
+        }});
+        emojiPanelEl.appendChild(btn);
+      }}
+    }}
+    function toggleEmojiPanel() {{
+      if (!emojiPanelEl || !emojiButtonEl) {{
+        return;
+      }}
+      if (emojiButtonEl.disabled || textEl.disabled || sendButtonEl.disabled) {{
+        closeEmojiPanel();
+        return;
+      }}
+      ensureEmojiPanelContent();
+      const shouldOpen = !!emojiPanelEl.hidden;
+      emojiPanelEl.hidden = !shouldOpen;
+      emojiButtonEl.setAttribute("aria-expanded", shouldOpen ? "true" : "false");
+      if (shouldOpen) {{
+        focusComposerInput();
+      }}
     }}
     function renderComposerToolLabels() {{
       for (const button of formatButtons) {{
@@ -425,6 +473,8 @@
         const emojiLabel = COMPOSER_TOOL_LABELS.emoji || "Emoji";
         emojiButtonEl.title = emojiLabel;
         emojiButtonEl.setAttribute("aria-label", emojiLabel);
+        emojiButtonEl.setAttribute("aria-haspopup", "true");
+        emojiButtonEl.setAttribute("aria-expanded", "false");
       }}
     }}
     let viewportRafId = 0;
@@ -563,17 +613,6 @@
         window.URL.revokeObjectURL(fileItem.preview_url);
       }} catch (_) {{}}
     }}
-    function clearPendingFiles() {{
-      const current = Array.isArray(state.pendingFiles) ? state.pendingFiles : [];
-      for (const fileItem of current) {{
-        revokePendingPreview(fileItem);
-      }}
-      state.pendingFiles = [];
-      if (fileInputEl) {{
-        fileInputEl.value = "";
-      }}
-      renderPendingFiles();
-    }}
     function removePendingFileById(fileId) {{
       const current = Array.isArray(state.pendingFiles) ? state.pendingFiles : [];
       const next = [];
@@ -617,12 +656,11 @@
     function renderPendingFiles() {{
       const pendingFiles = Array.isArray(state.pendingFiles) ? state.pendingFiles : [];
       if (!pendingFiles.length) {{
-        attachNoteEl.hidden = true;
+        attachPanelEl.hidden = true;
         attachListEl.innerHTML = "";
-        attachClearEl.disabled = false;
         return;
       }}
-      attachNoteEl.hidden = false;
+      attachPanelEl.hidden = false;
       attachListEl.innerHTML = "";
       for (const pending of pendingFiles) {{
         const row = document.createElement("div");
@@ -669,7 +707,6 @@
         row.appendChild(removeBtn);
         attachListEl.appendChild(row);
       }}
-      attachClearEl.disabled = state.fileReading;
     }}
     function readFileAsDataURL(file) {{
       return new Promise((resolve, reject) => {{
@@ -1424,15 +1461,16 @@
       const hardDisabled = onboardingMode;
       attachButtonEl.title = t("attach_title");
       attachButtonEl.innerHTML = '<i class="fa-solid fa-paperclip"></i>';
-      attachClearEl.innerHTML = '<i class="fa-regular fa-trash-can"></i><span>' + t("attach_clear") + "</span>";
       attachButtonEl.disabled = hardDisabled || state.fileReading;
       fileInputEl.disabled = hardDisabled || state.fileReading;
-      attachClearEl.disabled = hardDisabled || state.fileReading;
       for (const button of formatButtons) {{
         button.disabled = hardDisabled || state.fileReading;
       }}
       if (emojiButtonEl) {{
         emojiButtonEl.disabled = hardDisabled || state.fileReading;
+      }}
+      if (hardDisabled || state.fileReading) {{
+        closeEmojiPanel();
       }}
       const pendingCount = Array.isArray(state.pendingFiles) ? state.pendingFiles.length : 0;
       if (onboardingMode) {{
@@ -1665,6 +1703,7 @@
 
     formEl.addEventListener("submit", async (event) => {{
       event.preventDefault();
+      closeEmojiPanel();
       if (isOnboardingRequired() || state.onboardingSubmitBusy) {{
         return;
       }}
@@ -1699,26 +1738,39 @@
       if (attachButtonEl.disabled || state.fileReading) {{
         return;
       }}
+      closeEmojiPanel();
       fileInputEl.click();
-    }});
-    attachClearEl.addEventListener("click", () => {{
-      if (state.fileReading) {{
-        return;
-      }}
-      clearPendingFiles();
-      updateComposerState();
     }});
     for (const button of formatButtons) {{
       button.addEventListener("click", () => {{
         const action = String((button && button.dataset && button.dataset.format) || "");
+        closeEmojiPanel();
         applyComposerTool(action);
       }});
     }}
     if (emojiButtonEl) {{
-      emojiButtonEl.addEventListener("click", () => {{
-        applyComposerEmoji();
+      emojiButtonEl.addEventListener("click", (event) => {{
+        event.preventDefault();
+        event.stopPropagation();
+        toggleEmojiPanel();
       }});
     }}
+    document.addEventListener("click", (event) => {{
+      if (!emojiPanelEl || emojiPanelEl.hidden) {{
+        return;
+      }}
+      const target = event.target;
+      const clickedInsidePanel = !!(target && target.closest && target.closest("#emojiPanel"));
+      const clickedToggle = !!(target && target.closest && target.closest("#emojiButton"));
+      if (!clickedInsidePanel && !clickedToggle) {{
+        closeEmojiPanel();
+      }}
+    }});
+    document.addEventListener("keydown", (event) => {{
+      if (event.key === "Escape") {{
+        closeEmojiPanel();
+      }}
+    }});
     fileInputEl.addEventListener("change", async () => {{
       const files = Array.from(fileInputEl.files || []);
       if (!files.length) {{
