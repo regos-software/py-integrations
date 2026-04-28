@@ -2445,14 +2445,43 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         payload: Dict[str, Any],
         event_id: Optional[str],
     ) -> str:
+        fingerprint = _payload_fingerprint(payload if isinstance(payload, dict) else {})
+        ticket_id = _parse_int(
+            payload.get("ticket_id")
+            if payload.get("ticket_id") is not None
+            else payload.get("id"),
+            None,
+        )
+        message_id = str(
+            payload.get("message_id")
+            if payload.get("message_id") is not None
+            else payload.get("id")
+            or ""
+        ).strip()
+        chat_id = str(
+            payload.get("chat_id")
+            if payload.get("chat_id") is not None
+            else payload.get("chatId")
+            or ""
+        ).strip()
         event_id_value = str(event_id or "").strip()
         if event_id_value:
-            return f"event:{event_id_value}"
+            base = f"event:{event_id_value}:{webhook_action}"
+            if webhook_action.startswith("ChatMessage"):
+                if chat_id and message_id:
+                    return f"{base}:chat:{chat_id}:message:{message_id}"
+                if message_id:
+                    return f"{base}:message:{message_id}"
+                if chat_id:
+                    return f"{base}:chat:{chat_id}"
+            if chat_id and ticket_id:
+                return f"{base}:chat:{chat_id}:ticket:{ticket_id}"
+            if ticket_id:
+                return f"{base}:ticket:{ticket_id}"
+            if chat_id:
+                return f"{base}:chat:{chat_id}"
+            return f"{base}:{fingerprint}"
 
-        fingerprint = _payload_fingerprint(payload if isinstance(payload, dict) else {})
-        ticket_id = _parse_int(payload.get("id"), None)
-        message_id = str(payload.get("id") or "").strip()
-        chat_id = str(payload.get("chat_id") or "").strip()
         if webhook_action.startswith("ChatMessage"):
             if chat_id and message_id:
                 return f"{webhook_action}:chat:{chat_id}:message:{message_id}:{fingerprint}"

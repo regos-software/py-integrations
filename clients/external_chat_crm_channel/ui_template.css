@@ -434,6 +434,12 @@
       box-shadow: none;
       transform: none;
     }
+    .composer-spacer {
+      width: 100%;
+      min-height: 0;
+      flex: 0 0 auto;
+      pointer-events: none;
+    }
     .composer {
       display: grid;
       gap: 0;

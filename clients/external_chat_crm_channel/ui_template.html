@@ -27,6 +27,7 @@
         <div class="rating-text" id="ratingText"></div>
         <div class="rating-actions" id="ratingActions"></div>
       </div>
+      <div class="composer-spacer" id="composerSpacer" aria-hidden="true"></div>
       <form class="composer" id="composer">
         <div class="composer-main">
           <button type="button" class="attach-btn" id="attachButton" title="Attach file">+</button>
@@ -81,6 +82,7 @@
     const ratingBoxEl = document.getElementById("ratingBox");
     const ratingTextEl = document.getElementById("ratingText");
     const ratingActionsEl = document.getElementById("ratingActions");
+    const composerSpacerEl = document.getElementById("composerSpacer");
     const attachButtonEl = document.getElementById("attachButton");
     const fileInputEl = document.getElementById("fileInput");
     const emojiButtonEl = document.getElementById("emojiButton");
@@ -298,12 +300,25 @@
       }}
       return (value / (1024 * 1024)).toFixed(1) + " MB";
     }}
+    function syncComposerSpacer(force = false) {{
+      if (!composerSpacerEl || !formEl) {{
+        return;
+      }}
+      const nextReserve = Math.max(Number(formEl.offsetHeight || 0), 0) + 8;
+      const currentReserve = Number(composerSpacerEl.dataset.reserve || "0");
+      if (!force && Math.abs(nextReserve - currentReserve) < 1) {{
+        return;
+      }}
+      composerSpacerEl.style.height = nextReserve + "px";
+      composerSpacerEl.dataset.reserve = String(nextReserve);
+    }}
     function autoSizeTextarea() {{
       const minHeight = 44;
       const maxHeight = 136;
       textEl.style.height = "0px";
       const nextHeight = Math.min(Math.max(textEl.scrollHeight, minHeight), maxHeight);
       textEl.style.height = nextHeight + "px";
+      syncComposerSpacer();
     }}
     function setComposerSelection(start, end) {{
       if (typeof textEl.setSelectionRange !== "function") {{
@@ -1260,7 +1275,9 @@
         historyEl.appendChild(buildMessageNode(item));
       }}
       historyEl.appendChild(ratingBoxEl);
+      historyEl.appendChild(composerSpacerEl);
       historyEl.appendChild(formEl);
+      syncComposerSpacer(true);
       if (stickToBottom) {{
         historyEl.scrollTop = historyEl.scrollHeight;
       }} else {{
@@ -1461,7 +1478,9 @@
 
       card.appendChild(form);
       historyEl.appendChild(card);
+      historyEl.appendChild(composerSpacerEl);
       historyEl.appendChild(formEl);
+      syncComposerSpacer(true);
       historyEl.scrollTop = historyEl.scrollHeight;
       state.lastHistoryFingerprint = "__onboarding__";
     }}
@@ -1490,6 +1509,7 @@
         sendButtonEl.title = t("composer_locked");
         sendButtonEl.setAttribute("aria-label", t("composer_locked"));
         textEl.placeholder = t("composer_placeholder_fill");
+        syncComposerSpacer();
         return;
       }}
       textEl.disabled = false;
@@ -1509,6 +1529,7 @@
         textEl.placeholder = t("composer_placeholder_type");
       }}
       autoSizeTextarea();
+      syncComposerSpacer();
     }}
 
     const basePath = window.location.pathname.replace(/\/+$/g, "").replace(/\/+/g, "/");
@@ -1558,73 +1579,112 @@
 
     let eventLoopRunning = false;
     let eventLoopBackoffMs = 1000;
+    let eventLoopTickTs = 0;
+    let eventLoopWatchdogId = 0;
+
+    function safeUpdateComposerState() {{
+      try {{
+        updateComposerState();
+      }} catch (error) {{
+        console.error("[external_chat] updateComposerState failed:", error);
+      }}
+    }}
 
     async function runEventLoop() {{
       if (eventLoopRunning) {{
         return;
       }}
       eventLoopRunning = true;
-      while (eventLoopRunning) {{
-        if (isOnboardingRequired()) {{
-          if (!historyEl.querySelector(".onboarding-card")) {{
-            renderOnboarding();
-          }}
-          updateComposerState();
-          await delayMs(800);
-          continue;
-        }}
-
-        if (!state.chatReady) {{
+      try {{
+        while (eventLoopRunning) {{
+          eventLoopTickTs = Date.now();
           try {{
-            await initChat();
-            eventLoopBackoffMs = 1000;
-          }} catch (error) {{
-            state.chatReady = false;
-            handleActionError(error);
+            if (isOnboardingRequired()) {{
+              if (!historyEl.querySelector(".onboarding-card")) {{
+                renderOnboarding();
+              }}
+              safeUpdateComposerState();
+              await delayMs(800);
+              continue;
+            }}
+
+            if (!state.chatReady) {{
+              try {{
+                await initChat();
+                eventLoopBackoffMs = 1000;
+              }} catch (error) {{
+                state.chatReady = false;
+                handleActionError(error);
+                await delayMs(eventLoopBackoffMs);
+                eventLoopBackoffMs = Math.min(eventLoopBackoffMs * 2, 10000);
+              }}
+              safeUpdateComposerState();
+              continue;
+            }}
+
+            try {{
+              const result = await callApi("events", {{
+                visitor_id: state.visitorId,
+                display_name: state.profile.display_name,
+                email: state.profile.email,
+                phone: state.profile.phone,
+                known_revision: state.chatRevision,
+                last_event_id: state.lastEventId,
+                timeout_sec: 25,
+                max_events: 20,
+              }});
+              applyWriteState(result);
+              if (result && typeof result.last_event_id === "string" && result.last_event_id.trim()) {{
+                state.lastEventId = result.last_event_id.trim();
+              }}
+              const events = Array.isArray(result && result.events) ? result.events : [];
+              let shouldRefreshHistory = false;
+              let forceFullHistory = false;
+              for (const event of events) {{
+                const apiAction = String((event && event.api_action) || "").trim().toLowerCase();
+                if (apiAction === "history") {{
+                  shouldRefreshHistory = true;
+                  forceFullHistory = forceFullHistory || !!(event && event.force_full === true);
+                }}
+              }}
+              if (shouldRefreshHistory) {{
+                await refreshHistory(forceFullHistory);
+              }} else if (!events.length) {{
+                await delayMs(120);
+              }}
+              eventLoopBackoffMs = 1000;
+            }} catch (error) {{
+              handleActionError(error);
+              await delayMs(eventLoopBackoffMs);
+              eventLoopBackoffMs = Math.min(eventLoopBackoffMs * 2, 10000);
+            }}
+            safeUpdateComposerState();
+          }} catch (loopError) {{
+            console.error("[external_chat] event loop iteration failed:", loopError);
             await delayMs(eventLoopBackoffMs);
             eventLoopBackoffMs = Math.min(eventLoopBackoffMs * 2, 10000);
+            safeUpdateComposerState();
           }}
-          updateComposerState();
-          continue;
         }}
+      }} finally {{
+        eventLoopRunning = false;
+      }}
+    }}
 
-        try {{
-          const result = await callApi("events", {{
-            visitor_id: state.visitorId,
-            display_name: state.profile.display_name,
-            email: state.profile.email,
-            phone: state.profile.phone,
-            known_revision: state.chatRevision,
-            last_event_id: state.lastEventId,
-            timeout_sec: 25,
-            max_events: 20,
-          }});
-          applyWriteState(result);
-          if (result && typeof result.last_event_id === "string" && result.last_event_id.trim()) {{
-            state.lastEventId = result.last_event_id.trim();
-          }}
-          const events = Array.isArray(result && result.events) ? result.events : [];
-          let shouldRefreshHistory = false;
-          let forceFullHistory = false;
-          for (const event of events) {{
-            const apiAction = String((event && event.api_action) || "").trim().toLowerCase();
-            if (apiAction === "history") {{
-              shouldRefreshHistory = true;
-              forceFullHistory = forceFullHistory || !!(event && event.force_full === true);
-            }}
-          }}
-          if (shouldRefreshHistory) {{
-            await refreshHistory(forceFullHistory);
-          }} else if (!events.length) {{
-            await delayMs(120);
-          }}
-          eventLoopBackoffMs = 1000;
-        }} catch (error) {{
-          handleActionError(error);
-          await delayMs(eventLoopBackoffMs);
-          eventLoopBackoffMs = Math.min(eventLoopBackoffMs * 2, 10000);
-        }}
-        updateComposerState();
+    function ensureEventLoopAlive() {{
+      const nowTs = Date.now();
+      if (!eventLoopRunning) {{
+        runEventLoop().catch((error) => {{
+          console.error("[external_chat] event loop restart failed:", error);
+        }});
+        return;
+      }}
+      if (eventLoopTickTs > 0 && (nowTs - eventLoopTickTs) > 90000) {{
+        console.warn("[external_chat] event loop watchdog restart");
+        eventLoopRunning = false;
+        runEventLoop().catch((error) => {{
+          console.error("[external_chat] event loop watchdog restart failed:", error);
+        }});
       }}
     }}
 
@@ -1933,6 +1993,9 @@
         }}
       }}
       runEventLoop();
+      if (!eventLoopWatchdogId) {{
+        eventLoopWatchdogId = window.setInterval(ensureEventLoopAlive, 15000);
+      }}
       updateComposerState();
     }}
 
