@@ -105,6 +105,7 @@ class ExternalChatCrmChannelConfig:
     DEFAULT_CHAT_TITLE = "Support Chat"
     DEFAULT_SUBJECT_TEMPLATE = "{channel_name} {display_name}"
     CLOSED_ENTITY_ERROR_CODE = 1220
+    CHANNEL_AUTO_MESSAGE_MAX_LENGTH = MAX_MESSAGE_LENGTH
     CHAT_REVISION_DEFAULT = 1
     WEBHOOK_DEDUPE_TTL_SEC = 10 * 60
     EVENT_QUEUE_TTL_SEC = 6 * 60 * 60
@@ -290,6 +291,13 @@ def _normalize_message_markup(value: Any, max_len: int = 500) -> str:
     normalized = _BBCODE_CODE_RE.sub(_replace_code, normalized)
     normalized = _BBCODE_QUOTE_RE.sub(_replace_quote, normalized)
     return _normalize_text(normalized, max_len)
+
+
+def _normalize_channel_auto_message(value: Any) -> str:
+    return _normalize_message_markup(
+        value,
+        ExternalChatCrmChannelConfig.CHANNEL_AUTO_MESSAGE_MAX_LENGTH,
+    )
 
 
 def _is_meaningful_system_text(value: str) -> bool:
@@ -717,7 +725,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         if not _redis_enabled():
             return
         safe_chat_id = str(chat_id or "").strip()
-        safe_text = _normalize_message_markup(text, 300)
+        safe_text = _normalize_channel_auto_message(text)
         safe_external_message_id = str(external_message_id or "").strip()
         if not safe_chat_id or not safe_text or not safe_external_message_id:
             return
@@ -754,7 +762,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         if not expires_at or int(expires_at) <= int(now_ts):
             return None
         notice_id = _normalize_text(payload.get("id"), 200)
-        text = _normalize_message_markup(payload.get("text"), 300)
+        text = _normalize_channel_auto_message(payload.get("text"))
         created_date = _parse_int(payload.get("created_date"), None)
         if not notice_id or not text or not created_date:
             return None
@@ -1081,20 +1089,20 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             or ExternalChatCrmChannelConfig.DEFAULT_CHAT_TITLE
         )
         channel_start_message = (
-            _normalize_text(getattr(channel, "start_message", None), 300) or None
+            _normalize_channel_auto_message(getattr(channel, "start_message", None)) or None
         )
         channel_end_message = (
-            _normalize_text(getattr(channel, "end_message", None), 300) or None
+            _normalize_channel_auto_message(getattr(channel, "end_message", None)) or None
         )
         channel_rating_enabled = bool(getattr(channel, "rating_enabled", False))
         channel_rating_message = (
-            _normalize_text(getattr(channel, "rating_message", None), 300) or None
+            _normalize_channel_auto_message(getattr(channel, "rating_message", None)) or None
         )
         channel_rating_positive_message = (
-            _normalize_text(getattr(channel, "rating_positive_message", None), 300) or None
+            _normalize_channel_auto_message(getattr(channel, "rating_positive_message", None)) or None
         )
         channel_rating_negative_message = (
-            _normalize_text(getattr(channel, "rating_negative_message", None), 300) or None
+            _normalize_channel_auto_message(getattr(channel, "rating_negative_message", None)) or None
         )
 
         return RuntimeConfig(
@@ -2241,7 +2249,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         external_message_id: str,
     ) -> bool:
         safe_chat_id = str(chat_id or "").strip()
-        safe_text = _normalize_message_markup(text, 300)
+        safe_text = _normalize_channel_auto_message(text)
         safe_external_message_id = str(external_message_id or "").strip()
         if not safe_chat_id or not safe_text or not safe_external_message_id:
             return False
@@ -2302,7 +2310,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         once_flag: str,
         external_message_id: str,
     ) -> bool:
-        safe_text = _normalize_message_markup(text, 300)
+        safe_text = _normalize_channel_auto_message(text)
         if not safe_text:
             return False
         if not await cls._mark_ticket_once_flag(
