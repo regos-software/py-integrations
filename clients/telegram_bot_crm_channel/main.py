@@ -25,14 +25,21 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
 )
-from redis.exceptions import ResponseError
 from starlette.responses import JSONResponse
 
 from clients.base import ClientBase
 from config.settings import settings as app_settings
 from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
-from core.redis import redis_client
+from core.redis import (
+    redis_client,
+    redis_error_contains,
+    redis_expire_if_due,
+    redis_sadd_with_ttl,
+    redis_stream_add_with_ttl,
+    redis_stream_group_create_with_ttl,
+    redis_ttl_seconds,
+)
 from schemas.api.chat.chat import ChatGetRequest
 from schemas.api.chat.chat_message import (
     ChatMessageAddFileRequest,
@@ -194,8 +201,7 @@ _BOT_CLIENTS: Dict[str, Bot] = {}
 _BOT_CLIENTS_LOCK = asyncio.Lock()
 _HTTP_CLIENT: Optional[httpx.AsyncClient] = None
 _INSTANCE_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
-_STREAM_EXPIRE_TOUCH_TS: Dict[str, int] = {}
-_ACTIVE_CI_IDS_EXPIRE_TOUCH_TS = 0
+_REDIS_TTL_TOUCH_TS: Dict[str, int] = {}
 
 
 class TelegramFileTooLargeError(RuntimeError):
@@ -242,12 +248,6 @@ def _json_loads(raw: str) -> Any:
 
 def _redis_enabled() -> bool:
     return bool(app_settings.redis_enabled and redis_client is not None)
-
-
-def _is_redis_nogroup_error(error: Exception) -> bool:
-    if isinstance(error, ResponseError):
-        return "NOGROUP" in str(error).upper()
-    return "NOGROUP" in str(error or "").upper()
 
 
 def _parse_bool(value: Optional[str], default: bool = False) -> bool:
@@ -1167,20 +1167,32 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         return TelegramBotCrmChannelIntegration._redis_key("active_ci_ids")
 
     @staticmethod
-    def _ttl_refresh_interval(ttl_sec: int, *, min_refresh_sec: int) -> int:
-        return min(3600, max(min_refresh_sec, ttl_sec // 4))
+    def _active_ci_ids_ttl() -> int:
+        return redis_ttl_seconds(TelegramBotCrmChannelConfig.ACTIVE_CI_IDS_TTL_SEC)
+
+    @classmethod
+    async def _mark_ci_active(cls, connected_integration_id: str) -> None:
+        if not _redis_enabled():
+            return
+        ci = str(connected_integration_id or "").strip()
+        if not ci:
+            return
+        ttl = cls._active_ci_ids_ttl()
+        await redis_sadd_with_ttl(cls._active_ci_ids_key(), ci, ttl)
+        _REDIS_TTL_TOUCH_TS[cls._active_ci_ids_key()] = _now_ts()
 
     @classmethod
     async def _touch_active_ci_ids_ttl(cls, *, force: bool = False) -> None:
         if not _redis_enabled():
             return
-        global _ACTIVE_CI_IDS_EXPIRE_TOUCH_TS
-        ttl = max(int(TelegramBotCrmChannelConfig.ACTIVE_CI_IDS_TTL_SEC), 60)
-        now_ts = _now_ts()
-        refresh_interval_sec = cls._ttl_refresh_interval(ttl, min_refresh_sec=60)
-        if force or now_ts - _ACTIVE_CI_IDS_EXPIRE_TOUCH_TS >= refresh_interval_sec:
-            await redis_client.expire(cls._active_ci_ids_key(), ttl)
-            _ACTIVE_CI_IDS_EXPIRE_TOUCH_TS = now_ts
+        await redis_expire_if_due(
+            cls._active_ci_ids_key(),
+            cls._active_ci_ids_ttl(),
+            _REDIS_TTL_TOUCH_TS,
+            _now_ts(),
+            min_refresh_sec=60,
+            force=force,
+        )
 
     @staticmethod
     def _is_longpolling_mode() -> bool:
@@ -2179,20 +2191,23 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 serialized[key] = ""
             else:
                 serialized[key] = str(value)
-        await redis_client.xadd(
+        await redis_stream_add_with_ttl(
             stream_key,
             serialized,
             maxlen=TelegramBotCrmChannelConfig.STREAM_MAXLEN,
-            approximate=True,
+            ttl_sec=cls._resolve_stream_ttl(stream_ttl_sec),
+            touch_ts_by_key=_REDIS_TTL_TOUCH_TS,
+            now_ts=_now_ts(),
         )
-        await cls._touch_stream_ttl(stream_key, stream_ttl_sec)
 
     @staticmethod
     def _resolve_stream_ttl(stream_ttl_sec: Optional[int] = None) -> int:
-        ttl = _parse_int(str(stream_ttl_sec or ""), None)
-        if not ttl or ttl <= 0:
-            ttl = TelegramBotCrmChannelConfig.STREAM_TTL_SEC
-        return max(int(ttl), 60)
+        ttl = (
+            stream_ttl_sec
+            if stream_ttl_sec is not None
+            else TelegramBotCrmChannelConfig.STREAM_TTL_SEC
+        )
+        return redis_ttl_seconds(ttl)
 
     @classmethod
     async def _touch_stream_ttl(
@@ -2204,29 +2219,26 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
     ) -> None:
         if not _redis_enabled():
             return
-        ttl = cls._resolve_stream_ttl(stream_ttl_sec)
-        now_ts = _now_ts()
-        refresh_interval_sec = cls._ttl_refresh_interval(ttl, min_refresh_sec=10)
-        last_touch_ts = _parse_int(str(_STREAM_EXPIRE_TOUCH_TS.get(stream_key) or ""), 0) or 0
-        if force or now_ts - last_touch_ts >= refresh_interval_sec:
-            await redis_client.expire(stream_key, ttl)
-            _STREAM_EXPIRE_TOUCH_TS[stream_key] = now_ts
+        await redis_expire_if_due(
+            stream_key,
+            cls._resolve_stream_ttl(stream_ttl_sec),
+            _REDIS_TTL_TOUCH_TS,
+            _now_ts(),
+            min_refresh_sec=10,
+            force=force,
+        )
 
     @classmethod
     async def _ensure_consumer_group(cls, stream_key: str) -> None:
         if not _redis_enabled():
             return
-        try:
-            await redis_client.xgroup_create(
-                stream_key,
-                TelegramBotCrmChannelConfig.STREAM_GROUP,
-                id="0-0",
-                mkstream=True,
-            )
-        except Exception as error:
-            if "BUSYGROUP" not in str(error):
-                raise
-        await cls._touch_stream_ttl(stream_key, force=True)
+        await redis_stream_group_create_with_ttl(
+            stream_key,
+            TelegramBotCrmChannelConfig.STREAM_GROUP,
+            ttl_sec=cls._resolve_stream_ttl(),
+            touch_ts_by_key=_REDIS_TTL_TOUCH_TS,
+            now_ts=_now_ts(),
+        )
 
     @classmethod
     async def _ensure_stream_workers(cls, connected_integration_id: str) -> None:
@@ -2400,10 +2412,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     await self._ensure_poller(self.connected_integration_id, bot_cfg)
                 await self._clear_webhook_refresh_cache(self.connected_integration_id)
                 await self._ensure_stream_workers(self.connected_integration_id)
-                await redis_client.sadd(
-                    self._active_ci_ids_key(), self.connected_integration_id
-                )
-                await self._touch_active_ci_ids_ttl(force=True)
+                await self._mark_ci_active(self.connected_integration_id)
                 return {
                     "status": "connected",
                     "mode": "longpolling",
@@ -2420,8 +2429,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             await self._set_telegram_webhook(bot, url, runtime.telegram_secret_token)
             await self._touch_webhook_refresh_cache(self.connected_integration_id)
             await self._ensure_stream_workers(self.connected_integration_id)
-            await redis_client.sadd(self._active_ci_ids_key(), self.connected_integration_id)
-            await self._touch_active_ci_ids_ttl(force=True)
+            await self._mark_ci_active(self.connected_integration_id)
 
             return {
                 "status": "connected",
@@ -4518,7 +4526,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                         block=TelegramBotCrmChannelConfig.STREAM_READ_BLOCK_MS,
                     )
                 except Exception as error:
-                    if _is_redis_nogroup_error(error):
+                    if redis_error_contains(error, "NOGROUP"):
                         await cls._ensure_consumer_group(stream_key)
                         logger.warning(
                             "Recovered missing Redis stream/group after NOGROUP: ci=%s kind=%s stream=%s op=xreadgroup",
@@ -4583,7 +4591,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 count=TelegramBotCrmChannelConfig.STREAM_BATCH_SIZE,
             )
         except Exception as error:
-            if _is_redis_nogroup_error(error):
+            if redis_error_contains(error, "NOGROUP"):
                 await cls._ensure_consumer_group(stream_key)
                 logger.warning(
                     "Recovered missing Redis stream/group after NOGROUP: ci=%s kind=%s stream=%s op=xautoclaim",
