@@ -68,6 +68,7 @@ from schemas.api.files.file import FileGetRequest
 from schemas.api.integrations.connected_integration_setting import (
     ConnectedIntegrationSettingRequest,
 )
+from schemas.api.references.field import FieldAddRequest, FieldGetRequest
 from schemas.api.references.retail_customer import (
     RetailCustomerAddRequest,
     RetailCustomerEditRequest,
@@ -85,6 +86,7 @@ class TelegramBotCrmChannelConfig:
     ALERT_EXTERNAL_PREFIX = "tgsys"
 
     SETTINGS_TTL = max(int(app_settings.redis_cache_ttl or 60), 30)
+    WEBHOOK_REFRESH_TTL = app_settings.telegram_webhook_refresh_ttl
     DEFAULT_DEDUPE_TTL_SEC = 6 * 60 * 60
     DEFAULT_STATE_TTL_SEC = 6 * 60 * 60
     STREAM_MAXLEN = 10000
@@ -127,12 +129,16 @@ class TelegramBotCrmChannelConfig:
 
     CHAT_MESSAGE_ADD_CLOSED_ENTITY_ERROR = 1220
     PHONE_PROMPT_COOLDOWN_SEC = 24 * 60 * 60
+    TELEGRAM_FIELD_RAW_KEY = "telegram_id"
+    TELEGRAM_FIELD_FULL_KEY = "field_telegram_id"
+    TELEGRAM_FIELD_NAME = "Telegram ID"
+    TELEGRAM_FIELD_DATA_TYPE = "string"
+    TELEGRAM_FIELD_ENTITY_TYPES = ("Client", "RetailCustomer")
     PHONE_SHARE_BUTTON_TEXT = "Отправить номер / Raqamni ulashish"
     PHONE_REQUEST_SENT_SYSTEM_TEXT = "Запросили у клиента номер телефона."
     PHONE_RECEIVED_SYSTEM_TEXT = "Клиент отправил номер телефона: {phone}"
     PHONE_RECEIVED_TELEGRAM_TEXT = "Thank you, we received your phone number."
     PHONE_STATE_FIELD = "phone_state"
-    CLIENT_TELEGRAM_FIELD_KEY = "field_telegram_id"
     UNKNOWN_CLIENT_NAME = "Unknown"
     RATING_CALLBACK_PREFIX = "tgcrm_rate"
     RATING_POSITIVE_THRESHOLD = 4
@@ -1157,6 +1163,108 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         return TelegramBotCrmChannelIntegration._redis_key("active_ci_ids")
 
     @staticmethod
+    def _is_longpolling_mode() -> bool:
+        return (
+            _update_mode_from_value(app_settings.telegram_update_mode)
+            == "longpolling"
+        )
+
+    @staticmethod
+    def _resolve_webhook_base_url() -> str:
+        base_url = str(
+            app_settings.proxy_integration_url or app_settings.integration_url
+        ).strip()
+        if not base_url:
+            base_url = str(app_settings.integration_url).strip()
+        return f"{base_url.rstrip('/')}/external"
+
+    @classmethod
+    def _build_webhook_url(cls, connected_integration_id: str) -> str:
+        return (
+            f"{cls._resolve_webhook_base_url()}/"
+            f"{connected_integration_id}/external/"
+        )
+
+    @staticmethod
+    def _webhook_refresh_cache_key(connected_integration_id: str) -> str:
+        return (
+            "clients:telegram:webhook-refresh:"
+            f"{TelegramBotCrmChannelConfig.INTEGRATION_KEY}:{connected_integration_id}"
+        )
+
+    @classmethod
+    async def _touch_webhook_refresh_cache(cls, connected_integration_id: str) -> None:
+        if not (_redis_enabled() and connected_integration_id):
+            return
+        try:
+            await redis_client.setex(
+                cls._webhook_refresh_cache_key(connected_integration_id),
+                TelegramBotCrmChannelConfig.WEBHOOK_REFRESH_TTL,
+                "1",
+            )
+        except Exception as error:
+            logger.warning("Failed to update webhook refresh cache: %s", error)
+
+    @classmethod
+    async def _clear_webhook_refresh_cache(cls, connected_integration_id: str) -> None:
+        if not (_redis_enabled() and connected_integration_id):
+            return
+        try:
+            await redis_client.delete(
+                cls._webhook_refresh_cache_key(connected_integration_id)
+            )
+        except Exception as error:
+            logger.warning("Failed to clear webhook refresh cache: %s", error)
+
+    @staticmethod
+    async def _set_telegram_webhook(
+        bot: Bot,
+        webhook_url: str,
+        secret_token: Optional[str] = None,
+    ) -> None:
+        kwargs_set_webhook: Dict[str, Any] = {"url": webhook_url}
+        if secret_token:
+            kwargs_set_webhook["secret_token"] = secret_token
+        await bot.set_webhook(**kwargs_set_webhook)
+
+    @classmethod
+    async def _ensure_webhook_from_regos(cls, connected_integration_id: str) -> None:
+        if (
+            not connected_integration_id
+            or not _redis_enabled()
+            or cls._is_longpolling_mode()
+        ):
+            return
+
+        cache_key = cls._webhook_refresh_cache_key(connected_integration_id)
+        try:
+            if await redis_client.exists(cache_key):
+                return
+        except Exception as error:
+            logger.warning("Failed to read webhook refresh cache: %s", error)
+
+        webhook_url = cls._build_webhook_url(connected_integration_id)
+        try:
+            runtime = await cls._load_runtime(connected_integration_id)
+            if runtime.update_mode == "longpolling":
+                return
+
+            bot_cfg = runtime.bots[0]
+            bot = await cls._get_bot(bot_cfg.token)
+            info = await bot.get_webhook_info()
+            current_url = (getattr(info, "url", "") or "").rstrip("/")
+            if current_url != webhook_url.rstrip("/"):
+                await cls._set_telegram_webhook(
+                    bot,
+                    webhook_url,
+                    runtime.telegram_secret_token,
+                )
+                logger.info("Webhook url updated from REGOS webhook: %s", webhook_url)
+            await cls._touch_webhook_refresh_cache(connected_integration_id)
+        except Exception as error:
+            logger.warning("Failed to refresh webhook from REGOS webhook: %s", error)
+
+    @staticmethod
     # Canonical conversation cache for Telegram <-> CRM routing.
     def _mapping_by_tg_key(
         connected_integration_id: str, bot_hash: str, tg_chat_id: str
@@ -1474,6 +1582,105 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             )
         except Exception as error:
             logger.warning("Failed to clear settings cache: %s", error)
+
+    @classmethod
+    async def _field_exists(
+        cls,
+        api: RegosAPI,
+        entity_type: str,
+        full_key: str,
+    ) -> bool:
+        response = await api.references.field.get(
+            FieldGetRequest(
+                entity_type=entity_type,
+                keys=[full_key],
+            )
+        )
+        if not response.ok:
+            raise RuntimeError(
+                f"Field/Get rejected: entity_type={entity_type} payload={response.result}"
+            )
+
+        rows = response.result if isinstance(response.result, list) else []
+        expected_key = str(full_key or "").strip().lower()
+        for row in rows:
+            if isinstance(row, dict):
+                row_key_raw = row.get("key")
+            else:
+                row_key_raw = getattr(row, "key", None)
+            row_key = str(row_key_raw or "").strip().lower()
+            if row_key == expected_key:
+                return True
+        return False
+
+    @classmethod
+    async def _ensure_telegram_custom_field(
+        cls,
+        api: RegosAPI,
+        entity_type: str,
+    ) -> Dict[str, Any]:
+        raw_key = TelegramBotCrmChannelConfig.TELEGRAM_FIELD_RAW_KEY
+        full_key = TelegramBotCrmChannelConfig.TELEGRAM_FIELD_FULL_KEY
+
+        if await cls._field_exists(api, entity_type, full_key):
+            return {
+                "entity_type": entity_type,
+                "key": full_key,
+                "status": "exists",
+            }
+
+        response = await api.references.field.add(
+            FieldAddRequest(
+                key=raw_key,
+                name=TelegramBotCrmChannelConfig.TELEGRAM_FIELD_NAME,
+                entity_type=entity_type,
+                data_type=TelegramBotCrmChannelConfig.TELEGRAM_FIELD_DATA_TYPE,
+                required=False,
+            )
+        )
+
+        if not response.ok:
+            raise RuntimeError(
+                f"Field/Add rejected for key={raw_key} entity_type={entity_type}: "
+                f"{response.result}"
+            )
+
+        if isinstance(response.result, dict):
+            created_new_id_raw = response.result.get("new_id")
+        else:
+            created_new_id_raw = getattr(response.result, "new_id", None)
+        created_new_id = _parse_int(str(created_new_id_raw or ""), None)
+        for attempt in range(3):
+            if await cls._field_exists(api, entity_type, full_key):
+                return {
+                    "entity_type": entity_type,
+                    "key": full_key,
+                    "status": "created",
+                    "new_id": created_new_id,
+                }
+            if attempt < 2:
+                await asyncio.sleep(0.2)
+
+        raise RuntimeError(
+            "Field/Add returned ok but field is not visible yet: "
+            f"key={full_key} entity_type={entity_type}"
+        )
+
+    @classmethod
+    async def _ensure_telegram_custom_fields(
+        cls,
+        connected_integration_id: str,
+    ) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+            for entity_type in TelegramBotCrmChannelConfig.TELEGRAM_FIELD_ENTITY_TYPES:
+                rows.append(
+                    await cls._ensure_telegram_custom_field(
+                        api=api,
+                        entity_type=entity_type,
+                    )
+                )
+        return rows
 
     @staticmethod
     def _parse_channel_messages_cache(
@@ -2125,6 +2332,9 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 len(runtime.bots),
                 [b.bot_hash for b in runtime.bots],
             )
+            field_ensure_result = await self._ensure_telegram_custom_fields(
+                self.connected_integration_id
+            )
             webhook_subscribe = await self._subscribe_required_webhooks(
                 self.connected_integration_id
             )
@@ -2138,6 +2348,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     bot = await self._get_bot(bot_cfg.token)
                     await bot.delete_webhook(drop_pending_updates=True)
                     await self._ensure_poller(self.connected_integration_id, bot_cfg)
+                await self._clear_webhook_refresh_cache(self.connected_integration_id)
                 await self._ensure_stream_workers(self.connected_integration_id)
                 await redis_client.sadd(
                     self._active_ci_ids_key(), self.connected_integration_id
@@ -2146,21 +2357,17 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     "status": "connected",
                     "mode": "longpolling",
                     "bots": len(runtime.bots),
+                    "custom_fields": field_ensure_result,
                     "webhooks_subscription": webhook_subscribe,
                 }
 
             await self._stop_pollers_for_ci(self.connected_integration_id)
             bot_cfg = runtime.bots[0]
             bot = await self._get_bot(bot_cfg.token)
-            url = (
-                f"{app_settings.integration_url.rstrip('/')}/external/"
-                f"{self.connected_integration_id}/external/"
-            )
+            url = self._build_webhook_url(self.connected_integration_id)
             await bot.delete_webhook(drop_pending_updates=True)
-            kwargs_set_webhook: Dict[str, Any] = {"url": url}
-            if runtime.telegram_secret_token:
-                kwargs_set_webhook["secret_token"] = runtime.telegram_secret_token
-            await bot.set_webhook(**kwargs_set_webhook)
+            await self._set_telegram_webhook(bot, url, runtime.telegram_secret_token)
+            await self._touch_webhook_refresh_cache(self.connected_integration_id)
             await self._ensure_stream_workers(self.connected_integration_id)
             await redis_client.sadd(self._active_ci_ids_key(), self.connected_integration_id)
 
@@ -2170,6 +2377,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 "bots": len(runtime.bots),
                 "webhook_url": url,
                 "bot_hash": bot_cfg.bot_hash,
+                "custom_fields": field_ensure_result,
                 "webhooks_subscription": webhook_subscribe,
             }
         except Exception as error:
@@ -2179,6 +2387,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 await redis_client.srem(
                     self._active_ci_ids_key(), self.connected_integration_id
                 )
+                await self._clear_webhook_refresh_cache(self.connected_integration_id)
                 if runtime:
                     closed_tokens: set[str] = set()
                     for bot_cfg in runtime.bots:
@@ -2243,6 +2452,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                             await self._close_bot(token)
                             closed_tokens.add(token)
 
+            await self._clear_webhook_refresh_cache(self.connected_integration_id)
             await self._stop_stream_workers(self.connected_integration_id)
             await redis_client.srem(self._active_ci_ids_key(), self.connected_integration_id)
             return {"status": "disconnected"}
@@ -2258,6 +2468,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if not self.connected_integration_id:
             return self._error_response(1000, "connected_integration_id is required").dict()
         await self._clear_settings_cache(self.connected_integration_id)
+        await self._clear_webhook_refresh_cache(self.connected_integration_id)
         result = await self.reconnect()
         return {"status": "settings updated", "reconnect": result}
 
@@ -2374,6 +2585,8 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             return self._error_response(400, "Webhook action is not provided").dict()
         if event_action not in TelegramBotCrmChannelConfig.SUPPORTED_INBOUND_WEBHOOKS:
             return {"status": "ignored", "action": event_action}
+
+        await self._ensure_webhook_from_regos(self.connected_integration_id)
 
         try:
             logger.debug(
@@ -2800,7 +3013,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             )
 
             message_id = _parse_int(str(message.get("message_id") or ""), None) or _now_ts()
-            phone_text = cls._normalize_text_value(client_phone) or "РЅРµ СѓРєР°Р·Р°РЅ"
+            phone_text = cls._normalize_text_value(client_phone) or "не указан"
             await cls._send_phone_system_message_best_effort(
                 connected_integration_id=connected_integration_id,
                 chat_id=chat_id,
@@ -3064,29 +3277,29 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             return None
 
         map_url = f"https://maps.google.com/?q={lat},{lon}"
-        return f"[Р›РѕРєР°С†РёСЏ]({map_url})\nРљРѕРѕСЂРґРёРЅР°С‚С‹: {lat}, {lon}"
+        return f"[Локация]({map_url})\nКоординаты: {lat}, {lon}"
 
     @staticmethod
     def _reply_message_placeholder_text(message: Dict[str, Any]) -> str:
         if message.get("photo"):
-            return "[Р¤РѕС‚Рѕ]"
+            return "[Фото]"
         if message.get("video"):
-            return "[Р’РёРґРµРѕ]"
+            return "[Видео]"
         if message.get("voice"):
-            return "[Р“РѕР»РѕСЃРѕРІРѕРµ СЃРѕРѕР±С‰РµРЅРёРµ]"
+            return "[Голосовое сообщение]"
         if message.get("audio"):
-            return "[РђСѓРґРёРѕ]"
+            return "[Аудио]"
         if message.get("document"):
-            return "[Р¤Р°Р№Р»]"
+            return "[Файл]"
         if message.get("sticker"):
-            return "[РЎС‚РёРєРµСЂ]"
+            return "[Стикер]"
         if message.get("contact"):
-            return "[РљРѕРЅС‚Р°РєС‚]"
+            return "[Контакт]"
         if message.get("location"):
-            return "[Р›РѕРєР°С†РёСЏ]"
+            return "[Локация]"
         if message.get("poll"):
-            return "[РћРїСЂРѕСЃ]"
-        return "[РЎРѕРѕР±С‰РµРЅРёРµ]"
+            return "[Опрос]"
+        return "[Сообщение]"
 
     @staticmethod
     def _build_crm_reply_quote(text: Optional[str]) -> Optional[str]:
@@ -3340,10 +3553,11 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         telegram_id = cls._normalize_text_value(tg_chat_id)
         if not telegram_id:
             return None
+        field_key = TelegramBotCrmChannelConfig.TELEGRAM_FIELD_FULL_KEY
         request = RetailCustomerGetRequest(
             filters=[
                 Filter(
-                    field="field_telegram_id",
+                    field=field_key,
                     operator=FilterOperator.Equal,
                     value=telegram_id,
                 )
@@ -3359,9 +3573,10 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             response_payload = _result_to_dict(resp.result)
             error_code = response_payload.get("error")
             description = str(response_payload.get("description") or "").lower()
-            if error_code == 7501 or "field_telegram_id" in description:
+            if error_code == 7501 or field_key in description:
                 logger.warning(
-                    "RetailCustomer/Get by field_telegram_id is not available: %s",
+                    "RetailCustomer/Get by %s is not available: %s",
+                    field_key,
                     resp.result,
                 )
                 return None
@@ -3389,7 +3604,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             for field_row in fields:
                 if not isinstance(field_row, dict):
                     continue
-                if str(field_row.get("key") or "") != "field_telegram_id":
+                if str(field_row.get("key") or "") != field_key:
                     continue
                 if str(field_row.get("value") or "") == telegram_id:
                     matched_rows.append(row)
@@ -3403,8 +3618,9 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 if isinstance(row, dict)
             ]
             logger.warning(
-                "RetailCustomer pre-create lookup is ambiguous by field_telegram_id: "
+                "RetailCustomer pre-create lookup is ambiguous by %s: "
                 "ci=%s tg_chat_id=%s matched_ids=%s",
+                field_key,
                 connected_integration_id,
                 telegram_id,
                 matched_ids,
@@ -3476,10 +3692,16 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
 
         desired_telegram_id = str(tg_chat_id)
         current_telegram_id = cls._extract_field_value(
-            existing_row.get("fields"), "field_telegram_id"
+            existing_row.get("fields"),
+            TelegramBotCrmChannelConfig.TELEGRAM_FIELD_FULL_KEY,
         )
         if current_telegram_id != desired_telegram_id:
-            payload["fields"] = [{"key": "field_telegram_id", "value": desired_telegram_id}]
+            payload["fields"] = [
+                {
+                    "key": TelegramBotCrmChannelConfig.TELEGRAM_FIELD_FULL_KEY,
+                    "value": desired_telegram_id,
+                }
+            ]
 
         return payload
 
@@ -3601,7 +3823,12 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     last_name=customer_payload.get("last_name"),
                     full_name=customer_payload.get("full_name"),
                     main_phone=main_phone,
-                    fields=[{"key": "field_telegram_id", "value": str(tg_chat_id)}],
+                    fields=[
+                        {
+                            "key": TelegramBotCrmChannelConfig.TELEGRAM_FIELD_FULL_KEY,
+                            "value": str(tg_chat_id),
+                        }
+                    ],
                 )
             )
         if not resp.ok:
@@ -3923,7 +4150,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             return None
 
         direct_value = cls._normalize_telegram_chat_id_value(
-            getattr(client, TelegramBotCrmChannelConfig.CLIENT_TELEGRAM_FIELD_KEY, None)
+            getattr(client, TelegramBotCrmChannelConfig.TELEGRAM_FIELD_FULL_KEY, None)
         )
         if direct_value:
             return direct_value
@@ -3931,7 +4158,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         from_fields = cls._normalize_text_value(
             cls._extract_field_value(
                 getattr(client, "fields", None),
-                TelegramBotCrmChannelConfig.CLIENT_TELEGRAM_FIELD_KEY,
+                TelegramBotCrmChannelConfig.TELEGRAM_FIELD_FULL_KEY,
             )
         )
         if not from_fields:
@@ -3946,7 +4173,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             return None
         return [
             {
-                "key": TelegramBotCrmChannelConfig.CLIENT_TELEGRAM_FIELD_KEY,
+                "key": TelegramBotCrmChannelConfig.TELEGRAM_FIELD_FULL_KEY,
                 "value": telegram_field_value,
             }
         ]
@@ -3976,7 +4203,9 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
 
         return {
             "subject": subject,
-            "field_telegram_id": cls._normalize_telegram_chat_id_value(tg_chat_id),
+            TelegramBotCrmChannelConfig.TELEGRAM_FIELD_FULL_KEY: (
+                cls._normalize_telegram_chat_id_value(tg_chat_id)
+            ),
             "external_id": cls._build_client_external_id(tg_chat_id),
             "name": client_name,
             "phone": client_phone,
@@ -3991,7 +4220,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
     ) -> Dict[str, str]:
         patch: Dict[str, str] = {}
         field_names = [
-            "field_telegram_id",
+            TelegramBotCrmChannelConfig.TELEGRAM_FIELD_FULL_KEY,
             "external_id",
             "name",
             "phone",
@@ -4001,7 +4230,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             desired_value = cls._normalize_text_value(desired_payload.get(field_name))
             if not desired_value:
                 continue
-            if field_name == "field_telegram_id":
+            if field_name == TelegramBotCrmChannelConfig.TELEGRAM_FIELD_FULL_KEY:
                 current_value = cls._extract_client_telegram_field_value(client)
             elif field_name == "external_id":
                 current_value = cls._normalize_text_value(getattr(client, "external_id", None))
@@ -4009,7 +4238,11 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 current_value = cls._normalize_text_value(getattr(client, field_name, None))
             if field_name in {"phone", "email"} and current_value:
                 continue
-            if field_name == "field_telegram_id" and current_value and current_value != desired_value:
+            if (
+                field_name == TelegramBotCrmChannelConfig.TELEGRAM_FIELD_FULL_KEY
+                and current_value
+                and current_value != desired_value
+            ):
                 continue
             if field_name == "external_id" and current_value and current_value != desired_value:
                 continue
@@ -4025,7 +4258,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
     ) -> Dict[str, str]:
         patch: Dict[str, str] = {}
         field_names = [
-            "field_telegram_id",
+            TelegramBotCrmChannelConfig.TELEGRAM_FIELD_FULL_KEY,
             "external_id",
             "name",
             "phone",
@@ -4038,7 +4271,11 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             cached_value = cls._normalize_text_value(cached_payload.get(field_name))
             if field_name in {"phone", "email"} and cached_value:
                 continue
-            if field_name == "field_telegram_id" and cached_value and cached_value != desired_value:
+            if (
+                field_name == TelegramBotCrmChannelConfig.TELEGRAM_FIELD_FULL_KEY
+                and cached_value
+                and cached_value != desired_value
+            ):
                 continue
             if field_name == "external_id" and cached_value and cached_value != desired_value:
                 continue
@@ -4069,7 +4306,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {}
         field_names = [
-            "field_telegram_id",
+            TelegramBotCrmChannelConfig.TELEGRAM_FIELD_FULL_KEY,
             "external_id",
             "name",
             "phone",
@@ -4141,12 +4378,15 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             try:
                 edit_payload: Dict[str, Any] = dict(patch)
                 telegram_field_value = cls._normalize_text_value(
-                    edit_payload.pop("field_telegram_id", None)
+                    edit_payload.pop(
+                        TelegramBotCrmChannelConfig.TELEGRAM_FIELD_FULL_KEY,
+                        None,
+                    )
                 )
                 if telegram_field_value:
                     edit_payload["fields"] = [
                         {
-                            "key": TelegramBotCrmChannelConfig.CLIENT_TELEGRAM_FIELD_KEY,
+                            "key": TelegramBotCrmChannelConfig.TELEGRAM_FIELD_FULL_KEY,
                             "value": telegram_field_value,
                         }
                     ]
@@ -5769,11 +6009,11 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if telegram_field_id:
             lookup_requests.append(
                 (
-                    TelegramBotCrmChannelConfig.CLIENT_TELEGRAM_FIELD_KEY,
+                    TelegramBotCrmChannelConfig.TELEGRAM_FIELD_FULL_KEY,
                     ClientGetRequest(
                         filters=[
                             Filter(
-                                field=TelegramBotCrmChannelConfig.CLIENT_TELEGRAM_FIELD_KEY,
+                                field=TelegramBotCrmChannelConfig.TELEGRAM_FIELD_FULL_KEY,
                                 operator=FilterOperator.Equal,
                                 value=telegram_field_id,
                             )
@@ -6376,12 +6616,12 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
     @staticmethod
     def _delivery_action_label(action: str) -> str:
         labels = {
-            "TicketClosed": "ticket close notification",
-            "ChatMessageAdded": "РѕС‚РїСЂР°РІРєР° СЃРѕРѕР±С‰РµРЅРёСЏ",
-            "ChatMessageEdited": "СЂРµРґР°РєС‚РёСЂРѕРІР°РЅРёРµ СЃРѕРѕР±С‰РµРЅРёСЏ",
-            "ChatMessageDeleted": "СѓРґР°Р»РµРЅРёРµ СЃРѕРѕР±С‰РµРЅРёСЏ",
+            "TicketClosed": "закрытие обращения",
+            "ChatMessageAdded": "отправка сообщения",
+            "ChatMessageEdited": "редактирование сообщения",
+            "ChatMessageDeleted": "удаление сообщения",
         }
-        return labels.get(str(action or "").strip(), str(action or "").strip() or "РЅРµРёР·РІРµСЃС‚РЅРѕ")
+        return labels.get(str(action or "").strip(), str(action or "").strip() or "неизвестно")
 
     @staticmethod
     def _short_error_text(error_text: str) -> str:
@@ -6395,49 +6635,49 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         raw = cls._short_error_text(error_text)
         lower = raw.lower()
         if not lower:
-            return "РќРµРёР·РІРµСЃС‚РЅР°СЏ РѕС€РёР±РєР° РґРѕСЃС‚Р°РІРєРё."
+            return "Неизвестная ошибка доставки."
 
         if "bot was blocked by the user" in lower:
-            return "РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ Р·Р°Р±Р»РѕРєРёСЂРѕРІР°Р» Р±РѕС‚Р°."
+            return "Пользователь заблокировал бота."
         if "bot can't initiate conversation with a user" in lower:
-            return "Р‘РѕС‚ РЅРµ РјРѕР¶РµС‚ РЅР°С‡Р°С‚СЊ РґРёР°Р»РѕРі РїРµСЂРІС‹Рј. РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ РґРѕР»Р¶РµРЅ РЅР°РїРёСЃР°С‚СЊ Р±РѕС‚Сѓ."
+            return "Бот не может начать диалог первым. Пользователь должен написать боту."
         if "chat not found" in lower or "user not found" in lower:
-            return "Р§Р°С‚ РЅРµ РЅР°Р№РґРµРЅ. РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ РјРѕРі СѓРґР°Р»РёС‚СЊ С‡Р°С‚ РёР»Рё РЅРµ Р·Р°РїСѓСЃРєР°Р» Р±РѕС‚Р°."
+            return "Чат не найден. Пользователь мог удалить чат или не запускал бота."
         if "forbidden" in lower:
-            return "Telegram Р·Р°РїСЂРµС‚РёР» РѕС‚РїСЂР°РІРєСѓ РІ СЌС‚РѕС‚ С‡Р°С‚."
+            return "Telegram запретил отправку в этот чат."
         if "message is not modified" in lower:
-            return "РўРµРєСЃС‚ РЅРµ РёР·РјРµРЅРёР»СЃСЏ, Telegram РѕС‚РєР»РѕРЅРёР» РїРѕРІС‚РѕСЂРЅРѕРµ СЂРµРґР°РєС‚РёСЂРѕРІР°РЅРёРµ."
+            return "Текст не изменился, Telegram отклонил повторное редактирование."
         if "message to edit not found" in lower:
-            return "РЎРѕРѕР±С‰РµРЅРёРµ РґР»СЏ СЂРµРґР°РєС‚РёСЂРѕРІР°РЅРёСЏ РЅРµ РЅР°Р№РґРµРЅРѕ РІ Telegram."
+            return "Сообщение для редактирования не найдено в Telegram."
         if "message can't be edited" in lower:
-            return "Р­С‚Рѕ СЃРѕРѕР±С‰РµРЅРёРµ РЅРµР»СЊР·СЏ СЂРµРґР°РєС‚РёСЂРѕРІР°С‚СЊ РІ Telegram."
+            return "Это сообщение нельзя редактировать в Telegram."
         if "message to delete not found" in lower:
-            return "РЎРѕРѕР±С‰РµРЅРёРµ РґР»СЏ СѓРґР°Р»РµРЅРёСЏ РЅРµ РЅР°Р№РґРµРЅРѕ РІ Telegram."
+            return "Сообщение для удаления не найдено в Telegram."
         if "message can't be deleted" in lower:
-            return "Р­С‚Рѕ СЃРѕРѕР±С‰РµРЅРёРµ РЅРµР»СЊР·СЏ СѓРґР°Р»РёС‚СЊ РІ Telegram."
+            return "Это сообщение нельзя удалить в Telegram."
         if "can't parse entities" in lower:
-            return "РќРµРєРѕСЂСЂРµРєС‚РЅР°СЏ СЂР°Р·РјРµС‚РєР° СЃРѕРѕР±С‰РµРЅРёСЏ РґР»СЏ Telegram."
+            return "Некорректная разметка сообщения для Telegram."
         if "too many requests" in lower or "retry after" in lower or "flood control" in lower:
-            return "Telegram РІСЂРµРјРµРЅРЅРѕ РѕРіСЂР°РЅРёС‡РёР» С‡Р°СЃС‚РѕС‚Сѓ Р·Р°РїСЂРѕСЃРѕРІ."
+            return "Telegram временно ограничил частоту запросов."
         if "timed out" in lower or "timeout" in lower:
-            return "РўР°Р№РјР°СѓС‚ РїСЂРё РѕР±СЂР°С‰РµРЅРёРё Рє Telegram."
+            return "Таймаут при обращении к Telegram."
         if (
             "name or service not known" in lower
             or "temporary failure in name resolution" in lower
             or "nodename nor servname provided" in lower
         ):
-            return "DNS-РѕС€РёР±РєР° РїСЂРё РѕР±СЂР°С‰РµРЅРёРё Рє Telegram."
+            return "DNS-ошибка при обращении к Telegram."
         if (
             "connection reset" in lower
             or "connection refused" in lower
             or "network is unreachable" in lower
             or "server disconnected" in lower
         ):
-            return "РЎРµС‚РµРІР°СЏ РѕС€РёР±РєР° РїСЂРё РѕР±СЂР°С‰РµРЅРёРё Рє Telegram."
+            return "Сетевая ошибка при обращении к Telegram."
         if "telegram file exceeds size limit" in lower:
-            return "Р¤Р°Р№Р» РїСЂРµРІС‹С€Р°РµС‚ РґРѕРїСѓСЃС‚РёРјС‹Р№ СЂР°Р·РјРµСЂ РґР»СЏ Telegram."
+            return "Файл превышает допустимый размер для Telegram."
 
-        return "РћС€РёР±РєР° РґРѕСЃС‚Р°РІРєРё РІ Telegram."
+        return "Ошибка доставки в Telegram."
 
     @staticmethod
     def _format_delivery_alert_text(
@@ -6454,14 +6694,14 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             technical_reason and technical_reason.lower() != human_reason.lower()
         )
         technical_reason_line = (
-            f"\nРўРµС…РЅРёС‡РµСЃРєР°СЏ РїСЂРёС‡РёРЅР°: {technical_reason}" if include_technical_reason else ""
+            f"\nТехническая причина: {technical_reason}" if include_technical_reason else ""
         )
         return (
-            "[Telegram Integration] РќРµ СѓРґР°Р»РѕСЃСЊ РІС‹РїРѕР»РЅРёС‚СЊ СЃРѕР±С‹С‚РёРµ РІ Telegram.\n"
-            f"РћРїРµСЂР°С†РёСЏ: {action_label}\n"
+            "[Telegram Integration] Не удалось выполнить событие в Telegram.\n"
+            f"Операция: {action_label}\n"
             f"Chat: {source_chat_id}\n"
             f"Message: {source_message_id}\n"
-            f"РџСЂРёС‡РёРЅР°: {human_reason}"
+            f"Причина: {human_reason}"
             f"{technical_reason_line}"
         )
 
