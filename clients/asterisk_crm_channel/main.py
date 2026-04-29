@@ -15,14 +15,21 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
 import httpx
-from redis.exceptions import ResponseError
 from starlette.responses import JSONResponse
 
 from clients.base import ClientBase
 from config.settings import settings as app_settings
 from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
-from core.redis import redis_client
+from core.redis import (
+    redis_client,
+    redis_error_contains,
+    redis_expire_if_due,
+    redis_sadd_with_ttl,
+    redis_stream_add_with_ttl,
+    redis_stream_group_create_with_ttl,
+    redis_ttl_seconds,
+)
 from schemas.api.chat.chat_message import (
     ChatMessageAddFileRequest,
     ChatMessageAddRequest,
@@ -56,6 +63,8 @@ class AsteriskCrmChannelConfig:
     CI_ACTIVE_MEMORY_TTL_SEC = 5
     DEFAULT_DEDUPE_TTL_SEC = 6 * 60 * 60
     DEFAULT_STATE_TTL_SEC = 6 * 60 * 60
+    STREAM_TTL_SEC = DEFAULT_STATE_TTL_SEC
+    ACTIVE_CI_IDS_TTL_SEC = 30 * 24 * 60 * 60
     OPERATOR_NOT_FOUND_CACHE_TTL_SEC = 10 * 60
     STORE_DECISION_TRACE = bool(getattr(app_settings, "debug", False))
 
@@ -174,7 +183,7 @@ _INSTANCE_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
 _HTTP_CLIENT: Optional[httpx.AsyncClient] = None
 _CI_ACTIVE_MEMORY_CACHE: Dict[str, Tuple[bool, int]] = {}
 _CI_ACTIVE_LOCKS: Dict[str, asyncio.Lock] = {}
-_STREAM_EXPIRE_TOUCH_TS: Dict[str, int] = {}
+_REDIS_TTL_TOUCH_TS: Dict[str, int] = {}
 
 
 def _now_ts() -> int:
@@ -191,12 +200,6 @@ def _json_loads(raw: str) -> Any:
 
 def _redis_enabled() -> bool:
     return bool(app_settings.redis_enabled and redis_client is not None)
-
-
-def _is_redis_nogroup_error(error: Exception) -> bool:
-    if isinstance(error, ResponseError):
-        return "NOGROUP" in str(error).upper()
-    return "NOGROUP" in str(error or "").upper()
 
 
 def _to_int(value: Any, default: Optional[int] = None) -> Optional[int]:
@@ -618,6 +621,23 @@ class AsteriskCrmChannelIntegration(ClientBase):
         return AsteriskCrmChannelIntegration._redis_key("active_ci_ids")
 
     @staticmethod
+    def _active_ci_ids_ttl() -> int:
+        return redis_ttl_seconds(AsteriskCrmChannelConfig.ACTIVE_CI_IDS_TTL_SEC)
+
+    @classmethod
+    async def _touch_active_ci_ids_ttl(cls, *, force: bool = False) -> None:
+        if not _redis_enabled():
+            return
+        await redis_expire_if_due(
+            cls._active_ci_ids_key(),
+            cls._active_ci_ids_ttl(),
+            _REDIS_TTL_TOUCH_TS,
+            _now_ts(),
+            min_refresh_sec=60,
+            force=force,
+        )
+
+    @staticmethod
     def _stream_key(connected_integration_id: str) -> str:
         return AsteriskCrmChannelIntegration._redis_key(
             "stream",
@@ -872,7 +892,9 @@ class AsteriskCrmChannelIntegration(ClientBase):
         ci = str(connected_integration_id or "").strip()
         if not ci:
             return
-        await redis_client.sadd(cls._active_ci_ids_key(), ci)
+        ttl = cls._active_ci_ids_ttl()
+        await redis_sadd_with_ttl(cls._active_ci_ids_key(), ci, ttl)
+        _REDIS_TTL_TOUCH_TS[cls._active_ci_ids_key()] = _now_ts()
 
     @classmethod
     async def _mark_ci_inactive(cls, connected_integration_id: str) -> None:
@@ -2054,16 +2076,13 @@ return 0
     async def _ensure_consumer_group(cls, stream_key: str) -> None:
         if not _redis_enabled():
             return
-        try:
-            await redis_client.xgroup_create(
-                stream_key,
-                AsteriskCrmChannelConfig.STREAM_GROUP,
-                id="0-0",
-                mkstream=True,
-            )
-        except Exception as error:
-            if "BUSYGROUP" not in str(error):
-                raise
+        await redis_stream_group_create_with_ttl(
+            stream_key,
+            AsteriskCrmChannelConfig.STREAM_GROUP,
+            ttl_sec=cls._resolve_stream_ttl(),
+            touch_ts_by_key=_REDIS_TTL_TOUCH_TS,
+            now_ts=_now_ts(),
+        )
 
     @classmethod
     async def _enqueue(
@@ -2083,19 +2102,42 @@ return 0
             else:
                 serialized[key] = str(value)
 
-        await redis_client.xadd(
+        await redis_stream_add_with_ttl(
             stream_key,
             serialized,
             maxlen=AsteriskCrmChannelConfig.STREAM_MAXLEN,
-            approximate=True,
+            ttl_sec=cls._resolve_stream_ttl(stream_ttl_sec),
+            touch_ts_by_key=_REDIS_TTL_TOUCH_TS,
+            now_ts=_now_ts(),
         )
-        ttl = max(_to_int(stream_ttl_sec, 60) or 60, 60)
-        now_ts = _now_ts()
-        refresh_interval_sec = min(60, max(10, ttl // 4))
-        last_touch_ts = _to_int(_STREAM_EXPIRE_TOUCH_TS.get(stream_key), 0) or 0
-        if now_ts - last_touch_ts >= refresh_interval_sec:
-            await redis_client.expire(stream_key, ttl)
-            _STREAM_EXPIRE_TOUCH_TS[stream_key] = now_ts
+
+    @staticmethod
+    def _resolve_stream_ttl(stream_ttl_sec: Optional[int] = None) -> int:
+        ttl = (
+            stream_ttl_sec
+            if stream_ttl_sec is not None
+            else AsteriskCrmChannelConfig.STREAM_TTL_SEC
+        )
+        return redis_ttl_seconds(ttl)
+
+    @classmethod
+    async def _touch_stream_ttl(
+        cls,
+        stream_key: str,
+        stream_ttl_sec: Optional[int] = None,
+        *,
+        force: bool = False,
+    ) -> None:
+        if not _redis_enabled():
+            return
+        await redis_expire_if_due(
+            stream_key,
+            cls._resolve_stream_ttl(stream_ttl_sec),
+            _REDIS_TTL_TOUCH_TS,
+            _now_ts(),
+            min_refresh_sec=10,
+            force=force,
+        )
 
     @classmethod
     async def _set_worker_heartbeat(cls, connected_integration_id: str) -> None:
@@ -2106,6 +2148,7 @@ return 0
             AsteriskCrmChannelConfig.HEARTBEAT_TTL_SEC,
             str(_now_ts()),
         )
+        await cls._touch_active_ci_ids_ttl()
 
     @classmethod
     async def _ensure_stream_worker(cls, connected_integration_id: str) -> None:
@@ -2175,6 +2218,7 @@ return 0
         if not ci_ids:
             logger.info("Asterisk auto-restore: no active integrations found")
             return {"total": 0, "restored": 0, "failed": 0}
+        await cls._touch_active_ci_ids_ttl(force=True)
 
         restored = 0
         failed = 0
@@ -2470,6 +2514,7 @@ return 0
         while True:
             try:
                 await cls._set_worker_heartbeat(connected_integration_id)
+                await cls._touch_stream_ttl(stream_key)
                 claimed_entries = await cls._process_claimed_entries(
                     stream_key=stream_key,
                     consumer=consumer,
@@ -2489,7 +2534,7 @@ return 0
                         block=block_ms,
                     )
                 except Exception as error:
-                    if _is_redis_nogroup_error(error):
+                    if redis_error_contains(error, "NOGROUP"):
                         await cls._ensure_consumer_group(stream_key)
                         await asyncio.sleep(0.1)
                         continue
@@ -2539,7 +2584,7 @@ return 0
                 count=AsteriskCrmChannelConfig.STREAM_BATCH_SIZE,
             )
         except Exception as error:
-            if _is_redis_nogroup_error(error):
+            if redis_error_contains(error, "NOGROUP"):
                 await cls._ensure_consumer_group(stream_key)
                 return []
             raise

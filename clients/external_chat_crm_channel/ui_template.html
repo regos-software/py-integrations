@@ -147,6 +147,7 @@
       lastHistoryFingerprint: "",
       lastHistoryItems: [],
     }};
+    let historyExpiryTimerId = 0;
 
     function storageGet(key) {{
       try {{
@@ -1133,6 +1134,48 @@
       if (!value) return "";
       return new Date(value * 1000).toLocaleTimeString([], {{ hour: "2-digit", minute: "2-digit" }});
     }}
+    function historyItemExpiresAtMs(item) {{
+      const expiresAt = Number((item && item.expires_at) || 0);
+      return expiresAt > 0 ? expiresAt * 1000 : 0;
+    }}
+    function filterVisibleHistoryItems(items) {{
+      const list = Array.isArray(items) ? items : [];
+      const nowMs = Date.now();
+      return list.filter((item) => {{
+        const expiresAtMs = historyItemExpiresAtMs(item);
+        return !expiresAtMs || expiresAtMs > nowMs;
+      }});
+    }}
+    function scheduleHistoryExpiry(items) {{
+      if (historyExpiryTimerId) {{
+        window.clearTimeout(historyExpiryTimerId);
+        historyExpiryTimerId = 0;
+      }}
+      const list = Array.isArray(items) ? items : [];
+      const nowMs = Date.now();
+      let nearestMs = 0;
+      for (const item of list) {{
+        const expiresAtMs = historyItemExpiresAtMs(item);
+        if (expiresAtMs > nowMs && (!nearestMs || expiresAtMs < nearestMs)) {{
+          nearestMs = expiresAtMs;
+        }}
+      }}
+      if (!nearestMs) {{
+        return;
+      }}
+      historyExpiryTimerId = window.setTimeout(() => {{
+        renderHistory(state.lastHistoryItems, true);
+      }}, Math.max(nearestMs - nowMs + 250, 250));
+    }}
+    function hasVisibleNoticeKind(kind) {{
+      const expected = String(kind || "");
+      if (!expected) {{
+        return false;
+      }}
+      return filterVisibleHistoryItems(state.lastHistoryItems).some((item) => {{
+        return String((item && item.notice_kind) || "") === expected;
+      }});
+    }}
     function historyFingerprint(items) {{
       const list = Array.isArray(items) ? items : [];
       const chunks = [];
@@ -1144,6 +1187,8 @@
         const mine = item.mine ? "1" : "0";
         const createdDate = String(Number(item.created_date || 0) || 0);
         const authorName = String(item.author_name || "");
+        const expiresAt = String(Number(item.expires_at || 0) || 0);
+        const noticeKind = String(item.notice_kind || "");
         const files = Array.isArray(item.files) ? item.files : [];
         const filesChunk = files.map((file) => {{
           const fileId = String((file && file.id) || "");
@@ -1152,7 +1197,7 @@
           return fileId + ":" + fileName + ":" + fileUrl;
         }}).join(",");
         chunks.push(
-          id + "|" + type + "|" + mine + "|" + edited + "|" + createdDate + "|" + authorName + "|" + text + "|" + filesChunk
+          id + "|" + type + "|" + mine + "|" + edited + "|" + createdDate + "|" + authorName + "|" + expiresAt + "|" + noticeKind + "|" + text + "|" + filesChunk
         );
       }}
       return chunks.join("||");
@@ -1270,14 +1315,17 @@
       return box;
     }}
     function renderHistory(items, force = false) {{
-      const list = Array.isArray(items) ? items : [];
-      state.lastHistoryItems = list;
+      const rawList = Array.isArray(items) ? items : [];
+      state.lastHistoryItems = rawList;
+      scheduleHistoryExpiry(rawList);
+      const list = filterVisibleHistoryItems(rawList);
       const fingerprint = historyFingerprint(list);
       if (!force && fingerprint === state.lastHistoryFingerprint) {{
         return;
       }}
       const stickToBottom = state.lastHistoryFingerprint === "" || isHistoryNearBottom();
       const prevTop = historyEl.scrollTop;
+      renderRatingPanel();
       historyEl.innerHTML = "";
       for (const item of list) {{
         historyEl.appendChild(buildMessageNode(item));
@@ -1320,7 +1368,10 @@
         );
       }} else {{
         const ratingPrompt = String(state.ratingMessage || "").trim();
-        if (setFormattedNodeContent(ratingTextEl, ratingPrompt)) {{
+        if (ratingPrompt && !hasVisibleNoticeKind("rating_prompt")) {{
+          setFormattedNodeContent(ratingTextEl, ratingPrompt);
+        }}
+        if (ratingPrompt) {{
           for (let rating = 1; rating <= 5; rating += 1) {{
             const btn = document.createElement("button");
             btn.type = "button";

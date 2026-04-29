@@ -20,7 +20,12 @@ from clients.base import ClientBase
 from config.settings import settings as app_settings
 from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
-from core.redis import redis_client
+from core.redis import (
+    redis_client,
+    redis_incr_with_ttl,
+    redis_zadd_with_ttl,
+    redis_zrangebyscore_with_ttl,
+)
 from schemas.api.chat.chat import ChatEntityTypeEnum
 from schemas.api.chat.chat_message import (
     ChatMessageAddFileRequest,
@@ -100,11 +105,14 @@ class ExternalChatCrmChannelConfig:
     DEFAULT_CHAT_TITLE = "Support Chat"
     DEFAULT_SUBJECT_TEMPLATE = "{channel_name} {display_name}"
     CLOSED_ENTITY_ERROR_CODE = 1220
+    CHANNEL_AUTO_MESSAGE_MAX_LENGTH = MAX_MESSAGE_LENGTH
     CHAT_REVISION_DEFAULT = 1
     WEBHOOK_DEDUPE_TTL_SEC = 10 * 60
     EVENT_QUEUE_TTL_SEC = 6 * 60 * 60
     EVENT_QUEUE_MAX_ITEMS = 500
     EVENT_BATCH_MAX_ITEMS = 30
+    CLIENT_NOTICE_TTL_SEC = 10 * 60
+    CLIENT_NOTICE_MAX_ITEMS = 100
     RATING_POSITIVE_THRESHOLD = 4
     SUPPORTED_INBOUND_WEBHOOKS = {
         "ChatMessageAdded",
@@ -283,6 +291,13 @@ def _normalize_message_markup(value: Any, max_len: int = 500) -> str:
     normalized = _BBCODE_CODE_RE.sub(_replace_code, normalized)
     normalized = _BBCODE_QUOTE_RE.sub(_replace_quote, normalized)
     return _normalize_text(normalized, max_len)
+
+
+def _normalize_channel_auto_message(value: Any) -> str:
+    return _normalize_message_markup(
+        value,
+        ExternalChatCrmChannelConfig.CHANNEL_AUTO_MESSAGE_MAX_LENGTH,
+    )
 
 
 def _is_meaningful_system_text(value: str) -> bool:
@@ -588,6 +603,10 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         return cls._redis_key("events_queue", connected_integration_id, chat_id)
 
     @classmethod
+    def _client_notice_key(cls, connected_integration_id: str, chat_id: str) -> str:
+        return cls._redis_key("client_notice", connected_integration_id, chat_id)
+
+    @classmethod
     def _chat_events_revision_dedupe_key(
         cls,
         connected_integration_id: str,
@@ -646,9 +665,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
     async def _redis_incr(key: str, ttl_sec: int) -> int:
         if not _redis_enabled():
             return 0
-        value = await redis_client.incr(key)
-        await redis_client.expire(key, max(int(ttl_sec or 1), 1))
-        return int(value or 0)
+        return await redis_incr_with_ttl(key, max(int(ttl_sec or 1), 1))
 
     @staticmethod
     async def _redis_delete(*keys: str) -> None:
@@ -658,6 +675,138 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         if not valid:
             return
         await redis_client.delete(*valid)
+
+    @staticmethod
+    def _client_notice_kind(external_message_id: str) -> str:
+        safe_id = str(external_message_id or "").strip()
+        if safe_id.startswith("webchat:channel_start:"):
+            return "channel_start"
+        if safe_id.startswith("webchat:channel_end:"):
+            return "channel_end"
+        if safe_id.startswith("webchat:channel_rating_prompt:"):
+            return "rating_prompt"
+        if safe_id.startswith("webchat:channel_rating_result:"):
+            return "rating_result"
+        return "system"
+
+    @classmethod
+    def _build_client_notice(
+        cls,
+        *,
+        text: str,
+        external_message_id: str,
+        created_date: int,
+        expires_at: int,
+    ) -> Dict[str, Any]:
+        safe_external_message_id = str(external_message_id or "").strip()
+        return {
+            "id": f"client_notice:{safe_external_message_id}",
+            "text": text,
+            "files": [],
+            "created_date": int(created_date),
+            "message_type": ChatMessageTypeEnum.System.value,
+            "mine": False,
+            "edited": False,
+            "author_name": "",
+            "expires_at": int(expires_at),
+            "notice_kind": cls._client_notice_kind(safe_external_message_id),
+        }
+
+    @classmethod
+    async def _cache_client_notice(
+        cls,
+        connected_integration_id: str,
+        *,
+        chat_id: str,
+        text: str,
+        external_message_id: str,
+        created_date: int,
+    ) -> None:
+        if not _redis_enabled():
+            return
+        safe_chat_id = str(chat_id or "").strip()
+        safe_text = _normalize_channel_auto_message(text)
+        safe_external_message_id = str(external_message_id or "").strip()
+        if not safe_chat_id or not safe_text or not safe_external_message_id:
+            return
+
+        now_ts = int(time.time())
+        ttl_sec = max(int(ExternalChatCrmChannelConfig.CLIENT_NOTICE_TTL_SEC or 1), 1)
+        created_ts = int(created_date or now_ts)
+        expires_at = now_ts + ttl_sec
+        notice = cls._build_client_notice(
+            text=safe_text,
+            external_message_id=safe_external_message_id,
+            created_date=created_ts,
+            expires_at=expires_at,
+        )
+        await redis_zadd_with_ttl(
+            cls._client_notice_key(connected_integration_id, safe_chat_id),
+            _json_dumps(notice),
+            expires_at,
+            ttl_sec,
+            max_items=max(int(ExternalChatCrmChannelConfig.CLIENT_NOTICE_MAX_ITEMS or 1), 1),
+            prune_max_score=now_ts,
+        )
+
+    @classmethod
+    def _parse_client_notice(cls, raw: str, now_ts: int) -> Optional[Dict[str, Any]]:
+        try:
+            payload = _json_loads(str(raw or ""))
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+
+        expires_at = _parse_int(payload.get("expires_at"), None)
+        if not expires_at or int(expires_at) <= int(now_ts):
+            return None
+        notice_id = _normalize_text(payload.get("id"), 200)
+        text = _normalize_channel_auto_message(payload.get("text"))
+        created_date = _parse_int(payload.get("created_date"), None)
+        if not notice_id or not text or not created_date:
+            return None
+        return {
+            "id": notice_id,
+            "text": text,
+            "files": [],
+            "created_date": int(created_date),
+            "message_type": ChatMessageTypeEnum.System.value,
+            "mine": False,
+            "edited": False,
+            "author_name": "",
+            "expires_at": int(expires_at),
+            "notice_kind": _normalize_text(payload.get("notice_kind"), 60) or "system",
+        }
+
+    @classmethod
+    async def _read_client_notices(
+        cls,
+        connected_integration_id: str,
+        chat_id: str,
+    ) -> List[Dict[str, Any]]:
+        if not _redis_enabled():
+            return []
+        safe_chat_id = str(chat_id or "").strip()
+        if not safe_chat_id:
+            return []
+
+        now_ts = int(time.time())
+        ttl_sec = max(int(ExternalChatCrmChannelConfig.CLIENT_NOTICE_TTL_SEC or 1), 1)
+        rows = await redis_zrangebyscore_with_ttl(
+            cls._client_notice_key(connected_integration_id, safe_chat_id),
+            now_ts + 1,
+            "+inf",
+            ttl_sec,
+            max_items=max(int(ExternalChatCrmChannelConfig.CLIENT_NOTICE_MAX_ITEMS or 1), 1),
+            prune_max_score=now_ts,
+        )
+        notices: List[Dict[str, Any]] = []
+        for raw in rows:
+            notice = cls._parse_client_notice(raw, now_ts)
+            if notice:
+                notices.append(notice)
+        return notices
 
     @classmethod
     async def _publish_chat_event(
@@ -940,20 +1089,20 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             or ExternalChatCrmChannelConfig.DEFAULT_CHAT_TITLE
         )
         channel_start_message = (
-            _normalize_text(getattr(channel, "start_message", None), 300) or None
+            _normalize_channel_auto_message(getattr(channel, "start_message", None)) or None
         )
         channel_end_message = (
-            _normalize_text(getattr(channel, "end_message", None), 300) or None
+            _normalize_channel_auto_message(getattr(channel, "end_message", None)) or None
         )
         channel_rating_enabled = bool(getattr(channel, "rating_enabled", False))
         channel_rating_message = (
-            _normalize_text(getattr(channel, "rating_message", None), 300) or None
+            _normalize_channel_auto_message(getattr(channel, "rating_message", None)) or None
         )
         channel_rating_positive_message = (
-            _normalize_text(getattr(channel, "rating_positive_message", None), 300) or None
+            _normalize_channel_auto_message(getattr(channel, "rating_positive_message", None)) or None
         )
         channel_rating_negative_message = (
-            _normalize_text(getattr(channel, "rating_negative_message", None), 300) or None
+            _normalize_channel_auto_message(getattr(channel, "rating_negative_message", None)) or None
         )
 
         return RuntimeConfig(
@@ -2100,11 +2249,12 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         external_message_id: str,
     ) -> bool:
         safe_chat_id = str(chat_id or "").strip()
-        safe_text = _normalize_message_markup(text, 300)
+        safe_text = _normalize_channel_auto_message(text)
         safe_external_message_id = str(external_message_id or "").strip()
         if not safe_chat_id or not safe_text or not safe_external_message_id:
             return False
 
+        created_date = int(time.time())
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
             response = await api.chat.chat_message.add(
                 ChatMessageAddRequest(
@@ -2115,6 +2265,13 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 )
             )
         if response.ok:
+            await cls._cache_client_notice(
+                connected_integration_id,
+                chat_id=safe_chat_id,
+                text=safe_text,
+                external_message_id=safe_external_message_id,
+                created_date=created_date,
+            )
             revision = await cls._bump_chat_revision(
                 connected_integration_id,
                 safe_chat_id,
@@ -2153,7 +2310,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         once_flag: str,
         external_message_id: str,
     ) -> bool:
-        safe_text = _normalize_message_markup(text, 300)
+        safe_text = _normalize_channel_auto_message(text)
         if not safe_text:
             return False
         if not await cls._mark_ticket_once_flag(
@@ -2228,7 +2385,10 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     _enum_value(getattr(row, "message_type", None)).strip()
                     or ChatMessageTypeEnum.Regular.value
                 )
-                if message_type == ChatMessageTypeEnum.Private.value:
+                if message_type in {
+                    ChatMessageTypeEnum.Private.value,
+                    ChatMessageTypeEnum.System.value,
+                }:
                     continue
                 author_type = _enum_value(getattr(row, "author_entity_type", None)).strip().lower()
                 author_id = _parse_int(getattr(row, "author_entity_id", None), None)
@@ -2274,6 +2434,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     "author_name": _normalize_text(getattr(row, "author_entity_name", ""), 120),
                 }
             )
+        history.extend(await cls._read_client_notices(connected_integration_id, context.chat_id))
         history.sort(key=lambda item: (int(item.get("created_date") or 0), str(item.get("id") or "")))
         return history[-resolved_limit:]
 
@@ -2655,9 +2816,14 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         webhook_action: str,
         payload: Dict[str, Any],
     ) -> Dict[str, Any]:
-        ticket_id = _parse_int(payload.get("id"), None)
+        ticket_id = _parse_int(
+            payload.get("ticket_id")
+            if payload.get("ticket_id") is not None
+            else payload.get("id"),
+            None,
+        )
         if not ticket_id:
-            return {"status": "ignored", "reason": "invalid_payload:id"}
+            return {"status": "ignored", "reason": "invalid_payload:ticket_id"}
 
         status_value = _enum_value(payload.get("status")).strip()
         if webhook_action == "TicketClosed" and not status_value:
