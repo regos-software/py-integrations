@@ -56,6 +56,8 @@ class AsteriskCrmChannelConfig:
     CI_ACTIVE_MEMORY_TTL_SEC = 5
     DEFAULT_DEDUPE_TTL_SEC = 6 * 60 * 60
     DEFAULT_STATE_TTL_SEC = 6 * 60 * 60
+    STREAM_TTL_SEC = DEFAULT_STATE_TTL_SEC
+    ACTIVE_CI_IDS_TTL_SEC = 30 * 24 * 60 * 60
     OPERATOR_NOT_FOUND_CACHE_TTL_SEC = 10 * 60
     STORE_DECISION_TRACE = bool(getattr(app_settings, "debug", False))
 
@@ -175,6 +177,7 @@ _HTTP_CLIENT: Optional[httpx.AsyncClient] = None
 _CI_ACTIVE_MEMORY_CACHE: Dict[str, Tuple[bool, int]] = {}
 _CI_ACTIVE_LOCKS: Dict[str, asyncio.Lock] = {}
 _STREAM_EXPIRE_TOUCH_TS: Dict[str, int] = {}
+_ACTIVE_CI_IDS_EXPIRE_TOUCH_TS = 0
 
 
 def _now_ts() -> int:
@@ -618,6 +621,22 @@ class AsteriskCrmChannelIntegration(ClientBase):
         return AsteriskCrmChannelIntegration._redis_key("active_ci_ids")
 
     @staticmethod
+    def _ttl_refresh_interval(ttl_sec: int, *, min_refresh_sec: int) -> int:
+        return min(3600, max(min_refresh_sec, ttl_sec // 4))
+
+    @classmethod
+    async def _touch_active_ci_ids_ttl(cls, *, force: bool = False) -> None:
+        if not _redis_enabled():
+            return
+        global _ACTIVE_CI_IDS_EXPIRE_TOUCH_TS
+        ttl = max(int(AsteriskCrmChannelConfig.ACTIVE_CI_IDS_TTL_SEC), 60)
+        now_ts = _now_ts()
+        refresh_interval_sec = cls._ttl_refresh_interval(ttl, min_refresh_sec=60)
+        if force or now_ts - _ACTIVE_CI_IDS_EXPIRE_TOUCH_TS >= refresh_interval_sec:
+            await redis_client.expire(cls._active_ci_ids_key(), ttl)
+            _ACTIVE_CI_IDS_EXPIRE_TOUCH_TS = now_ts
+
+    @staticmethod
     def _stream_key(connected_integration_id: str) -> str:
         return AsteriskCrmChannelIntegration._redis_key(
             "stream",
@@ -873,6 +892,7 @@ class AsteriskCrmChannelIntegration(ClientBase):
         if not ci:
             return
         await redis_client.sadd(cls._active_ci_ids_key(), ci)
+        await cls._touch_active_ci_ids_ttl(force=True)
 
     @classmethod
     async def _mark_ci_inactive(cls, connected_integration_id: str) -> None:
@@ -2064,6 +2084,7 @@ return 0
         except Exception as error:
             if "BUSYGROUP" not in str(error):
                 raise
+        await cls._touch_stream_ttl(stream_key, force=True)
 
     @classmethod
     async def _enqueue(
@@ -2089,11 +2110,29 @@ return 0
             maxlen=AsteriskCrmChannelConfig.STREAM_MAXLEN,
             approximate=True,
         )
-        ttl = max(_to_int(stream_ttl_sec, 60) or 60, 60)
+        await cls._touch_stream_ttl(stream_key, stream_ttl_sec)
+
+    @staticmethod
+    def _resolve_stream_ttl(stream_ttl_sec: Optional[int] = None) -> int:
+        if stream_ttl_sec is None:
+            return max(int(AsteriskCrmChannelConfig.STREAM_TTL_SEC), 60)
+        return max(_to_int(stream_ttl_sec, 60) or 60, 60)
+
+    @classmethod
+    async def _touch_stream_ttl(
+        cls,
+        stream_key: str,
+        stream_ttl_sec: Optional[int] = None,
+        *,
+        force: bool = False,
+    ) -> None:
+        if not _redis_enabled():
+            return
+        ttl = cls._resolve_stream_ttl(stream_ttl_sec)
         now_ts = _now_ts()
-        refresh_interval_sec = min(60, max(10, ttl // 4))
+        refresh_interval_sec = cls._ttl_refresh_interval(ttl, min_refresh_sec=10)
         last_touch_ts = _to_int(_STREAM_EXPIRE_TOUCH_TS.get(stream_key), 0) or 0
-        if now_ts - last_touch_ts >= refresh_interval_sec:
+        if force or now_ts - last_touch_ts >= refresh_interval_sec:
             await redis_client.expire(stream_key, ttl)
             _STREAM_EXPIRE_TOUCH_TS[stream_key] = now_ts
 
@@ -2106,6 +2145,7 @@ return 0
             AsteriskCrmChannelConfig.HEARTBEAT_TTL_SEC,
             str(_now_ts()),
         )
+        await cls._touch_active_ci_ids_ttl()
 
     @classmethod
     async def _ensure_stream_worker(cls, connected_integration_id: str) -> None:
@@ -2175,6 +2215,7 @@ return 0
         if not ci_ids:
             logger.info("Asterisk auto-restore: no active integrations found")
             return {"total": 0, "restored": 0, "failed": 0}
+        await cls._touch_active_ci_ids_ttl(force=True)
 
         restored = 0
         failed = 0
@@ -2470,6 +2511,7 @@ return 0
         while True:
             try:
                 await cls._set_worker_heartbeat(connected_integration_id)
+                await cls._touch_stream_ttl(stream_key)
                 claimed_entries = await cls._process_claimed_entries(
                     stream_key=stream_key,
                     consumer=consumer,

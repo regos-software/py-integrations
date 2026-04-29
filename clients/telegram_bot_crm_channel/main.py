@@ -89,6 +89,8 @@ class TelegramBotCrmChannelConfig:
     WEBHOOK_REFRESH_TTL = app_settings.telegram_webhook_refresh_ttl
     DEFAULT_DEDUPE_TTL_SEC = 6 * 60 * 60
     DEFAULT_STATE_TTL_SEC = 6 * 60 * 60
+    STREAM_TTL_SEC = DEFAULT_STATE_TTL_SEC
+    ACTIVE_CI_IDS_TTL_SEC = 30 * 24 * 60 * 60
     STREAM_MAXLEN = 10000
     STREAM_GROUP = "tg_crm_channel_workers"
     STREAM_MIN_IDLE_MS = 60_000
@@ -192,6 +194,8 @@ _BOT_CLIENTS: Dict[str, Bot] = {}
 _BOT_CLIENTS_LOCK = asyncio.Lock()
 _HTTP_CLIENT: Optional[httpx.AsyncClient] = None
 _INSTANCE_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+_STREAM_EXPIRE_TOUCH_TS: Dict[str, int] = {}
+_ACTIVE_CI_IDS_EXPIRE_TOUCH_TS = 0
 
 
 class TelegramFileTooLargeError(RuntimeError):
@@ -1161,6 +1165,22 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
     @staticmethod
     def _active_ci_ids_key() -> str:
         return TelegramBotCrmChannelIntegration._redis_key("active_ci_ids")
+
+    @staticmethod
+    def _ttl_refresh_interval(ttl_sec: int, *, min_refresh_sec: int) -> int:
+        return min(3600, max(min_refresh_sec, ttl_sec // 4))
+
+    @classmethod
+    async def _touch_active_ci_ids_ttl(cls, *, force: bool = False) -> None:
+        if not _redis_enabled():
+            return
+        global _ACTIVE_CI_IDS_EXPIRE_TOUCH_TS
+        ttl = max(int(TelegramBotCrmChannelConfig.ACTIVE_CI_IDS_TTL_SEC), 60)
+        now_ts = _now_ts()
+        refresh_interval_sec = cls._ttl_refresh_interval(ttl, min_refresh_sec=60)
+        if force or now_ts - _ACTIVE_CI_IDS_EXPIRE_TOUCH_TS >= refresh_interval_sec:
+            await redis_client.expire(cls._active_ci_ids_key(), ttl)
+            _ACTIVE_CI_IDS_EXPIRE_TOUCH_TS = now_ts
 
     @staticmethod
     def _is_longpolling_mode() -> bool:
@@ -2142,10 +2162,12 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             logger.warning("Webhook subscription failed for %s: %s", connected_integration_id, error)
             return {"status": "failed", "error": str(error)}
 
-    @staticmethod
+    @classmethod
     async def _enqueue(
+        cls,
         stream_key: str,
         fields: Dict[str, Any],
+        stream_ttl_sec: Optional[int] = None,
     ) -> None:
         if not _redis_enabled():
             raise RuntimeError("Redis is not enabled")
@@ -2163,9 +2185,35 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             maxlen=TelegramBotCrmChannelConfig.STREAM_MAXLEN,
             approximate=True,
         )
+        await cls._touch_stream_ttl(stream_key, stream_ttl_sec)
 
     @staticmethod
-    async def _ensure_consumer_group(stream_key: str) -> None:
+    def _resolve_stream_ttl(stream_ttl_sec: Optional[int] = None) -> int:
+        ttl = _parse_int(str(stream_ttl_sec or ""), None)
+        if not ttl or ttl <= 0:
+            ttl = TelegramBotCrmChannelConfig.STREAM_TTL_SEC
+        return max(int(ttl), 60)
+
+    @classmethod
+    async def _touch_stream_ttl(
+        cls,
+        stream_key: str,
+        stream_ttl_sec: Optional[int] = None,
+        *,
+        force: bool = False,
+    ) -> None:
+        if not _redis_enabled():
+            return
+        ttl = cls._resolve_stream_ttl(stream_ttl_sec)
+        now_ts = _now_ts()
+        refresh_interval_sec = cls._ttl_refresh_interval(ttl, min_refresh_sec=10)
+        last_touch_ts = _parse_int(str(_STREAM_EXPIRE_TOUCH_TS.get(stream_key) or ""), 0) or 0
+        if force or now_ts - last_touch_ts >= refresh_interval_sec:
+            await redis_client.expire(stream_key, ttl)
+            _STREAM_EXPIRE_TOUCH_TS[stream_key] = now_ts
+
+    @classmethod
+    async def _ensure_consumer_group(cls, stream_key: str) -> None:
         if not _redis_enabled():
             return
         try:
@@ -2178,6 +2226,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         except Exception as error:
             if "BUSYGROUP" not in str(error):
                 raise
+        await cls._touch_stream_ttl(stream_key, force=True)
 
     @classmethod
     async def _ensure_stream_workers(cls, connected_integration_id: str) -> None:
@@ -2260,6 +2309,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if not ci_ids:
             logger.info("Telegram auto-restore: no active integrations found")
             return {"total": 0, "restored": 0, "failed": 0}
+        await cls._touch_active_ci_ids_ttl(force=True)
 
         restored = 0
         failed = 0
@@ -2353,6 +2403,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 await redis_client.sadd(
                     self._active_ci_ids_key(), self.connected_integration_id
                 )
+                await self._touch_active_ci_ids_ttl(force=True)
                 return {
                     "status": "connected",
                     "mode": "longpolling",
@@ -2370,6 +2421,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             await self._touch_webhook_refresh_cache(self.connected_integration_id)
             await self._ensure_stream_workers(self.connected_integration_id)
             await redis_client.sadd(self._active_ci_ids_key(), self.connected_integration_id)
+            await self._touch_active_ci_ids_ttl(force=True)
 
             return {
                 "status": "connected",
@@ -4437,6 +4489,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         await redis_client.setex(
             cls._worker_heartbeat_key(connected_integration_id), 30, str(_now_ts())
         )
+        await cls._touch_active_ci_ids_ttl()
 
     @classmethod
     async def _stream_worker_loop(cls, connected_integration_id: str, kind: str) -> None:
@@ -4452,6 +4505,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                         f"ConnectedIntegration {connected_integration_id} is inactive"
                     )
                 await cls._set_worker_heartbeat(connected_integration_id)
+                await cls._touch_stream_ttl(stream_key)
                 await cls._process_claimed_entries(
                     stream_key, consumer, connected_integration_id, kind
                 )
