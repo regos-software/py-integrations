@@ -889,7 +889,7 @@ const wholesaleDefinition = {
         offset: (page - 1) * pageSize,
         limit: pageSize,
         search: search || undefined,
-        sort_orders: [{ column: "date", direction: "desc" }],
+        sort_orders: [{ column: "id", direction: "desc" }],
       };
       params.performed = false;
       params.deleted_mark = false;
