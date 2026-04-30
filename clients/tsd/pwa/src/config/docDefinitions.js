@@ -587,7 +587,7 @@ const inventoryDefinition = {
         offset: (page - 1) * pageSize,
         limit: pageSize,
         search: search || undefined,
-        sort_orders: [{ column: "OpenDate", direction: "desc" }],
+        sort_orders: [{ column: "id", direction: "desc" }],
         closed: false,
         deleted_mark: false,
       };
@@ -889,7 +889,7 @@ const wholesaleDefinition = {
         offset: (page - 1) * pageSize,
         limit: pageSize,
         search: search || undefined,
-        sort_orders: [{ column: "id", direction: "desc" }],
+        sort_orders: [{ column: "date", direction: "desc" }],
       };
       params.performed = false;
       params.deleted_mark = false;
