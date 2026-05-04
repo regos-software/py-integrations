@@ -27,6 +27,7 @@
   - `ChatMessageAdded`
   - `ChatMessageEdited`
   - `ChatMessageDeleted`
+  - `ChatMessageRead`
   - `TicketStatusSet`
   - `TicketClosed`
 
@@ -59,8 +60,25 @@
 
 - `init` — инициализация сессии, создание/поиск клиента и обращения, загрузка истории.
 - `history` — получение истории сообщений.
+- `getupdates` — получение изменений чата и состояния обращения для iframe UI.
+- `unread_count` — получение текущего количества непрочитанных сообщений.
 - `send_message` — отправка сообщения посетителя в CRM.
 - `mark_read` — отметка чата как прочитанного.
+
+## Событие непрочитанных сообщений для parent window
+
+Iframe отправляет родительскому окну событие:
+
+```js
+window.parent.postMessage({
+  type: "SUPPORT_CHAT_UNREAD",
+  count,
+  visitor_id,
+}, "*");
+```
+
+Событие отправляется после инициализации, при изменениях чата, после восстановления polling loop и после `mark_read`.
+Чтобы явно отметить чат прочитанным при открытии виджета, parent window может отправить iframe сообщение `SUPPORT_CHAT_OPENED` с тем же `visitor_id`.
 
 ## Порядок настройки
 

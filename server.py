@@ -6,6 +6,7 @@ from core.exception_handlers import add_exception_handlers
 from fastapi.middleware.gzip import GZipMiddleware
 from clients.asterisk_crm_channel.main import AsteriskCrmChannelIntegration
 from clients.gpt_crm_chat_assistant.main import GptCrmChatAssistantIntegration
+from clients.instagram_crm_channel.main import InstagramCrmChannelIntegration
 from clients.telegram_bot_crm_channel.main import TelegramBotCrmChannelIntegration
 
 
@@ -13,12 +14,14 @@ _RESTORE_INTEGRATIONS = (
     ("Asterisk", AsteriskCrmChannelIntegration),
     ("Telegram", TelegramBotCrmChannelIntegration),
     ("GPT assistant", GptCrmChatAssistantIntegration),
+    ("Instagram", InstagramCrmChannelIntegration),
 )
 
 _SHUTDOWN_INTEGRATIONS = (
     ("Telegram", TelegramBotCrmChannelIntegration),
     ("Asterisk", AsteriskCrmChannelIntegration),
     ("GPT assistant", GptCrmChatAssistantIntegration),
+    ("Instagram", InstagramCrmChannelIntegration),
 )
 
 

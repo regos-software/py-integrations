@@ -549,6 +549,7 @@ async def handle_external(
     if connected_integration_id:
         headers["Connected-Integration-Id"] = str(connected_integration_id)
 
+    raw_body = await request.body()
     body_data = await _read_body_safely(request)
 
     envelope: Dict[str, Any] = {
@@ -558,6 +559,7 @@ async def handle_external(
         "query": dict(request.query_params),
         "headers": headers,
         "body": body_data,
+        "raw_body": raw_body,
         "client": request.client.host if request.client else None,
     }
 

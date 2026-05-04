@@ -26,7 +26,7 @@ from core.redis import (
     redis_zadd_with_ttl,
     redis_zrangebyscore_with_ttl,
 )
-from schemas.api.chat.chat import ChatEntityTypeEnum
+from schemas.api.chat.chat import ChatEntityTypeEnum, ChatGetRequest
 from schemas.api.chat.chat_message import (
     ChatMessageAddFileRequest,
     ChatMessageAddRequest,
@@ -118,6 +118,7 @@ class ExternalChatCrmChannelConfig:
         "ChatMessageAdded",
         "ChatMessageEdited",
         "ChatMessageDeleted",
+        "ChatMessageRead",
         "TicketStatusSet",
         "TicketClosed",
     }
@@ -2449,6 +2450,52 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 ChatMessageMarkReadRequest(chat_id=context.chat_id)
             )
 
+    @classmethod
+    async def _get_unread_count(
+        cls,
+        connected_integration_id: str,
+        context: ChatContext,
+    ) -> int:
+        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+            response = await api.chat.chat.get(
+                ChatGetRequest(
+                    ids=[str(context.chat_id)],
+                    limit=1,
+                    offset=0,
+                )
+            )
+        rows = response.result if response.ok and isinstance(response.result, list) else []
+        if not rows:
+            return 0
+        return max(_parse_int(getattr(rows[0], "unread_count", None), 0) or 0, 0)
+
+    @staticmethod
+    def _compose_chat_state_view(
+        chat_revision: Any,
+        unread_count: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        view: Dict[str, Any] = {"chat_revision": chat_revision}
+        if unread_count is not None:
+            view["unread_count"] = max(_parse_int(unread_count, 0) or 0, 0)
+        return view
+
+    @classmethod
+    async def _get_chat_state_view(
+        cls,
+        connected_integration_id: str,
+        context: ChatContext,
+        *,
+        include_unread: bool,
+    ) -> Dict[str, Any]:
+        if include_unread:
+            chat_revision, unread_count = await asyncio.gather(
+                cls._get_chat_revision(connected_integration_id, str(context.chat_id)),
+                cls._get_unread_count(connected_integration_id, context),
+            )
+            return cls._compose_chat_state_view(chat_revision, unread_count)
+        chat_revision = await cls._get_chat_revision(connected_integration_id, str(context.chat_id))
+        return cls._compose_chat_state_view(chat_revision)
+
     @staticmethod
     def _extract_profile(data: Dict[str, Any]) -> Dict[str, Any]:
         return {
@@ -2953,7 +3000,12 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             return {"status": "ignored", "reason": "duplicate_event"}
 
         try:
-            if webhook_action in {"ChatMessageAdded", "ChatMessageEdited", "ChatMessageDeleted"}:
+            if webhook_action in {
+                "ChatMessageAdded",
+                "ChatMessageEdited",
+                "ChatMessageDeleted",
+                "ChatMessageRead",
+            }:
                 result = await self._apply_chat_message_webhook(ci, webhook_action, payload)
             else:
                 result = await self._apply_ticket_webhook(ci, webhook_action, payload)
@@ -3097,11 +3149,13 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     runtime,
                     context,
                 )
-                chat_revision = await self._get_chat_revision(ci, str(context.chat_id))
-                history = await self._read_history(
-                    ci,
-                    context,
-                    ExternalChatCrmChannelConfig.DEFAULT_HISTORY_LIMIT,
+                chat_state, history = await asyncio.gather(
+                    self._get_chat_state_view(ci, context, include_unread=True),
+                    self._read_history(
+                        ci,
+                        context,
+                        ExternalChatCrmChannelConfig.DEFAULT_HISTORY_LIMIT,
+                    ),
                 )
                 return {
                     "status": "ok",
@@ -3112,7 +3166,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                         "phone": runtime.require_phone,
                         "email": runtime.require_email,
                     },
-                    "chat_revision": chat_revision,
+                    **chat_state,
                     "history_changed": True,
                     **ticket_view,
                     "history": history,
@@ -3144,22 +3198,29 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     and int(chat_revision) > 0
                     and int(known_revision) == int(chat_revision)
                 ):
+                    chat_state = self._compose_chat_state_view(
+                        chat_revision,
+                        await self._get_unread_count(ci, context),
+                    )
                     return {
                         "status": "ok",
                         "visitor_id": visitor_id,
-                        "chat_revision": chat_revision,
+                        **chat_state,
                         "history_changed": False,
                         **ticket_view,
                     }
-                history = await self._read_history(
-                    ci,
-                    context,
-                    int(limit or ExternalChatCrmChannelConfig.DEFAULT_HISTORY_LIMIT),
+                history, unread_count = await asyncio.gather(
+                    self._read_history(
+                        ci,
+                        context,
+                        int(limit or ExternalChatCrmChannelConfig.DEFAULT_HISTORY_LIMIT),
+                    ),
+                    self._get_unread_count(ci, context),
                 )
                 return {
                     "status": "ok",
                     "visitor_id": visitor_id,
-                    "chat_revision": chat_revision,
+                    **self._compose_chat_state_view(chat_revision, unread_count),
                     "history_changed": True,
                     **ticket_view,
                     "history": history,
@@ -3177,15 +3238,18 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     and int(chat_revision) > 0
                     and int(known_revision) != int(chat_revision)
                 ):
-                    ticket_view = await self._compose_context_ticket_view(
-                        ci,
-                        runtime,
-                        context,
+                    ticket_view, unread_count = await asyncio.gather(
+                        self._compose_context_ticket_view(
+                            ci,
+                            runtime,
+                            context,
+                        ),
+                        self._get_unread_count(ci, context),
                     )
                     return {
                         "status": "ok",
                         "visitor_id": visitor_id,
-                        "chat_revision": chat_revision,
+                        **self._compose_chat_state_view(chat_revision, unread_count),
                         "events": [self._build_revision_sync_event(
                             chat_id=str(context.chat_id),
                             ticket_id=int(context.ticket_id),
@@ -3210,15 +3274,18 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     latest_chat_revision = await self._get_chat_revision(ci, str(context.chat_id))
                     chat_revision = int(latest_chat_revision or 0)
                     if int(chat_revision) > 0 and int(known_revision) != int(chat_revision):
-                        ticket_view = await self._compose_context_ticket_view(
-                            ci,
-                            runtime,
-                            context,
+                        ticket_view, unread_count = await asyncio.gather(
+                            self._compose_context_ticket_view(
+                                ci,
+                                runtime,
+                                context,
+                            ),
+                            self._get_unread_count(ci, context),
                         )
                         return {
                             "status": "ok",
                             "visitor_id": visitor_id,
-                            "chat_revision": chat_revision,
+                            **self._compose_chat_state_view(chat_revision, unread_count),
                             "events": [self._build_revision_sync_event(
                                 chat_id=str(context.chat_id),
                                 ticket_id=int(context.ticket_id),
@@ -3227,18 +3294,29 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                             )],
                             **ticket_view,
                         }
-                ticket_view = await self._compose_context_ticket_view(
-                    ci,
-                    runtime,
-                    context,
+                if not events:
+                    return {
+                        "status": "ok",
+                        "visitor_id": visitor_id,
+                        **self._compose_chat_state_view(chat_revision),
+                        "events": [],
+                    }
+                ticket_view, unread_count = await asyncio.gather(
+                    self._compose_context_ticket_view(
+                        ci,
+                        runtime,
+                        context,
+                    ),
+                    self._get_unread_count(ci, context),
                 )
-                return {
+                response_payload = {
                     "status": "ok",
                     "visitor_id": visitor_id,
-                    "chat_revision": chat_revision,
                     "events": events,
+                    **self._compose_chat_state_view(chat_revision, unread_count),
                     **ticket_view,
                 }
+                return response_payload
 
             if action == "send_message":
                 text = _normalize_message_markup(
@@ -3267,7 +3345,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     "status": "ok",
                     "visitor_id": visitor_id,
                     "message_id": message_id,
-                    "chat_revision": chat_revision,
+                    **self._compose_chat_state_view(chat_revision, 0),
                     **ticket_view,
                 }
 
@@ -3306,7 +3384,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     "file_id": int(file_id),
                     "file_name": file_name,
                     "file_size": int(file_size),
-                    "chat_revision": chat_revision,
+                    **self._compose_chat_state_view(chat_revision, 0),
                     **ticket_view,
                 }
 
@@ -3435,6 +3513,14 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     **saved_view,
                 }
 
+            if action == "unread_count":
+                chat_state = await self._get_chat_state_view(ci, context, include_unread=True)
+                return {
+                    "status": "ok",
+                    "visitor_id": visitor_id,
+                    **chat_state,
+                }
+
             if action == "mark_read":
                 await self._mark_read(ci, context)
                 ticket_state = await self._get_ticket_write_state(ci, int(context.ticket_id))
@@ -3443,7 +3529,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 return {
                     "status": "ok",
                     "visitor_id": visitor_id,
-                    "chat_revision": chat_revision,
+                    **self._compose_chat_state_view(chat_revision, 0),
                     **ticket_view,
                 }
 
