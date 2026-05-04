@@ -5,8 +5,21 @@ from routes.clients import router as clients
 from core.exception_handlers import add_exception_handlers
 from fastapi.middleware.gzip import GZipMiddleware
 from clients.asterisk_crm_channel.main import AsteriskCrmChannelIntegration
+from clients.gpt_crm_chat_assistant.main import GptCrmChatAssistantIntegration
 from clients.telegram_bot_crm_channel.main import TelegramBotCrmChannelIntegration
 
+
+_RESTORE_INTEGRATIONS = (
+    ("Asterisk", AsteriskCrmChannelIntegration),
+    ("Telegram", TelegramBotCrmChannelIntegration),
+    ("GPT assistant", GptCrmChatAssistantIntegration),
+)
+
+_SHUTDOWN_INTEGRATIONS = (
+    ("Telegram", TelegramBotCrmChannelIntegration),
+    ("Asterisk", AsteriskCrmChannelIntegration),
+    ("GPT assistant", GptCrmChatAssistantIntegration),
+)
 
 
 logger = setup_logger("server")
@@ -17,29 +30,21 @@ def create_app() -> FastAPI:
 
     @app.on_event("startup")
     async def _restore_integrations_on_startup() -> None:
-        try:
-            summary = await AsteriskCrmChannelIntegration.restore_active_connections()
-            logger.info("Asterisk auto-restore on startup: %s", summary)
-        except Exception as error:
-            logger.exception("Asterisk auto-restore failed on startup: %s", error)
-        try:
-            summary = await TelegramBotCrmChannelIntegration.restore_active_connections()
-            logger.info("Telegram auto-restore on startup: %s", summary)
-        except Exception as error:
-            logger.exception("Telegram auto-restore failed on startup: %s", error)
+        for name, integration_cls in _RESTORE_INTEGRATIONS:
+            try:
+                summary = await integration_cls.restore_active_connections()
+                logger.info("%s auto-restore on startup: %s", name, summary)
+            except Exception as error:
+                logger.exception("%s auto-restore failed on startup: %s", name, error)
 
     @app.on_event("shutdown")
     async def _shutdown_integrations_on_shutdown() -> None:
-        try:
-            await TelegramBotCrmChannelIntegration.shutdown_all()
-            logger.info("Telegram integrations shutdown cleanup completed")
-        except Exception as error:
-            logger.exception("Telegram shutdown cleanup failed: %s", error)
-        try:
-            await AsteriskCrmChannelIntegration.shutdown_all()
-            logger.info("Asterisk integrations shutdown cleanup completed")
-        except Exception as error:
-            logger.exception("Asterisk shutdown cleanup failed: %s", error)
+        for name, integration_cls in _SHUTDOWN_INTEGRATIONS:
+            try:
+                await integration_cls.shutdown_all()
+                logger.info("%s shutdown cleanup completed", name)
+            except Exception as error:
+                logger.exception("%s shutdown cleanup failed: %s", name, error)
 
     app.add_middleware(GZipMiddleware, minimum_size=500)
 
