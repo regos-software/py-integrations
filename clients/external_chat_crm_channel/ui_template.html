@@ -128,9 +128,9 @@
       chatReady: false,
       ticketClosed: false,
       chatRevision: 0,
-      unreadCount: 0,
-      lastNotifiedUnreadCount: null,
-      unreadSyncBusy: false,
+      notificationCount: 0,
+      lastNotifiedNotificationCount: null,
+      notificationSyncBusy: false,
       eventLoopReconnectPending: false,
       visitorId: "",
       profile: {{
@@ -1627,7 +1627,7 @@
       }}
       return payload;
     }}
-    function normalizeUnreadCount(value) {{
+    function normalizeNotificationCount(value) {{
       const count = Number(value);
       if (!Number.isFinite(count) || count < 0) {{
         return 0;
@@ -1635,12 +1635,12 @@
       return Math.floor(count);
     }}
     function notifySupportUnread(count, force = false) {{
-      const normalized = normalizeUnreadCount(count);
-      state.unreadCount = normalized;
+      const normalized = normalizeNotificationCount(count);
+      state.notificationCount = normalized;
       if (!state.visitorId) {{
         return;
       }}
-      if (!force && state.lastNotifiedUnreadCount === normalized) {{
+      if (!force && state.lastNotifiedNotificationCount === normalized) {{
         return;
       }}
       try {{
@@ -1649,24 +1649,24 @@
           count: normalized,
           visitor_id: state.visitorId,
         }}, "*");
-        state.lastNotifiedUnreadCount = normalized;
+        state.lastNotifiedNotificationCount = normalized;
       }} catch (error) {{
-        console.warn("[external_chat] unread postMessage failed:", error);
+        console.warn("[external_chat] notification postMessage failed:", error);
       }}
     }}
-    function applyUnreadState(payload, force = false) {{
-      if (payload && Object.prototype.hasOwnProperty.call(payload, "unread_count")) {{
-        notifySupportUnread(payload.unread_count, force);
+    function applyNotificationState(payload, force = false) {{
+      if (payload && Object.prototype.hasOwnProperty.call(payload, "notification_count")) {{
+        notifySupportUnread(payload.notification_count, force);
       }}
     }}
     function hasPayloadField(payload, field) {{
       return !!(payload && Object.prototype.hasOwnProperty.call(payload, field));
     }}
-    function applyWriteState(payload, forceUnread = false) {{
+    function applyWriteState(payload, forceNotification = false) {{
       if (payload && Number(payload.chat_revision) > 0) {{
         state.chatRevision = Number(payload.chat_revision);
       }}
-      applyUnreadState(payload, forceUnread);
+      applyNotificationState(payload, forceNotification);
       for (const [field, applyField] of WRITE_STATE_FIELDS) {{
         if (hasPayloadField(payload, field)) {{
           applyField(payload[field]);
@@ -1760,13 +1760,13 @@
               if (shouldRefreshHistory) {{
                 await refreshHistory(forceFullHistory);
                 if (reconnectSyncNeeded) {{
-                  notifySupportUnread(state.unreadCount, true);
+                  notifySupportUnread(state.notificationCount, true);
                 }}
               }} else if (reconnectSyncNeeded) {{
-                if (result && Object.prototype.hasOwnProperty.call(result, "unread_count")) {{
-                  notifySupportUnread(result.unread_count, true);
+                if (result && Object.prototype.hasOwnProperty.call(result, "notification_count")) {{
+                  notifySupportUnread(result.notification_count, true);
                 }} else {{
-                  await syncUnreadCount(true);
+                  await syncNotificationCount(true);
                 }}
               }}
               await delayMs(EVENT_POLL_INTERVAL_MS);
@@ -1857,19 +1857,19 @@
       }}
       setStatus(t("status_online"), "ok");
     }}
-    async function syncUnreadCount(force = false) {{
+    async function syncNotificationCount(force = false) {{
       if (!state.chatReady) {{
         if (force) {{
-          notifySupportUnread(state.unreadCount, true);
+          notifySupportUnread(state.notificationCount, true);
         }}
         return;
       }}
-      if (state.unreadSyncBusy) {{
+      if (state.notificationSyncBusy) {{
         return;
       }}
-      state.unreadSyncBusy = true;
+      state.notificationSyncBusy = true;
       try {{
-        const result = await callApi("unread_count", {{
+        const result = await callApi("notification_count", {{
           visitor_id: state.visitorId,
           display_name: state.profile.display_name,
           email: state.profile.email,
@@ -1877,10 +1877,10 @@
         }});
         applyWriteState(result, force);
       }} finally {{
-        state.unreadSyncBusy = false;
+        state.notificationSyncBusy = false;
       }}
     }}
-    async function markChatRead(forceUnreadNotify = false) {{
+    async function markChatRead(forceNotificationNotify = false) {{
       if (!state.chatReady) {{
         await initChat();
       }}
@@ -1893,7 +1893,7 @@
         email: state.profile.email,
         phone: state.profile.phone,
       }});
-      applyWriteState(result, forceUnreadNotify);
+      applyWriteState(result, forceNotificationNotify);
     }}
     async function sendChatMessage(text) {{
       if (!state.chatReady) {{
