@@ -429,7 +429,8 @@ class GptCrmChatAssistantIntegration(ClientBase):
                     cls._ACTIVE_CACHE[ci] = (cached_value, now + 60)
                 return cached_value
 
-        active = False
+        detected: Optional[bool] = None
+        last_error: Optional[Exception] = None
         try:
             async with RegosAPI(connected_integration_id=ci) as api:
                 response = await api.integrations.connected_integration.get(
@@ -442,13 +443,35 @@ class GptCrmChatAssistantIntegration(ClientBase):
             if response.ok and isinstance(response.result, list):
                 for row in response.result:
                     row_ci = str(getattr(row, "connected_integration_id", "") or "").strip()
-                    if row_ci != ci:
+                    if row_ci and row_ci != ci:
                         continue
                     row_active = getattr(row, "is_active", None)
-                    active = bool(row_active) if row_active is not None else False
+                    if row_active is None:
+                        continue
+                    detected = bool(row_active)
                     break
-        except Exception:
-            active = False
+        except httpx.HTTPStatusError as error:
+            last_error = error
+            status_code = (
+                int(error.response.status_code)
+                if error.response is not None
+                else None
+            )
+            if status_code in {401, 403, 404}:
+                detected = False
+        except Exception as error:
+            last_error = error
+
+        if detected is None:
+            if last_error is not None:
+                logger.warning(
+                    "ConnectedIntegration/Get failed for active check, fallback active=true: ci=%s error=%s",
+                    ci,
+                    last_error,
+                )
+            detected = True
+
+        active = bool(detected)
 
         async with cls._ACTIVE_CACHE_LOCK:
             cls._ACTIVE_CACHE[ci] = (active, now + 60)
