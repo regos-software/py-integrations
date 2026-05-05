@@ -138,6 +138,7 @@
         phone: "",
         email: "",
       }},
+      clientParams: {{}},
       ticketFields: [],
       onboardingErrors: {{}},
       onboardingSubmitBusy: false,
@@ -834,6 +835,27 @@
         }}
       }}
       state.ticketFields = Object.keys(fieldsByKey).map((key) => fieldsByKey[key]);
+    }}
+    function loadClientParamsFromQuery() {{
+      const params = new URLSearchParams(window.location.search || "");
+      const clientParams = {{}};
+      for (const pair of params.entries()) {{
+        const rawKey = String(pair[0] || "").trim().slice(0, 160);
+        const rawValue = normalizeTicketFieldValue(pair[1]);
+        if (!rawKey || rawValue === null) {{
+          continue;
+        }}
+        if (Object.prototype.hasOwnProperty.call(clientParams, rawKey)) {{
+          if (Array.isArray(clientParams[rawKey])) {{
+            clientParams[rawKey].push(rawValue);
+          }} else {{
+            clientParams[rawKey] = [clientParams[rawKey], rawValue];
+          }}
+        }} else {{
+          clientParams[rawKey] = rawValue;
+        }}
+      }}
+      state.clientParams = clientParams;
     }}
     function initVisitorId() {{
       const queryVisitorId = normalizeVisitorId(
@@ -1924,6 +1946,9 @@
       if (Array.isArray(state.ticketFields) && state.ticketFields.length) {{
         initPayload.ticket_fields = state.ticketFields;
       }}
+      if (state.clientParams && Object.keys(state.clientParams).length) {{
+        initPayload.client_params = state.clientParams;
+      }}
       const result = await callApi("init", initPayload);
       if (result.visitor_id && result.visitor_id !== state.visitorId) {{
         state.visitorId = normalizeVisitorId(result.visitor_id);
@@ -2248,6 +2273,7 @@
       renderComposerToolLabels();
       loadProfile();
       applyQueryProfileOverrides();
+      loadClientParamsFromQuery();
       loadTicketFieldsFromQuery();
       persistProfile();
       initVisitorId();

@@ -120,6 +120,10 @@ class ExternalChatCrmChannelConfig:
     MAX_TICKET_FIELD_KEY_LENGTH = 160
     MAX_TICKET_FIELD_VALUE_LENGTH = 4000
     TICKET_FIELD_EXISTS_CACHE_TTL_SEC = max(SETTINGS_TTL_SEC, 5 * 60)
+    MAX_CLIENT_INFO_PARAM_KEY_LENGTH = 120
+    MAX_CLIENT_INFO_PARAM_VALUE_LENGTH = 500
+    MAX_CLIENT_INFO_PARAMS = 80
+    CLIENT_FIELD_EXISTS_CACHE_TTL_SEC = max(SETTINGS_TTL_SEC, 5 * 60)
     SUPPORTED_INBOUND_WEBHOOKS = {
         "ChatMessageAdded",
         "ChatMessageEdited",
@@ -328,6 +332,161 @@ def _normalize_ticket_field_value(value: Any) -> Optional[str]:
     return text.strip()[: ExternalChatCrmChannelConfig.MAX_TICKET_FIELD_VALUE_LENGTH]
 
 
+_CLIENT_INFO_IGNORED_KEYS = {
+    "action",
+    "ci",
+    "client_custom_fields",
+    "client_fields",
+    "client_params",
+    "connected-integration-id",
+    "connected_integration_id",
+    "custom_fields",
+    "data",
+    "fields",
+    "file",
+    "file_data",
+    "force_full",
+    "known_revision",
+    "limit",
+    "max_events",
+    "payload",
+    "payload_b64",
+    "text",
+    "ticket_custom_fields",
+    "ticket_fields",
+    "visitor",
+    "visitor_id",
+    "visitorid",
+    "vid",
+}
+_CLIENT_PROFILE_ALIAS_KEYS = {
+    "display_name",
+    "email",
+    "full_name",
+    "mail",
+    "name",
+    "phone",
+    "phone_number",
+    "tel",
+}
+_CLIENT_INFO_SENSITIVE_KEY_RE = re.compile(
+    r"(^|[_.:-])(api_key|apikey|auth|authorization|password|passwd|secret|signature|token)([_.:-]|$)",
+    flags=re.IGNORECASE,
+)
+
+
+def _normalize_client_info_param_key(value: Any) -> str:
+    key = re.sub(r"[\r\n\t]+", " ", str(value or "")).strip()
+    return key[: ExternalChatCrmChannelConfig.MAX_CLIENT_INFO_PARAM_KEY_LENGTH]
+
+
+def _normalize_client_info_param_value(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        text = "true" if value else "false"
+    elif isinstance(value, (int, float)):
+        text = str(value)
+    elif isinstance(value, (list, tuple)):
+        parts = []
+        for item in value:
+            normalized = _normalize_client_info_param_value(item)
+            if normalized:
+                parts.append(normalized)
+        text = ", ".join(parts)
+    elif isinstance(value, dict):
+        text = _json_dumps(value)
+    else:
+        text = str(value or "")
+    text = re.sub(r"[\r\n\t]+", " ", text).strip()
+    if not text:
+        return None
+    return text[: ExternalChatCrmChannelConfig.MAX_CLIENT_INFO_PARAM_VALUE_LENGTH]
+
+
+def _is_client_info_param_allowed(key: str) -> bool:
+    normalized = _normalize_client_info_param_key(key)
+    if not normalized:
+        return False
+    lowered = normalized.strip().lower()
+    if lowered in _CLIENT_INFO_IGNORED_KEYS:
+        return False
+    return _CLIENT_INFO_SENSITIVE_KEY_RE.search(lowered) is None
+
+
+def _iter_client_info_param_rows(value: Any) -> List[Tuple[Any, Any]]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return []
+        try:
+            parsed = _json_loads(raw)
+        except Exception:
+            return []
+        return _iter_client_info_param_rows(parsed)
+    if isinstance(value, dict):
+        if "key" in value:
+            return [(value.get("key"), value.get("value"))]
+        return list(value.items())
+    if isinstance(value, (list, tuple)):
+        rows: List[Tuple[Any, Any]] = []
+        for item in value:
+            if isinstance(item, dict):
+                rows.extend(_iter_client_info_param_rows(item))
+                continue
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                rows.append((item[0], item[1]))
+        return rows
+    return []
+
+
+def _append_client_info_param(
+    target: List[Tuple[str, str]],
+    seen: Dict[str, bool],
+    key: Any,
+    value: Any,
+    *,
+    allow_technical: bool = False,
+) -> None:
+    if len(target) >= ExternalChatCrmChannelConfig.MAX_CLIENT_INFO_PARAMS:
+        return
+    normalized_key = _normalize_client_info_param_key(key)
+    if not normalized_key:
+        return
+    if not allow_technical and not _is_client_info_param_allowed(normalized_key):
+        return
+    normalized_value = _normalize_client_info_param_value(value)
+    if normalized_value is None:
+        return
+    lowered = normalized_key.strip().lower()
+    if seen.get(lowered):
+        return
+    seen[lowered] = True
+    target.append((normalized_key, normalized_value))
+
+
+def _client_field_key_from_param_key(value: Any, *, allow_unprefixed: bool) -> str:
+    key = str(value or "").strip()
+    if not key:
+        return ""
+    lowered = key.lower()
+    if lowered in _CLIENT_PROFILE_ALIAS_KEYS:
+        return ""
+    if key.startswith("client_field_"):
+        return key[len("client_field_") :]
+    if key.startswith("client_field."):
+        return key[len("client_field.") :]
+    if key.startswith(("ticket_field_", "ticket_field.")):
+        return ""
+    if key.startswith("field_"):
+        return key
+    if allow_unprefixed and _is_client_info_param_allowed(key):
+        return key
+    return ""
+
+
 def _iter_ticket_field_rows(value: Any) -> List[Dict[str, Any]]:
     if value is None:
         return []
@@ -382,6 +541,43 @@ def _extract_ticket_field_rows(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     return rows
 
 
+def _extract_client_field_rows(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    container_keys = ("client_fields", "client_custom_fields")
+    for key in container_keys:
+        if key not in data:
+            continue
+        rows.extend(_iter_ticket_field_rows(data.get(key)))
+
+    for raw_key, raw_value in _iter_client_info_param_rows(data.get("client_params")):
+        key = str(raw_key or "").strip()
+        if not key:
+            continue
+        if key in container_keys:
+            rows.extend(_iter_ticket_field_rows(raw_value))
+            continue
+        field_key = _client_field_key_from_param_key(key, allow_unprefixed=True)
+        if field_key:
+            rows.append({"key": field_key, "value": raw_value})
+
+    ignored_top_level_keys = {
+        *container_keys,
+        "client_params",
+        "custom_fields",
+        "fields",
+        "ticket_custom_fields",
+        "ticket_fields",
+    }
+    for raw_key, raw_value in data.items():
+        key = str(raw_key or "").strip()
+        if not key or key in ignored_top_level_keys:
+            continue
+        field_key = _client_field_key_from_param_key(key, allow_unprefixed=True)
+        if field_key:
+            rows.append({"key": field_key, "value": raw_value})
+    return rows
+
+
 def _normalize_ticket_field_adds(data: Dict[str, Any]) -> List[FieldValueAdd]:
     fields_by_key: Dict[str, FieldValueAdd] = {}
     for row in _extract_ticket_field_rows(data):
@@ -397,9 +593,41 @@ def _normalize_ticket_field_adds(data: Dict[str, Any]) -> List[FieldValueAdd]:
     return list(fields_by_key.values())
 
 
+def _normalize_client_field_adds(data: Dict[str, Any]) -> List[FieldValueAdd]:
+    fields_by_key: Dict[str, FieldValueAdd] = {}
+    for row in _extract_client_field_rows(data):
+        key = _normalize_ticket_field_key(row.get("key"))
+        if not key:
+            continue
+        if _parse_bool(row.get("deleted"), False):
+            continue
+        value = _normalize_ticket_field_value(row.get("value"))
+        if value is None:
+            continue
+        fields_by_key[key] = FieldValueAdd(key=key, value=value)
+    return list(fields_by_key.values())
+
+
 def _normalize_ticket_field_edits(data: Dict[str, Any]) -> List[FieldValueEdit]:
     fields_by_key: Dict[str, FieldValueEdit] = {}
     for row in _extract_ticket_field_rows(data):
+        key = _normalize_ticket_field_key(row.get("key"))
+        if not key:
+            continue
+        deleted = _parse_bool(row.get("deleted"), False)
+        value = _normalize_ticket_field_value(row.get("value"))
+        if deleted:
+            fields_by_key[key] = FieldValueEdit(key=key, deleted=True)
+            continue
+        if value is None:
+            continue
+        fields_by_key[key] = FieldValueEdit(key=key, value=value, deleted=False)
+    return list(fields_by_key.values())
+
+
+def _normalize_client_field_edits(data: Dict[str, Any]) -> List[FieldValueEdit]:
+    fields_by_key: Dict[str, FieldValueEdit] = {}
+    for row in _extract_client_field_rows(data):
         key = _normalize_ticket_field_key(row.get("key"))
         if not key:
             continue
@@ -765,6 +993,12 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         digest = hashlib.sha1(normalized_key.encode("utf-8", errors="ignore")).hexdigest()
         return cls._redis_key("ticket_field_exists", connected_integration_id, digest)
 
+    @classmethod
+    def _client_field_exists_cache_key(cls, connected_integration_id: str, field_key: str) -> str:
+        normalized_key = _normalize_ticket_field_key(field_key).strip().lower()
+        digest = hashlib.sha1(normalized_key.encode("utf-8", errors="ignore")).hexdigest()
+        return cls._redis_key("client_field_exists", connected_integration_id, digest)
+
     @staticmethod
     async def _redis_get(key: str) -> Optional[str]:
         if not _redis_enabled():
@@ -807,6 +1041,8 @@ class ExternalChatCrmChannelIntegration(ClientBase):
     @staticmethod
     def _client_notice_kind(external_message_id: str) -> str:
         safe_id = str(external_message_id or "").strip()
+        if safe_id.startswith("webchat:client_info:"):
+            return "client_info"
         if safe_id.startswith("webchat:channel_start:"):
             return "channel_start"
         if safe_id.startswith("webchat:channel_end:"):
@@ -1848,6 +2084,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         *,
         external_id: str,
         profile: Dict[str, Any],
+        client_fields: Optional[List[FieldValueAdd]] = None,
     ) -> Client:
         add_response = await api.crm.client.add(
             ClientAddRequest(
@@ -1855,6 +2092,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 name=_normalize_text(profile.get("display_name"), 120) or "Guest",
                 phone=_normalize_phone(profile.get("phone")),
                 email=_normalize_email(profile.get("email")),
+                fields=client_fields or None,
             )
         )
         if not add_response.ok:
@@ -1880,11 +2118,34 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         return rows[0]
 
     @classmethod
+    async def _apply_client_fields(
+        cls,
+        api: RegosAPI,
+        *,
+        client_id: int,
+        client_fields: Optional[List[FieldValueEdit]],
+    ) -> None:
+        if not client_id or not client_fields:
+            return
+        response = await api.crm.client.edit(
+            ClientEditRequest(id=int(client_id), fields=client_fields)
+        )
+        if response.ok:
+            return
+        payload = _result_to_dict(response.result)
+        raise RuntimeError(
+            "Client/Edit rejected: "
+            f"error={payload.get('error')} description={payload.get('description')}"
+        )
+
+    @classmethod
     async def _sync_client_profile_if_needed(
         cls,
         api: RegosAPI,
         client: Client,
         profile: Dict[str, Any],
+        *,
+        client_fields: Optional[List[FieldValueEdit]] = None,
     ) -> None:
         if not client or not client.id:
             return
@@ -1894,13 +2155,56 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         email = _normalize_email(profile.get("email"))
         if display_name and _normalize_text(client.name, 120) != display_name:
             patch["name"] = display_name
-        if phone and not _normalize_phone(client.phone):
+        if phone and _normalize_phone(client.phone) != phone:
             patch["phone"] = phone
-        if email and not _normalize_email(client.email):
+        if email and _normalize_email(client.email) != email:
             patch["email"] = email
+        if client_fields:
+            patch["fields"] = client_fields
         if not patch:
             return
-        await api.crm.client.edit(ClientEditRequest(id=int(client.id), **patch))
+        response = await api.crm.client.edit(ClientEditRequest(id=int(client.id), **patch))
+        if response.ok:
+            return
+        payload = _result_to_dict(response.result)
+        raise RuntimeError(
+            "Client/Edit rejected: "
+            f"error={payload.get('error')} description={payload.get('description')}"
+        )
+
+    @classmethod
+    async def _sync_client_profile_by_id(
+        cls,
+        connected_integration_id: str,
+        *,
+        client_id: int,
+        profile: Dict[str, Any],
+        client_fields: Optional[List[FieldValueEdit]] = None,
+    ) -> None:
+        if not client_id:
+            return
+        display_name = _normalize_text(profile.get("display_name"), 120)
+        phone = _normalize_phone(profile.get("phone"))
+        email = _normalize_email(profile.get("email"))
+        profile_has_values = bool(display_name or phone or email)
+        if not profile_has_values and not client_fields:
+            return
+        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+            if profile_has_values:
+                client = await cls._load_client_by_id(api, int(client_id))
+                if client and getattr(client, "id", None):
+                    await cls._sync_client_profile_if_needed(
+                        api,
+                        client,
+                        profile,
+                        client_fields=client_fields,
+                    )
+                    return
+            await cls._apply_client_fields(
+                api,
+                client_id=int(client_id),
+                client_fields=client_fields,
+            )
 
     @classmethod
     async def _create_ticket(
@@ -2048,6 +2352,44 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             ExternalChatCrmChannelConfig.TICKET_FIELD_EXISTS_CACHE_TTL_SEC,
         )
 
+    @classmethod
+    async def _get_cached_client_field_exists(
+        cls,
+        connected_integration_id: str,
+        field_key: str,
+    ) -> Optional[bool]:
+        if not _redis_enabled():
+            return None
+        raw = await cls._redis_get(
+            cls._client_field_exists_cache_key(connected_integration_id, field_key)
+        )
+        if raw is None:
+            return None
+        if isinstance(raw, (bytes, bytearray)):
+            text = raw.decode("utf-8", errors="ignore").strip().lower()
+        else:
+            text = str(raw or "").strip().lower()
+        if text in {"1", "true", "yes"}:
+            return True
+        if text in {"0", "false", "no"}:
+            return False
+        return None
+
+    @classmethod
+    async def _cache_client_field_exists(
+        cls,
+        connected_integration_id: str,
+        field_key: str,
+        exists: bool,
+    ) -> None:
+        if not _redis_enabled():
+            return
+        await cls._redis_set(
+            cls._client_field_exists_cache_key(connected_integration_id, field_key),
+            "1" if exists else "0",
+            ExternalChatCrmChannelConfig.CLIENT_FIELD_EXISTS_CACHE_TTL_SEC,
+        )
+
     @staticmethod
     def _field_rows_from_result(result: Any) -> List[Any]:
         if isinstance(result, list):
@@ -2091,6 +2433,41 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 continue
             row_entity_type = str(row_entity_type_raw or "").strip().lower()
             if row_entity_type and row_entity_type != "ticket":
+                continue
+            existing[row_key.lower()] = row_key
+        return existing
+
+    @classmethod
+    async def _fetch_existing_client_field_keys(
+        cls,
+        api: RegosAPI,
+        field_keys: List[str],
+    ) -> Dict[str, str]:
+        normalized_keys = [key for key in (_normalize_ticket_field_key(item) for item in field_keys) if key]
+        if not normalized_keys:
+            return {}
+        response = await api.references.field.get(
+            FieldGetRequest(
+                entity_type="Client",
+                keys=normalized_keys,
+                limit=max(len(normalized_keys), 1),
+                offset=0,
+            )
+        )
+        if not response.ok:
+            raise RuntimeError(f"Field/Get rejected for Client fields: {response.result}")
+
+        existing: Dict[str, str] = {}
+        for row in cls._field_rows_from_result(response.result):
+            row_key_raw = row.get("key") if isinstance(row, dict) else getattr(row, "key", None)
+            row_entity_type_raw = (
+                row.get("entity_type") if isinstance(row, dict) else getattr(row, "entity_type", None)
+            )
+            row_key = _normalize_ticket_field_key(row_key_raw)
+            if not row_key:
+                continue
+            row_entity_type = str(row_entity_type_raw or "").strip().lower()
+            if row_entity_type and row_entity_type != "client":
                 continue
             existing[row_key.lower()] = row_key
         return existing
@@ -2142,6 +2519,79 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         return list(unknown_by_lower.values())
 
     @classmethod
+    async def _find_existing_client_field_key_lowers(
+        cls,
+        connected_integration_id: str,
+        field_keys: List[str],
+    ) -> Dict[str, str]:
+        keys_by_lower: Dict[str, str] = {}
+        for raw_key in field_keys:
+            key = _normalize_ticket_field_key(raw_key)
+            if key:
+                keys_by_lower[key.lower()] = key
+        if not keys_by_lower:
+            return {}
+
+        existing_by_lower: Dict[str, str] = {}
+        keys_to_fetch_by_lower: Dict[str, str] = {}
+        for lowered, key in keys_by_lower.items():
+            cached = await cls._get_cached_client_field_exists(
+                connected_integration_id,
+                key,
+            )
+            if cached is True:
+                existing_by_lower[lowered] = key
+                continue
+            if cached is False:
+                continue
+            keys_to_fetch_by_lower[lowered] = key
+
+        if keys_to_fetch_by_lower:
+            async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+                fetched_existing_by_lower = await cls._fetch_existing_client_field_keys(
+                    api,
+                    list(keys_to_fetch_by_lower.values()),
+                )
+            for lowered, key in keys_to_fetch_by_lower.items():
+                exists = lowered in fetched_existing_by_lower
+                await cls._cache_client_field_exists(
+                    connected_integration_id,
+                    key,
+                    exists,
+                )
+                if exists:
+                    existing_by_lower[lowered] = key
+
+        return existing_by_lower
+
+    @classmethod
+    async def _filter_existing_client_fields(
+        cls,
+        connected_integration_id: str,
+        *field_lists: Optional[List[Any]],
+    ) -> Tuple[List[Any], ...]:
+        field_keys = cls._ticket_field_keys(*field_lists)
+        existing_by_lower = await cls._find_existing_client_field_key_lowers(
+            connected_integration_id,
+            field_keys,
+        )
+        if not existing_by_lower:
+            return tuple([] for _ in field_lists)
+
+        filtered: List[List[Any]] = []
+        for field_list in field_lists:
+            rows: List[Any] = []
+            for field in field_list or []:
+                raw_key = getattr(field, "key", None)
+                if isinstance(field, dict):
+                    raw_key = field.get("key")
+                key = _normalize_ticket_field_key(raw_key)
+                if key and key.lower() in existing_by_lower:
+                    rows.append(field)
+            filtered.append(rows)
+        return tuple(filtered)
+
+    @classmethod
     async def _ensure_chat_context(
         cls,
         connected_integration_id: str,
@@ -2149,6 +2599,9 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         visitor_id: str,
         profile: Dict[str, Any],
         *,
+        client_field_adds: Optional[List[FieldValueAdd]] = None,
+        client_field_edits: Optional[List[FieldValueEdit]] = None,
+        sync_client_info: bool = False,
         ticket_field_adds: Optional[List[FieldValueAdd]] = None,
         ticket_field_edits: Optional[List[FieldValueEdit]] = None,
         require_writable: bool = False,
@@ -2171,6 +2624,13 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     ticket_id=int(cached.ticket_id),
                     ticket_fields=ticket_field_edits,
                 )
+                if sync_client_info:
+                    await cls._sync_client_profile_by_id(
+                        connected_integration_id,
+                        client_id=int(cached.client_id),
+                        profile=profile,
+                        client_fields=client_field_edits,
+                    )
                 await cls._save_cached_context(connected_integration_id, cached)
                 return cached
 
@@ -2194,8 +2654,14 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     api,
                     external_id=external_client_id,
                     profile=profile,
+                    client_fields=client_field_adds,
                 )
-            await cls._sync_client_profile_if_needed(api, client, profile)
+            await cls._sync_client_profile_if_needed(
+                api,
+                client,
+                profile,
+                client_fields=client_field_edits,
+            )
 
             ticket = await cls._find_ticket_by_external_dialog_id(
                 api,
@@ -2296,6 +2762,9 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         visitor_id: str,
         profile: Dict[str, Any],
         *,
+        client_field_adds: Optional[List[FieldValueAdd]] = None,
+        client_field_edits: Optional[List[FieldValueEdit]] = None,
+        sync_client_info: bool = False,
         ticket_field_adds: Optional[List[FieldValueAdd]] = None,
         ticket_field_edits: Optional[List[FieldValueEdit]] = None,
     ) -> ChatContext:
@@ -2304,6 +2773,9 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             runtime=runtime,
             visitor_id=visitor_id,
             profile=profile,
+            client_field_adds=client_field_adds,
+            client_field_edits=client_field_edits,
+            sync_client_info=sync_client_info,
             ticket_field_adds=ticket_field_adds,
             ticket_field_edits=ticket_field_edits,
             require_writable=True,
@@ -2321,6 +2793,9 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         text: str,
         external_message_id: str,
         *,
+        client_field_adds: Optional[List[FieldValueAdd]] = None,
+        client_field_edits: Optional[List[FieldValueEdit]] = None,
+        sync_client_info: bool = False,
         ticket_field_adds: Optional[List[FieldValueAdd]] = None,
         ticket_field_edits: Optional[List[FieldValueEdit]] = None,
     ) -> Tuple[ChatContext, str]:
@@ -2338,6 +2813,9 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 runtime=runtime,
                 visitor_id=visitor_id,
                 profile=profile,
+                client_field_adds=client_field_adds,
+                client_field_edits=client_field_edits,
+                sync_client_info=sync_client_info,
                 ticket_field_adds=ticket_field_adds,
                 ticket_field_edits=ticket_field_edits,
             )
@@ -2363,6 +2841,9 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         extension: str,
         payload_b64: str,
         external_message_id: str,
+        client_field_adds: Optional[List[FieldValueAdd]] = None,
+        client_field_edits: Optional[List[FieldValueEdit]] = None,
+        sync_client_info: bool = False,
         ticket_field_adds: Optional[List[FieldValueAdd]] = None,
         ticket_field_edits: Optional[List[FieldValueEdit]] = None,
     ) -> Tuple[ChatContext, str, int]:
@@ -2383,6 +2864,9 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 runtime=runtime,
                 visitor_id=visitor_id,
                 profile=profile,
+                client_field_adds=client_field_adds,
+                client_field_edits=client_field_edits,
+                sync_client_info=sync_client_info,
                 ticket_field_adds=ticket_field_adds,
                 ticket_field_edits=ticket_field_edits,
             )
@@ -2611,6 +3095,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         chat_id: str,
         text: str,
         external_message_id: str,
+        notify_client: bool = True,
     ) -> bool:
         safe_chat_id = str(chat_id or "").strip()
         safe_text = _normalize_channel_auto_message(text)
@@ -2627,28 +3112,29 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     text=safe_text,
                     external_message_id=safe_external_message_id,
                 )
-            )
+        )
         if response.ok:
-            await cls._cache_client_notice(
-                connected_integration_id,
-                chat_id=safe_chat_id,
-                text=safe_text,
-                external_message_id=safe_external_message_id,
-                created_date=created_date,
-            )
-            revision = await cls._bump_chat_revision(
-                connected_integration_id,
-                safe_chat_id,
-            )
-            await cls._publish_chat_event(
-                connected_integration_id,
-                chat_id=safe_chat_id,
-                event_type="chat_message_changed",
-                source_action="local_system_message",
-                chat_revision=int(revision or 0),
-                force_full=False,
-                payload={},
-            )
+            if notify_client:
+                await cls._cache_client_notice(
+                    connected_integration_id,
+                    chat_id=safe_chat_id,
+                    text=safe_text,
+                    external_message_id=safe_external_message_id,
+                    created_date=created_date,
+                )
+                revision = await cls._bump_chat_revision(
+                    connected_integration_id,
+                    safe_chat_id,
+                )
+                await cls._publish_chat_event(
+                    connected_integration_id,
+                    chat_id=safe_chat_id,
+                    event_type="chat_message_changed",
+                    source_action="local_system_message",
+                    chat_revision=int(revision or 0),
+                    force_full=False,
+                    payload={},
+                )
             return True
 
         payload = _result_to_dict(response.result)
@@ -2662,6 +3148,150 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             response.result,
         )
         return False
+
+    @staticmethod
+    def _build_client_info_system_message(
+        data: Dict[str, Any],
+        profile: Dict[str, Any],
+        client_fields: Optional[List[Any]],
+        ticket_fields: Optional[List[Any]],
+    ) -> str:
+        profile_items: List[Tuple[str, str]] = []
+        profile_seen: Dict[str, bool] = {}
+        _append_client_info_param(
+            profile_items,
+            profile_seen,
+            "display_name",
+            profile.get("display_name"),
+            allow_technical=True,
+        )
+        _append_client_info_param(
+            profile_items,
+            profile_seen,
+            "phone",
+            profile.get("phone"),
+            allow_technical=True,
+        )
+        _append_client_info_param(
+            profile_items,
+            profile_seen,
+            "email",
+            profile.get("email"),
+            allow_technical=True,
+        )
+
+        param_items: List[Tuple[str, str]] = []
+        param_seen: Dict[str, bool] = {}
+        for raw_key, raw_value in _iter_client_info_param_rows(data.get("client_params")):
+            _append_client_info_param(param_items, param_seen, raw_key, raw_value)
+
+        for raw_key, raw_value in (data or {}).items():
+            normalized_key = _normalize_client_info_param_key(raw_key)
+            if not normalized_key or normalized_key.lower() in _CLIENT_PROFILE_ALIAS_KEYS:
+                continue
+            _append_client_info_param(param_items, param_seen, normalized_key, raw_value)
+
+        client_field_items: List[Tuple[str, str]] = []
+        client_field_seen: Dict[str, bool] = {}
+        for field in client_fields or []:
+            if isinstance(field, dict):
+                raw_key = field.get("key")
+                raw_value = field.get("value")
+                deleted = _parse_bool(field.get("deleted"), False)
+            else:
+                raw_key = getattr(field, "key", None)
+                raw_value = getattr(field, "value", None)
+                deleted = _parse_bool(getattr(field, "deleted", False), False)
+            _append_client_info_param(
+                client_field_items,
+                client_field_seen,
+                raw_key,
+                "deleted" if deleted else raw_value,
+                allow_technical=True,
+            )
+
+        field_items: List[Tuple[str, str]] = []
+        field_seen: Dict[str, bool] = {}
+        for field in ticket_fields or []:
+            if isinstance(field, dict):
+                raw_key = field.get("key")
+                raw_value = field.get("value")
+                deleted = _parse_bool(field.get("deleted"), False)
+            else:
+                raw_key = getattr(field, "key", None)
+                raw_value = getattr(field, "value", None)
+                deleted = _parse_bool(getattr(field, "deleted", False), False)
+            _append_client_info_param(
+                field_items,
+                field_seen,
+                raw_key,
+                "deleted" if deleted else raw_value,
+                allow_technical=True,
+            )
+
+        param_items.sort(key=lambda item: item[0].lower())
+        client_field_items.sort(key=lambda item: item[0].lower())
+        field_items.sort(key=lambda item: item[0].lower())
+        if not profile_items and not param_items and not client_field_items and not field_items:
+            return ""
+
+        lines: List[str] = ["Client information"]
+        max_len = ExternalChatCrmChannelConfig.MAX_MESSAGE_LENGTH
+
+        def append_line(line: str) -> bool:
+            candidate = "\n".join([*lines, line])
+            if len(candidate) <= max_len:
+                lines.append(line)
+                return True
+            if lines and lines[-1] != "...":
+                truncated = "\n".join([*lines, "..."])
+                if len(truncated) <= max_len:
+                    lines.append("...")
+            return False
+
+        def append_section(title: str, items: List[Tuple[str, str]]) -> bool:
+            if not items:
+                return True
+            if len(lines) > 1 and not append_line(""):
+                return False
+            if not append_line(f"{title}:"):
+                return False
+            for key, value in items:
+                if not append_line(f"{key}: {value}"):
+                    return False
+            return True
+
+        if not append_section("Profile", profile_items):
+            return _normalize_channel_auto_message("\n".join(lines))
+        if not append_section("Parameters", param_items):
+            return _normalize_channel_auto_message("\n".join(lines))
+        if not append_section("Client fields", client_field_items):
+            return _normalize_channel_auto_message("\n".join(lines))
+        append_section("Ticket fields", field_items)
+        return _normalize_channel_auto_message("\n".join(lines))
+
+    @classmethod
+    async def _send_client_info_system_message_if_needed(
+        cls,
+        connected_integration_id: str,
+        *,
+        context: ChatContext,
+        data: Dict[str, Any],
+        profile: Dict[str, Any],
+        client_fields: Optional[List[Any]],
+        ticket_fields: Optional[List[Any]],
+    ) -> bool:
+        text = cls._build_client_info_system_message(data, profile, client_fields, ticket_fields)
+        if not text:
+            return False
+        fingerprint = _payload_fingerprint(text)
+        return await cls._add_system_message(
+            connected_integration_id,
+            chat_id=str(context.chat_id),
+            text=text,
+            external_message_id=f"webchat:client_info:{int(context.ticket_id)}:{fingerprint}",
+            notify_client=False,
+        )
 
     @classmethod
     async def _send_channel_auto_message_if_needed(
@@ -2914,10 +3544,35 @@ class ExternalChatCrmChannelIntegration(ClientBase):
 
     @staticmethod
     def _extract_profile(data: Dict[str, Any]) -> Dict[str, Any]:
+        client_params: Dict[str, Any] = {}
+        for raw_key, raw_value in _iter_client_info_param_rows(data.get("client_params")):
+            key = str(raw_key or "").strip().lower()
+            if key and key not in client_params:
+                client_params[key] = raw_value
         return {
-            "display_name": _normalize_text(data.get("display_name"), 120),
-            "email": _normalize_email(data.get("email")),
-            "phone": _normalize_phone(data.get("phone")),
+            "display_name": _normalize_text(
+                data.get("display_name")
+                or data.get("name")
+                or data.get("full_name")
+                or client_params.get("display_name")
+                or client_params.get("name")
+                or client_params.get("full_name"),
+                120,
+            ),
+            "email": _normalize_email(
+                data.get("email")
+                or data.get("mail")
+                or client_params.get("email")
+                or client_params.get("mail")
+            ),
+            "phone": _normalize_phone(
+                data.get("phone")
+                or data.get("phone_number")
+                or data.get("tel")
+                or client_params.get("phone")
+                or client_params.get("phone_number")
+                or client_params.get("tel")
+            ),
         }
 
     @staticmethod
@@ -3564,6 +4219,8 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             )
 
         profile = self._extract_profile(data)
+        client_field_adds = _normalize_client_field_adds(data)
+        client_field_edits = _normalize_client_field_edits(data)
         ticket_field_adds = _normalize_ticket_field_adds(data)
         ticket_field_edits = _normalize_ticket_field_edits(data)
         ticket_field_keys = self._ticket_field_keys(ticket_field_adds, ticket_field_edits)
@@ -3610,13 +4267,37 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     "unknown_ticket_fields": unknown_ticket_fields,
                 },
             )
+        try:
+            client_field_adds, client_field_edits = await self._filter_existing_client_fields(
+                ci,
+                client_field_adds,
+                client_field_edits,
+            )
+        except Exception as error:
+            logger.exception(
+                "Client field validation failed: ci=%s visitor_id=%s fields=%s",
+                ci,
+                visitor_id,
+                self._ticket_field_keys(client_field_adds, client_field_edits),
+            )
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "error": 500,
+                    "description": f"Failed to validate client fields: {error}",
+                },
+            )
 
         require_writable_context = action in {"send_message", "send_file"}
+        sync_client_info = action == "init" or bool(client_field_edits)
         context = await self._ensure_chat_context(
             connected_integration_id=ci,
             runtime=runtime,
             visitor_id=visitor_id,
             profile=profile,
+            client_field_adds=client_field_adds,
+            client_field_edits=client_field_edits,
+            sync_client_info=sync_client_info,
             ticket_field_adds=ticket_field_adds,
             ticket_field_edits=ticket_field_edits,
             require_writable=require_writable_context,
@@ -3624,6 +4305,23 @@ class ExternalChatCrmChannelIntegration(ClientBase):
 
         try:
             if action == "init":
+                try:
+                    await self._send_client_info_system_message_if_needed(
+                        ci,
+                        context=context,
+                        data=data,
+                        profile=profile,
+                        client_fields=client_field_edits,
+                        ticket_fields=ticket_field_edits,
+                    )
+                except Exception as error:
+                    logger.warning(
+                        "Failed to send client info system message: ci=%s ticket_id=%s visitor_id=%s error=%s",
+                        ci,
+                        int(context.ticket_id),
+                        visitor_id,
+                        error,
+                    )
                 ticket_view = await self._compose_context_ticket_view_fresh(
                     ci,
                     runtime,
@@ -3817,6 +4515,9 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     context=context,
                     text=text,
                     external_message_id=ext_id,
+                    client_field_adds=client_field_adds,
+                    client_field_edits=client_field_edits,
+                    sync_client_info=sync_client_info,
                     ticket_field_adds=ticket_field_adds,
                     ticket_field_edits=ticket_field_edits,
                 )
@@ -3855,6 +4556,9 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     extension=extension,
                     payload_b64=payload_b64,
                     external_message_id=ext_id,
+                    client_field_adds=client_field_adds,
+                    client_field_edits=client_field_edits,
+                    sync_client_info=sync_client_info,
                     ticket_field_adds=ticket_field_adds,
                     ticket_field_edits=ticket_field_edits,
                 )
