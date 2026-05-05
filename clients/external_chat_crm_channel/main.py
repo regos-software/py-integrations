@@ -40,6 +40,7 @@ from schemas.api.crm.ticket import (
     Ticket,
     TicketAddRequest,
     TicketDirectionEnum,
+    TicketEditRequest,
     TicketGetRequest,
     TicketSetRatingRequest,
     TicketStatusEnum,
@@ -52,6 +53,8 @@ from schemas.api.integrations.connected_integration import (
 from schemas.api.integrations.connected_integration_setting import (
     ConnectedIntegrationSettingRequest,
 )
+from schemas.api.references.field import FieldGetRequest
+from schemas.api.references.fields import FieldValueAdd, FieldValueEdit
 from schemas.integration.base import IntegrationErrorModel, IntegrationErrorResponse
 
 logger = setup_logger("external_chat_crm_channel")
@@ -114,6 +117,9 @@ class ExternalChatCrmChannelConfig:
     CLIENT_NOTICE_TTL_SEC = 10 * 60
     CLIENT_NOTICE_MAX_ITEMS = 100
     RATING_POSITIVE_THRESHOLD = 4
+    MAX_TICKET_FIELD_KEY_LENGTH = 160
+    MAX_TICKET_FIELD_VALUE_LENGTH = 4000
+    TICKET_FIELD_EXISTS_CACHE_TTL_SEC = max(SETTINGS_TTL_SEC, 5 * 60)
     SUPPORTED_INBOUND_WEBHOOKS = {
         "ChatMessageAdded",
         "ChatMessageEdited",
@@ -299,6 +305,113 @@ def _normalize_channel_auto_message(value: Any) -> str:
         value,
         ExternalChatCrmChannelConfig.CHANNEL_AUTO_MESSAGE_MAX_LENGTH,
     )
+
+
+def _normalize_ticket_field_key(value: Any) -> str:
+    key = str(value or "").strip()
+    if not key:
+        return ""
+    return key[: ExternalChatCrmChannelConfig.MAX_TICKET_FIELD_KEY_LENGTH]
+
+
+def _normalize_ticket_field_value(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, (dict, list)):
+        text = _json_dumps(value)
+    else:
+        text = str(value or "")
+    return text.strip()[: ExternalChatCrmChannelConfig.MAX_TICKET_FIELD_VALUE_LENGTH]
+
+
+def _iter_ticket_field_rows(value: Any) -> List[Dict[str, Any]]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return []
+        try:
+            parsed = _json_loads(raw)
+        except Exception:
+            return []
+        return _iter_ticket_field_rows(parsed)
+    if isinstance(value, dict):
+        if "key" in value:
+            return [value]
+        rows: List[Dict[str, Any]] = []
+        for raw_key, raw_value in value.items():
+            rows.append({"key": raw_key, "value": raw_value})
+        return rows
+    if isinstance(value, (list, tuple)):
+        rows = []
+        for item in value:
+            if isinstance(item, dict):
+                rows.extend(_iter_ticket_field_rows(item))
+                continue
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                rows.append({"key": item[0], "value": item[1]})
+        return rows
+    return []
+
+
+def _extract_ticket_field_rows(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    container_keys = ("ticket_fields", "ticket_custom_fields", "custom_fields", "fields")
+    for key in container_keys:
+        if key not in data:
+            continue
+        rows.extend(_iter_ticket_field_rows(data.get(key)))
+    for raw_key, raw_value in data.items():
+        key = str(raw_key or "").strip()
+        if not key or key in container_keys:
+            continue
+        field_key = ""
+        if key.startswith("ticket_field_"):
+            field_key = key[len("ticket_field_") :]
+        elif key.startswith("ticket_field."):
+            field_key = key[len("ticket_field.") :]
+        elif key.startswith("field_"):
+            field_key = key
+        if field_key:
+            rows.append({"key": field_key, "value": raw_value})
+    return rows
+
+
+def _normalize_ticket_field_adds(data: Dict[str, Any]) -> List[FieldValueAdd]:
+    fields_by_key: Dict[str, FieldValueAdd] = {}
+    for row in _extract_ticket_field_rows(data):
+        key = _normalize_ticket_field_key(row.get("key"))
+        if not key:
+            continue
+        if _parse_bool(row.get("deleted"), False):
+            continue
+        value = _normalize_ticket_field_value(row.get("value"))
+        if value is None:
+            continue
+        fields_by_key[key] = FieldValueAdd(key=key, value=value)
+    return list(fields_by_key.values())
+
+
+def _normalize_ticket_field_edits(data: Dict[str, Any]) -> List[FieldValueEdit]:
+    fields_by_key: Dict[str, FieldValueEdit] = {}
+    for row in _extract_ticket_field_rows(data):
+        key = _normalize_ticket_field_key(row.get("key"))
+        if not key:
+            continue
+        deleted = _parse_bool(row.get("deleted"), False)
+        value = _normalize_ticket_field_value(row.get("value"))
+        if deleted:
+            fields_by_key[key] = FieldValueEdit(key=key, deleted=True)
+            continue
+        if value is None:
+            continue
+        fields_by_key[key] = FieldValueEdit(key=key, value=value, deleted=False)
+    return list(fields_by_key.values())
 
 
 def _is_meaningful_system_text(value: str) -> bool:
@@ -645,6 +758,12 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             int(ticket_id),
             str(flag or "").strip().lower(),
         )
+
+    @classmethod
+    def _ticket_field_exists_cache_key(cls, connected_integration_id: str, field_key: str) -> str:
+        normalized_key = _normalize_ticket_field_key(field_key).strip().lower()
+        digest = hashlib.sha1(normalized_key.encode("utf-8", errors="ignore")).hexdigest()
+        return cls._redis_key("ticket_field_exists", connected_integration_id, digest)
 
     @staticmethod
     async def _redis_get(key: str) -> Optional[str]:
@@ -1792,6 +1911,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         client_id: int,
         external_dialog_id: str,
         subject: str,
+        ticket_fields: Optional[List[FieldValueAdd]] = None,
     ) -> Ticket:
         add_response = await api.crm.ticket.add(
             TicketAddRequest(
@@ -1801,6 +1921,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 external_dialog_id=external_dialog_id,
                 subject=subject,
                 responsible_user_id=runtime.default_responsible_user_id,
+                fields=ticket_fields or None,
             )
         )
         if not add_response.ok:
@@ -1834,6 +1955,193 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         return ticket
 
     @classmethod
+    async def _apply_ticket_fields(
+        cls,
+        api: RegosAPI,
+        *,
+        ticket_id: int,
+        ticket_fields: Optional[List[FieldValueEdit]],
+    ) -> None:
+        if not ticket_id or not ticket_fields:
+            return
+        response = await api.crm.ticket.edit(
+            TicketEditRequest(id=int(ticket_id), fields=ticket_fields)
+        )
+        if response.ok:
+            return
+        payload = _result_to_dict(response.result)
+        raise RuntimeError(
+            "Ticket/Edit rejected: "
+            f"error={payload.get('error')} description={payload.get('description')}"
+        )
+
+    @classmethod
+    async def _apply_ticket_fields_by_id(
+        cls,
+        connected_integration_id: str,
+        *,
+        ticket_id: int,
+        ticket_fields: Optional[List[FieldValueEdit]],
+    ) -> None:
+        if not ticket_id or not ticket_fields:
+            return
+        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+            await cls._apply_ticket_fields(
+                api,
+                ticket_id=int(ticket_id),
+                ticket_fields=ticket_fields,
+            )
+
+    @staticmethod
+    def _ticket_field_keys(
+        *field_lists: Optional[List[Any]],
+    ) -> List[str]:
+        keys: Dict[str, str] = {}
+        for field_list in field_lists:
+            if not field_list:
+                continue
+            for field in field_list:
+                raw_key = getattr(field, "key", None)
+                if isinstance(field, dict):
+                    raw_key = field.get("key")
+                key = _normalize_ticket_field_key(raw_key)
+                if not key:
+                    continue
+                keys[key.strip().lower()] = key
+        return list(keys.values())
+
+    @classmethod
+    async def _get_cached_ticket_field_exists(
+        cls,
+        connected_integration_id: str,
+        field_key: str,
+    ) -> Optional[bool]:
+        if not _redis_enabled():
+            return None
+        raw = await cls._redis_get(
+            cls._ticket_field_exists_cache_key(connected_integration_id, field_key)
+        )
+        if raw is None:
+            return None
+        if isinstance(raw, (bytes, bytearray)):
+            text = raw.decode("utf-8", errors="ignore").strip().lower()
+        else:
+            text = str(raw or "").strip().lower()
+        if text in {"1", "true", "yes"}:
+            return True
+        if text in {"0", "false", "no"}:
+            return False
+        return None
+
+    @classmethod
+    async def _cache_ticket_field_exists(
+        cls,
+        connected_integration_id: str,
+        field_key: str,
+        exists: bool,
+    ) -> None:
+        if not _redis_enabled():
+            return
+        await cls._redis_set(
+            cls._ticket_field_exists_cache_key(connected_integration_id, field_key),
+            "1" if exists else "0",
+            ExternalChatCrmChannelConfig.TICKET_FIELD_EXISTS_CACHE_TTL_SEC,
+        )
+
+    @staticmethod
+    def _field_rows_from_result(result: Any) -> List[Any]:
+        if isinstance(result, list):
+            return result
+        if not isinstance(result, dict):
+            return []
+        for key in ("rows", "items", "data", "result"):
+            nested = result.get(key)
+            if isinstance(nested, list):
+                return nested
+        return []
+
+    @classmethod
+    async def _fetch_existing_ticket_field_keys(
+        cls,
+        api: RegosAPI,
+        field_keys: List[str],
+    ) -> Dict[str, str]:
+        normalized_keys = [key for key in (_normalize_ticket_field_key(item) for item in field_keys) if key]
+        if not normalized_keys:
+            return {}
+        response = await api.references.field.get(
+            FieldGetRequest(
+                entity_type="Ticket",
+                keys=normalized_keys,
+                limit=max(len(normalized_keys), 1),
+                offset=0,
+            )
+        )
+        if not response.ok:
+            raise RuntimeError(f"Field/Get rejected for Ticket fields: {response.result}")
+
+        existing: Dict[str, str] = {}
+        for row in cls._field_rows_from_result(response.result):
+            row_key_raw = row.get("key") if isinstance(row, dict) else getattr(row, "key", None)
+            row_entity_type_raw = (
+                row.get("entity_type") if isinstance(row, dict) else getattr(row, "entity_type", None)
+            )
+            row_key = _normalize_ticket_field_key(row_key_raw)
+            if not row_key:
+                continue
+            row_entity_type = str(row_entity_type_raw or "").strip().lower()
+            if row_entity_type and row_entity_type != "ticket":
+                continue
+            existing[row_key.lower()] = row_key
+        return existing
+
+    @classmethod
+    async def _find_unknown_ticket_field_keys(
+        cls,
+        connected_integration_id: str,
+        field_keys: List[str],
+    ) -> List[str]:
+        keys_by_lower: Dict[str, str] = {}
+        for raw_key in field_keys:
+            key = _normalize_ticket_field_key(raw_key)
+            if key:
+                keys_by_lower[key.lower()] = key
+        if not keys_by_lower:
+            return []
+
+        unknown_by_lower: Dict[str, str] = {}
+        keys_to_fetch_by_lower: Dict[str, str] = {}
+        for lowered, key in keys_by_lower.items():
+            cached = await cls._get_cached_ticket_field_exists(
+                connected_integration_id,
+                key,
+            )
+            if cached is True:
+                continue
+            if cached is False:
+                unknown_by_lower[lowered] = key
+                continue
+            keys_to_fetch_by_lower[lowered] = key
+
+        if keys_to_fetch_by_lower:
+            async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+                existing_by_lower = await cls._fetch_existing_ticket_field_keys(
+                    api,
+                    list(keys_to_fetch_by_lower.values()),
+                )
+            for lowered, key in keys_to_fetch_by_lower.items():
+                exists = lowered in existing_by_lower
+                await cls._cache_ticket_field_exists(
+                    connected_integration_id,
+                    key,
+                    exists,
+                )
+                if not exists:
+                    unknown_by_lower[lowered] = key
+
+        return list(unknown_by_lower.values())
+
+    @classmethod
     async def _ensure_chat_context(
         cls,
         connected_integration_id: str,
@@ -1841,6 +2149,8 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         visitor_id: str,
         profile: Dict[str, Any],
         *,
+        ticket_field_adds: Optional[List[FieldValueAdd]] = None,
+        ticket_field_edits: Optional[List[FieldValueEdit]] = None,
         require_writable: bool = False,
         force_refresh: bool = False,
     ) -> ChatContext:
@@ -1856,6 +2166,11 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             if require_writable and not cached_state.get("can_write", True):
                 cached = None
             else:
+                await cls._apply_ticket_fields_by_id(
+                    connected_integration_id,
+                    ticket_id=int(cached.ticket_id),
+                    ticket_fields=ticket_field_edits,
+                )
                 await cls._save_cached_context(connected_integration_id, cached)
                 return cached
 
@@ -1908,8 +2223,15 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     client_id=int(client.id),
                     external_dialog_id=external_dialog_id,
                     subject=subject,
+                    ticket_fields=ticket_field_adds,
                 )
                 created_ticket_now = True
+            elif ticket_field_edits:
+                await cls._apply_ticket_fields(
+                    api,
+                    ticket_id=int(ticket.id),
+                    ticket_fields=ticket_field_edits,
+                )
 
             if created_ticket_now and runtime.channel_start_message and getattr(ticket, "chat_id", None):
                 start_message_for_new_ticket = runtime.channel_start_message
@@ -1973,12 +2295,17 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         runtime: RuntimeConfig,
         visitor_id: str,
         profile: Dict[str, Any],
+        *,
+        ticket_field_adds: Optional[List[FieldValueAdd]] = None,
+        ticket_field_edits: Optional[List[FieldValueEdit]] = None,
     ) -> ChatContext:
         return await cls._ensure_chat_context(
             connected_integration_id=connected_integration_id,
             runtime=runtime,
             visitor_id=visitor_id,
             profile=profile,
+            ticket_field_adds=ticket_field_adds,
+            ticket_field_edits=ticket_field_edits,
             require_writable=True,
             force_refresh=True,
         )
@@ -1993,6 +2320,9 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         context: ChatContext,
         text: str,
         external_message_id: str,
+        *,
+        ticket_field_adds: Optional[List[FieldValueAdd]] = None,
+        ticket_field_edits: Optional[List[FieldValueEdit]] = None,
     ) -> Tuple[ChatContext, str]:
         try:
             message_id = await cls._add_message_from_visitor(
@@ -2008,6 +2338,8 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 runtime=runtime,
                 visitor_id=visitor_id,
                 profile=profile,
+                ticket_field_adds=ticket_field_adds,
+                ticket_field_edits=ticket_field_edits,
             )
             message_id = await cls._add_message_from_visitor(
                 connected_integration_id=connected_integration_id,
@@ -2031,6 +2363,8 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         extension: str,
         payload_b64: str,
         external_message_id: str,
+        ticket_field_adds: Optional[List[FieldValueAdd]] = None,
+        ticket_field_edits: Optional[List[FieldValueEdit]] = None,
     ) -> Tuple[ChatContext, str, int]:
         try:
             message_id, file_id = await cls._add_file_message_from_visitor(
@@ -2049,6 +2383,8 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 runtime=runtime,
                 visitor_id=visitor_id,
                 profile=profile,
+                ticket_field_adds=ticket_field_adds,
+                ticket_field_edits=ticket_field_edits,
             )
             message_id, file_id = await cls._add_file_message_from_visitor(
                 connected_integration_id=connected_integration_id,
@@ -3228,6 +3564,9 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             )
 
         profile = self._extract_profile(data)
+        ticket_field_adds = _normalize_ticket_field_adds(data)
+        ticket_field_edits = _normalize_ticket_field_edits(data)
+        ticket_field_keys = self._ticket_field_keys(ticket_field_adds, ticket_field_edits)
         missing_required_fields = self._missing_required_profile_fields(runtime, profile)
         if missing_required_fields:
             return JSONResponse(
@@ -3243,6 +3582,34 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     },
                 },
             )
+        try:
+            unknown_ticket_fields = await self._find_unknown_ticket_field_keys(
+                ci,
+                ticket_field_keys,
+            )
+        except Exception as error:
+            logger.exception(
+                "Ticket field validation failed: ci=%s visitor_id=%s fields=%s",
+                ci,
+                visitor_id,
+                ticket_field_keys,
+            )
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "error": 500,
+                    "description": f"Failed to validate ticket fields: {error}",
+                },
+            )
+        if unknown_ticket_fields:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": 400,
+                    "description": "Unknown ticket fields",
+                    "unknown_ticket_fields": unknown_ticket_fields,
+                },
+            )
 
         require_writable_context = action in {"send_message", "send_file"}
         context = await self._ensure_chat_context(
@@ -3250,6 +3617,8 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             runtime=runtime,
             visitor_id=visitor_id,
             profile=profile,
+            ticket_field_adds=ticket_field_adds,
+            ticket_field_edits=ticket_field_edits,
             require_writable=require_writable_context,
         )
 
@@ -3448,6 +3817,8 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     context=context,
                     text=text,
                     external_message_id=ext_id,
+                    ticket_field_adds=ticket_field_adds,
+                    ticket_field_edits=ticket_field_edits,
                 )
                 await self._mark_read(ci, context)
                 chat_revision = await self._get_chat_revision(ci, str(context.chat_id))
@@ -3484,6 +3855,8 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     extension=extension,
                     payload_b64=payload_b64,
                     external_message_id=ext_id,
+                    ticket_field_adds=ticket_field_adds,
+                    ticket_field_edits=ticket_field_edits,
                 )
                 await self._mark_read(ci, context)
                 chat_revision = await self._get_chat_revision(ci, str(context.chat_id))
