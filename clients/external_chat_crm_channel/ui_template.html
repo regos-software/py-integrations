@@ -138,6 +138,8 @@
         phone: "",
         email: "",
       }},
+      clientParams: {{}},
+      ticketFields: [],
       onboardingErrors: {{}},
       onboardingSubmitBusy: false,
       ratingEnabled: false,
@@ -740,6 +742,118 @@
       if (queryEmail) {{
         state.profile.email = queryEmail;
       }}
+    }}
+    function normalizeTicketFieldValue(value) {{
+      if (value === null || value === undefined) {{
+        return null;
+      }}
+      if (typeof value === "boolean") {{
+        return value ? "true" : "false";
+      }}
+      if (typeof value === "number") {{
+        return Number.isFinite(value) ? String(value) : null;
+      }}
+      if (typeof value === "string") {{
+        return value.trim().slice(0, 4000);
+      }}
+      try {{
+        return JSON.stringify(value).slice(0, 4000);
+      }} catch (_) {{
+        return String(value || "").trim().slice(0, 4000);
+      }}
+    }}
+    function addTicketField(target, key, value) {{
+      const fieldKey = String(key || "").trim().slice(0, 160);
+      if (!fieldKey) {{
+        return;
+      }}
+      const fieldValue = normalizeTicketFieldValue(value);
+      if (fieldValue === null) {{
+        return;
+      }}
+      target[fieldKey] = {{
+        key: fieldKey,
+        value: fieldValue,
+      }};
+    }}
+    function addTicketFieldRows(target, value) {{
+      if (value === null || value === undefined || value === "") {{
+        return;
+      }}
+      if (typeof value === "string") {{
+        try {{
+          addTicketFieldRows(target, JSON.parse(value));
+        }} catch (_) {{}}
+        return;
+      }}
+      if (Array.isArray(value)) {{
+        for (const item of value) {{
+          if (Array.isArray(item) && item.length >= 2) {{
+            addTicketField(target, item[0], item[1]);
+          }} else {{
+            addTicketFieldRows(target, item);
+          }}
+        }}
+        return;
+      }}
+      if (typeof value === "object") {{
+        if (Object.prototype.hasOwnProperty.call(value, "key")) {{
+          addTicketField(target, value.key, value.value);
+          return;
+        }}
+        for (const key of Object.keys(value)) {{
+          addTicketField(target, key, value[key]);
+        }}
+      }}
+    }}
+    function addClientParam(target, key, value) {{
+      const rawKey = String(key || "").trim().slice(0, 160);
+      const rawValue = normalizeTicketFieldValue(value);
+      if (!rawKey || rawValue === null) {{
+        return;
+      }}
+      if (Object.prototype.hasOwnProperty.call(target, rawKey)) {{
+        if (Array.isArray(target[rawKey])) {{
+          target[rawKey].push(rawValue);
+        }} else {{
+          target[rawKey] = [target[rawKey], rawValue];
+        }}
+      }} else {{
+        target[rawKey] = rawValue;
+      }}
+    }}
+    function loadExternalParamsFromQuery() {{
+      const params = new URLSearchParams(window.location.search || "");
+      const fieldsByKey = {{}};
+      const clientParams = {{}};
+      const structuredKeys = ["ticket_fields", "ticket_custom_fields", "custom_fields", "fields"];
+      for (const key of structuredKeys) {{
+        const value = params.get(key);
+        if (value) {{
+          addTicketFieldRows(fieldsByKey, value);
+        }}
+      }}
+      for (const pair of params.entries()) {{
+        const rawKey = String(pair[0] || "").trim();
+        const rawValue = pair[1];
+        addClientParam(clientParams, rawKey, rawValue);
+        if (!rawKey || structuredKeys.indexOf(rawKey) >= 0) {{
+          continue;
+        }}
+        let fieldKey = "";
+        if (rawKey.indexOf("ticket_field_") === 0) {{
+          fieldKey = rawKey.slice("ticket_field_".length);
+        }} else if (rawKey.indexOf("ticket_field.") === 0) {{
+          fieldKey = rawKey.slice("ticket_field.".length);
+        }} else if (rawKey.indexOf("field_") === 0) {{
+          fieldKey = rawKey;
+        }}
+        if (fieldKey) {{
+          addTicketField(fieldsByKey, fieldKey, rawValue);
+        }}
+      }}
+      state.ticketFields = Object.keys(fieldsByKey).map((key) => fieldsByKey[key]);
+      state.clientParams = clientParams;
     }}
     function initVisitorId() {{
       const queryVisitorId = normalizeVisitorId(
@@ -1821,12 +1935,19 @@
         return;
       }}
       setStatus(t("status_connecting"), "pending");
-      const result = await callApi("init", {{
+      const initPayload = {{
         visitor_id: state.visitorId,
         display_name: state.profile.display_name,
         email: state.profile.email,
         phone: state.profile.phone
-      }});
+      }};
+      if (Array.isArray(state.ticketFields) && state.ticketFields.length) {{
+        initPayload.ticket_fields = state.ticketFields;
+      }}
+      if (state.clientParams && Object.keys(state.clientParams).length) {{
+        initPayload.client_params = state.clientParams;
+      }}
+      const result = await callApi("init", initPayload);
       if (result.visitor_id && result.visitor_id !== state.visitorId) {{
         state.visitorId = normalizeVisitorId(result.visitor_id);
         storageSet(CONFIG.visitorKey, state.visitorId);
@@ -2150,6 +2271,7 @@
       renderComposerToolLabels();
       loadProfile();
       applyQueryProfileOverrides();
+      loadExternalParamsFromQuery();
       persistProfile();
       initVisitorId();
       updateComposerState();
