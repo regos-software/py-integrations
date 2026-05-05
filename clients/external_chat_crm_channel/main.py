@@ -944,6 +944,22 @@ def _url_with_ui_asset_version(raw_url: str) -> str:
     )
 
 
+def _relative_query_with_ui_asset_version(query: Dict[str, Any]) -> str:
+    version_key = ExternalChatCrmChannelConfig.UI_ASSET_VERSION_PARAM
+    query_items: List[Tuple[str, str]] = []
+    for raw_key, raw_value in (query or {}).items():
+        key = str(raw_key or "").strip()
+        if not key or key == version_key:
+            continue
+        if isinstance(raw_value, (list, tuple)):
+            for item in raw_value:
+                query_items.append((key, str(item or "")))
+            continue
+        query_items.append((key, str(raw_value or "")))
+    query_items.append((version_key, ExternalChatCrmChannelConfig.UI_ASSET_VERSION))
+    return f"?{urlencode(query_items)}"
+
+
 def _redis_enabled() -> bool:
     return bool(app_settings.redis_enabled and redis_client is not None)
 
@@ -4290,9 +4306,10 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         version_param = ExternalChatCrmChannelConfig.UI_ASSET_VERSION_PARAM
         current_version = str(query.get(version_param) or "").strip()
         if current_version != ExternalChatCrmChannelConfig.UI_ASSET_VERSION:
-            redirect_url = _url_with_ui_asset_version(str(envelope.get("url") or "").strip())
-            if redirect_url:
-                return RedirectResponse(url=redirect_url, status_code=302)
+            return RedirectResponse(
+                url=_relative_query_with_ui_asset_version(query),
+                status_code=302,
+            )
 
         try:
             runtime = await self._load_runtime(ci)
