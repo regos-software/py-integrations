@@ -12,9 +12,10 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi.responses import HTMLResponse
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse, RedirectResponse, Response
 
 from clients.base import ClientBase
 from config.settings import settings as app_settings
@@ -93,6 +94,8 @@ _IMAGE_FILE_EXTENSIONS = {
 class ExternalChatCrmChannelConfig:
     INTEGRATION_KEY = "external_chat_crm_channel"
     REDIS_PREFIX = "clients:external_chat_crm_channel:"
+    UI_ASSET_VERSION = "20260505-1"
+    UI_ASSET_VERSION_PARAM = "v"
     SETTINGS_TTL_SEC = max(int(app_settings.redis_cache_ttl or 60), 30)
     CONTEXT_TTL_SEC = 7 * 24 * 60 * 60
     ACTIVE_CACHE_TTL_SEC = 30
@@ -116,12 +119,18 @@ class ExternalChatCrmChannelConfig:
     EVENT_BATCH_MAX_ITEMS = 30
     CLIENT_NOTICE_TTL_SEC = 10 * 60
     CLIENT_NOTICE_MAX_ITEMS = 100
+    PENDING_PARAMS_TTL_SEC = 6 * 60 * 60
+    PENDING_PARAMS_MAX_ITEMS = 100
     RATING_POSITIVE_THRESHOLD = 4
     MAX_CUSTOM_FIELD_KEY_LENGTH = 160
     MAX_CUSTOM_FIELD_VALUE_LENGTH = 4000
     MAX_CLIENT_INFO_PARAM_KEY_LENGTH = 120
     FIELD_EXISTS_CACHE_TTL_SEC = max(SETTINGS_TTL_SEC, 5 * 60)
-    CRM_PARAM_SYNC_ACTIONS = {"init", "send_message", "send_file"}
+    CREATE_CONTEXT_ACTIONS = {"send_message", "send_file"}
+    READ_CONTEXT_ACTIONS = {"init", "history", "getupdates", "notification_count", "mark_read"}
+    EXISTING_CONTEXT_ACTIONS = READ_CONTEXT_ACTIONS | {"set_rating"}
+    SUPPORTED_EXTERNAL_ACTIONS = CREATE_CONTEXT_ACTIONS | EXISTING_CONTEXT_ACTIONS
+    PENDING_PARAM_CAPTURE_ACTIONS = {"init"}
     SUPPORTED_INBOUND_WEBHOOKS = {
         "ChatMessageAdded",
         "ChatMessageEdited",
@@ -158,6 +167,17 @@ class ChatContext:
     client_id: int
     ticket_id: int
     chat_id: str
+
+
+@dataclass
+class PreparedWriteParams:
+    profile: Dict[str, Any]
+    client_field_adds: List[FieldValueAdd]
+    client_field_edits: List[FieldValueEdit]
+    ticket_field_adds: List[FieldValueAdd]
+    ticket_field_edits: List[FieldValueEdit]
+    sync_client_info: bool
+    sync_ticket_fields: bool
 
 
 def _json_dumps(payload: Any) -> str:
@@ -575,6 +595,169 @@ def _normalize_client_field_edits(data: Dict[str, Any]) -> List[FieldValueEdit]:
     return _normalize_field_edits(_extract_client_field_rows(data))
 
 
+_PENDING_PROFILE_KEYS = (
+    "display_name",
+    "email",
+    "full_name",
+    "mail",
+    "name",
+    "phone",
+    "phone_number",
+    "tel",
+)
+_PENDING_CLIENT_FIELD_CONTAINER_KEYS = ("client_fields", "client_custom_fields")
+_PENDING_TICKET_FIELD_CONTAINER_KEYS = (
+    "ticket_fields",
+    "ticket_custom_fields",
+    "custom_fields",
+    "fields",
+)
+
+
+def _append_pending_field_row(rows: List[Dict[str, Any]], row: Dict[str, Any]) -> None:
+    key = _normalize_custom_field_key(row.get("key"))
+    if not key:
+        return
+    if len(rows) >= ExternalChatCrmChannelConfig.PENDING_PARAMS_MAX_ITEMS:
+        return
+    if _parse_bool(row.get("deleted"), False):
+        rows.append({"key": key, "deleted": True})
+        return
+    value = _normalize_custom_field_value(row.get("value"))
+    if value is None:
+        return
+    rows.append({"key": key, "value": value})
+
+
+def _extract_pending_request_params(data: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(data, dict):
+        return {}
+
+    pending: Dict[str, Any] = {}
+    client_params: Dict[str, Any] = {}
+    client_field_rows: List[Dict[str, Any]] = []
+    ticket_field_rows: List[Dict[str, Any]] = []
+
+    for key in _PENDING_PROFILE_KEYS:
+        if key not in data:
+            continue
+        value = _normalize_custom_field_value(data.get(key))
+        if value:
+            pending[key] = value
+
+    for raw_key, raw_value in _iter_client_info_param_rows(data.get("client_params")):
+        key = _normalize_client_info_param_key(raw_key)
+        if not key:
+            continue
+        lowered = key.lower()
+        if lowered in _PENDING_CLIENT_FIELD_CONTAINER_KEYS:
+            for row in _iter_ticket_field_rows(raw_value):
+                _append_pending_field_row(client_field_rows, row)
+            continue
+        if lowered in _CLIENT_PROFILE_ALIAS_KEYS or _is_client_info_param_allowed(key):
+            value = _normalize_custom_field_value(raw_value)
+            if (
+                value is not None
+                and (value or lowered not in _CLIENT_PROFILE_ALIAS_KEYS)
+                and len(client_params) < ExternalChatCrmChannelConfig.PENDING_PARAMS_MAX_ITEMS
+            ):
+                client_params[key] = value
+
+    for container_key in _PENDING_CLIENT_FIELD_CONTAINER_KEYS:
+        for row in _iter_ticket_field_rows(data.get(container_key)):
+            _append_pending_field_row(client_field_rows, row)
+
+    for container_key in _PENDING_TICKET_FIELD_CONTAINER_KEYS:
+        for row in _iter_ticket_field_rows(data.get(container_key)):
+            _append_pending_field_row(ticket_field_rows, row)
+
+    ignored_keys = {
+        "client_params",
+        *_PENDING_CLIENT_FIELD_CONTAINER_KEYS,
+        *_PENDING_TICKET_FIELD_CONTAINER_KEYS,
+        *_PENDING_PROFILE_KEYS,
+    }
+    for raw_key, raw_value in data.items():
+        key = str(raw_key or "").strip()
+        if not key or key in ignored_keys:
+            continue
+        client_field_key = _client_field_key_from_param_key(key, allow_unprefixed=True)
+        if client_field_key and key.startswith(("client_field_", "client_field.", "field_")):
+            _append_pending_field_row(client_field_rows, {"key": client_field_key, "value": raw_value})
+            if key.startswith("field_"):
+                _append_pending_field_row(ticket_field_rows, {"key": key, "value": raw_value})
+            continue
+        ticket_field_key = ""
+        if key.startswith("ticket_field_"):
+            ticket_field_key = key[len("ticket_field_") :]
+        elif key.startswith("ticket_field."):
+            ticket_field_key = key[len("ticket_field.") :]
+        if ticket_field_key:
+            _append_pending_field_row(ticket_field_rows, {"key": ticket_field_key, "value": raw_value})
+            continue
+        if _is_client_info_param_allowed(key):
+            value = _normalize_custom_field_value(raw_value)
+            if value is not None and len(client_params) < ExternalChatCrmChannelConfig.PENDING_PARAMS_MAX_ITEMS:
+                client_params[key] = value
+
+    if client_params:
+        pending["client_params"] = client_params
+    if client_field_rows:
+        pending["client_fields"] = client_field_rows
+    if ticket_field_rows:
+        pending["ticket_fields"] = ticket_field_rows
+    return pending
+
+
+def _merge_profiles(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    merged = {
+        "display_name": _normalize_text((base or {}).get("display_name"), 120),
+        "email": _normalize_email((base or {}).get("email")),
+        "phone": _normalize_phone((base or {}).get("phone")),
+    }
+    for key in ("display_name", "email", "phone"):
+        value = (override or {}).get(key)
+        if key == "display_name":
+            normalized = _normalize_text(value, 120)
+        elif key == "email":
+            normalized = _normalize_email(value)
+        else:
+            normalized = _normalize_phone(value)
+        if normalized:
+            merged[key] = normalized
+    return merged
+
+
+def _field_model_key(field: Any) -> str:
+    if isinstance(field, dict):
+        return _normalize_custom_field_key(field.get("key"))
+    return _normalize_custom_field_key(getattr(field, "key", None))
+
+
+def _merge_field_adds(
+    base: Optional[List[FieldValueAdd]],
+    override: Optional[List[FieldValueAdd]],
+) -> List[FieldValueAdd]:
+    fields_by_key: Dict[str, FieldValueAdd] = {}
+    for field in list(base or []) + list(override or []):
+        key = _field_model_key(field)
+        if key:
+            fields_by_key[key] = field
+    return list(fields_by_key.values())
+
+
+def _merge_field_edits(
+    base: Optional[List[FieldValueEdit]],
+    override: Optional[List[FieldValueEdit]],
+) -> List[FieldValueEdit]:
+    fields_by_key: Dict[str, FieldValueEdit] = {}
+    for field in list(base or []) + list(override or []):
+        key = _field_model_key(field)
+        if key:
+            fields_by_key[key] = field
+    return list(fields_by_key.values())
+
+
 def _is_meaningful_system_text(value: str) -> bool:
     normalized = str(value or "").strip()
     if not normalized:
@@ -729,6 +912,38 @@ def _parse_chat_css_url(raw: Any) -> Optional[str]:
     raise ValueError("chat_css_url must be http(s) URL or relative path")
 
 
+def _url_with_query_param(raw_url: str, key: str, value: str) -> str:
+    url = str(raw_url or "").strip()
+    safe_key = str(key or "").strip()
+    safe_value = str(value or "").strip()
+    if not url or not safe_key:
+        return url
+    parts = urlsplit(url)
+    query_items = [
+        (item_key, item_value)
+        for item_key, item_value in parse_qsl(parts.query, keep_blank_values=True)
+        if item_key != safe_key
+    ]
+    query_items.append((safe_key, safe_value))
+    return urlunsplit(
+        (
+            parts.scheme,
+            parts.netloc,
+            parts.path,
+            urlencode(query_items),
+            parts.fragment,
+        )
+    )
+
+
+def _url_with_ui_asset_version(raw_url: str) -> str:
+    return _url_with_query_param(
+        raw_url,
+        ExternalChatCrmChannelConfig.UI_ASSET_VERSION_PARAM,
+        ExternalChatCrmChannelConfig.UI_ASSET_VERSION,
+    )
+
+
 def _redis_enabled() -> bool:
     return bool(app_settings.redis_enabled and redis_client is not None)
 
@@ -868,6 +1083,10 @@ class ExternalChatCrmChannelIntegration(ClientBase):
     @classmethod
     def _context_cache_key(cls, connected_integration_id: str, visitor_id: str) -> str:
         return cls._redis_key("context", connected_integration_id, visitor_id)
+
+    @classmethod
+    def _pending_params_cache_key(cls, connected_integration_id: str, visitor_id: str) -> str:
+        return cls._redis_key("pending_params", connected_integration_id, visitor_id)
 
     @classmethod
     def _chat_context_cache_key(cls, connected_integration_id: str, chat_id: str) -> str:
@@ -1865,6 +2084,45 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         return cls._context_from_payload(payload, visitor_id)
 
     @classmethod
+    async def _save_pending_params(
+        cls,
+        connected_integration_id: str,
+        visitor_id: str,
+        data: Dict[str, Any],
+        *,
+        clear_empty: bool = False,
+    ) -> None:
+        pending = _extract_pending_request_params(data)
+        if not pending:
+            if clear_empty:
+                await cls._redis_delete(cls._pending_params_cache_key(connected_integration_id, visitor_id))
+            return
+        await cls._redis_set(
+            cls._pending_params_cache_key(connected_integration_id, visitor_id),
+            _json_dumps(pending),
+            ExternalChatCrmChannelConfig.PENDING_PARAMS_TTL_SEC,
+        )
+
+    @classmethod
+    async def _load_pending_params(
+        cls,
+        connected_integration_id: str,
+        visitor_id: str,
+    ) -> Dict[str, Any]:
+        raw = await cls._redis_get(cls._pending_params_cache_key(connected_integration_id, visitor_id))
+        if not raw:
+            return {}
+        try:
+            payload = _json_loads(raw)
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    @classmethod
+    async def _delete_pending_params(cls, connected_integration_id: str, visitor_id: str) -> None:
+        await cls._redis_delete(cls._pending_params_cache_key(connected_integration_id, visitor_id))
+
+    @classmethod
     async def _load_cached_context_by_chat(
         cls, connected_integration_id: str, chat_id: str
     ) -> Optional[ChatContext]:
@@ -2448,6 +2706,116 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         return tuple(filtered)
 
     @classmethod
+    async def _prepare_write_params(
+        cls,
+        connected_integration_id: str,
+        runtime: RuntimeConfig,
+        visitor_id: str,
+        data: Dict[str, Any],
+    ) -> Tuple[Optional[PreparedWriteParams], Optional[JSONResponse]]:
+        pending_data = await cls._load_pending_params(connected_integration_id, visitor_id)
+        profile = _merge_profiles(
+            cls._extract_profile(pending_data),
+            cls._extract_profile(data),
+        )
+        pending_client_field_adds = _normalize_client_field_adds(pending_data)
+        pending_client_field_edits = _normalize_client_field_edits(pending_data)
+        pending_ticket_field_adds = _normalize_ticket_field_adds(pending_data)
+        pending_ticket_field_edits = _normalize_ticket_field_edits(pending_data)
+        current_client_field_adds = _normalize_client_field_adds(data)
+        current_client_field_edits = _normalize_client_field_edits(data)
+        current_ticket_field_adds = _normalize_ticket_field_adds(data)
+        current_ticket_field_edits = _normalize_ticket_field_edits(data)
+
+        client_field_adds = _merge_field_adds(pending_client_field_adds, current_client_field_adds)
+        client_field_edits = _merge_field_edits(pending_client_field_edits, current_client_field_edits)
+        ticket_field_adds = _merge_field_adds(pending_ticket_field_adds, current_ticket_field_adds)
+        ticket_field_edits = _merge_field_edits(pending_ticket_field_edits, current_ticket_field_edits)
+
+        missing_required_fields = cls._missing_required_profile_fields(runtime, profile)
+        if missing_required_fields:
+            return None, JSONResponse(
+                status_code=400,
+                content={
+                    "error": 400,
+                    "description": "Missing required profile fields",
+                    "missing_fields": missing_required_fields,
+                    "required_profile_fields": {
+                        "display_name": runtime.require_display_name,
+                        "phone": runtime.require_phone,
+                        "email": runtime.require_email,
+                    },
+                },
+            )
+
+        ticket_field_keys = cls._custom_field_keys(ticket_field_adds, ticket_field_edits)
+        if ticket_field_keys:
+            try:
+                unknown_ticket_fields = await cls._find_unknown_field_keys(
+                    connected_integration_id,
+                    "Ticket",
+                    ticket_field_keys,
+                )
+            except Exception as error:
+                logger.exception(
+                    "Ticket field validation failed: ci=%s visitor_id=%s fields=%s",
+                    connected_integration_id,
+                    visitor_id,
+                    ticket_field_keys,
+                )
+                return None, JSONResponse(
+                    status_code=500,
+                    content={
+                        "error": 500,
+                        "description": f"Failed to validate ticket fields: {error}",
+                    },
+                )
+            if unknown_ticket_fields:
+                return None, JSONResponse(
+                    status_code=400,
+                    content={
+                        "error": 400,
+                        "description": "Unknown ticket fields",
+                        "unknown_ticket_fields": unknown_ticket_fields,
+                    },
+                )
+
+        if client_field_adds or client_field_edits:
+            try:
+                client_field_adds, client_field_edits = await cls._filter_existing_fields(
+                    connected_integration_id,
+                    "Client",
+                    client_field_adds,
+                    client_field_edits,
+                )
+            except Exception as error:
+                logger.exception(
+                    "Client field validation failed: ci=%s visitor_id=%s fields=%s",
+                    connected_integration_id,
+                    visitor_id,
+                    cls._custom_field_keys(client_field_adds, client_field_edits),
+                )
+                return None, JSONResponse(
+                    status_code=500,
+                    content={
+                        "error": 500,
+                        "description": f"Failed to validate client fields: {error}",
+                    },
+                )
+
+        sync_client_info = bool(pending_data or client_field_edits)
+        sync_ticket_fields = bool(ticket_field_adds or ticket_field_edits)
+        return PreparedWriteParams(
+            profile=profile,
+            client_field_adds=client_field_adds,
+            client_field_edits=client_field_edits,
+            ticket_field_adds=ticket_field_adds,
+            ticket_field_edits=ticket_field_edits,
+            sync_client_info=sync_client_info,
+            sync_ticket_fields=sync_ticket_fields,
+        ), None
+
+    @classmethod
     async def _ensure_chat_context(
         cls,
         connected_integration_id: str,
@@ -2461,6 +2829,8 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         sync_ticket_fields: bool = False,
         ticket_field_adds: Optional[List[FieldValueAdd]] = None,
         ticket_field_edits: Optional[List[FieldValueEdit]] = None,
+        allow_create_ticket: bool = False,
+        create_source: str = "",
         require_writable: bool = False,
         force_refresh: bool = False,
     ) -> ChatContext:
@@ -2495,6 +2865,8 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         if not cached:
             cached = await cls._load_cached_context(connected_integration_id, visitor_id)
         cached_client_id = int(cached.client_id) if cached and cached.client_id else None
+        if not cached_client_id and not allow_create_ticket:
+            raise RuntimeError("Chat context creation is not allowed for this action")
 
         external_client_id = cls._build_client_external_id(connected_integration_id, visitor_id)
         external_dialog_id = cls._build_ticket_external_dialog_id(connected_integration_id, visitor_id)
@@ -2538,11 +2910,19 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 or not getattr(ticket, "chat_id", None)
                 or (require_writable and ticket_closed)
             ):
+                if not allow_create_ticket:
+                    raise RuntimeError("Ticket creation is not allowed for this action")
                 subject = cls._build_subject(
                     runtime.ticket_subject_template,
                     runtime.channel_name,
                     visitor_id,
                     profile,
+                )
+                logger.info(
+                    "Creating external chat ticket: ci=%s visitor_id=%s source=%s",
+                    connected_integration_id,
+                    visitor_id,
+                    str(create_source or "").strip() or "unknown",
                 )
                 ticket = await cls._create_ticket(
                     api,
@@ -2641,6 +3021,8 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             sync_ticket_fields=sync_ticket_fields,
             ticket_field_adds=ticket_field_adds,
             ticket_field_edits=ticket_field_edits,
+            allow_create_ticket=True,
+            create_source="reopen_after_client_message",
             require_writable=True,
             force_refresh=True,
         )
@@ -3210,6 +3592,39 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         return view
 
     @classmethod
+    def _compose_no_context_response(
+        cls,
+        visitor_id: str,
+        runtime: RuntimeConfig,
+        *,
+        include_settings: bool = False,
+        include_history: bool = False,
+        include_events: bool = False,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "status": "ok",
+            "visitor_id": visitor_id,
+            **cls._compose_chat_state_view(0, 0),
+            **cls._compose_ticket_view_state(runtime, None),
+        }
+        if include_settings:
+            payload.update(
+                {
+                    "chat_title": runtime.chat_title,
+                    "required_profile_fields": {
+                        "display_name": runtime.require_display_name,
+                        "phone": runtime.require_phone,
+                        "email": runtime.require_email,
+                    },
+                }
+            )
+        if include_history:
+            payload.update({"history_changed": True, "history": []})
+        if include_events:
+            payload["events"] = []
+        return payload
+
+    @classmethod
     async def _get_chat_state_view(
         cls,
         connected_integration_id: str,
@@ -3425,9 +3840,16 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         safe_require_phone = "true" if require_phone else "false"
         safe_require_email = "true" if require_email else "false"
         safe_i18n_bundle = _json_dumps(i18n_bundle or {}).replace("</", "<\\/")
+        safe_asset_version = html.escape(ExternalChatCrmChannelConfig.UI_ASSET_VERSION, quote=True)
+        safe_fontawesome_css_url = html.escape(
+            _url_with_ui_asset_version(
+                "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css"
+            ),
+            quote=True,
+        )
 
         if chat_css_url:
-            safe_css_url = html.escape(chat_css_url, quote=True)
+            safe_css_url = html.escape(_url_with_ui_asset_version(chat_css_url), quote=True)
             style_block = f'  <link rel="stylesheet" href="{safe_css_url}">'
         else:
             css_template = ExternalChatCrmChannelIntegration._load_ui_css_template()
@@ -3450,6 +3872,8 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             safe_require_display_name=safe_require_display_name,
             safe_require_phone=safe_require_phone,
             safe_require_email=safe_require_email,
+            safe_asset_version=safe_asset_version,
+            safe_fontawesome_css_url=safe_fontawesome_css_url,
             style_block=style_block,
             safe_i18n_bundle=safe_i18n_bundle,
         )
@@ -3861,6 +4285,15 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 f"<h1>ConnectedIntegration '{html.escape(ci)}' is inactive</h1>",
                 status_code=403,
             )
+
+        query = envelope.get("query") or {}
+        version_param = ExternalChatCrmChannelConfig.UI_ASSET_VERSION_PARAM
+        current_version = str(query.get(version_param) or "").strip()
+        if current_version != ExternalChatCrmChannelConfig.UI_ASSET_VERSION:
+            redirect_url = _url_with_ui_asset_version(str(envelope.get("url") or "").strip())
+            if redirect_url:
+                return RedirectResponse(url=redirect_url, status_code=302)
+
         try:
             runtime = await self._load_runtime(ci)
         except Exception as error:
@@ -3923,8 +4356,10 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         data = data if isinstance(data, dict) else {}
 
         visitor_id = self._normalize_visitor_id(data.get("visitor_id"))
+        generated_visitor_id = False
         if action == "init" and not visitor_id:
             visitor_id = self._normalize_visitor_id(uuid.uuid4().hex)
+            generated_visitor_id = True
         if not visitor_id:
             return JSONResponse(
                 status_code=400,
@@ -3939,101 +4374,33 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 content={"error": 400, "description": str(error)},
             )
 
-        sync_param_fields = action in ExternalChatCrmChannelConfig.CRM_PARAM_SYNC_ACTIONS
-        profile = self._extract_profile(data)
-        client_field_adds = _normalize_client_field_adds(data) if sync_param_fields else []
-        client_field_edits = _normalize_client_field_edits(data) if sync_param_fields else []
-        ticket_field_adds = _normalize_ticket_field_adds(data) if sync_param_fields else []
-        ticket_field_edits = _normalize_ticket_field_edits(data) if sync_param_fields else []
-        ticket_field_keys = self._custom_field_keys(ticket_field_adds, ticket_field_edits)
-        sync_ticket_fields = bool(ticket_field_adds or ticket_field_edits)
-        missing_required_fields = self._missing_required_profile_fields(runtime, profile)
-        if missing_required_fields:
+        if action not in ExternalChatCrmChannelConfig.SUPPORTED_EXTERNAL_ACTIONS:
             return JSONResponse(
                 status_code=400,
-                content={
-                    "error": 400,
-                    "description": "Missing required profile fields",
-                    "missing_fields": missing_required_fields,
-                    "required_profile_fields": {
-                        "display_name": runtime.require_display_name,
-                        "phone": runtime.require_phone,
-                        "email": runtime.require_email,
-                    },
-                },
+                content={"error": 400, "description": f"Unsupported action '{action}'"},
             )
-        unknown_ticket_fields: List[str] = []
-        if ticket_field_keys:
-            try:
-                unknown_ticket_fields = await self._find_unknown_field_keys(
-                    ci,
-                    "Ticket",
-                    ticket_field_keys,
-                )
-            except Exception as error:
-                logger.exception(
-                    "Ticket field validation failed: ci=%s visitor_id=%s fields=%s",
-                    ci,
-                    visitor_id,
-                    ticket_field_keys,
-                )
-                return JSONResponse(
-                    status_code=500,
-                    content={
-                        "error": 500,
-                        "description": f"Failed to validate ticket fields: {error}",
-                    },
-                )
-        if unknown_ticket_fields:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "error": 400,
-                    "description": "Unknown ticket fields",
-                    "unknown_ticket_fields": unknown_ticket_fields,
-                },
-            )
-        if client_field_adds or client_field_edits:
-            try:
-                client_field_adds, client_field_edits = await self._filter_existing_fields(
-                    ci,
-                    "Client",
-                    client_field_adds,
-                    client_field_edits,
-                )
-            except Exception as error:
-                logger.exception(
-                    "Client field validation failed: ci=%s visitor_id=%s fields=%s",
-                    ci,
-                    visitor_id,
-                    self._custom_field_keys(client_field_adds, client_field_edits),
-                )
-                return JSONResponse(
-                    status_code=500,
-                    content={
-                        "error": 500,
-                        "description": f"Failed to validate client fields: {error}",
-                    },
-                )
 
-        require_writable_context = action in {"send_message", "send_file"}
-        sync_client_info = sync_param_fields and (action == "init" or bool(client_field_edits))
-        context = await self._ensure_chat_context(
-            connected_integration_id=ci,
-            runtime=runtime,
-            visitor_id=visitor_id,
-            profile=profile,
-            client_field_adds=client_field_adds,
-            client_field_edits=client_field_edits,
-            sync_client_info=sync_client_info,
-            sync_ticket_fields=sync_ticket_fields,
-            ticket_field_adds=ticket_field_adds,
-            ticket_field_edits=ticket_field_edits,
-            require_writable=require_writable_context,
-        )
+        if action in ExternalChatCrmChannelConfig.PENDING_PARAM_CAPTURE_ACTIONS:
+            await self._save_pending_params(
+                ci,
+                visitor_id,
+                data,
+                clear_empty=not generated_visitor_id,
+            )
+
+        context: Optional[ChatContext] = None
+        if action in ExternalChatCrmChannelConfig.EXISTING_CONTEXT_ACTIONS:
+            context = await self._load_cached_context(ci, visitor_id)
 
         try:
             if action == "init":
+                if not context:
+                    return self._compose_no_context_response(
+                        visitor_id,
+                        runtime,
+                        include_settings=True,
+                        include_history=True,
+                    )
                 ticket_view = await self._compose_context_ticket_view_fresh(
                     ci,
                     runtime,
@@ -4063,6 +4430,12 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 }
 
             if action == "history":
+                if not context:
+                    return self._compose_no_context_response(
+                        visitor_id,
+                        runtime,
+                        include_history=True,
+                    )
                 force_full = _parse_bool(data.get("force_full"), False)
                 if force_full:
                     ticket_view = await self._compose_context_ticket_view_fresh(
@@ -4117,6 +4490,12 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 }
 
             if action == "getupdates":
+                if not context:
+                    return self._compose_no_context_response(
+                        visitor_id,
+                        runtime,
+                        include_events=True,
+                    )
                 max_events = _parse_int(
                     data.get("max_events"),
                     ExternalChatCrmChannelConfig.EVENT_BATCH_MAX_ITEMS,
@@ -4218,22 +4597,42 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                         status_code=400,
                         content={"error": 400, "description": "text is required"},
                     )
+                write_params, params_error = await self._prepare_write_params(ci, runtime, visitor_id, data)
+                if params_error:
+                    return params_error
+                assert write_params is not None
+                context = await self._ensure_chat_context(
+                    connected_integration_id=ci,
+                    runtime=runtime,
+                    visitor_id=visitor_id,
+                    profile=write_params.profile,
+                    client_field_adds=write_params.client_field_adds,
+                    client_field_edits=write_params.client_field_edits,
+                    sync_client_info=write_params.sync_client_info,
+                    sync_ticket_fields=write_params.sync_ticket_fields,
+                    ticket_field_adds=write_params.ticket_field_adds,
+                    ticket_field_edits=write_params.ticket_field_edits,
+                    allow_create_ticket=True,
+                    create_source="send_message",
+                    require_writable=True,
+                )
                 ext_id = f"webchat:msg:{visitor_id}:{uuid.uuid4().hex[:12]}"
                 context, message_id = await self._send_visitor_message_with_reopen(
                     connected_integration_id=ci,
                     runtime=runtime,
                     visitor_id=visitor_id,
-                    profile=profile,
+                    profile=write_params.profile,
                     context=context,
                     text=text,
                     external_message_id=ext_id,
-                    client_field_adds=client_field_adds,
-                    client_field_edits=client_field_edits,
-                    sync_client_info=sync_client_info,
-                    sync_ticket_fields=sync_ticket_fields,
-                    ticket_field_adds=ticket_field_adds,
-                    ticket_field_edits=ticket_field_edits,
+                    client_field_adds=write_params.client_field_adds,
+                    client_field_edits=write_params.client_field_edits,
+                    sync_client_info=write_params.sync_client_info,
+                    sync_ticket_fields=write_params.sync_ticket_fields,
+                    ticket_field_adds=write_params.ticket_field_adds,
+                    ticket_field_edits=write_params.ticket_field_edits,
                 )
+                await self._delete_pending_params(ci, visitor_id)
                 await self._mark_read(ci, context)
                 chat_revision = await self._get_chat_revision(ci, str(context.chat_id))
                 ticket_view = await self._compose_context_ticket_view(ci, runtime, context)
@@ -4257,25 +4656,45 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     data.get("text"),
                     ExternalChatCrmChannelConfig.MAX_MESSAGE_LENGTH,
                 )
+                write_params, params_error = await self._prepare_write_params(ci, runtime, visitor_id, data)
+                if params_error:
+                    return params_error
+                assert write_params is not None
+                context = await self._ensure_chat_context(
+                    connected_integration_id=ci,
+                    runtime=runtime,
+                    visitor_id=visitor_id,
+                    profile=write_params.profile,
+                    client_field_adds=write_params.client_field_adds,
+                    client_field_edits=write_params.client_field_edits,
+                    sync_client_info=write_params.sync_client_info,
+                    sync_ticket_fields=write_params.sync_ticket_fields,
+                    ticket_field_adds=write_params.ticket_field_adds,
+                    ticket_field_edits=write_params.ticket_field_edits,
+                    allow_create_ticket=True,
+                    create_source="send_file",
+                    require_writable=True,
+                )
                 ext_id = f"webchat:file:{visitor_id}:{uuid.uuid4().hex[:12]}"
                 context, message_id, file_id = await self._send_visitor_file_with_reopen(
                     connected_integration_id=ci,
                     runtime=runtime,
                     visitor_id=visitor_id,
-                    profile=profile,
+                    profile=write_params.profile,
                     context=context,
                     text=text,
                     file_name=file_name,
                     extension=extension,
                     payload_b64=payload_b64,
                     external_message_id=ext_id,
-                    client_field_adds=client_field_adds,
-                    client_field_edits=client_field_edits,
-                    sync_client_info=sync_client_info,
-                    sync_ticket_fields=sync_ticket_fields,
-                    ticket_field_adds=ticket_field_adds,
-                    ticket_field_edits=ticket_field_edits,
+                    client_field_adds=write_params.client_field_adds,
+                    client_field_edits=write_params.client_field_edits,
+                    sync_client_info=write_params.sync_client_info,
+                    sync_ticket_fields=write_params.sync_ticket_fields,
+                    ticket_field_adds=write_params.ticket_field_adds,
+                    ticket_field_edits=write_params.ticket_field_edits,
                 )
+                await self._delete_pending_params(ci, visitor_id)
                 await self._mark_read(ci, context)
                 chat_revision = await self._get_chat_revision(ci, str(context.chat_id))
                 ticket_view = await self._compose_context_ticket_view(ci, runtime, context)
@@ -4291,6 +4710,17 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 }
 
             if action == "set_rating":
+                if not context:
+                    empty_view = self._compose_no_context_response(visitor_id, runtime)
+                    empty_view.pop("status", None)
+                    return JSONResponse(
+                        status_code=409,
+                        content={
+                            "error": 409,
+                            "description": "Ticket is not started",
+                            **empty_view,
+                        },
+                    )
                 rating = _normalize_rating(data.get("rating"))
                 if rating is None:
                     return JSONResponse(
@@ -4416,6 +4846,8 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 }
 
             if action == "notification_count":
+                if not context:
+                    return self._compose_no_context_response(visitor_id, runtime)
                 chat_state = await self._get_chat_state_view(ci, context, include_notifications=True)
                 return {
                     "status": "ok",
@@ -4424,6 +4856,8 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 }
 
             if action == "mark_read":
+                if not context:
+                    return self._compose_no_context_response(visitor_id, runtime)
                 await self._mark_read(ci, context)
                 ticket_state = await self._get_ticket_write_state(ci, int(context.ticket_id))
                 ticket_view = self._compose_ticket_view_state(runtime, ticket_state)
@@ -4434,11 +4868,6 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     **self._compose_chat_state_view(chat_revision, 0),
                     **ticket_view,
                 }
-
-            return JSONResponse(
-                status_code=400,
-                content={"error": 400, "description": f"Unsupported action '{action}'"},
-            )
         except Exception as error:
             logger.exception(
                 "External chat action failed: ci=%s action=%s visitor_id=%s",

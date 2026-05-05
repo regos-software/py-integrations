@@ -23,7 +23,7 @@ from core.redis import (
     redis_stream_group_create_with_ttl,
     redis_ttl_seconds,
 )
-from schemas.api.chat.chat import ChatAddBotRequest, ChatGetRequest
+from schemas.api.chat.chat import ChatAddBotRequest, ChatEntityTypeEnum, ChatGetRequest
 from schemas.api.chat.chat_message import (
     ChatMessage,
     ChatMessageAddRequest,
@@ -49,6 +49,10 @@ from schemas.api.references.field import FieldAddRequest, FieldGetRequest
 from schemas.integration.base import IntegrationErrorModel, IntegrationErrorResponse
 
 logger = setup_logger("gpt_crm_chat_assistant")
+
+_CHAT_ENTITY_TYPE_USER = ChatEntityTypeEnum.User.value.lower()
+_CHAT_ENTITY_TYPE_CHATBOT = ChatEntityTypeEnum.ChatBot.value.lower()
+_CHAT_ENTITY_TYPE_CLIENT = ChatEntityTypeEnum.Client.value.lower()
 
 _INSTANCE_ID = uuid.uuid4().hex[:12]
 _MANAGER_LOCK = asyncio.Lock()
@@ -175,7 +179,7 @@ def _normalize_text(value: Any) -> str:
 
 
 def _normalize_entity_type(value: Any) -> str:
-    return str(value or "").strip().lower()
+    return str(getattr(value, "value", value) or "").strip().lower()
 
 
 def _extract_json_object(raw_text: str) -> Optional[Dict[str, Any]]:
@@ -1851,7 +1855,7 @@ class GptCrmChatAssistantIntegration(ClientBase):
         if message.message_type != ChatMessageTypeEnum.Regular:
             return False
         author_entity_type = _normalize_entity_type(message.author_entity_type)
-        if author_entity_type in {"user", "chatbot"}:
+        if author_entity_type != _CHAT_ENTITY_TYPE_CLIENT:
             return False
         if _normalize_text(message.text):
             return True
@@ -1965,9 +1969,9 @@ class GptCrmChatAssistantIntegration(ClientBase):
             return "system"
         if message_type == ChatMessageTypeEnum.Private:
             return "staff_note"
-        if normalized == "user":
+        if normalized == _CHAT_ENTITY_TYPE_USER:
             return "operator"
-        if normalized == "chatbot":
+        if normalized == _CHAT_ENTITY_TYPE_CHATBOT:
             return "assistant"
         return "client"
 
