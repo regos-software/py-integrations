@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     redis_cache_ttl: int = 60
     telegram_webhook_refresh_ttl: int = 86400
     telegram_update_mode: str = "webhook"
+    instagram_app_id: str = ""
+    instagram_app_secret: str = ""
+    instagram_redirect_uri: str = ""
+    instagram_webhook_verify_token: str = ""
 
     oauth_endpoint: str = "https://auth.regos.uz/" # oath/token
     oauth_client_id: str = ""

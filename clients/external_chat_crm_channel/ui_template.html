@@ -128,6 +128,10 @@
       chatReady: false,
       ticketClosed: false,
       chatRevision: 0,
+      notificationCount: 0,
+      lastNotifiedNotificationCount: null,
+      notificationSyncBusy: false,
+      eventLoopReconnectPending: false,
       visitorId: "",
       profile: {{
         display_name: "",
@@ -147,6 +151,14 @@
       lastHistoryFingerprint: "",
       lastHistoryItems: [],
     }};
+    const WRITE_STATE_FIELDS = [
+      ["rating_enabled", (value) => {{ state.ratingEnabled = value === true; }}],
+      ["rating_required", (value) => {{ state.ratingRequired = value === true; }}],
+      ["rating_submitted", (value) => {{ state.ratingSubmitted = value === true; }}],
+      ["ticket_rating", (value) => {{ state.ticketRating = normalizeRating(value); }}],
+      ["rating_message", (value) => {{ state.ratingMessage = String(value || ""); }}],
+      ["ticket_closed", (value) => {{ state.ticketClosed = value === true; }}],
+    ];
     let historyExpiryTimerId = 0;
 
     function storageGet(key) {{
@@ -1615,16 +1627,51 @@
       }}
       return payload;
     }}
-    function applyWriteState(payload) {{
+    function normalizeNotificationCount(value) {{
+      const count = Number(value);
+      if (!Number.isFinite(count) || count < 0) {{
+        return 0;
+      }}
+      return Math.floor(count);
+    }}
+    function notifySupportUnread(count, force = false) {{
+      const normalized = normalizeNotificationCount(count);
+      state.notificationCount = normalized;
+      if (!state.visitorId) {{
+        return;
+      }}
+      if (!force && state.lastNotifiedNotificationCount === normalized) {{
+        return;
+      }}
+      try {{
+        window.parent.postMessage({{
+          type: "SUPPORT_CHAT_UNREAD",
+          count: normalized,
+          visitor_id: state.visitorId,
+        }}, "*");
+        state.lastNotifiedNotificationCount = normalized;
+      }} catch (error) {{
+        console.warn("[external_chat] notification postMessage failed:", error);
+      }}
+    }}
+    function applyNotificationState(payload, force = false) {{
+      if (payload && Object.prototype.hasOwnProperty.call(payload, "notification_count")) {{
+        notifySupportUnread(payload.notification_count, force);
+      }}
+    }}
+    function hasPayloadField(payload, field) {{
+      return !!(payload && Object.prototype.hasOwnProperty.call(payload, field));
+    }}
+    function applyWriteState(payload, forceNotification = false) {{
       if (payload && Number(payload.chat_revision) > 0) {{
         state.chatRevision = Number(payload.chat_revision);
       }}
-      state.ratingEnabled = !!(payload && payload.rating_enabled === true);
-      state.ratingRequired = !!(payload && payload.rating_required === true);
-      state.ratingSubmitted = !!(payload && payload.rating_submitted === true);
-      state.ticketRating = normalizeRating(payload && payload.ticket_rating);
-      state.ratingMessage = String((payload && payload.rating_message) || "");
-      state.ticketClosed = !!(payload && payload.ticket_closed === true);
+      applyNotificationState(payload, forceNotification);
+      for (const [field, applyField] of WRITE_STATE_FIELDS) {{
+        if (hasPayloadField(payload, field)) {{
+          applyField(payload[field]);
+        }}
+      }}
       renderRatingPanel();
       updateComposerState();
     }}
@@ -1691,6 +1738,8 @@
                 known_revision: state.chatRevision,
                 max_events: 20,
               }});
+              const reconnectSyncNeeded = state.eventLoopReconnectPending;
+              state.eventLoopReconnectPending = false;
               applyWriteState(result);
               const events = Array.isArray(result && result.events) ? result.events : [];
               let shouldRefreshHistory = false;
@@ -1710,16 +1759,27 @@
               }}
               if (shouldRefreshHistory) {{
                 await refreshHistory(forceFullHistory);
+                if (reconnectSyncNeeded) {{
+                  notifySupportUnread(state.notificationCount, true);
+                }}
+              }} else if (reconnectSyncNeeded) {{
+                if (result && Object.prototype.hasOwnProperty.call(result, "notification_count")) {{
+                  notifySupportUnread(result.notification_count, true);
+                }} else {{
+                  await syncNotificationCount(true);
+                }}
               }}
               await delayMs(EVENT_POLL_INTERVAL_MS);
               eventLoopBackoffMs = 1000;
             }} catch (error) {{
+              state.eventLoopReconnectPending = true;
               handleActionError(error);
               await delayMs(eventLoopBackoffMs);
               eventLoopBackoffMs = Math.min(eventLoopBackoffMs * 2, 10000);
             }}
             safeUpdateComposerState();
           }} catch (loopError) {{
+            state.eventLoopReconnectPending = true;
             console.error("[external_chat] event loop iteration failed:", loopError);
             await delayMs(eventLoopBackoffMs);
             eventLoopBackoffMs = Math.min(eventLoopBackoffMs * 2, 10000);
@@ -1741,6 +1801,7 @@
       }}
       if (eventLoopTickTs > 0 && (nowTs - eventLoopTickTs) > 90000) {{
         console.warn("[external_chat] event loop watchdog restart");
+        state.eventLoopReconnectPending = true;
         eventLoopRunning = false;
         runEventLoop().catch((error) => {{
           console.error("[external_chat] event loop watchdog restart failed:", error);
@@ -1795,6 +1856,44 @@
         renderHistory(result.history || []);
       }}
       setStatus(t("status_online"), "ok");
+    }}
+    async function syncNotificationCount(force = false) {{
+      if (!state.chatReady) {{
+        if (force) {{
+          notifySupportUnread(state.notificationCount, true);
+        }}
+        return;
+      }}
+      if (state.notificationSyncBusy) {{
+        return;
+      }}
+      state.notificationSyncBusy = true;
+      try {{
+        const result = await callApi("notification_count", {{
+          visitor_id: state.visitorId,
+          display_name: state.profile.display_name,
+          email: state.profile.email,
+          phone: state.profile.phone,
+        }});
+        applyWriteState(result, force);
+      }} finally {{
+        state.notificationSyncBusy = false;
+      }}
+    }}
+    async function markChatRead(forceNotificationNotify = false) {{
+      if (!state.chatReady) {{
+        await initChat();
+      }}
+      if (!state.chatReady) {{
+        return;
+      }}
+      const result = await callApi("mark_read", {{
+        visitor_id: state.visitorId,
+        display_name: state.profile.display_name,
+        email: state.profile.email,
+        phone: state.profile.phone,
+      }});
+      applyWriteState(result, forceNotificationNotify);
     }}
     async function sendChatMessage(text) {{
       if (!state.chatReady) {{
@@ -1973,6 +2072,22 @@
       if (event.key === "Escape") {{
         closeEmojiPanel();
       }}
+    }});
+    window.addEventListener("message", (event) => {{
+      const data = event && event.data;
+      if (!data || typeof data !== "object") {{
+        return;
+      }}
+      if (String(data.type || "").trim() !== "SUPPORT_CHAT_OPENED") {{
+        return;
+      }}
+      const incomingVisitorId = normalizeVisitorId(data.visitor_id || "");
+      if (incomingVisitorId && state.visitorId && incomingVisitorId !== state.visitorId) {{
+        return;
+      }}
+      markChatRead(true).catch((error) => {{
+        handleActionError(error);
+      }});
     }});
     fileInputEl.addEventListener("change", async () => {{
       const files = Array.from(fileInputEl.files || []);

@@ -118,6 +118,7 @@ class ExternalChatCrmChannelConfig:
         "ChatMessageAdded",
         "ChatMessageEdited",
         "ChatMessageDeleted",
+        "ChatMessageRead",
         "TicketStatusSet",
         "TicketClosed",
     }
@@ -593,6 +594,14 @@ class ExternalChatCrmChannelIntegration(ClientBase):
     @classmethod
     def _context_cache_key(cls, connected_integration_id: str, visitor_id: str) -> str:
         return cls._redis_key("context", connected_integration_id, visitor_id)
+
+    @classmethod
+    def _chat_context_cache_key(cls, connected_integration_id: str, chat_id: str) -> str:
+        return cls._redis_key("context_by_chat", connected_integration_id, chat_id)
+
+    @classmethod
+    def _chat_notification_count_key(cls, connected_integration_id: str, chat_id: str) -> str:
+        return cls._redis_key("notification_count", connected_integration_id, chat_id)
 
     @classmethod
     def _chat_revision_key(cls, connected_integration_id: str, chat_id: str) -> str:
@@ -1537,6 +1546,23 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             return None
         return cls._normalize_ticket_state(parsed if isinstance(parsed, dict) else {})
 
+    @staticmethod
+    def _context_from_payload(payload: Any, visitor_id: Optional[str] = None) -> Optional[ChatContext]:
+        if not isinstance(payload, dict):
+            return None
+        resolved_visitor_id = str(visitor_id or payload.get("visitor_id") or "").strip()
+        client_id = _parse_int(payload.get("client_id"), None)
+        ticket_id = _parse_int(payload.get("ticket_id"), None)
+        chat_id = str(payload.get("chat_id") or "").strip()
+        if not resolved_visitor_id or not client_id or not ticket_id or not chat_id:
+            return None
+        return ChatContext(
+            visitor_id=resolved_visitor_id,
+            client_id=int(client_id),
+            ticket_id=int(ticket_id),
+            chat_id=chat_id,
+        )
+
     @classmethod
     async def _load_cached_context(
         cls, connected_integration_id: str, visitor_id: str
@@ -1550,17 +1576,20 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             return None
         if not isinstance(payload, dict):
             return None
-        client_id = _parse_int(payload.get("client_id"), None)
-        ticket_id = _parse_int(payload.get("ticket_id"), None)
-        chat_id = str(payload.get("chat_id") or "").strip()
-        if not client_id or not ticket_id or not chat_id:
+        return cls._context_from_payload(payload, visitor_id)
+
+    @classmethod
+    async def _load_cached_context_by_chat(
+        cls, connected_integration_id: str, chat_id: str
+    ) -> Optional[ChatContext]:
+        raw = await cls._redis_get(cls._chat_context_cache_key(connected_integration_id, chat_id))
+        if not raw:
             return None
-        return ChatContext(
-            visitor_id=visitor_id,
-            client_id=int(client_id),
-            ticket_id=int(ticket_id),
-            chat_id=chat_id,
-        )
+        try:
+            payload = _json_loads(raw)
+        except Exception:
+            return None
+        return cls._context_from_payload(payload)
 
     @classmethod
     async def _save_cached_context(
@@ -1576,10 +1605,17 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 "chat_id": context.chat_id,
             }
         )
-        await cls._redis_set(
-            cls._context_cache_key(connected_integration_id, context.visitor_id),
-            payload,
-            ExternalChatCrmChannelConfig.CONTEXT_TTL_SEC,
+        await asyncio.gather(
+            cls._redis_set(
+                cls._context_cache_key(connected_integration_id, context.visitor_id),
+                payload,
+                ExternalChatCrmChannelConfig.CONTEXT_TTL_SEC,
+            ),
+            cls._redis_set(
+                cls._chat_context_cache_key(connected_integration_id, context.chat_id),
+                payload,
+                ExternalChatCrmChannelConfig.CONTEXT_TTL_SEC,
+            ),
         )
         await cls._set_ticket_chat_index(
             connected_integration_id,
@@ -1820,15 +1856,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             if require_writable and not cached_state.get("can_write", True):
                 cached = None
             else:
-                await cls._set_ticket_chat_index(
-                    connected_integration_id,
-                    int(cached.ticket_id),
-                    str(cached.chat_id),
-                )
-                await cls._ensure_chat_revision_exists(
-                    connected_integration_id,
-                    str(cached.chat_id),
-                )
+                await cls._save_cached_context(connected_integration_id, cached)
                 return cached
 
         if not cached:
@@ -2448,6 +2476,105 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             await api.chat.chat_message.mark_read(
                 ChatMessageMarkReadRequest(chat_id=context.chat_id)
             )
+        await cls._reset_notification_count(connected_integration_id, context)
+
+    @classmethod
+    async def _get_notification_count(
+        cls,
+        connected_integration_id: str,
+        context: ChatContext,
+    ) -> int:
+        raw = await cls._redis_get(
+            cls._chat_notification_count_key(connected_integration_id, context.chat_id)
+        )
+        return max(_parse_int(raw, 0) or 0, 0)
+
+    @classmethod
+    async def _increment_notification_count(
+        cls,
+        connected_integration_id: str,
+        context: ChatContext,
+    ) -> int:
+        if not _redis_enabled():
+            return 0
+        return await cls._redis_incr(
+            cls._chat_notification_count_key(connected_integration_id, context.chat_id),
+            ExternalChatCrmChannelConfig.CONTEXT_TTL_SEC,
+        )
+
+    @classmethod
+    async def _reset_notification_count(
+        cls,
+        connected_integration_id: str,
+        context: ChatContext,
+    ) -> None:
+        await cls._redis_delete(
+            cls._chat_notification_count_key(connected_integration_id, context.chat_id)
+        )
+
+    @staticmethod
+    def _compose_chat_state_view(
+        chat_revision: Any,
+        notification_count: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        view: Dict[str, Any] = {"chat_revision": chat_revision}
+        if notification_count is not None:
+            view["notification_count"] = max(_parse_int(notification_count, 0) or 0, 0)
+        return view
+
+    @classmethod
+    async def _get_chat_state_view(
+        cls,
+        connected_integration_id: str,
+        context: ChatContext,
+        *,
+        include_notifications: bool,
+    ) -> Dict[str, Any]:
+        if include_notifications:
+            chat_revision, notification_count = await asyncio.gather(
+                cls._get_chat_revision(connected_integration_id, str(context.chat_id)),
+                cls._get_notification_count(connected_integration_id, context),
+            )
+            return cls._compose_chat_state_view(chat_revision, notification_count)
+        chat_revision = await cls._get_chat_revision(connected_integration_id, str(context.chat_id))
+        return cls._compose_chat_state_view(chat_revision)
+
+    @classmethod
+    async def _load_chat_message_by_id(
+        cls,
+        connected_integration_id: str,
+        chat_id: str,
+        message_id: str,
+    ) -> Optional[Any]:
+        safe_message_id = str(message_id or "").strip()
+        if not safe_message_id:
+            return None
+        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+            response = await api.chat.chat_message.get(
+                ChatMessageGetRequest(
+                    chat_id=str(chat_id),
+                    ids=[safe_message_id],
+                    limit=1,
+                    offset=0,
+                    include_staff_private=False,
+                )
+            )
+        rows = response.result if response.ok and isinstance(response.result, list) else []
+        return rows[0] if rows else None
+
+    @staticmethod
+    def _should_increment_notification_for_message(message: Any) -> bool:
+        message_payload = _result_to_dict(message)
+        message_type = (
+            _enum_value(message_payload.get("message_type")).strip()
+            or ChatMessageTypeEnum.Regular.value
+        )
+        if message_type != ChatMessageTypeEnum.Regular.value:
+            return False
+        author_type = _enum_value(message_payload.get("author_entity_type")).strip().lower()
+        if not author_type:
+            return False
+        return author_type != ChatEntityTypeEnum.Client.value.lower()
 
     @staticmethod
     def _extract_profile(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -2795,6 +2922,29 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         if not chat_id:
             return {"status": "ignored", "reason": "invalid_payload:chat_id"}
 
+        message_id = str(payload.get("id") or "").strip()
+        notification_count: Optional[int] = None
+        if webhook_action == "ChatMessageAdded":
+            context = await cls._load_cached_context_by_chat(connected_integration_id, chat_id)
+            if context:
+                message: Optional[Any]
+                if any(
+                    key in payload
+                    for key in ("author_entity_type", "message_type", "author_entity_id")
+                ):
+                    message = payload
+                else:
+                    message = await cls._load_chat_message_by_id(
+                        connected_integration_id,
+                        chat_id,
+                        message_id,
+                    )
+                if message and cls._should_increment_notification_for_message(message):
+                    notification_count = await cls._increment_notification_count(
+                        connected_integration_id,
+                        context,
+                    )
+
         revision = await cls._bump_chat_revision(connected_integration_id, chat_id)
         await cls._publish_chat_event(
             connected_integration_id,
@@ -2804,10 +2954,18 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             chat_revision=int(revision or 0),
             force_full=False,
             payload={
-                "message_id": str(payload.get("id") or "").strip() or None,
+                "message_id": message_id or None,
+                "notification_count": notification_count,
             },
         )
-        return {"status": "processed", "chat_id": chat_id, "chat_revision": revision}
+        result: Dict[str, Any] = {
+            "status": "processed",
+            "chat_id": chat_id,
+            "chat_revision": revision,
+        }
+        if notification_count is not None:
+            result["notification_count"] = notification_count
+        return result
 
     @classmethod
     async def _apply_ticket_webhook(
@@ -2953,7 +3111,12 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             return {"status": "ignored", "reason": "duplicate_event"}
 
         try:
-            if webhook_action in {"ChatMessageAdded", "ChatMessageEdited", "ChatMessageDeleted"}:
+            if webhook_action in {
+                "ChatMessageAdded",
+                "ChatMessageEdited",
+                "ChatMessageDeleted",
+                "ChatMessageRead",
+            }:
                 result = await self._apply_chat_message_webhook(ci, webhook_action, payload)
             else:
                 result = await self._apply_ticket_webhook(ci, webhook_action, payload)
@@ -3097,11 +3260,13 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     runtime,
                     context,
                 )
-                chat_revision = await self._get_chat_revision(ci, str(context.chat_id))
-                history = await self._read_history(
-                    ci,
-                    context,
-                    ExternalChatCrmChannelConfig.DEFAULT_HISTORY_LIMIT,
+                chat_state, history = await asyncio.gather(
+                    self._get_chat_state_view(ci, context, include_notifications=True),
+                    self._read_history(
+                        ci,
+                        context,
+                        ExternalChatCrmChannelConfig.DEFAULT_HISTORY_LIMIT,
+                    ),
                 )
                 return {
                     "status": "ok",
@@ -3112,7 +3277,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                         "phone": runtime.require_phone,
                         "email": runtime.require_email,
                     },
-                    "chat_revision": chat_revision,
+                    **chat_state,
                     "history_changed": True,
                     **ticket_view,
                     "history": history,
@@ -3144,22 +3309,29 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     and int(chat_revision) > 0
                     and int(known_revision) == int(chat_revision)
                 ):
+                    chat_state = self._compose_chat_state_view(
+                        chat_revision,
+                        await self._get_notification_count(ci, context),
+                    )
                     return {
                         "status": "ok",
                         "visitor_id": visitor_id,
-                        "chat_revision": chat_revision,
+                        **chat_state,
                         "history_changed": False,
                         **ticket_view,
                     }
-                history = await self._read_history(
-                    ci,
-                    context,
-                    int(limit or ExternalChatCrmChannelConfig.DEFAULT_HISTORY_LIMIT),
+                history, notification_count = await asyncio.gather(
+                    self._read_history(
+                        ci,
+                        context,
+                        int(limit or ExternalChatCrmChannelConfig.DEFAULT_HISTORY_LIMIT),
+                    ),
+                    self._get_notification_count(ci, context),
                 )
                 return {
                     "status": "ok",
                     "visitor_id": visitor_id,
-                    "chat_revision": chat_revision,
+                    **self._compose_chat_state_view(chat_revision, notification_count),
                     "history_changed": True,
                     **ticket_view,
                     "history": history,
@@ -3177,15 +3349,18 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     and int(chat_revision) > 0
                     and int(known_revision) != int(chat_revision)
                 ):
-                    ticket_view = await self._compose_context_ticket_view(
-                        ci,
-                        runtime,
-                        context,
+                    ticket_view, notification_count = await asyncio.gather(
+                        self._compose_context_ticket_view(
+                            ci,
+                            runtime,
+                            context,
+                        ),
+                        self._get_notification_count(ci, context),
                     )
                     return {
                         "status": "ok",
                         "visitor_id": visitor_id,
-                        "chat_revision": chat_revision,
+                        **self._compose_chat_state_view(chat_revision, notification_count),
                         "events": [self._build_revision_sync_event(
                             chat_id=str(context.chat_id),
                             ticket_id=int(context.ticket_id),
@@ -3210,15 +3385,18 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     latest_chat_revision = await self._get_chat_revision(ci, str(context.chat_id))
                     chat_revision = int(latest_chat_revision or 0)
                     if int(chat_revision) > 0 and int(known_revision) != int(chat_revision):
-                        ticket_view = await self._compose_context_ticket_view(
-                            ci,
-                            runtime,
-                            context,
+                        ticket_view, notification_count = await asyncio.gather(
+                            self._compose_context_ticket_view(
+                                ci,
+                                runtime,
+                                context,
+                            ),
+                            self._get_notification_count(ci, context),
                         )
                         return {
                             "status": "ok",
                             "visitor_id": visitor_id,
-                            "chat_revision": chat_revision,
+                            **self._compose_chat_state_view(chat_revision, notification_count),
                             "events": [self._build_revision_sync_event(
                                 chat_id=str(context.chat_id),
                                 ticket_id=int(context.ticket_id),
@@ -3227,18 +3405,29 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                             )],
                             **ticket_view,
                         }
-                ticket_view = await self._compose_context_ticket_view(
-                    ci,
-                    runtime,
-                    context,
+                if not events:
+                    return {
+                        "status": "ok",
+                        "visitor_id": visitor_id,
+                        **self._compose_chat_state_view(chat_revision),
+                        "events": [],
+                    }
+                ticket_view, notification_count = await asyncio.gather(
+                    self._compose_context_ticket_view(
+                        ci,
+                        runtime,
+                        context,
+                    ),
+                    self._get_notification_count(ci, context),
                 )
-                return {
+                response_payload = {
                     "status": "ok",
                     "visitor_id": visitor_id,
-                    "chat_revision": chat_revision,
                     "events": events,
+                    **self._compose_chat_state_view(chat_revision, notification_count),
                     **ticket_view,
                 }
+                return response_payload
 
             if action == "send_message":
                 text = _normalize_message_markup(
@@ -3267,7 +3456,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     "status": "ok",
                     "visitor_id": visitor_id,
                     "message_id": message_id,
-                    "chat_revision": chat_revision,
+                    **self._compose_chat_state_view(chat_revision, 0),
                     **ticket_view,
                 }
 
@@ -3306,7 +3495,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     "file_id": int(file_id),
                     "file_name": file_name,
                     "file_size": int(file_size),
-                    "chat_revision": chat_revision,
+                    **self._compose_chat_state_view(chat_revision, 0),
                     **ticket_view,
                 }
 
@@ -3435,6 +3624,14 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     **saved_view,
                 }
 
+            if action == "notification_count":
+                chat_state = await self._get_chat_state_view(ci, context, include_notifications=True)
+                return {
+                    "status": "ok",
+                    "visitor_id": visitor_id,
+                    **chat_state,
+                }
+
             if action == "mark_read":
                 await self._mark_read(ci, context)
                 ticket_state = await self._get_ticket_write_state(ci, int(context.ticket_id))
@@ -3443,7 +3640,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 return {
                     "status": "ok",
                     "visitor_id": visitor_id,
-                    "chat_revision": chat_revision,
+                    **self._compose_chat_state_view(chat_revision, 0),
                     **ticket_view,
                 }
 
