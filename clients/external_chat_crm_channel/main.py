@@ -2226,12 +2226,6 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     ticket_fields=ticket_field_adds,
                 )
                 created_ticket_now = True
-                if ticket_field_edits:
-                    await cls._apply_ticket_fields(
-                        api,
-                        ticket_id=int(ticket.id),
-                        ticket_fields=ticket_field_edits,
-                    )
             elif ticket_field_edits:
                 await cls._apply_ticket_fields(
                     api,
