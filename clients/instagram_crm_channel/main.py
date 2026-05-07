@@ -252,6 +252,51 @@ class InstagramCrmChannelIntegration(ClientBase):
         return redis_ttl_seconds(InstagramCrmChannelConfig.ACTIVE_CI_IDS_TTL_SEC)
 
     @staticmethod
+    def _normalize_setting_key(key: Any) -> str:
+        return str(key or "").strip().lower()
+
+    @classmethod
+    def _normalize_settings_map(cls, values: Dict[Any, Any]) -> Dict[str, str]:
+        normalized: Dict[str, str] = {}
+        for raw_key, raw_value in (values or {}).items():
+            key = cls._normalize_setting_key(raw_key)
+            if not key:
+                continue
+            value = str(raw_value or "").strip()
+            if key not in normalized or (value and not normalized[key]):
+                normalized[key] = value
+        return normalized
+
+    @classmethod
+    async def _settings_key_case_map(cls, connected_integration_id: str) -> Dict[str, str]:
+        try:
+            async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+                response = await api.integrations.connected_integration_setting.get(
+                    ConnectedIntegrationSettingRequest(
+                        connected_integration_id=connected_integration_id
+                    )
+                )
+        except Exception as error:
+            logger.warning(
+                "Failed to read setting key case map, using patch keys: ci=%s error=%s",
+                connected_integration_id,
+                error,
+            )
+            return {}
+
+        key_case_map: Dict[str, str] = {}
+        for row in response.result or []:
+            data = _row_to_dict(row)
+            raw_key_value = data.get("key") if data else getattr(row, "key", "")
+            raw_key = str(raw_key_value or "").strip()
+            key = cls._normalize_setting_key(raw_key)
+            if not key:
+                continue
+            if key not in key_case_map or raw_key.isupper():
+                key_case_map[key] = raw_key
+        return key_case_map
+
+    @staticmethod
     async def _redis_get(key: str) -> Optional[str]:
         if not _redis_enabled():
             return None
@@ -382,7 +427,7 @@ class InstagramCrmChannelIntegration(ClientBase):
                 try:
                     cached = _json_loads(raw)
                     if isinstance(cached, dict):
-                        return {str(k): str(v or "") for k, v in cached.items()}
+                        return cls._normalize_settings_map(cached)
                 except Exception:
                     pass
 
@@ -393,19 +438,26 @@ class InstagramCrmChannelIntegration(ClientBase):
 
         settings_map: Dict[str, str] = {}
         for row in response.result or []:
-            key = str(getattr(row, "key", "") or "").strip()
+            data = _row_to_dict(row)
+            key = cls._normalize_setting_key(
+                data.get("key") if data else getattr(row, "key", "")
+            )
             if key:
-                settings_map[key] = str(getattr(row, "value", "") or "").strip()
+                raw_value = data.get("value") if data else getattr(row, "value", "")
+                value = str(raw_value or "").strip()
+                if key not in settings_map or (value and not settings_map[key]):
+                    settings_map[key] = value
 
         await cls._redis_set(cache_key, _json_dumps(settings_map), InstagramCrmChannelConfig.SETTINGS_TTL_SEC)
         return settings_map
 
     @classmethod
     async def _edit_settings(cls, connected_integration_id: str, patch: Dict[str, str]) -> None:
+        key_case_map = await cls._settings_key_case_map(connected_integration_id)
         rows = [
             ConnectedIntegrationSettingEditItem(
                 connected_integration_id=connected_integration_id,
-                key=str(key),
+                key=key_case_map.get(cls._normalize_setting_key(key), str(key)),
                 value=str(value or ""),
             )
             for key, value in patch.items()

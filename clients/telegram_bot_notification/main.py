@@ -1,11 +1,13 @@
 import httpx
 import json
+import re
 from enum import Enum
 from typing import Optional, Dict, List, Set
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import Update as TelegramUpdate
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -144,19 +146,74 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         return result or None
 
     @staticmethod
-    def _is_bot_blocked_error(error: object) -> bool:
+    def _subscriber_removal_reason(error: object) -> Optional[str]:
         text = str(error).lower()
-        return "bot was blocked by the user" in text
+        if "bot was blocked by the user" in text:
+            return "bot was blocked"
+        if "bot was kicked from the group chat" in text:
+            return "bot was kicked from the group"
+        if "chat not found" in text or "bot is not a member of the chat" in text:
+            return "chat is unavailable"
+        if "not enough rights to send text messages to the chat" in text:
+            return "bot lacks rights"
+        if "not enough rights to send messages" in text:
+            return "bot lacks rights"
+        if "forbidden: user is deactivated" in text:
+            return "user is deactivated"
+        return None
 
     @staticmethod
-    def _is_not_enough_rights_error(error: object) -> bool:
-        text = str(error).lower()
-        return "not enough rights to send text messages to the chat" in text
+    def _migrate_to_chat_id(error: object) -> Optional[str]:
+        migrate_to_chat_id = getattr(error, "migrate_to_chat_id", None)
+        if migrate_to_chat_id:
+            return str(migrate_to_chat_id)
+        match = re.search(
+            r"migrated to a supergroup with id\s+(-?\d+)",
+            str(error),
+            flags=re.IGNORECASE,
+        )
+        return match.group(1) if match else None
 
     @staticmethod
-    def _is_user_deactivated_error(error: object) -> bool:
+    def _is_callback_query_expired_error(error: object) -> bool:
         text = str(error).lower()
-        return "forbidden: user is deactivated" in text
+        return (
+            "query is too old" in text
+            or "response timeout expired" in text
+            or "query id is invalid" in text
+        )
+
+    async def _answer_callback_query(
+        self,
+        callback_query: types.CallbackQuery,
+        *args,
+        **kwargs,
+    ) -> bool:
+        try:
+            await callback_query.answer(*args, **kwargs)
+            return True
+        except TelegramBadRequest as error:
+            if self._is_callback_query_expired_error(error):
+                logger.info("Ignoring stale callback query answer: %s", error)
+            else:
+                logger.warning("Failed to answer callback query: %s", error)
+            return False
+        except Exception as error:
+            logger.warning("Failed to answer callback query: %s", error)
+            return False
+
+    async def _cleanup_failed_subscriber(self, chat_id: str, error: object) -> Optional[str]:
+        reason = self._subscriber_removal_reason(error)
+        if not reason:
+            return None
+        try:
+            await self._remove_subscriber(str(chat_id))
+            logger.info("Removed subscriber %s because %s", chat_id, reason)
+        except Exception as remove_error:
+            logger.warning(
+                "Failed to remove subscriber %s: %s", chat_id, remove_error
+            )
+        return reason
 
     @staticmethod
     def _is_longpolling_mode() -> bool:
@@ -354,6 +411,58 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             logger.error(f"Error removing subscriber {chat_id}: {error}")
             raise
 
+    async def _replace_subscriber(self, old_chat_id: str, new_chat_id: str) -> bool:
+        """Replace a migrated Telegram chat ID in settings."""
+        old_chat_id = str(old_chat_id or "").strip()
+        new_chat_id = str(new_chat_id or "").strip()
+        if not old_chat_id or not new_chat_id or old_chat_id == new_chat_id:
+            return False
+
+        cache_key = f"clients:settings:telegram:{self.connected_integration_id}"
+        settings_map = await self._fetch_settings(cache_key) or {}
+        raw_chat_ids = settings_map.get(TelegramSettings.CHAT_IDS.value.lower())
+        subscribers = parse_chat_ids(raw_chat_ids)
+        if old_chat_id not in subscribers:
+            return False
+
+        updated: List[str] = []
+        for subscriber in subscribers:
+            candidate = new_chat_id if subscriber == old_chat_id else subscriber
+            if candidate not in updated:
+                updated.append(candidate)
+
+        async with RegosAPI(
+            connected_integration_id=self.connected_integration_id
+        ) as api:
+            edit_resp = await api.integrations.connected_integration_setting.edit(
+                [
+                    ConnectedIntegrationSettingEditItem(
+                        key=TelegramSettings.CHAT_IDS.value,
+                        value=json.dumps(updated),
+                        connected_integration_id=self.connected_integration_id,
+                    )
+                ]
+            )
+        success = getattr(edit_resp, "ok", None)
+        if success is None:
+            success = bool(getattr(edit_resp, "result", edit_resp))
+        if not success:
+            logger.error(
+                "Settings update failed (replace): ok=%s result=%s",
+                getattr(edit_resp, "ok", None),
+                getattr(edit_resp, "result", None),
+            )
+            raise RuntimeError("Failed to update settings")
+        if settings.redis_enabled and redis_client:
+            await redis_client.delete(cache_key)
+        logger.info(
+            "Replaced Telegram subscriber %s with %s for ID %s",
+            old_chat_id,
+            new_chat_id,
+            self.connected_integration_id,
+        )
+        return True
+
     async def _initialize_bot(self) -> None:
         """Initialize the Telegram bot if not already done."""
         if self.bot:
@@ -411,7 +520,9 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             try:
                 _, uuid, _ = callback_query.data.split("_", 2)
             except Exception:
-                await callback_query.answer("Некорректные данные кнопки", show_alert=False)
+                await self._answer_callback_query(
+                    callback_query, "Некорректные данные кнопки", show_alert=False
+                )
                 return
 
             try:
@@ -419,7 +530,9 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                     # Приводим чек к DocCheque
                     raw_cheques = (await api.docs.cheque.get_by_uuids([uuid])).result or []
                     if not raw_cheques:
-                        await callback_query.answer("Чек не найден", show_alert=True)
+                        await self._answer_callback_query(
+                            callback_query, "Чек не найден", show_alert=True
+                        )
                         return
                     cheque = (
                         raw_cheques[0]
@@ -452,7 +565,9 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                     ]
             except Exception as error:
                 logger.error(f"Error fetching cheque details {uuid}: {error}")
-                await callback_query.answer("Ошибка получения данных", show_alert=True)
+                await self._answer_callback_query(
+                    callback_query, "Ошибка получения данных", show_alert=True
+                )
                 return
 
             message_text = format_cheque_details(
@@ -463,19 +578,23 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                 await callback_query.message.edit_text(
                     text=message_text, parse_mode=ParseMode.MARKDOWN
                 )
-                await callback_query.answer()  # закрываем «часики»
             except Exception as error:
                 logger.error(f"Error editing cheque details {uuid}: {error}")
-                await callback_query.answer(
+                await self._answer_callback_query(
+                    callback_query,
                     "Не удалось обновить сообщение", show_alert=True
                 )
+                return
+            await self._answer_callback_query(callback_query)
 
         @self.dispatcher.callback_query(lambda c: c.data.startswith("sdetails_"))
         async def handle_session_details(callback_query: types.CallbackQuery):
             try:
                 _, uuid, _ = callback_query.data.split("_", 2)
             except Exception:
-                await callback_query.answer("Некорректные данные кнопки", show_alert=False)
+                await self._answer_callback_query(
+                    callback_query, "Некорректные данные кнопки", show_alert=False
+                )
                 return
 
             try:
@@ -483,7 +602,9 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                     sessions_resp = await api.docs.cash_session.get_by_uuids([uuid])
                     sessions = sessions_resp.result or []
                     if not sessions:
-                        await callback_query.answer("Смена не найдена", show_alert=True)
+                        await self._answer_callback_query(
+                            callback_query, "Смена не найдена", show_alert=True
+                        )
                         return
 
                     session = sessions[0]
@@ -534,7 +655,9 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
 
             except Exception as error:
                 logger.error(f"Error fetching session details {uuid}: {error}")
-                await callback_query.answer("Ошибка получения данных", show_alert=True)
+                await self._answer_callback_query(
+                    callback_query, "Ошибка получения данных", show_alert=True
+                )
                 return
 
             
@@ -546,10 +669,13 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                 await callback_query.message.edit_text(
                     text=message_text, parse_mode=ParseMode.MARKDOWN
                 )
-                await callback_query.answer()
             except Exception as error:
                 logger.error(f"Error editing session details {uuid}: {error}")
-                await callback_query.answer("Не удалось обновить сообщение", show_alert=True)
+                await self._answer_callback_query(
+                    callback_query, "Не удалось обновить сообщение", show_alert=True
+                )
+                return
+            await self._answer_callback_query(callback_query)
 
 
     @retry(
@@ -917,24 +1043,42 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                 results.append({"status": "sent", "chat_id": chat_id})
             except Exception as error:
                 logger.error(f"Error sending message to chat {chat_id}: {error}")
-                if self._is_bot_blocked_error(error):
-                    reason = "bot was blocked"
-                elif self._is_not_enough_rights_error(error):
-                    reason = "bot lacks rights"
-                elif self._is_user_deactivated_error(error):
-                    reason = "user is deactivated"
-                else:
-                    reason = None
-                if reason:
+                migrated_to = self._migrate_to_chat_id(error)
+                if migrated_to:
                     try:
-                        await self._remove_subscriber(str(chat_id))
-                        logger.info(
-                            "Removed subscriber %s because %s", chat_id, reason
-                        )
-                    except Exception as remove_error:
+                        await self._replace_subscriber(str(chat_id), migrated_to)
+                    except Exception as replace_error:
                         logger.warning(
-                            "Failed to remove subscriber %s: %s", chat_id, remove_error
+                            "Failed to replace migrated subscriber %s -> %s: %s",
+                            chat_id,
+                            migrated_to,
+                            replace_error,
                         )
+                    try:
+                        await self.bot.send_message(
+                            chat_id=migrated_to,
+                            text=message_text,
+                            reply_markup=keyboard if keyboard else None,
+                        )
+                        results.append(
+                            {
+                                "status": "sent",
+                                "chat_id": migrated_to,
+                                "migrated_from": str(chat_id),
+                            }
+                        )
+                        continue
+                    except Exception as retry_error:
+                        logger.error(
+                            "Error sending message to migrated chat %s from %s: %s",
+                            migrated_to,
+                            chat_id,
+                            retry_error,
+                        )
+                        error = retry_error
+                        chat_id = migrated_to
+
+                await self._cleanup_failed_subscriber(str(chat_id), error)
                 results.append(
                     {"status": "error", "chat_id": chat_id, "error": str(error)}
                 )
@@ -1010,24 +1154,25 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                 chat_id = detail.get("chat_id")
                 if not chat_id:
                     continue
-                removed_reason = None
-                if self._is_bot_blocked_error(error_text):
-                    removed_reason = "bot was blocked"
-                elif self._is_not_enough_rights_error(error_text):
-                    removed_reason = "not enough rights"
-                elif self._is_user_deactivated_error(error_text):
-                    removed_reason = "user deactivated"
-                if not removed_reason:
+                migrated_to = detail.get("migrate_to_chat_id") or self._migrate_to_chat_id(
+                    error_text
+                )
+                if migrated_to:
+                    try:
+                        replaced = await self._replace_subscriber(
+                            str(chat_id), str(migrated_to)
+                        )
+                        if replaced:
+                            detail["migrated_to_chat_id"] = str(migrated_to)
+                    except Exception as replace_error:
+                        logger.warning(
+                            "Failed to replace migrated subscriber %s -> %s: %s",
+                            chat_id,
+                            migrated_to,
+                            replace_error,
+                        )
                     continue
-                try:
-                    await self._remove_subscriber(str(chat_id))
-                    logger.info(
-                        "Removed subscriber %s because %s", chat_id, removed_reason
-                    )
-                except Exception as remove_error:
-                    logger.warning(
-                        "Failed to remove subscriber %s: %s", chat_id, remove_error
-                    )
+                await self._cleanup_failed_subscriber(str(chat_id), error_text)
 
         logger.info(f"Message sending completed. Processed {len(results)} batches")
         return {"sent_batches": len(results), "details": results}
