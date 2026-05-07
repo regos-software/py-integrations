@@ -43,14 +43,16 @@ async def send_messages(
             results.append({"status": "sent", "chat_id": chat_id, "message": text})
         except Exception as e:
             logger.error(f"Ошибка отправки в чат {chat_id}: {e}")
-            results.append(
-                {
-                    "status": "error",
-                    "chat_id": chat_id,
-                    "message": text,
-                    "error": str(e),
-                }
-            )
+            result = {
+                "status": "error",
+                "chat_id": chat_id,
+                "message": text,
+                "error": str(e),
+            }
+            migrate_to_chat_id = getattr(e, "migrate_to_chat_id", None)
+            if migrate_to_chat_id:
+                result["migrate_to_chat_id"] = str(migrate_to_chat_id)
+            results.append(result)
 
         if sleep_between and sleep_between > 0:
             await asyncio.sleep(sleep_between)
