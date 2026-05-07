@@ -206,6 +206,7 @@ class InstagramCrmChannelIntegration(ClientBase):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
+        self.connected_integration_id: Optional[str] = None
         self.http_client = httpx.AsyncClient(timeout=InstagramCrmChannelConfig.HTTP_TIMEOUT_SEC)
 
     async def __aenter__(self) -> "InstagramCrmChannelIntegration":
@@ -1583,8 +1584,9 @@ class InstagramCrmChannelIntegration(ClientBase):
             raise
 
     def _resolve_ci_from_envelope(self, envelope: Dict[str, Any]) -> Optional[str]:
-        if self.connected_integration_id:
-            return str(self.connected_integration_id).strip()
+        instance_ci = str(getattr(self, "connected_integration_id", "") or "").strip()
+        if instance_ci:
+            return instance_ci
 
         headers = envelope.get("headers") or {}
         query = envelope.get("query") or {}
