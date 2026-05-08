@@ -248,23 +248,10 @@ def _connected_integration_id_from_external_path(external_path: Optional[str]) -
     return None
 
 
-def _connected_integration_id_from_external_headers(headers) -> Optional[str]:
-    for header_name in (
-        "x-original-uri",
-        "x-forwarded-uri",
-        "x-forwarded-path",
-        "x-rewrite-url",
-    ):
-        header_value = str(headers.get(header_name) or "").strip()
-        match = re.search(r"/external/([0-9a-fA-F]{32})(?:/|$)", header_value)
-        if match:
-            return match.group(1)
-    return None
-
-
-async def _read_body_safely(request: Request) -> Any:
+async def _read_body_safely(request: Request, raw: Optional[bytes] = None) -> Any:
     """Считываем тело: пробуем JSON, затем текст, иначе bytes/None."""
-    raw = await request.body()
+    if raw is None:
+        raw = await request.body()
     if not raw:
         return None
     try:
@@ -557,7 +544,6 @@ async def handle_external(
     resolved_connected_integration_id = (
         connected_integration_id
         or _connected_integration_id_from_external_path(external_path)
-        or _connected_integration_id_from_external_headers(request.headers)
     )
     logger.info(f"[external] Connected-Integration-Id: {resolved_connected_integration_id}")
 
@@ -602,7 +588,7 @@ async def handle_external(
         headers["Connected-Integration-Id"] = str(resolved_connected_integration_id)
 
     raw_body = await request.body()
-    body_data = await _read_body_safely(request)
+    body_data = await _read_body_safely(request, raw_body)
 
     envelope: Dict[str, Any] = {
         "method": request.method,

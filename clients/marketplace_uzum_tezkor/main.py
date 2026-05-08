@@ -144,6 +144,15 @@ def _lookup(data: Dict[str, Any], *names: str) -> Any:
     return None
 
 
+def _normalize_settings_map(raw: Dict[str, Any]) -> Dict[str, str]:
+    normalized: Dict[str, str] = {}
+    for key, value in (raw or {}).items():
+        normalized_key = str(key or "").strip().lower()
+        if normalized_key:
+            normalized[normalized_key] = str(value or "").strip()
+    return normalized
+
+
 def _connected_integration_id(envelope: Dict[str, Any]) -> str:
     for key in ("connected_integration_id", "connectedIntegrationId"):
         value = envelope.get(key)
@@ -298,13 +307,6 @@ class UzumTezkorIntegration(ClientBase):
         return {"status": "ok"}
 
     async def update_settings(self, settings: Optional[dict] = None, **kwargs: Any) -> Dict[str, Any]:
-        ci = str(
-            kwargs.get("connected_integration_id")
-            or kwargs.get("connectedIntegrationId")
-            or ""
-        ).strip()
-        if ci:
-            self.connected_integration_id = ci
         if not self._ci():
             return {"status": "error", "error": "connected_integration_id is required"}
         self._integration_key = None
@@ -357,7 +359,7 @@ class UzumTezkorIntegration(ClientBase):
             return self._settings
         cached = await redis_get_json(self._settings_cache_key())
         if isinstance(cached, dict):
-            self._settings = {str(key): str(value or "") for key, value in cached.items() if str(key)}
+            self._settings = _normalize_settings_map(cached)
             return self._settings
 
         lock_token = await redis_acquire_lock(
@@ -370,7 +372,7 @@ class UzumTezkorIntegration(ClientBase):
         try:
             cached = await redis_get_json(self._settings_cache_key())
             if isinstance(cached, dict):
-                self._settings = {str(key): str(value or "") for key, value in cached.items() if str(key)}
+                self._settings = _normalize_settings_map(cached)
                 return self._settings
 
             await self._load_integration()
@@ -380,11 +382,13 @@ class UzumTezkorIntegration(ClientBase):
                 )
             if not response.ok or not isinstance(response.result, list):
                 raise UzumTezkorError(113423, "Integration settings not found", status_code=500)
-            self._settings = {
-                str(getattr(row, "key", "") or ""): str(getattr(row, "value", "") or "")
-                for row in response.result
-                if str(getattr(row, "key", "") or "")
-            }
+            self._settings = _normalize_settings_map(
+                {
+                    getattr(row, "key", ""): getattr(row, "value", "")
+                    for row in response.result
+                    if getattr(row, "key", None)
+                }
+            )
             await redis_set_json(self._settings_cache_key(), self._settings, settings.marketplace_cache_ttl)
             return self._settings
         finally:
@@ -420,6 +424,15 @@ class UzumTezkorIntegration(ClientBase):
                 await redis_release_lock(self._token_lock_key(), lock_token)
 
     async def _issue_token(self, data: Dict[str, Any]) -> str:
+        if not self._ci():
+            raise UzumTezkorError(100, "connected-integration-id не получен")
+        grant_type = _text(_lookup(data, "grant_type", "Grant_Type", "grantType")).strip()
+        scope = _text(_lookup(data, "scope", "Scope")).strip()
+        if grant_type.lower() != "client_credentials":
+            raise UzumTezkorError(400, "Unsupported grant_type. Expected 'client_credentials'.")
+        if not scope:
+            raise UzumTezkorError(400, "Scope is required.")
+
         lock_token = await redis_acquire_lock(
             self._token_lock_key(),
             settings.marketplace_lock_ttl,
@@ -428,19 +441,12 @@ class UzumTezkorIntegration(ClientBase):
         if not lock_token:
             raise UzumTezkorError(113423, "Token issue lock timeout", status_code=500)
         try:
-            grant_type = _text(_lookup(data, "grant_type", "Grant_Type", "grantType")).strip()
-            scope = _text(_lookup(data, "scope", "Scope")).strip()
-            if grant_type.lower() != "client_credentials":
-                raise UzumTezkorError(400, "Unsupported grant_type. Expected 'client_credentials'.")
-            if not scope:
-                raise UzumTezkorError(400, "Scope is required.")
-
             settings_map = await self._load_settings()
-            if "CLIENT_ID" not in settings_map or "CLIENT_SECRET" not in settings_map:
+            if "client_id" not in settings_map or "client_secret" not in settings_map:
                 raise UzumTezkorError(113423, "Integration settings not found or incomplete", status_code=500)
             client_id = _text(_lookup(data, "client_id", "client_Id", "Client_Id", "clientId")).strip()
             client_secret = _text(_lookup(data, "client_secret", "client_Secret", "Client_Secret", "clientSecret")).strip()
-            if client_id != settings_map.get("CLIENT_ID") or client_secret != settings_map.get("CLIENT_SECRET"):
+            if client_id != settings_map.get("client_id") or client_secret != settings_map.get("client_secret"):
                 raise UzumTezkorError(100, "Invalid client credentials")
             token = uuid.uuid4().hex.lower()
             await self._edit_setting("ACCESS_TOKEN", token, lock=False)
@@ -454,7 +460,7 @@ class UzumTezkorIntegration(ClientBase):
         if not authorization.lower().startswith("bearer "):
             return False, _error(401, "Invalid token format")
         settings_map = await self._load_settings()
-        access_token = settings_map.get("ACCESS_TOKEN")
+        access_token = settings_map.get("access_token")
         if not access_token:
             return False, _error(401, "Settings or AccessToken not found")
         if authorization.split(" ", 1)[1].strip() != access_token:
@@ -490,7 +496,7 @@ class UzumTezkorIntegration(ClientBase):
 
     async def _price_type(self) -> int:
         settings_map = await self._load_settings()
-        price_type = _to_int(settings_map.get("PRICE_TYPE"))
+        price_type = _to_int(settings_map.get("price_type"))
         if price_type <= 0:
             raise UzumTezkorError(113422, f"{await self._load_integration()} PRICE_TYPE not set", status_code=500)
         return price_type
@@ -639,9 +645,9 @@ class UzumTezkorIntegration(ClientBase):
         if not eats_id or restaurant_id <= 0 or not isinstance(items, list) or not items or payment_info is None:
             raise UzumTezkorError(400, "Некорректные данные в заказе")
         settings_map = await self._load_settings()
-        order_from = _to_int(settings_map.get("ORDER_FROM"))
-        delivery_type = _to_int(settings_map.get("ORDER_DELIVERY_TYPE"))
-        price_type = _to_int(settings_map.get("PRICE_TYPE"))
+        order_from = _to_int(settings_map.get("order_from"))
+        delivery_type = _to_int(settings_map.get("order_delivery_type"))
+        price_type = _to_int(settings_map.get("price_type"))
         if order_from <= 0 or delivery_type <= 0 or price_type <= 0:
             raise UzumTezkorError(113422, "Не установлены необходимые параметры заказа", status_code=500)
 

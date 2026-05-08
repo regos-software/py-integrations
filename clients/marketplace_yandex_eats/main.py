@@ -142,6 +142,15 @@ def _lookup(data: Dict[str, Any], *names: str) -> Any:
     return None
 
 
+def _normalize_settings_map(raw: Dict[str, Any]) -> Dict[str, str]:
+    normalized: Dict[str, str] = {}
+    for key, value in (raw or {}).items():
+        normalized_key = str(key or "").strip().lower()
+        if normalized_key:
+            normalized[normalized_key] = str(value or "").strip()
+    return normalized
+
+
 def _connected_integration_id(envelope: Dict[str, Any]) -> str:
     for key in ("connected_integration_id", "connectedIntegrationId"):
         value = envelope.get(key)
@@ -293,13 +302,6 @@ class YandexEatsIntegration(ClientBase):
         return {"status": "ok"}
 
     async def update_settings(self, settings: Optional[dict] = None, **kwargs: Any) -> Dict[str, Any]:
-        ci = str(
-            kwargs.get("connected_integration_id")
-            or kwargs.get("connectedIntegrationId")
-            or ""
-        ).strip()
-        if ci:
-            self.connected_integration_id = ci
         if not self._ci():
             return {"status": "error", "error": "connected_integration_id is required"}
         self._integration_key = None
@@ -352,7 +354,7 @@ class YandexEatsIntegration(ClientBase):
             return self._settings
         cached = await redis_get_json(self._settings_cache_key())
         if isinstance(cached, dict):
-            self._settings = {str(key): str(value or "") for key, value in cached.items() if str(key)}
+            self._settings = _normalize_settings_map(cached)
             return self._settings
 
         lock_token = await redis_acquire_lock(
@@ -365,7 +367,7 @@ class YandexEatsIntegration(ClientBase):
         try:
             cached = await redis_get_json(self._settings_cache_key())
             if isinstance(cached, dict):
-                self._settings = {str(key): str(value or "") for key, value in cached.items() if str(key)}
+                self._settings = _normalize_settings_map(cached)
                 return self._settings
 
             await self._load_integration()
@@ -375,11 +377,13 @@ class YandexEatsIntegration(ClientBase):
                 )
             if not response.ok or not isinstance(response.result, list):
                 raise YandexEatsError(113423, "Integration settings not found")
-            self._settings = {
-                str(getattr(row, "key", "") or ""): str(getattr(row, "value", "") or "")
-                for row in response.result
-                if str(getattr(row, "key", "") or "")
-            }
+            self._settings = _normalize_settings_map(
+                {
+                    getattr(row, "key", ""): getattr(row, "value", "")
+                    for row in response.result
+                    if getattr(row, "key", None)
+                }
+            )
             await redis_set_json(self._settings_cache_key(), self._settings, settings.marketplace_cache_ttl)
             return self._settings
         finally:
@@ -415,6 +419,8 @@ class YandexEatsIntegration(ClientBase):
                 await redis_release_lock(self._token_lock_key(), lock_token)
 
     async def _issue_token(self, data: Dict[str, Any]) -> str:
+        if not self._ci():
+            raise YandexEatsError(100, "connected-integration-id не получен")
         lock_token = await redis_acquire_lock(
             self._token_lock_key(),
             settings.marketplace_lock_ttl,
@@ -424,11 +430,11 @@ class YandexEatsIntegration(ClientBase):
             raise YandexEatsError(113423, "Token issue lock timeout")
         try:
             settings_map = await self._load_settings()
-            if "CLIENT_ID" not in settings_map or "CLIENT_SECRET" not in settings_map:
+            if "client_id" not in settings_map or "client_secret" not in settings_map:
                 raise YandexEatsError(113423, "Integration settings not found or incomplete")
             client_id = _text(_lookup(data, "client_id", "client_Id", "Client_Id", "clientId")).strip()
             client_secret = _text(_lookup(data, "client_secret", "client_Secret", "Client_Secret", "clientSecret")).strip()
-            if client_id != settings_map.get("CLIENT_ID") or client_secret != settings_map.get("CLIENT_SECRET"):
+            if client_id != settings_map.get("client_id") or client_secret != settings_map.get("client_secret"):
                 raise YandexEatsError(100, "Invalid client credentials")
             token = uuid.uuid4().hex.lower()
             await self._edit_setting("ACCESS_TOKEN", token, lock=False)
@@ -442,7 +448,7 @@ class YandexEatsIntegration(ClientBase):
         if not authorization.startswith("Bearer "):
             return False, _error(400, "Invalid token format")
         settings_map = await self._load_settings()
-        access_token = settings_map.get("ACCESS_TOKEN")
+        access_token = settings_map.get("access_token")
         if not access_token:
             return False, _error(400, "Settings or AccessToken not found")
         if authorization.split(" ", 1)[1].strip() != access_token:
@@ -478,7 +484,7 @@ class YandexEatsIntegration(ClientBase):
 
     async def _price_type(self) -> int:
         settings_map = await self._load_settings()
-        price_type = _to_int(settings_map.get("PRICE_TYPE"))
+        price_type = _to_int(settings_map.get("price_type"))
         if price_type <= 0:
             raise YandexEatsError(113422, f"{await self._load_integration()} PRICE_TYPE not set")
         return price_type
@@ -627,9 +633,9 @@ class YandexEatsIntegration(ClientBase):
         if not eats_id or restaurant_id <= 0 or not isinstance(items, list) or not items or payment_info is None:
             raise YandexEatsError(400, "Некорректные данные в заказе")
         settings_map = await self._load_settings()
-        order_from = _to_int(settings_map.get("ORDER_FROM"))
-        delivery_type = _to_int(settings_map.get("ORDER_DELIVERY_TYPE"))
-        price_type = _to_int(settings_map.get("PRICE_TYPE"))
+        order_from = _to_int(settings_map.get("order_from"))
+        delivery_type = _to_int(settings_map.get("order_delivery_type"))
+        price_type = _to_int(settings_map.get("price_type"))
         if order_from <= 0 or delivery_type <= 0 or price_type <= 0:
             raise YandexEatsError(113422, "Не установлены необходимые параметры заказа")
 
