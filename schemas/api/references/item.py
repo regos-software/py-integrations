@@ -341,6 +341,50 @@ class ItemGetQuantityResponse(APIBaseResponse[List[ItemQuantity]]):
     model_config = ConfigDict(extra="ignore")
 
 
+class ItemGetCurrentQuantityRequest(BaseSchema):
+    """Request for current item quantities by item and stock ids."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_ids: List[int] = PydField(..., max_length=250, description="Item ids.")
+    stock_ids: List[int] = PydField(..., description="Stock ids.")
+
+
+class ItemCurrentQuantity(BaseSchema):
+    """Current quantity row returned by Item/GetCurrentQuantity."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    item_id: int = PydField(..., ge=1, description="Item id.")
+    stock_id: int = PydField(..., ge=1, description="Stock id.")
+    quantity: Decimal = PydField(default=Decimal("0"), description="Quantity.")
+
+
+class ItemGetCurrentQuantityResponse(APIBaseResponse[List[ItemCurrentQuantity]]):
+    """Response for Item/GetCurrentQuantity."""
+
+    model_config = ConfigDict(extra="ignore")
+
+
+class ItemShort(BaseSchema):
+    """Short item read model returned by Item/GetShort."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: int = PydField(..., description="Item id.")
+    group_id: Optional[int] = PydField(default=None, description="Group id.")
+    code: Optional[int] = PydField(default=None, description="Item code.")
+    name: Optional[str] = PydField(default=None, description="Item name.")
+    deleted_mark: Optional[bool] = PydField(default=None, description="Deleted mark.")
+    last_update: Optional[int] = PydField(default=None, description="Last update.")
+
+
+class ItemGetShortResponse(APIBaseResponse[List[ItemShort]]):
+    """Response for Item/GetShort."""
+
+    model_config = ConfigDict(extra="ignore")
+
+
 class ItemExt(BaseSchema):
     """Элемент расширенной выдачи."""
 
@@ -485,6 +529,11 @@ __all__ = [
     "ItemQuantity",
     "ItemGetQuantityRequest",
     "ItemGetQuantityResponse",
+    "ItemCurrentQuantity",
+    "ItemGetCurrentQuantityRequest",
+    "ItemGetCurrentQuantityResponse",
+    "ItemGetShortResponse",
+    "ItemShort",
     "ItemExt",
     "ItemImportData",
     "ItemImportRequest",

@@ -52,6 +52,13 @@ class Settings(BaseSettings):
     gpt_crm_chat_assistant_stream_maxlen: int = 100000
     gpt_crm_chat_assistant_stream_retry_limit: int = 5
     gpt_crm_chat_assistant_event_concurrency: int = 20
+    marketplace_external_timeout: int = 60
+    marketplace_unload_page_size: int = 250
+    marketplace_cache_ttl: int = 300
+    marketplace_lock_ttl: int = 30
+    marketplace_lock_wait_timeout: float = 5.0
+    marketplace_order_dedupe_ttl: int = 86400
+    marketplace_toserver_lock_ttl: int = 3600
     instagram_app_id: str = ""
     instagram_app_secret: str = ""
     instagram_redirect_uri: str = ""

@@ -1,10 +1,17 @@
-from typing import Any, Dict, List, Optional
+import asyncio
+import json
+import time
+import uuid
+from typing import Any, Dict, List, Optional, Tuple
 
 import redis.asyncio as redis
 
 from config.settings import settings
 
 redis_client = None
+_LOCAL_JSON_CACHE: Dict[str, Tuple[float, Any]] = {}
+_LOCAL_JSON_CACHE_LOCK = asyncio.Lock()
+_LOCAL_JSON_CACHE_MAX_ITEMS = 10000
 
 if settings.redis_enabled:
     redis_client = redis.Redis(
@@ -42,6 +49,100 @@ def _require_redis_client():
     if redis_client is None:
         raise RuntimeError("Redis is not enabled")
     return redis_client
+
+
+def redis_is_enabled() -> bool:
+    return redis_client is not None
+
+
+def redis_make_key(*parts: Any) -> str:
+    return ":".join(str(part).strip(":") for part in parts if str(part or "").strip(":"))
+
+
+def _prune_local_json_cache(now: float) -> None:
+    if len(_LOCAL_JSON_CACHE) <= _LOCAL_JSON_CACHE_MAX_ITEMS:
+        return
+    expired_keys = [key for key, (expires_at, _) in _LOCAL_JSON_CACHE.items() if expires_at <= now]
+    for key in expired_keys:
+        _LOCAL_JSON_CACHE.pop(key, None)
+    if len(_LOCAL_JSON_CACHE) <= _LOCAL_JSON_CACHE_MAX_ITEMS:
+        return
+    overflow = len(_LOCAL_JSON_CACHE) - _LOCAL_JSON_CACHE_MAX_ITEMS
+    for key in sorted(_LOCAL_JSON_CACHE, key=lambda item: _LOCAL_JSON_CACHE[item][0])[:overflow]:
+        _LOCAL_JSON_CACHE.pop(key, None)
+
+
+async def redis_get_json(key: str, *, local_ttl_sec: int = 5) -> Optional[Any]:
+    now = time.monotonic()
+    if local_ttl_sec > 0:
+        async with _LOCAL_JSON_CACHE_LOCK:
+            _prune_local_json_cache(now)
+            cached = _LOCAL_JSON_CACHE.get(key)
+            if cached and cached[0] > now:
+                return cached[1]
+
+    raw = await _require_redis_client().get(key)
+    if not raw:
+        return None
+    value = json.loads(raw)
+    if local_ttl_sec > 0:
+        async with _LOCAL_JSON_CACHE_LOCK:
+            _LOCAL_JSON_CACHE[key] = (now + local_ttl_sec, value)
+    return value
+
+
+async def redis_set_json(
+    key: str,
+    value: Any,
+    ttl_sec: int,
+    *,
+    local_ttl_sec: int = 5,
+) -> None:
+    ttl = max(int(ttl_sec or 1), 1)
+    await _require_redis_client().set(key, json.dumps(value, ensure_ascii=False), ex=ttl)
+    if local_ttl_sec > 0:
+        async with _LOCAL_JSON_CACHE_LOCK:
+            _prune_local_json_cache(time.monotonic())
+            _LOCAL_JSON_CACHE[key] = (time.monotonic() + local_ttl_sec, value)
+
+
+async def redis_delete_keys(*keys: str) -> None:
+    valid = [key for key in keys if key]
+    if not valid:
+        return
+    async with _LOCAL_JSON_CACHE_LOCK:
+        for key in valid:
+            _LOCAL_JSON_CACHE.pop(key, None)
+    await _require_redis_client().delete(*valid)
+
+
+async def redis_acquire_lock(
+    key: str,
+    ttl_sec: int,
+    *,
+    wait_timeout_sec: float = 0,
+    retry_delay_sec: float = 0.05,
+) -> Optional[str]:
+    client = _require_redis_client()
+    token = uuid.uuid4().hex
+    deadline = time.monotonic() + max(float(wait_timeout_sec or 0), 0)
+    ttl = max(int(ttl_sec or 1), 1)
+    while True:
+        if await client.set(key, token, ex=ttl, nx=True):
+            return token
+        if time.monotonic() >= deadline:
+            return None
+        await asyncio.sleep(max(float(retry_delay_sec or 0.05), 0.01))
+
+
+async def redis_release_lock(key: str, token: Optional[str]) -> None:
+    if not key or not token:
+        return
+    script = (
+        "if redis.call('get', KEYS[1]) == ARGV[1] "
+        "then return redis.call('del', KEYS[1]) else return 0 end"
+    )
+    await _require_redis_client().eval(script, 1, key, token)
 
 
 async def redis_expire_if_due(
