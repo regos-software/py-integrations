@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     telegram_notification_stream_batch_size: int = 50
     telegram_notification_stream_maxlen: int = 100000
     telegram_notification_send_concurrency: int = 20
+    telegram_notification_chat_min_interval_sec: float = 1.0
+    telegram_notification_flood_retry_attempts: int = 3
+    telegram_notification_flood_extra_delay_sec: float = 0.5
     telegram_orders_stream_workers: int = 2
     telegram_orders_stream_batch_size: int = 50
     telegram_orders_stream_maxlen: int = 100000
