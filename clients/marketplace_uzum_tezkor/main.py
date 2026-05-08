@@ -297,6 +297,21 @@ class UzumTezkorIntegration(ClientBase):
         await self._load_settings()
         return {"status": "ok"}
 
+    async def update_settings(self, settings: Optional[dict] = None, **kwargs: Any) -> Dict[str, Any]:
+        ci = str(
+            kwargs.get("connected_integration_id")
+            or kwargs.get("connectedIntegrationId")
+            or ""
+        ).strip()
+        if ci:
+            self.connected_integration_id = ci
+        if not self._ci():
+            return {"status": "error", "error": "connected_integration_id is required"}
+        self._integration_key = None
+        self._settings = None
+        await redis_delete_keys(self._active_cache_key(), self._settings_cache_key())
+        return {"status": "settings updated"}
+
     async def _load_integration(self) -> str:
         if self._integration_key:
             return self._integration_key
@@ -358,10 +373,10 @@ class UzumTezkorIntegration(ClientBase):
                 self._settings = {str(key): str(value or "") for key, value in cached.items() if str(key)}
                 return self._settings
 
-            integration_key = await self._load_integration()
+            await self._load_integration()
             async with RegosAPI(self._ci()) as api:
                 response = await api.integrations.connected_integration_setting.get(
-                    ConnectedIntegrationSettingRequest(integration_key=integration_key)
+                    ConnectedIntegrationSettingRequest(connected_integration_id=self._ci())
                 )
             if not response.ok or not isinstance(response.result, list):
                 raise UzumTezkorError(113423, "Integration settings not found", status_code=500)
@@ -386,8 +401,12 @@ class UzumTezkorIntegration(ClientBase):
             if not lock_token:
                 raise UzumTezkorError(113423, "Settings edit lock timeout", status_code=500)
         try:
-            integration_key = await self._load_integration()
-            item = ConnectedIntegrationSettingEditItem(key=key, value=value, integration_key=integration_key)
+            await self._load_integration()
+            item = ConnectedIntegrationSettingEditItem(
+                key=key,
+                value=value,
+                connected_integration_id=self._ci(),
+            )
             async with RegosAPI(self._ci()) as api:
                 response = await api.integrations.connected_integration_setting.edit(
                     ConnectedIntegrationSettingEditRequest([item])

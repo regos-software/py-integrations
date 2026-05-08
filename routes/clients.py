@@ -248,6 +248,20 @@ def _connected_integration_id_from_external_path(external_path: Optional[str]) -
     return None
 
 
+def _connected_integration_id_from_external_headers(headers) -> Optional[str]:
+    for header_name in (
+        "x-original-uri",
+        "x-forwarded-uri",
+        "x-forwarded-path",
+        "x-rewrite-url",
+    ):
+        header_value = str(headers.get(header_name) or "").strip()
+        match = re.search(r"/external/([0-9a-fA-F]{32})(?:/|$)", header_value)
+        if match:
+            return match.group(1)
+    return None
+
+
 async def _read_body_safely(request: Request) -> Any:
     """Считываем тело: пробуем JSON, затем текст, иначе bytes/None."""
     raw = await request.body()
@@ -543,6 +557,7 @@ async def handle_external(
     resolved_connected_integration_id = (
         connected_integration_id
         or _connected_integration_id_from_external_path(external_path)
+        or _connected_integration_id_from_external_headers(request.headers)
     )
     logger.info(f"[external] Connected-Integration-Id: {resolved_connected_integration_id}")
 
@@ -594,6 +609,7 @@ async def handle_external(
         "url": str(request.url),
         "path": request.url.path,
         "external_path": str(external_path or "").strip("/"),
+        "connected_integration_id": resolved_connected_integration_id,
         "query": dict(request.query_params),
         "headers": headers,
         "body": body_data,

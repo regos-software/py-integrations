@@ -13,6 +13,7 @@ from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
 from core.redis import (
     redis_acquire_lock,
+    redis_delete_keys,
     redis_get_json,
     redis_make_key,
     redis_release_lock,
@@ -121,6 +122,20 @@ class MarketplaceToServerIntegration(ClientBase):
             return {"status": "reachable_bad_request"}
         response.raise_for_status()
         return {"status": "ok"}
+
+    async def update_settings(self, settings: Optional[dict] = None, **kwargs: Any) -> Dict[str, Any]:
+        ci = str(
+            kwargs.get("connected_integration_id")
+            or kwargs.get("connectedIntegrationId")
+            or ""
+        ).strip()
+        if ci:
+            self.connected_integration_id = ci
+        if not self._ci():
+            return {"status": "error", "error": "connected_integration_id is required"}
+        self._settings = None
+        await redis_delete_keys(self._active_cache_key(), self._settings_cache_key())
+        return {"status": "settings updated"}
 
     async def do_work(self) -> Dict[str, Any]:
         await self._ensure_active()
@@ -259,10 +274,10 @@ class MarketplaceToServerIntegration(ClientBase):
                 self._settings = {str(key): str(value or "") for key, value in cached.items() if str(key)}
                 return self._settings
 
-            integration_key = await self._ensure_active()
+            await self._ensure_active()
             async with RegosAPI(self._ci()) as api:
                 response = await api.integrations.connected_integration_setting.get(
-                    ConnectedIntegrationSettingRequest(integration_key=integration_key)
+                    ConnectedIntegrationSettingRequest(connected_integration_id=self._ci())
                 )
             if not response.ok or not isinstance(response.result, list):
                 raise MarketplaceToServerError(111350, "settings not found")
