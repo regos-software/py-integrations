@@ -1,6 +1,5 @@
-# services/send_messages.py
-from typing import Dict, List
 import asyncio
+from typing import Dict, List
 
 
 async def send_messages(
@@ -9,53 +8,53 @@ async def send_messages(
     messages: List[Dict[str, str]],
     sleep_between: float,
     logger,
+    concurrency: int = 10,
 ) -> Dict:
     """
-    Простая последовательная отправка сообщений.
-    messages: [{ "message": "...", "recipient": "<chat_id>" }]
+    Send Telegram messages. If sleep_between is zero, messages are sent concurrently
+    with a bounded semaphore; otherwise order and delay are preserved.
     """
 
-    results: List[Dict] = []
-
-    for msg in messages:
+    async def send_one(msg: Dict[str, str]) -> Dict:
         if "message" not in msg or not msg["message"]:
-            results.append(
-                {"status": "error", "error": "Пустой текст сообщения", "message": msg}
-            )
-            continue
+            return {"status": "error", "error": "Empty message text", "message": msg}
 
         if "recipient" not in msg or not msg["recipient"]:
-            results.append(
-                {
-                    "status": "error",
-                    "error": "Не указан recipient (chat_id)",
-                    "message": msg,
-                }
-            )
-            continue
+            return {"status": "error", "error": "Missing recipient", "message": msg}
 
         chat_id = str(msg["recipient"])
         text = msg["message"]
 
         try:
             await bot.send_message(chat_id=chat_id, text=text)
-            logger.debug(f"Отправлено в чат {chat_id}: {text}")
-            results.append({"status": "sent", "chat_id": chat_id, "message": text})
-        except Exception as e:
-            logger.error(f"Ошибка отправки в чат {chat_id}: {e}")
+            logger.debug("Sent Telegram message to chat %s", chat_id)
+            return {"status": "sent", "chat_id": chat_id, "message": text}
+        except Exception as error:
+            logger.error("Telegram send error for chat %s: %s", chat_id, error)
             result = {
                 "status": "error",
                 "chat_id": chat_id,
                 "message": text,
-                "error": str(e),
+                "error": str(error),
             }
-            migrate_to_chat_id = getattr(e, "migrate_to_chat_id", None)
+            migrate_to_chat_id = getattr(error, "migrate_to_chat_id", None)
             if migrate_to_chat_id:
                 result["migrate_to_chat_id"] = str(migrate_to_chat_id)
-            results.append(result)
+            return result
 
-        if sleep_between and sleep_between > 0:
+    if sleep_between and sleep_between > 0:
+        results: List[Dict] = []
+        for msg in messages:
+            results.append(await send_one(msg))
             await asyncio.sleep(sleep_between)
+    else:
+        semaphore = asyncio.Semaphore(max(int(concurrency or 1), 1))
 
-    sent_count = sum(1 for r in results if r["status"] == "sent")
+        async def guarded_send(msg: Dict[str, str]) -> Dict:
+            async with semaphore:
+                return await send_one(msg)
+
+        results = await asyncio.gather(*(guarded_send(msg) for msg in messages))
+
+    sent_count = sum(1 for item in results if item["status"] == "sent")
     return {"sent_messages": sent_count, "details": results}
