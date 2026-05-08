@@ -370,9 +370,18 @@ class YandexEatsIntegration(ClientBase):
 
             await self._load_integration()
             async with RegosAPI(self._ci()) as api:
-                response = await api.integrations.connected_integration_setting.get(
-                    ConnectedIntegrationSettingRequest(connected_integration_id=self._ci())
-                )
+                try:
+                    response = await api.integrations.connected_integration_setting.get(
+                        ConnectedIntegrationSettingRequest(connected_integration_id=self._ci())
+                    )
+                except httpx.HTTPStatusError as error:
+                    logger.warning(
+                        "YandexEats settings get HTTP error: ci=%s status=%s body=%s",
+                        self._ci(),
+                        error.response.status_code if error.response else None,
+                        (error.response.text[:500] if error.response else ""),
+                    )
+                    raise
             if not response.ok or not isinstance(response.result, list):
                 raise YandexEatsError(113423, "Integration settings not found")
             self._settings = {
@@ -403,9 +412,19 @@ class YandexEatsIntegration(ClientBase):
                 connected_integration_id=self._ci(),
             )
             async with RegosAPI(self._ci()) as api:
-                response = await api.integrations.connected_integration_setting.edit(
-                    ConnectedIntegrationSettingEditRequest([item])
-                )
+                try:
+                    response = await api.integrations.connected_integration_setting.edit(
+                        ConnectedIntegrationSettingEditRequest([item])
+                    )
+                except httpx.HTTPStatusError as error:
+                    logger.warning(
+                        "YandexEats settings edit HTTP error: ci=%s key=%s status=%s body=%s",
+                        self._ci(),
+                        key,
+                        error.response.status_code if error.response else None,
+                        (error.response.text[:500] if error.response else ""),
+                    )
+                    raise
             if not response.ok:
                 raise YandexEatsError(113423, "Failed to edit integration settings")
             self._settings = None
@@ -415,6 +434,8 @@ class YandexEatsIntegration(ClientBase):
                 await redis_release_lock(self._token_lock_key(), lock_token)
 
     async def _issue_token(self, data: Dict[str, Any]) -> str:
+        if not self._ci():
+            raise YandexEatsError(100, "connected-integration-id не получен")
         lock_token = await redis_acquire_lock(
             self._token_lock_key(),
             settings.marketplace_lock_ttl,

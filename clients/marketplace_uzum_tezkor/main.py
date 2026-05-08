@@ -375,9 +375,18 @@ class UzumTezkorIntegration(ClientBase):
 
             await self._load_integration()
             async with RegosAPI(self._ci()) as api:
-                response = await api.integrations.connected_integration_setting.get(
-                    ConnectedIntegrationSettingRequest(connected_integration_id=self._ci())
-                )
+                try:
+                    response = await api.integrations.connected_integration_setting.get(
+                        ConnectedIntegrationSettingRequest(connected_integration_id=self._ci())
+                    )
+                except httpx.HTTPStatusError as error:
+                    logger.warning(
+                        "Uzum settings get HTTP error: ci=%s status=%s body=%s",
+                        self._ci(),
+                        error.response.status_code if error.response else None,
+                        (error.response.text[:500] if error.response else ""),
+                    )
+                    raise
             if not response.ok or not isinstance(response.result, list):
                 raise UzumTezkorError(113423, "Integration settings not found", status_code=500)
             self._settings = {
@@ -408,9 +417,19 @@ class UzumTezkorIntegration(ClientBase):
                 connected_integration_id=self._ci(),
             )
             async with RegosAPI(self._ci()) as api:
-                response = await api.integrations.connected_integration_setting.edit(
-                    ConnectedIntegrationSettingEditRequest([item])
-                )
+                try:
+                    response = await api.integrations.connected_integration_setting.edit(
+                        ConnectedIntegrationSettingEditRequest([item])
+                    )
+                except httpx.HTTPStatusError as error:
+                    logger.warning(
+                        "Uzum settings edit HTTP error: ci=%s key=%s status=%s body=%s",
+                        self._ci(),
+                        key,
+                        error.response.status_code if error.response else None,
+                        (error.response.text[:500] if error.response else ""),
+                    )
+                    raise
             if not response.ok:
                 raise UzumTezkorError(113423, "Failed to edit integration settings", status_code=500)
             self._settings = None
@@ -420,6 +439,15 @@ class UzumTezkorIntegration(ClientBase):
                 await redis_release_lock(self._token_lock_key(), lock_token)
 
     async def _issue_token(self, data: Dict[str, Any]) -> str:
+        if not self._ci():
+            raise UzumTezkorError(100, "connected-integration-id не получен")
+        grant_type = _text(_lookup(data, "grant_type", "Grant_Type", "grantType")).strip()
+        scope = _text(_lookup(data, "scope", "Scope")).strip()
+        if grant_type.lower() != "client_credentials":
+            raise UzumTezkorError(400, "Unsupported grant_type. Expected 'client_credentials'.")
+        if not scope:
+            raise UzumTezkorError(400, "Scope is required.")
+
         lock_token = await redis_acquire_lock(
             self._token_lock_key(),
             settings.marketplace_lock_ttl,
@@ -428,13 +456,6 @@ class UzumTezkorIntegration(ClientBase):
         if not lock_token:
             raise UzumTezkorError(113423, "Token issue lock timeout", status_code=500)
         try:
-            grant_type = _text(_lookup(data, "grant_type", "Grant_Type", "grantType")).strip()
-            scope = _text(_lookup(data, "scope", "Scope")).strip()
-            if grant_type.lower() != "client_credentials":
-                raise UzumTezkorError(400, "Unsupported grant_type. Expected 'client_credentials'.")
-            if not scope:
-                raise UzumTezkorError(400, "Scope is required.")
-
             settings_map = await self._load_settings()
             if "CLIENT_ID" not in settings_map or "CLIENT_SECRET" not in settings_map:
                 raise UzumTezkorError(113423, "Integration settings not found or incomplete", status_code=500)

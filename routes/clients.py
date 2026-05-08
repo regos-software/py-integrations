@@ -74,6 +74,13 @@ _CONNECTED_INTEGRATION_ACTIVE_CACHE: Dict[str, Tuple[bool, float]] = {}
 _CONNECTED_INTEGRATION_ACTIVE_CACHE_LOCK = asyncio.Lock()
 
 
+def _normalize_connected_integration_id(value: Any) -> Optional[str]:
+    ci = str(value or "").strip()
+    if re.fullmatch(r"[0-9a-fA-F]{32}", ci):
+        return ci
+    return None
+
+
 async def _is_connected_integration_active(
     connected_integration_id: Optional[str],
     *,
@@ -243,12 +250,21 @@ def _sanitize_headers(headers) -> Dict[str, str]:
 
 def _connected_integration_id_from_external_path(external_path: Optional[str]) -> Optional[str]:
     first_segment = str(external_path or "").strip("/").split("/", 1)[0].strip()
-    if re.fullmatch(r"[0-9a-fA-F]{32}", first_segment):
-        return first_segment
-    return None
+    return _normalize_connected_integration_id(first_segment)
 
 
 def _connected_integration_id_from_external_headers(headers) -> Optional[str]:
+    for header_name in (
+        "connected-integration-id",
+        "connected_integration_id",
+        "connectedintegrationid",
+        "x-connected-integration-id",
+        "x-regos-connected-integration-id",
+    ):
+        ci = _normalize_connected_integration_id(headers.get(header_name))
+        if ci:
+            return ci
+
     for header_name in (
         "x-original-uri",
         "x-forwarded-uri",
@@ -259,6 +275,14 @@ def _connected_integration_id_from_external_headers(headers) -> Optional[str]:
         match = re.search(r"/external/([0-9a-fA-F]{32})(?:/|$)", header_value)
         if match:
             return match.group(1)
+    return None
+
+
+def _connected_integration_id_from_external_query(query_params) -> Optional[str]:
+    for key in ("ci", "connected_integration_id", "connectedIntegrationId"):
+        ci = _normalize_connected_integration_id(query_params.get(key))
+        if ci:
+            return ci
     return None
 
 
@@ -559,6 +583,7 @@ async def handle_external(
         connected_integration_id
         or _connected_integration_id_from_external_path(external_path)
         or _connected_integration_id_from_external_headers(request.headers)
+        or _connected_integration_id_from_external_query(request.query_params)
     )
     logger.info(f"[external] Connected-Integration-Id: {resolved_connected_integration_id}")
 
