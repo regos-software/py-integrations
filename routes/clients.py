@@ -262,9 +262,10 @@ def _connected_integration_id_from_external_headers(headers) -> Optional[str]:
     return None
 
 
-async def _read_body_safely(request: Request) -> Any:
+async def _read_body_safely(request: Request, raw: Optional[bytes] = None) -> Any:
     """Считываем тело: пробуем JSON, затем текст, иначе bytes/None."""
-    raw = await request.body()
+    if raw is None:
+        raw = await request.body()
     if not raw:
         return None
     try:
@@ -602,7 +603,7 @@ async def handle_external(
         headers["Connected-Integration-Id"] = str(resolved_connected_integration_id)
 
     raw_body = await request.body()
-    body_data = await _read_body_safely(request)
+    body_data = await _read_body_safely(request, raw_body)
 
     envelope: Dict[str, Any] = {
         "method": request.method,
