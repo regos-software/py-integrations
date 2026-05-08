@@ -79,6 +79,15 @@ def _nested(data: Any, path: str, default: Any = None) -> Any:
     return current
 
 
+def _normalize_settings_map(raw: Dict[str, Any]) -> Dict[str, str]:
+    normalized: Dict[str, str] = {}
+    for key, value in (raw or {}).items():
+        normalized_key = str(key or "").strip().lower()
+        if normalized_key:
+            normalized[normalized_key] = str(value or "").strip()
+    return normalized
+
+
 class MarketplaceToServerIntegration(ClientBase):
     integration_key = "marketplace_toserver"
     redis_prefix = "mp:ts"
@@ -108,7 +117,7 @@ class MarketplaceToServerIntegration(ClientBase):
     async def check(self) -> Dict[str, Any]:
         await self._ensure_active()
         settings_map = await self._load_settings()
-        endpoint = _text(settings_map.get("ENDPOINT")).strip()
+        endpoint = _text(settings_map.get("endpoint")).strip()
         if not endpoint:
             raise MarketplaceToServerError(111350, "ENDPOINT is not set")
 
@@ -124,13 +133,6 @@ class MarketplaceToServerIntegration(ClientBase):
         return {"status": "ok"}
 
     async def update_settings(self, settings: Optional[dict] = None, **kwargs: Any) -> Dict[str, Any]:
-        ci = str(
-            kwargs.get("connected_integration_id")
-            or kwargs.get("connectedIntegrationId")
-            or ""
-        ).strip()
-        if ci:
-            self.connected_integration_id = ci
         if not self._ci():
             return {"status": "error", "error": "connected_integration_id is required"}
         self._settings = None
@@ -144,16 +146,16 @@ class MarketplaceToServerIntegration(ClientBase):
             return {"status": "skipped", "reason": "already_running"}
         try:
             settings_map = await self._load_settings()
-            if str(settings_map.get("UNLOAD_ENABLED", "1")).strip() == "0":
+            if str(settings_map.get("unload_enabled", "1")).strip() == "0":
                 return {"status": "skipped", "reason": "unload_disabled"}
 
-            endpoint = _text(settings_map.get("ENDPOINT")).strip()
+            endpoint = _text(settings_map.get("endpoint")).strip()
             if not endpoint:
                 raise MarketplaceToServerError(111350, "ENDPOINT is not set")
 
-            firm_id = _to_int(settings_map.get("FIRM"), -1)
-            price_type_id = _to_int(settings_map.get("PRICE_TYPE"), -1)
-            stock_ids = self._parse_ids(settings_map.get("STOCK_ID") or settings_map.get("STOCK_IDS"))
+            firm_id = _to_int(settings_map.get("firm"), -1)
+            price_type_id = _to_int(settings_map.get("price_type"), -1)
+            stock_ids = self._parse_ids(settings_map.get("stock_id") or settings_map.get("stock_ids"))
 
             stocks = await self._get_stocks(firm_id=firm_id, stock_ids=stock_ids)
             if not stocks:
@@ -166,7 +168,7 @@ class MarketplaceToServerIntegration(ClientBase):
             sent_items = 0
             offset = 0
             total = 0
-            image_size = self._image_size(settings_map.get("IMAGE_SIZE"))
+            image_size = self._image_size(settings_map.get("image_size"))
             async with httpx.AsyncClient(timeout=settings.marketplace_external_timeout) as client:
                 await self._preflight(client, endpoint, settings_map)
                 while True:
@@ -258,7 +260,7 @@ class MarketplaceToServerIntegration(ClientBase):
             return self._settings
         cached = await redis_get_json(self._settings_cache_key())
         if isinstance(cached, dict):
-            self._settings = {str(key): str(value or "") for key, value in cached.items() if str(key)}
+            self._settings = _normalize_settings_map(cached)
             return self._settings
 
         lock_token = await redis_acquire_lock(
@@ -271,7 +273,7 @@ class MarketplaceToServerIntegration(ClientBase):
         try:
             cached = await redis_get_json(self._settings_cache_key())
             if isinstance(cached, dict):
-                self._settings = {str(key): str(value or "") for key, value in cached.items() if str(key)}
+                self._settings = _normalize_settings_map(cached)
                 return self._settings
 
             await self._ensure_active()
@@ -281,11 +283,13 @@ class MarketplaceToServerIntegration(ClientBase):
                 )
             if not response.ok or not isinstance(response.result, list):
                 raise MarketplaceToServerError(111350, "settings not found")
-            self._settings = {
-                str(getattr(row, "key", "") or ""): str(getattr(row, "value", "") or "")
-                for row in response.result
-                if str(getattr(row, "key", "") or "")
-            }
+            self._settings = _normalize_settings_map(
+                {
+                    getattr(row, "key", ""): getattr(row, "value", "")
+                    for row in response.result
+                    if getattr(row, "key", None)
+                }
+            )
             await redis_set_json(self._settings_cache_key(), self._settings, settings.marketplace_cache_ttl)
             return self._settings
         finally:
@@ -368,9 +372,9 @@ class MarketplaceToServerIntegration(ClientBase):
 
     @staticmethod
     def _basic_auth(settings_map: Dict[str, str]) -> Optional[Tuple[str, str]]:
-        if _to_int(settings_map.get("AUTHORIZATION_REQUIRED")) != 1:
+        if _to_int(settings_map.get("authorization_required")) != 1:
             return None
-        return _text(settings_map.get("USER_LOGIN")), _text(settings_map.get("USER_PASSWORD"))
+        return _text(settings_map.get("user_login")), _text(settings_map.get("user_password"))
 
     @staticmethod
     def _image_size(value: Any) -> Optional[ItemGetExtImageSize]:
