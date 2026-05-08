@@ -143,6 +143,10 @@ def _lookup(data: Dict[str, Any], *names: str) -> Any:
 
 
 def _connected_integration_id(envelope: Dict[str, Any]) -> str:
+    for key in ("connected_integration_id", "connectedIntegrationId"):
+        value = envelope.get(key)
+        if value:
+            return str(value or "").strip()
     for key, value in (envelope.get("headers") or {}).items():
         if str(key).lower() == "connected-integration-id":
             return str(value or "").strip()
@@ -162,6 +166,9 @@ def _path(envelope: Dict[str, Any]) -> str:
         raw = str(envelope.get("path") or "")
         external_path = raw.split("/external/", 1)[1] if "/external/" in raw else ""
     normalized = external_path.strip("/")
+    ci = _connected_integration_id(envelope)
+    if ci and normalized.lower().startswith(f"{ci.lower()}/"):
+        normalized = normalized[len(ci) + 1 :]
     if normalized.lower().startswith("yandexeats/"):
         normalized = normalized[len("yandexeats/") :]
     return normalized.strip("/").lower()
@@ -232,7 +239,11 @@ class YandexEatsIntegration(ClientBase):
     def _order_dedupe_key(self, external_order_id: str) -> str:
         return self._redis_key("od", _sha1(external_order_id)[:16])
 
-    async def handle_external(self, envelope: Dict[str, Any]) -> Any:
+    async def handle_external(self, envelope: Optional[Dict[str, Any]] = None, **kwargs: Any) -> Any:
+        if envelope is None:
+            envelope = dict(kwargs)
+        elif kwargs:
+            envelope = {**envelope, **kwargs}
         ci = _connected_integration_id(envelope)
         if ci:
             self.connected_integration_id = ci
