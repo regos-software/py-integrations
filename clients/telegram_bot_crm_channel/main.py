@@ -89,7 +89,7 @@ logger = setup_logger("telegram_bot_crm_channel")
 
 class TelegramBotCrmChannelConfig:
     INTEGRATION_KEY = "telegram_bot_crm_channel"
-    REDIS_PREFIX = "clients:tg_crm_channel:"
+    REDIS_PREFIX = "tbc:"
     STREAM_REDIS_PREFIX = "tbc"
     ALERT_EXTERNAL_PREFIX = "tgsys"
 
@@ -1701,7 +1701,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if local is not None:
             return local
         try:
-            cached = await redis_client.get(stale_key)
+            cached = await cls._redis_get(stale_key)
             if not cached:
                 return None
             settings_map = cls._normalize_settings_map(_json_loads(cached))
@@ -1720,7 +1720,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if local is not None:
             return local
         try:
-            cached = await redis_client.get(cache_key)
+            cached = await TelegramBotCrmChannelIntegration._redis_get(cache_key)
             if cached:
                 settings_map = TelegramBotCrmChannelIntegration._normalize_settings_map(
                     _json_loads(cached)
@@ -1751,7 +1751,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             )
 
         try:
-            cached = await redis_client.get(cache_key)
+            cached = await TelegramBotCrmChannelIntegration._redis_get(cache_key)
             if cached:
                 settings_map = TelegramBotCrmChannelIntegration._normalize_settings_map(
                     _json_loads(cached)
@@ -1850,7 +1850,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         async with _RUNTIME_LOCAL_LOCK:
             _RUNTIME_LOCAL_CACHE.pop(str(connected_integration_id or "").strip(), None)
         try:
-            await redis_client.delete(
+            await TelegramBotCrmChannelIntegration._redis_delete(
                 settings_key,
                 stale_key,
                 TelegramBotCrmChannelIntegration._ci_active_cache_key(
@@ -2348,7 +2348,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         _require_redis()
         cache_key = cls._ci_active_cache_key(ci)
         if not force_refresh:
-            cached = str(await redis_client.get(cache_key) or "").strip().lower()
+            cached = str(await cls._redis_get(cache_key) or "").strip().lower()
             if cached in {"1", "0"}:
                 return cached == "1"
 
@@ -2392,10 +2392,10 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 ) from last_error
             detected = False
 
-        await redis_client.setex(
+        await cls._redis_set_with_ttl(
             cache_key,
-            TelegramBotCrmChannelConfig.SETTINGS_TTL,
             "1" if detected else "0",
+            TelegramBotCrmChannelConfig.SETTINGS_TTL,
         )
         return bool(detected)
 

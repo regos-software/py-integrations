@@ -47,6 +47,11 @@ class Settings(BaseSettings):
     external_chat_crm_channel_stream_maxlen: int = 100000
     external_chat_crm_channel_stream_retry_limit: int = 5
     external_chat_crm_channel_event_concurrency: int = 20
+    gpt_crm_chat_assistant_stream_workers: int = 2
+    gpt_crm_chat_assistant_stream_batch_size: int = 50
+    gpt_crm_chat_assistant_stream_maxlen: int = 100000
+    gpt_crm_chat_assistant_stream_retry_limit: int = 5
+    gpt_crm_chat_assistant_event_concurrency: int = 20
     instagram_app_id: str = ""
     instagram_app_secret: str = ""
     instagram_redirect_uri: str = ""

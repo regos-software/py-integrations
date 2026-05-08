@@ -56,7 +56,7 @@ logger = setup_logger("asterisk_crm_channel")
 
 class AsteriskCrmChannelConfig:
     INTEGRATION_KEY = "asterisk_crm_channel"
-    REDIS_PREFIX = "clients:asterisk_crm_channel:"
+    REDIS_PREFIX = "acc:"
     STREAM_REDIS_PREFIX = "acc"
     DEFAULT_AMI_PORT = 5038
 
