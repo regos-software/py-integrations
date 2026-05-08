@@ -11,7 +11,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi.responses import HTMLResponse
@@ -23,7 +23,12 @@ from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
 from core.redis import (
     redis_client,
+    redis_error_contains,
+    redis_expire_if_due,
     redis_incr_with_ttl,
+    redis_stream_add_with_ttl,
+    redis_stream_group_create_with_ttl,
+    redis_ttl_seconds,
     redis_zadd_with_ttl,
     redis_zrangebyscore_with_ttl,
 )
@@ -94,9 +99,16 @@ _IMAGE_FILE_EXTENSIONS = {
 class ExternalChatCrmChannelConfig:
     INTEGRATION_KEY = "external_chat_crm_channel"
     REDIS_PREFIX = "clients:external_chat_crm_channel:"
+    STREAM_REDIS_PREFIX = "ecc"
     UI_ASSET_VERSION = "20260505-1"
     UI_ASSET_VERSION_PARAM = "v"
     SETTINGS_TTL_SEC = max(int(app_settings.redis_cache_ttl or 60), 30)
+    SETTINGS_STALE_TTL_SEC = max(SETTINGS_TTL_SEC * 10, 10 * 60)
+    SETTINGS_LOCAL_TTL_SEC = min(30, max(5, SETTINGS_TTL_SEC // 4))
+    SETTINGS_LOCAL_MAX = 10000
+    SETTINGS_LOCK_TTL_SEC = 10
+    SETTINGS_LOCK_WAIT_SEC = 2.0
+    RUNTIME_LOCAL_TTL_SEC = min(30, max(5, SETTINGS_TTL_SEC // 4))
     CONTEXT_TTL_SEC = 7 * 24 * 60 * 60
     ACTIVE_CACHE_TTL_SEC = 30
     DEFAULT_HISTORY_LIMIT = 50
@@ -117,6 +129,19 @@ class ExternalChatCrmChannelConfig:
     EVENT_QUEUE_TTL_SEC = 6 * 60 * 60
     EVENT_QUEUE_MAX_ITEMS = 500
     EVENT_BATCH_MAX_ITEMS = 30
+    STREAM_TTL_SEC = 24 * 60 * 60
+    STREAM_GROUP = "eccw"
+    STREAM_MAXLEN = max(int(app_settings.external_chat_crm_channel_stream_maxlen or 0), 10000)
+    STREAM_BATCH_SIZE = max(int(app_settings.external_chat_crm_channel_stream_batch_size or 0), 1)
+    STREAM_WORKERS = max(int(app_settings.external_chat_crm_channel_stream_workers or 0), 1)
+    STREAM_READ_BLOCK_MS = 5000
+    STREAM_MIN_IDLE_MS = 60_000
+    STREAM_CLAIM_INTERVAL_SEC = 30
+    STREAM_MAX_RETRIES = max(int(app_settings.external_chat_crm_channel_stream_retry_limit or 0), 1)
+    EVENT_CONCURRENCY = max(int(app_settings.external_chat_crm_channel_event_concurrency or 0), 1)
+    LOCK_TTL_SEC = 30
+    PROCESSING_LOCK_TTL_SEC = 60
+    HEARTBEAT_TTL_SEC = 30
     CLIENT_NOTICE_TTL_SEC = 10 * 60
     CLIENT_NOTICE_MAX_ITEMS = 100
     PENDING_PARAMS_TTL_SEC = 6 * 60 * 60
@@ -178,6 +203,29 @@ class PreparedWriteParams:
     ticket_field_edits: List[FieldValueEdit]
     sync_client_info: bool
     sync_ticket_fields: bool
+
+
+_INSTANCE_ID = f"external_chat:{uuid.uuid4().hex[:12]}"
+_STREAM_WORKER_TASKS: Dict[int, asyncio.Task] = {}
+_STREAM_WORKER_LOCK = asyncio.Lock()
+_STREAM_TTL_TOUCH_TS: Dict[str, int] = {}
+_STREAM_GROUP_READY: Set[str] = set()
+_STREAM_CLAIM_TS: Dict[str, int] = {}
+_SETTINGS_LOCAL_CACHE: Dict[str, Tuple[int, Dict[str, str]]] = {}
+_RUNTIME_LOCAL_CACHE: Dict[str, Tuple[int, RuntimeConfig]] = {}
+_RUNTIME_LOCAL_LOCK = asyncio.Lock()
+
+_ENQUEUE_DEDUPE_LUA = """
+local ok = redis.call('set', KEYS[1], '1', 'EX', ARGV[1], 'NX')
+if not ok then
+  return 0
+end
+redis.call('xadd', KEYS[2], 'MAXLEN', '~', ARGV[2], '*', unpack(ARGV, 5))
+if ARGV[4] == '1' then
+  redis.call('expire', KEYS[2], ARGV[3])
+end
+return 1
+"""
 
 
 def _json_dumps(payload: Any) -> str:
@@ -964,6 +1012,15 @@ def _redis_enabled() -> bool:
     return bool(app_settings.redis_enabled and redis_client is not None)
 
 
+def _require_redis() -> None:
+    if not _redis_enabled():
+        raise RuntimeError("Redis is required for external_chat_crm_channel")
+
+
+def _now_ts() -> int:
+    return int(time.time())
+
+
 def _headers_ci(headers: Dict[str, Any], key: str) -> Optional[str]:
     key_lower = str(key or "").lower()
     for name, value in (headers or {}).items():
@@ -1054,6 +1111,10 @@ class ChatMessageAddClosedEntityError(RuntimeError):
     pass
 
 
+class ConnectedIntegrationInactiveError(RuntimeError):
+    pass
+
+
 class ExternalChatCrmChannelIntegration(ClientBase):
     _ACTIVE_CACHE: Dict[str, Tuple[bool, float]] = {}
     _FILE_META_CACHE: Dict[str, Tuple[Dict[str, Any], float]] = {}
@@ -1088,13 +1149,70 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         tokens = [str(item).strip() for item in parts if str(item or "").strip()]
         return f"{ExternalChatCrmChannelConfig.REDIS_PREFIX}{':'.join(tokens)}"
 
+    @staticmethod
+    def _stream_redis_key(*parts: Any) -> str:
+        tokens = [str(item).strip(":") for item in parts if str(item or "").strip()]
+        prefix = ExternalChatCrmChannelConfig.STREAM_REDIS_PREFIX
+        return f"{prefix}:{':'.join(tokens)}" if tokens else prefix
+
     @classmethod
     def _settings_cache_key(cls, connected_integration_id: str) -> str:
         return cls._redis_key("settings", connected_integration_id)
 
     @classmethod
+    def _settings_stale_cache_key(cls, connected_integration_id: str) -> str:
+        return cls._redis_key("settings_stale", connected_integration_id)
+
+    @classmethod
+    def _settings_fetch_lock_key(cls, connected_integration_id: str) -> str:
+        return cls._stream_redis_key("stl", connected_integration_id)
+
+    @classmethod
     def _active_cache_key(cls, connected_integration_id: str) -> str:
         return cls._redis_key("active", connected_integration_id)
+
+    @classmethod
+    def _stream_key(cls) -> str:
+        return cls._stream_redis_key("s", "w")
+
+    @classmethod
+    def _dlq_stream_key(cls) -> str:
+        return cls._stream_redis_key("s", "dlq")
+
+    @classmethod
+    def _worker_heartbeat_key(cls, worker_index: int) -> str:
+        return cls._stream_redis_key("w", worker_index, _INSTANCE_ID)
+
+    @classmethod
+    def _webhook_enqueue_dedupe_key(
+        cls,
+        connected_integration_id: str,
+        event_key: str,
+    ) -> str:
+        event_hash = hashlib.sha256(str(event_key or "").encode("utf-8")).hexdigest()[:24]
+        return cls._stream_redis_key("d", connected_integration_id, event_hash)
+
+    @classmethod
+    def _webhook_processing_lock_key(
+        cls,
+        connected_integration_id: str,
+        webhook_action: str,
+        payload: Dict[str, Any],
+    ) -> str:
+        chat_id = str(payload.get("chat_id") or payload.get("chatId") or "").strip()
+        ticket_id = _parse_int(payload.get("ticket_id") if payload.get("ticket_id") is not None else payload.get("id"), None)
+        message_id = str(payload.get("message_id") if payload.get("message_id") is not None else payload.get("id") or "").strip()
+        if chat_id:
+            resource = f"chat:{chat_id}"
+        elif ticket_id:
+            resource = f"ticket:{ticket_id}"
+        elif message_id:
+            resource = f"message:{message_id}"
+        else:
+            resource = _payload_fingerprint(payload)
+        resource_hash = hashlib.sha256(resource.encode("utf-8", errors="ignore")).hexdigest()[:24]
+        action_code = "cm" if str(webhook_action or "").startswith("ChatMessage") else "tk"
+        return cls._stream_redis_key("l", connected_integration_id, action_code, resource_hash)
 
     @classmethod
     def _context_cache_key(cls, connected_integration_id: str, visitor_id: str) -> str:
@@ -1169,20 +1287,17 @@ class ExternalChatCrmChannelIntegration(ClientBase):
 
     @staticmethod
     async def _redis_get(key: str) -> Optional[str]:
-        if not _redis_enabled():
-            return None
+        _require_redis()
         return await redis_client.get(key)
 
     @staticmethod
     async def _redis_set(key: str, value: str, ttl_sec: int) -> None:
-        if not _redis_enabled():
-            return
+        _require_redis()
         await redis_client.set(key, value, ex=max(int(ttl_sec or 1), 1))
 
     @staticmethod
     async def _redis_set_nx(key: str, value: str, ttl_sec: int) -> bool:
-        if not _redis_enabled():
-            return False
+        _require_redis()
         inserted = await redis_client.set(
             key,
             value,
@@ -1193,18 +1308,51 @@ class ExternalChatCrmChannelIntegration(ClientBase):
 
     @staticmethod
     async def _redis_incr(key: str, ttl_sec: int) -> int:
-        if not _redis_enabled():
-            return 0
+        _require_redis()
         return await redis_incr_with_ttl(key, max(int(ttl_sec or 1), 1))
 
     @staticmethod
     async def _redis_delete(*keys: str) -> None:
-        if not _redis_enabled():
-            return
+        _require_redis()
         valid = [str(key).strip() for key in keys if str(key or "").strip()]
         if not valid:
             return
         await redis_client.delete(*valid)
+
+    @classmethod
+    async def _acquire_lock_wait(
+        cls,
+        lock_key: str,
+        ttl_sec: int,
+        *,
+        wait_seconds: float = 0.0,
+    ) -> Optional[str]:
+        _require_redis()
+        token = uuid.uuid4().hex
+        deadline = asyncio.get_running_loop().time() + max(float(wait_seconds or 0.0), 0.0)
+        while True:
+            ok = await cls._redis_set_nx(lock_key, token, ttl_sec)
+            if ok:
+                return token
+            if asyncio.get_running_loop().time() >= deadline:
+                return None
+            await asyncio.sleep(0.05)
+
+    @staticmethod
+    async def _release_lock(lock_key: str, token: Optional[str]) -> None:
+        if not lock_key or not token:
+            return
+        _require_redis()
+        script = (
+            "if redis.call('get', KEYS[1]) == ARGV[1] "
+            "then return redis.call('del', KEYS[1]) else return 0 end"
+        )
+        try:
+            await redis_client.eval(script, 1, lock_key, token)
+        except Exception:
+            current = await redis_client.get(lock_key)
+            if current == token:
+                await redis_client.delete(lock_key)
 
     @staticmethod
     def _client_notice_kind(external_message_id: str) -> str:
@@ -1252,8 +1400,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         external_message_id: str,
         created_date: int,
     ) -> None:
-        if not _redis_enabled():
-            return
+        _require_redis()
         safe_chat_id = str(chat_id or "").strip()
         safe_text = _normalize_channel_auto_message(text)
         safe_external_message_id = str(external_message_id or "").strip()
@@ -1315,8 +1462,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         connected_integration_id: str,
         chat_id: str,
     ) -> List[Dict[str, Any]]:
-        if not _redis_enabled():
-            return []
+        _require_redis()
         safe_chat_id = str(chat_id or "").strip()
         if not safe_chat_id:
             return []
@@ -1352,8 +1498,9 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         payload: Optional[Dict[str, Any]] = None,
     ) -> None:
         safe_chat_id = str(chat_id or "").strip()
-        if not safe_chat_id or not _redis_enabled():
+        if not safe_chat_id:
             return
+        _require_redis()
         safe_revision = int(chat_revision or 0)
         if safe_revision > 0:
             dedupe_key = cls._chat_events_revision_dedupe_key(
@@ -1423,8 +1570,9 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         max_items: int,
     ) -> List[Dict[str, Any]]:
         safe_chat_id = str(chat_id or "").strip()
-        if not safe_chat_id or not _redis_enabled():
+        if not safe_chat_id:
             return []
+        _require_redis()
 
         queue_key = cls._chat_events_queue_key(connected_integration_id, safe_chat_id)
         resolved_max_items = min(
@@ -1462,6 +1610,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         *,
         force_refresh: bool = False,
     ) -> bool:
+        _require_redis()
         ci = str(connected_integration_id or "").strip()
         if not ci:
             return False
@@ -1474,7 +1623,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 return cached[0]
 
         cache_key = cls._active_cache_key(ci)
-        if _redis_enabled() and not force_refresh:
+        if not force_refresh:
             cached_raw = await cls._redis_get(cache_key)
             if cached_raw in {"0", "1"}:
                 active = cached_raw == "1"
@@ -1511,9 +1660,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 ci,
                 error,
             )
-
-        if detected is None:
-            detected = True
+            raise
 
         active = bool(detected)
         async with cls._ACTIVE_CACHE_LOCK:
@@ -1521,13 +1668,111 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 active,
                 now + ExternalChatCrmChannelConfig.ACTIVE_CACHE_TTL_SEC,
             )
-        if _redis_enabled():
-            await cls._redis_set(
-                cache_key,
-                "1" if active else "0",
-                ExternalChatCrmChannelConfig.ACTIVE_CACHE_TTL_SEC,
-            )
+        await cls._redis_set(
+            cache_key,
+            "1" if active else "0",
+            ExternalChatCrmChannelConfig.ACTIVE_CACHE_TTL_SEC,
+        )
         return active
+
+    @classmethod
+    async def _ensure_connected_integration_active(
+        cls,
+        connected_integration_id: str,
+        *,
+        force_refresh: bool = False,
+    ) -> None:
+        if await cls._is_connected_integration_active(
+            connected_integration_id,
+            force_refresh=force_refresh,
+        ):
+            return
+        raise ConnectedIntegrationInactiveError(
+            f"ConnectedIntegration {connected_integration_id} is inactive"
+        )
+
+    @staticmethod
+    def _normalize_settings_map(raw: Dict[str, Any]) -> Dict[str, str]:
+        normalized: Dict[str, str] = {}
+        for key, value in (raw or {}).items():
+            normalized_key = str(key or "").strip().lower()
+            if normalized_key:
+                normalized[normalized_key] = str(value or "").strip()
+        return normalized
+
+    @classmethod
+    def _read_local_settings_cache(cls, cache_key: str) -> Optional[Dict[str, str]]:
+        cached = _SETTINGS_LOCAL_CACHE.get(cache_key)
+        if not cached:
+            return None
+        expires_at, settings_map = cached
+        if expires_at <= _now_ts():
+            _SETTINGS_LOCAL_CACHE.pop(cache_key, None)
+            return None
+        return dict(settings_map)
+
+    @classmethod
+    def _write_local_settings_cache(cls, cache_key: str, settings_map: Dict[str, str]) -> None:
+        now_ts = _now_ts()
+        if len(_SETTINGS_LOCAL_CACHE) >= ExternalChatCrmChannelConfig.SETTINGS_LOCAL_MAX:
+            for key, (expires_at, _) in list(_SETTINGS_LOCAL_CACHE.items()):
+                if expires_at <= now_ts:
+                    _SETTINGS_LOCAL_CACHE.pop(key, None)
+            while len(_SETTINGS_LOCAL_CACHE) >= ExternalChatCrmChannelConfig.SETTINGS_LOCAL_MAX:
+                _SETTINGS_LOCAL_CACHE.pop(next(iter(_SETTINGS_LOCAL_CACHE)), None)
+        _SETTINGS_LOCAL_CACHE[cache_key] = (
+            now_ts + ExternalChatCrmChannelConfig.SETTINGS_LOCAL_TTL_SEC,
+            dict(settings_map),
+        )
+
+    @classmethod
+    async def _read_settings_stale_cache(
+        cls,
+        connected_integration_id: str,
+    ) -> Optional[Dict[str, str]]:
+        stale_key = cls._settings_stale_cache_key(connected_integration_id)
+        local = cls._read_local_settings_cache(stale_key)
+        if local is not None:
+            return local
+        try:
+            cached_raw = await redis_client.get(stale_key)
+            if not cached_raw:
+                return None
+            cached = _json_loads(str(cached_raw))
+            if not isinstance(cached, dict):
+                return None
+            settings_map = cls._normalize_settings_map(cached)
+            cls._write_local_settings_cache(stale_key, settings_map)
+            return settings_map
+        except Exception:
+            return None
+
+    @classmethod
+    async def _clear_settings_runtime_cache(cls, connected_integration_id: str) -> None:
+        ci = str(connected_integration_id or "").strip()
+        if not ci:
+            return
+        lock_token = await cls._acquire_lock_wait(
+            cls._settings_fetch_lock_key(ci),
+            ExternalChatCrmChannelConfig.SETTINGS_LOCK_TTL_SEC,
+            wait_seconds=ExternalChatCrmChannelConfig.SETTINGS_LOCK_WAIT_SEC,
+        )
+        if not lock_token:
+            raise TimeoutError(f"Timed out waiting for external chat settings lock for ID {ci}")
+        try:
+            async with cls._ACTIVE_CACHE_LOCK:
+                cls._ACTIVE_CACHE.pop(ci, None)
+            _SETTINGS_LOCAL_CACHE.pop(cls._settings_cache_key(ci), None)
+            _SETTINGS_LOCAL_CACHE.pop(cls._settings_stale_cache_key(ci), None)
+            async with _RUNTIME_LOCAL_LOCK:
+                _RUNTIME_LOCAL_CACHE.pop(ci, None)
+            await cls._redis_delete(
+                cls._settings_cache_key(ci),
+                cls._settings_stale_cache_key(ci),
+                cls._active_cache_key(ci),
+            )
+        finally:
+            await cls._release_lock(cls._settings_fetch_lock_key(ci), lock_token)
 
     @classmethod
     async def _fetch_settings_map(
@@ -1536,38 +1781,80 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         *,
         force_refresh: bool = False,
     ) -> Dict[str, str]:
+        _require_redis()
         cache_key = cls._settings_cache_key(connected_integration_id)
-        if _redis_enabled() and not force_refresh:
+        if not force_refresh:
+            local = cls._read_local_settings_cache(cache_key)
+            if local is not None:
+                return local
             cached_raw = await cls._redis_get(cache_key)
             if cached_raw:
                 try:
                     cached = _json_loads(cached_raw)
                     if isinstance(cached, dict):
-                        return {str(k): str(v or "") for k, v in cached.items()}
+                        settings_map = cls._normalize_settings_map(cached)
+                        cls._write_local_settings_cache(cache_key, settings_map)
+                        return settings_map
                 except Exception:
                     pass
 
-        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-            response = await api.integrations.connected_integration_setting.get(
-                ConnectedIntegrationSettingRequest(
-                    connected_integration_id=connected_integration_id,
+        lock_token = await cls._acquire_lock_wait(
+            cls._settings_fetch_lock_key(connected_integration_id),
+            ExternalChatCrmChannelConfig.SETTINGS_LOCK_TTL_SEC,
+            wait_seconds=ExternalChatCrmChannelConfig.SETTINGS_LOCK_WAIT_SEC,
+        )
+        if not lock_token:
+            stale = await cls._read_settings_stale_cache(connected_integration_id)
+            if stale is not None:
+                return stale
+            raise TimeoutError(
+                f"Timed out waiting for external chat settings refresh for ID {connected_integration_id}"
+        )
+
+        try:
+            if not force_refresh:
+                cached_raw = await cls._redis_get(cache_key)
+                if cached_raw:
+                    cached = _json_loads(cached_raw)
+                    if isinstance(cached, dict):
+                        settings_map = cls._normalize_settings_map(cached)
+                        cls._write_local_settings_cache(cache_key, settings_map)
+                        return settings_map
+
+            async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+                response = await api.integrations.connected_integration_setting.get(
+                    ConnectedIntegrationSettingRequest(
+                        connected_integration_id=connected_integration_id,
+                    )
                 )
-            )
 
-        settings_map: Dict[str, str] = {}
-        for row in response.result or []:
-            key = str(getattr(row, "key", "") or "").strip().lower()
-            if not key:
-                continue
-            settings_map[key] = str(getattr(row, "value", "") or "").strip()
+            settings_map: Dict[str, str] = {}
+            for row in response.result or []:
+                key = str(getattr(row, "key", "") or "").strip().lower()
+                if not key:
+                    continue
+                settings_map[key] = str(getattr(row, "value", "") or "").strip()
 
-        if _redis_enabled():
-            await cls._redis_set(
-                cache_key,
-                _json_dumps(settings_map),
-                ExternalChatCrmChannelConfig.SETTINGS_TTL_SEC,
+            settings_map = cls._normalize_settings_map(settings_map)
+            payload = _json_dumps(settings_map)
+            stale_key = cls._settings_stale_cache_key(connected_integration_id)
+            cls._write_local_settings_cache(cache_key, settings_map)
+            cls._write_local_settings_cache(stale_key, settings_map)
+            async with redis_client.pipeline(transaction=True) as pipe:
+                await pipe.set(cache_key, payload, ex=ExternalChatCrmChannelConfig.SETTINGS_TTL_SEC)
+                await pipe.set(stale_key, payload, ex=ExternalChatCrmChannelConfig.SETTINGS_STALE_TTL_SEC)
+                await pipe.execute()
+            return settings_map
+        except Exception:
+            stale = await cls._read_settings_stale_cache(connected_integration_id)
+            if stale is not None:
+                return stale
+            raise
+        finally:
+            await cls._release_lock(
+                cls._settings_fetch_lock_key(connected_integration_id),
+                lock_token,
             )
-        return settings_map
 
     @classmethod
     async def _get_channel(cls, connected_integration_id: str, channel_id: int) -> Optional[Channel]:
@@ -1585,8 +1872,21 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         *,
         force_refresh: bool = False,
     ) -> RuntimeConfig:
+        ci = str(connected_integration_id or "").strip()
+        if not ci:
+            raise ValueError("connected_integration_id is required")
+        await cls._ensure_connected_integration_active(ci, force_refresh=force_refresh)
+        now_ts = _now_ts()
+        if not force_refresh:
+            async with _RUNTIME_LOCAL_LOCK:
+                cached = _RUNTIME_LOCAL_CACHE.get(ci)
+                if cached and cached[0] > now_ts:
+                    return cached[1]
+                if cached:
+                    _RUNTIME_LOCAL_CACHE.pop(ci, None)
+
         settings_map = await cls._fetch_settings_map(
-            connected_integration_id,
+            ci,
             force_refresh=force_refresh,
         )
 
@@ -1611,7 +1911,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             False,
         )
         chat_css_url = _parse_chat_css_url(settings_map.get("chat_css_url"))
-        channel = await cls._get_channel(connected_integration_id, int(channel_id))
+        channel = await cls._get_channel(ci, int(channel_id))
         channel_name = _normalize_text(getattr(channel, "name", None), 80)
         chat_title = (
             channel_name
@@ -1635,8 +1935,8 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             _normalize_channel_auto_message(getattr(channel, "rating_negative_message", None)) or None
         )
 
-        return RuntimeConfig(
-            connected_integration_id=connected_integration_id,
+        runtime = RuntimeConfig(
+            connected_integration_id=ci,
             channel_id=int(channel_id),
             ticket_subject_template=ticket_subject_template,
             default_responsible_user_id=_parse_int(
@@ -1655,6 +1955,12 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             require_email=require_email,
             chat_css_url=chat_css_url,
         )
+        async with _RUNTIME_LOCAL_LOCK:
+            _RUNTIME_LOCAL_CACHE[ci] = (
+                _now_ts() + ExternalChatCrmChannelConfig.RUNTIME_LOCAL_TTL_SEC,
+                runtime,
+            )
+        return runtime
 
     @staticmethod
     def _build_client_external_id(
@@ -1912,8 +2218,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
     ) -> None:
         if not ticket_id or not chat_id:
             return
-        if not _redis_enabled():
-            return
+        _require_redis()
         ttl = ExternalChatCrmChannelConfig.CONTEXT_TTL_SEC
         await cls._redis_set(
             cls._ticket_chat_index_key(connected_integration_id, int(ticket_id)),
@@ -1929,8 +2234,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
     ) -> Optional[str]:
         if not ticket_id:
             return None
-        if not _redis_enabled():
-            return None
+        _require_redis()
         value = await cls._redis_get(
             cls._ticket_chat_index_key(connected_integration_id, int(ticket_id))
         )
@@ -1946,8 +2250,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         chat_id_raw = str(chat_id or "").strip()
         if not chat_id_raw:
             return 0
-        if not _redis_enabled():
-            return 0
+        _require_redis()
 
         key = cls._chat_revision_key(connected_integration_id, chat_id_raw)
         current = await cls._redis_get(key)
@@ -1979,8 +2282,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         chat_id_raw = str(chat_id or "").strip()
         if not chat_id_raw:
             return 0
-        if not _redis_enabled():
-            return 0
+        _require_redis()
 
         current = await cls._redis_get(
             cls._chat_revision_key(connected_integration_id, chat_id_raw)
@@ -1999,8 +2301,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         chat_id_raw = str(chat_id or "").strip()
         if not chat_id_raw:
             return 0
-        if not _redis_enabled():
-            return 0
+        _require_redis()
 
         key = cls._chat_revision_key(connected_integration_id, chat_id_raw)
         try:
@@ -2036,8 +2337,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         normalized = cls._normalize_ticket_state(merged)
         if not ticket_id:
             return normalized
-        if not _redis_enabled():
-            return normalized
+        _require_redis()
 
         await cls._redis_set(
             cls._ticket_state_cache_key(connected_integration_id, int(ticket_id)),
@@ -2054,8 +2354,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
     ) -> Optional[Dict[str, Any]]:
         if not ticket_id:
             return None
-        if not _redis_enabled():
-            return None
+        _require_redis()
         raw = await cls._redis_get(
             cls._ticket_state_cache_key(connected_integration_id, int(ticket_id))
         )
@@ -2540,8 +2839,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         entity_type: str,
         field_key: str,
     ) -> Optional[bool]:
-        if not _redis_enabled():
-            return None
+        _require_redis()
         raw = await cls._redis_get(
             cls._field_exists_cache_key(connected_integration_id, entity_type, field_key)
         )
@@ -2565,8 +2863,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         field_key: str,
         exists: bool,
     ) -> None:
-        if not _redis_enabled():
-            return
+        _require_redis()
         await cls._redis_set(
             cls._field_exists_cache_key(connected_integration_id, entity_type, field_key),
             "1" if exists else "0",
@@ -3344,8 +3641,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
     ) -> bool:
         if not ticket_id or not str(flag or "").strip():
             return False
-        if not _redis_enabled():
-            return True
+        _require_redis()
         return await cls._redis_set_nx(
             cls._ticket_once_flag_key(connected_integration_id, int(ticket_id), flag),
             "1",
@@ -3580,8 +3876,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         connected_integration_id: str,
         context: ChatContext,
     ) -> int:
-        if not _redis_enabled():
-            return 0
+        _require_redis()
         return await cls._redis_incr(
             cls._chat_notification_count_key(connected_integration_id, context.chat_id),
             ExternalChatCrmChannelConfig.CONTEXT_TTL_SEC,
@@ -3924,16 +4219,425 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             )
             return {"status": "failed", "error": str(error), "webhooks": required}
 
+    @staticmethod
+    def _resolve_stream_ttl() -> int:
+        return redis_ttl_seconds(ExternalChatCrmChannelConfig.STREAM_TTL_SEC)
+
+    @classmethod
+    async def _ensure_consumer_group(cls, stream_key: str, *, force: bool = False) -> None:
+        _require_redis()
+        if not force and stream_key in _STREAM_GROUP_READY:
+            return
+        await redis_stream_group_create_with_ttl(
+            stream_key,
+            ExternalChatCrmChannelConfig.STREAM_GROUP,
+            ttl_sec=cls._resolve_stream_ttl(),
+            touch_ts_by_key=_STREAM_TTL_TOUCH_TS,
+            now_ts=_now_ts(),
+        )
+        _STREAM_GROUP_READY.add(stream_key)
+
+    @classmethod
+    def _serialize_stream_fields(cls, fields: Dict[str, Any]) -> Dict[str, str]:
+        serialized: Dict[str, str] = {}
+        for key, value in (fields or {}).items():
+            if isinstance(value, (dict, list)):
+                serialized[str(key)] = _json_dumps(value)
+            elif value is None:
+                serialized[str(key)] = ""
+            else:
+                serialized[str(key)] = str(value)
+        return serialized
+
+    @classmethod
+    async def _enqueue_stream(cls, stream_key: str, fields: Dict[str, Any]) -> None:
+        _require_redis()
+        await redis_stream_add_with_ttl(
+            stream_key,
+            cls._serialize_stream_fields(fields),
+            maxlen=ExternalChatCrmChannelConfig.STREAM_MAXLEN,
+            ttl_sec=cls._resolve_stream_ttl(),
+            touch_ts_by_key=_STREAM_TTL_TOUCH_TS,
+            now_ts=_now_ts(),
+        )
+
+    @classmethod
+    async def _enqueue_stream_deduped(
+        cls,
+        *,
+        stream_key: str,
+        dedupe_key: str,
+        fields: Dict[str, Any],
+    ) -> bool:
+        _require_redis()
+        now_ts = _now_ts()
+        stream_ttl = cls._resolve_stream_ttl()
+        should_touch = (
+            now_ts - int(_STREAM_TTL_TOUCH_TS.get(stream_key) or 0)
+            >= min(3600, max(10, stream_ttl // 4))
+        )
+        field_args: List[str] = []
+        for key, value in cls._serialize_stream_fields(fields).items():
+            field_args.extend([key, value])
+        result = await redis_client.eval(
+            _ENQUEUE_DEDUPE_LUA,
+            2,
+            dedupe_key,
+            stream_key,
+            str(ExternalChatCrmChannelConfig.WEBHOOK_DEDUPE_TTL_SEC),
+            str(ExternalChatCrmChannelConfig.STREAM_MAXLEN),
+            str(stream_ttl),
+            "1" if should_touch else "0",
+            *field_args,
+        )
+        if should_touch and int(result or 0) == 1:
+            _STREAM_TTL_TOUCH_TS[stream_key] = now_ts
+        return int(result or 0) == 1
+
+    @classmethod
+    async def _enqueue_webhook_event(
+        cls,
+        connected_integration_id: str,
+        webhook_action: str,
+        payload: Dict[str, Any],
+        event_id: Optional[str],
+        event_key: str,
+    ) -> bool:
+        ci = str(connected_integration_id or "").strip()
+        if not ci:
+            raise ValueError("connected_integration_id is required")
+        await cls._ensure_stream_workers(ensure_groups=False)
+        fields = {
+            "connected_integration_id": ci,
+            "action": webhook_action,
+            "payload": payload if isinstance(payload, dict) else {},
+            "event_id": event_id or "",
+            "event_key": event_key,
+            "attempt": "0",
+            "enqueued_at": str(_now_ts()),
+        }
+        queued = await cls._enqueue_stream_deduped(
+            stream_key=cls._stream_key(),
+            dedupe_key=cls._webhook_enqueue_dedupe_key(ci, event_key),
+            fields=fields,
+        )
+        if not queued:
+            logger.debug("External chat webhook duplicate skipped: ci=%s action=%s", ci, webhook_action)
+        return queued
+
+    @classmethod
+    async def _touch_stream_ttl(cls, stream_key: str, *, force: bool = False) -> None:
+        _require_redis()
+        await redis_expire_if_due(
+            stream_key,
+            cls._resolve_stream_ttl(),
+            _STREAM_TTL_TOUCH_TS,
+            _now_ts(),
+            min_refresh_sec=10,
+            force=force,
+        )
+
+    @classmethod
+    async def _set_worker_heartbeat(cls, worker_index: int) -> None:
+        _require_redis()
+        await redis_client.setex(
+            cls._worker_heartbeat_key(worker_index),
+            ExternalChatCrmChannelConfig.HEARTBEAT_TTL_SEC,
+            str(_now_ts()),
+        )
+
+    @classmethod
+    def _stream_workers_ready(cls) -> bool:
+        for index in range(ExternalChatCrmChannelConfig.STREAM_WORKERS):
+            task = _STREAM_WORKER_TASKS.get(index)
+            if not task or task.done():
+                return False
+        return True
+
+    @classmethod
+    async def _ensure_stream_workers(cls, *, ensure_groups: bool = True) -> None:
+        _require_redis()
+        if not ensure_groups and cls._stream_workers_ready():
+            return
+        stream_key = cls._stream_key()
+        if ensure_groups:
+            await cls._ensure_consumer_group(stream_key)
+        async with _STREAM_WORKER_LOCK:
+            for index in range(ExternalChatCrmChannelConfig.STREAM_WORKERS):
+                task = _STREAM_WORKER_TASKS.get(index)
+                if task and not task.done():
+                    continue
+                _STREAM_WORKER_TASKS[index] = asyncio.create_task(
+                    cls._stream_worker_loop(index),
+                    name=f"external_chat_stream_{index}",
+                )
+
+    @classmethod
+    async def shutdown_all(cls) -> None:
+        async with _STREAM_WORKER_LOCK:
+            tasks = list(_STREAM_WORKER_TASKS.values())
+            _STREAM_WORKER_TASKS.clear()
+        for task in tasks:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("Error while stopping external chat stream worker")
+        _STREAM_GROUP_READY.clear()
+        _STREAM_CLAIM_TS.clear()
+        _STREAM_TTL_TOUCH_TS.clear()
+        _SETTINGS_LOCAL_CACHE.clear()
+        async with _RUNTIME_LOCAL_LOCK:
+            _RUNTIME_LOCAL_CACHE.clear()
+
+    @classmethod
+    async def restore_active_connections(cls) -> Dict[str, int]:
+        _require_redis()
+        await cls._ensure_stream_workers()
+        return {"streams": 1, "workers": len(_STREAM_WORKER_TASKS)}
+
+    @classmethod
+    async def _process_claimed_entries(
+        cls,
+        stream_key: str,
+        consumer: str,
+    ) -> List[Tuple[str, Dict[str, Any]]]:
+        try:
+            claimed_raw = await redis_client.xautoclaim(
+                stream_key,
+                ExternalChatCrmChannelConfig.STREAM_GROUP,
+                consumer,
+                min_idle_time=ExternalChatCrmChannelConfig.STREAM_MIN_IDLE_MS,
+                start_id="0-0",
+                count=ExternalChatCrmChannelConfig.STREAM_BATCH_SIZE,
+            )
+        except Exception as error:
+            if redis_error_contains(error, "NOGROUP"):
+                await cls._ensure_consumer_group(stream_key, force=True)
+                return []
+            raise
+        entries: List[Tuple[str, Dict[str, Any]]] = []
+        if isinstance(claimed_raw, (list, tuple)) and len(claimed_raw) >= 2:
+            entries = claimed_raw[1] or []
+        return [
+            (str(entry_id), fields if isinstance(fields, dict) else {})
+            for entry_id, fields in entries
+        ]
+
+    @classmethod
+    async def _stream_worker_loop(cls, worker_index: int) -> None:
+        stream_key = cls._stream_key()
+        consumer = f"{_INSTANCE_ID}:webhook:{worker_index}"
+        semaphore = asyncio.Semaphore(ExternalChatCrmChannelConfig.EVENT_CONCURRENCY)
+        logger.info("External chat stream worker started: index=%s", worker_index)
+        try:
+            await cls._ensure_consumer_group(stream_key)
+            while True:
+                try:
+                    await cls._set_worker_heartbeat(worker_index)
+                    await cls._touch_stream_ttl(stream_key)
+                    now_ts = _now_ts()
+                    last_claim_ts = int(_STREAM_CLAIM_TS.get(stream_key) or 0)
+                    if now_ts - last_claim_ts >= ExternalChatCrmChannelConfig.STREAM_CLAIM_INTERVAL_SEC:
+                        _STREAM_CLAIM_TS[stream_key] = now_ts
+                        claimed = await cls._process_claimed_entries(stream_key, consumer)
+                        if claimed:
+                            await asyncio.gather(
+                                *[
+                                    cls._process_stream_entry_guarded(stream_key, entry_id, fields, semaphore)
+                                    for entry_id, fields in claimed
+                                ]
+                            )
+
+                    try:
+                        records = await redis_client.xreadgroup(
+                            groupname=ExternalChatCrmChannelConfig.STREAM_GROUP,
+                            consumername=consumer,
+                            streams={stream_key: ">"},
+                            count=ExternalChatCrmChannelConfig.STREAM_BATCH_SIZE,
+                            block=ExternalChatCrmChannelConfig.STREAM_READ_BLOCK_MS,
+                        )
+                    except Exception as error:
+                        if redis_error_contains(error, "NOGROUP"):
+                            await cls._ensure_consumer_group(stream_key, force=True)
+                            continue
+                        raise
+
+                    entries: List[Tuple[str, Dict[str, Any]]] = []
+                    for _, rows in records or []:
+                        entries.extend(
+                            (str(entry_id), fields if isinstance(fields, dict) else {})
+                            for entry_id, fields in rows or []
+                        )
+                    if entries:
+                        await asyncio.gather(
+                            *[
+                                cls._process_stream_entry_guarded(stream_key, entry_id, fields, semaphore)
+                                for entry_id, fields in entries
+                            ]
+                        )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    logger.exception("External chat stream worker error: index=%s error=%s", worker_index, error)
+                    await asyncio.sleep(1.0)
+        finally:
+            async with _STREAM_WORKER_LOCK:
+                if _STREAM_WORKER_TASKS.get(worker_index) is asyncio.current_task():
+                    _STREAM_WORKER_TASKS.pop(worker_index, None)
+
+    @classmethod
+    async def _process_stream_entry_guarded(
+        cls,
+        stream_key: str,
+        entry_id: str,
+        fields: Dict[str, Any],
+        semaphore: asyncio.Semaphore,
+    ) -> None:
+        async with semaphore:
+            await cls._process_stream_entry(stream_key, entry_id, fields)
+
+    @classmethod
+    def _decode_stream_payload(cls, raw: Any) -> Dict[str, Any]:
+        if isinstance(raw, dict):
+            return raw
+        try:
+            decoded = _json_loads(str(raw or ""))
+            return decoded if isinstance(decoded, dict) else {}
+        except Exception:
+            return {}
+
+    @classmethod
+    async def _ack_stream_entry(cls, stream_key: str, entry_id: str) -> None:
+        await redis_client.xack(stream_key, ExternalChatCrmChannelConfig.STREAM_GROUP, entry_id)
+
+    @classmethod
+    async def _process_stream_entry(
+        cls,
+        stream_key: str,
+        entry_id: str,
+        fields: Dict[str, Any],
+    ) -> None:
+        ci = str(fields.get("connected_integration_id") or "").strip()
+        webhook_action = str(fields.get("action") or "").strip()
+        event_id = str(fields.get("event_id") or "").strip() or None
+        event_key = str(fields.get("event_key") or "").strip()
+        payload = cls._decode_stream_payload(fields.get("payload"))
+        attempt = _parse_int(fields.get("attempt"), 0) or 0
+        if not ci or webhook_action not in ExternalChatCrmChannelConfig.SUPPORTED_INBOUND_WEBHOOKS:
+            logger.warning("External chat stream entry skipped with invalid payload: entry_id=%s", entry_id)
+            await cls._ack_stream_entry(stream_key, entry_id)
+            return
+
+        try:
+            await cls._process_queued_webhook(ci, webhook_action, payload)
+            await cls._ack_stream_entry(stream_key, entry_id)
+            logger.debug(
+                "External chat webhook processed: ci=%s action=%s entry_id=%s event_id=%s",
+                ci,
+                webhook_action,
+                entry_id,
+                event_id,
+            )
+        except ConnectedIntegrationInactiveError as error:
+            await cls._ack_stream_entry(stream_key, entry_id)
+            await cls._redis_delete(cls._webhook_enqueue_dedupe_key(ci, event_key))
+            logger.info(
+                "External chat webhook skipped for inactive integration: ci=%s entry_id=%s reason=%s",
+                ci,
+                entry_id,
+                error,
+            )
+        except Exception as error:
+            next_attempt = attempt + 1
+            if next_attempt >= ExternalChatCrmChannelConfig.STREAM_MAX_RETRIES:
+                dlq_payload = dict(fields)
+                dlq_payload["attempt"] = str(next_attempt)
+                dlq_payload["source_stream"] = stream_key
+                dlq_payload["source_entry_id"] = entry_id
+                dlq_payload["failed_at"] = str(_now_ts())
+                dlq_payload["error"] = str(error)
+                await cls._enqueue_stream(cls._dlq_stream_key(), dlq_payload)
+                await cls._redis_delete(cls._webhook_enqueue_dedupe_key(ci, event_key))
+                await cls._ack_stream_entry(stream_key, entry_id)
+                logger.error(
+                    "External chat webhook moved to DLQ: ci=%s action=%s entry_id=%s error=%s",
+                    ci,
+                    webhook_action,
+                    entry_id,
+                    error,
+                )
+                return
+            retry_payload = dict(fields)
+            retry_payload["attempt"] = str(next_attempt)
+            retry_payload["last_error"] = str(error)
+            await cls._enqueue_stream(stream_key, retry_payload)
+            await cls._ack_stream_entry(stream_key, entry_id)
+            logger.warning(
+                "External chat webhook requeued: ci=%s action=%s entry_id=%s attempt=%s error=%s",
+                ci,
+                webhook_action,
+                entry_id,
+                next_attempt,
+                error,
+            )
+
+    @classmethod
+    async def _process_queued_webhook(
+        cls,
+        connected_integration_id: str,
+        webhook_action: str,
+        payload: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        await cls._ensure_connected_integration_active(connected_integration_id)
+        lock_key = cls._webhook_processing_lock_key(
+            connected_integration_id,
+            webhook_action,
+            payload,
+        )
+        lock_token = await cls._acquire_lock_wait(
+            lock_key,
+            ExternalChatCrmChannelConfig.PROCESSING_LOCK_TTL_SEC,
+            wait_seconds=2.0,
+        )
+        if not lock_token:
+            raise RuntimeError("webhook processing lock busy")
+        try:
+            if webhook_action in {
+                "ChatMessageAdded",
+                "ChatMessageEdited",
+                "ChatMessageDeleted",
+                "ChatMessageRead",
+            }:
+                return await cls._apply_chat_message_webhook(
+                    connected_integration_id,
+                    webhook_action,
+                    payload,
+                )
+            return await cls._apply_ticket_webhook(
+                connected_integration_id,
+                webhook_action,
+                payload,
+            )
+        finally:
+            await cls._release_lock(lock_key, lock_token)
+
     async def connect(self, **_: Any) -> Any:
+        _require_redis()
         if not self.connected_integration_id:
             return self._error_response(1000, "connected_integration_id is required").dict()
         ci = str(self.connected_integration_id).strip()
-        if not await self._is_connected_integration_active(ci, force_refresh=True):
+        try:
+            await self._ensure_connected_integration_active(ci, force_refresh=True)
+        except ConnectedIntegrationInactiveError:
             return self._error_response(1001, f"ConnectedIntegration '{ci}' is inactive").dict()
         try:
             runtime = await self._load_runtime(ci)
         except Exception as error:
             return self._error_response(1002, str(error)).dict()
+        await self._ensure_stream_workers()
         webhook_subscribe = await self._subscribe_required_webhooks(ci)
         return {
             "status": "connected",
@@ -3949,10 +4653,11 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         }
 
     async def disconnect(self, **_: Any) -> Any:
+        _require_redis()
         if not self.connected_integration_id:
             return self._error_response(1000, "connected_integration_id is required").dict()
         ci = str(self.connected_integration_id).strip()
-        await self._redis_delete(self._settings_cache_key(ci), self._active_cache_key(ci))
+        await self._clear_settings_runtime_cache(ci)
         return {"status": "disconnected"}
 
     async def reconnect(self, **_: Any) -> Any:
@@ -3960,12 +4665,13 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         return await self.connect()
 
     async def update_settings(self, settings: Optional[dict] = None, **_: Any) -> Any:
+        _require_redis()
         _ = settings
         if not self.connected_integration_id:
             return self._error_response(1000, "connected_integration_id is required").dict()
         ci = str(self.connected_integration_id).strip()
-        await self._redis_delete(self._settings_cache_key(ci), self._active_cache_key(ci))
-        return {"status": "settings updated", "reconnect": await self.reconnect()}
+        await self._clear_settings_runtime_cache(ci)
+        return {"status": "settings updated", "reconnect": await self.connect()}
 
     @staticmethod
     def _normalize_regos_webhook_payload(
@@ -4047,21 +4753,6 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         if ticket_id:
             return f"{webhook_action}:ticket:{ticket_id}:{fingerprint}"
         return f"{webhook_action}:{fingerprint}"
-
-    async def _is_duplicate_webhook_event(
-        self,
-        connected_integration_id: str,
-        event_key: str,
-    ) -> bool:
-        if not _redis_enabled():
-            return False
-        ttl = ExternalChatCrmChannelConfig.WEBHOOK_DEDUPE_TTL_SEC
-        inserted = await self._redis_set_nx(
-            self._redis_key("webhook_dedupe", connected_integration_id, event_key),
-            "1",
-            ttl,
-        )
-        return not inserted
 
     @classmethod
     async def _apply_chat_message_webhook(
@@ -4243,6 +4934,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         data: Optional[Dict[str, Any]] = None,
         **extra: Any,
     ) -> Dict[str, Any]:
+        _require_redis()
         if not self.connected_integration_id:
             return self._error_response(1000, "connected_integration_id is required").dict()
 
@@ -4259,33 +4951,25 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             return {"status": "ignored", "reason": f"unsupported_action:{webhook_action}"}
 
         event_key = self._build_webhook_event_key(webhook_action, payload, event_id)
-        if await self._is_duplicate_webhook_event(ci, event_key):
-            return {"status": "ignored", "reason": "duplicate_event"}
-
-        try:
-            if webhook_action in {
-                "ChatMessageAdded",
-                "ChatMessageEdited",
-                "ChatMessageDeleted",
-                "ChatMessageRead",
-            }:
-                result = await self._apply_chat_message_webhook(ci, webhook_action, payload)
-            else:
-                result = await self._apply_ticket_webhook(ci, webhook_action, payload)
-        except Exception as error:
-            logger.exception(
-                "Webhook processing failed: ci=%s action=%s payload=%s",
-                ci,
-                webhook_action,
-                payload,
-            )
-            return self._error_response(1002, str(error)).dict()
-
+        queued = await self._enqueue_webhook_event(
+            ci,
+            webhook_action,
+            payload,
+            event_id,
+            event_key,
+        )
+        if not queued:
+            return {
+                "status": "ignored",
+                "reason": "duplicate_event",
+                "action": webhook_action,
+                "event_id": event_id,
+            }
         return {
-            "status": result.get("status", "processed"),
+            "status": "accepted",
             "action": webhook_action,
             "event_id": event_id,
-            **{key: value for key, value in result.items() if key != "status"},
+            "queued": True,
         }
 
     async def handle_ui(self, envelope: Dict[str, Any]) -> Any:

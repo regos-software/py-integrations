@@ -26,7 +26,23 @@ async def send_messages(
         text = msg["message"]
 
         try:
-            await bot.send_message(chat_id=chat_id, text=text)
+            try:
+                await bot.send_message(chat_id=chat_id, text=text)
+            except Exception as error:
+                error_text = str(error or "").lower()
+                if not (
+                    "can't parse entities" in error_text
+                    or "can't find end of the entity" in error_text
+                    or "unsupported start tag" in error_text
+                    or "parse entities" in error_text
+                ):
+                    raise
+                logger.warning(
+                    "Telegram markdown send rejected, retrying as plain text: chat=%s error=%s",
+                    chat_id,
+                    error,
+                )
+                await bot.send_message(chat_id=chat_id, text=text, parse_mode=None)
             logger.debug("Sent Telegram message to chat %s", chat_id)
             return {"status": "sent", "chat_id": chat_id, "message": text}
         except Exception as error:

@@ -5,6 +5,7 @@ from routes.clients import router as clients
 from core.exception_handlers import add_exception_handlers
 from fastapi.middleware.gzip import GZipMiddleware
 from clients.asterisk_crm_channel.main import AsteriskCrmChannelIntegration
+from clients.external_chat_crm_channel.main import ExternalChatCrmChannelIntegration
 from clients.gpt_crm_chat_assistant.main import GptCrmChatAssistantIntegration
 from clients.instagram_crm_channel.main import InstagramCrmChannelIntegration
 from clients.meta_leadgen_crm_channel.main import MetaLeadgenCrmChannelIntegration
@@ -15,6 +16,7 @@ from clients.telegram_bot_orders.main import TelegramBotOrdersIntegration
 
 _RESTORE_INTEGRATIONS = (
     ("Asterisk", AsteriskCrmChannelIntegration),
+    ("External chat", ExternalChatCrmChannelIntegration),
     ("Telegram", TelegramBotCrmChannelIntegration),
     ("Telegram notification", TelegramBotNotificationIntegration),
     ("Telegram orders", TelegramBotOrdersIntegration),
@@ -28,6 +30,7 @@ _SHUTDOWN_INTEGRATIONS = (
     ("Telegram notification", TelegramBotNotificationIntegration),
     ("Telegram orders", TelegramBotOrdersIntegration),
     ("Asterisk", AsteriskCrmChannelIntegration),
+    ("External chat", ExternalChatCrmChannelIntegration),
     ("GPT assistant", GptCrmChatAssistantIntegration),
     ("Instagram", InstagramCrmChannelIntegration),
     ("Meta Leadgen", MetaLeadgenCrmChannelIntegration),
