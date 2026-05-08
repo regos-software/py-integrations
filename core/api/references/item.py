@@ -8,11 +8,14 @@ from core.logger import setup_logger
 from schemas.api.base import APIBaseResponse
 from schemas.api.references.item import (
     Item,
+    ItemGetCurrentQuantityRequest,
+    ItemGetCurrentQuantityResponse,
     ItemExt,
     ItemGetExtRequest,
     ItemGetQuantityRequest,
     ItemGetQuantityResponse,
     ItemGetRequest,
+    ItemGetShortResponse,
     ItemSearchRequest,
 )
 
@@ -24,6 +27,8 @@ class ItemService:
     PATH_GET = "Item/Get"
     PATH_GET_EXT = "Item/GetExt"
     PATH_GET_QUANTITY = "Item/GetQuantity"
+    PATH_GET_CURRENT_QUANTITY = "Item/GetCurrentQuantity"
+    PATH_GET_SHORT = "Item/GetShort"
 
     def __init__(self, api):
         self.api = api
@@ -47,3 +52,15 @@ class ItemService:
             req,
             ItemGetQuantityResponse,
         )
+
+    async def get_current_quantity(
+        self, req: ItemGetCurrentQuantityRequest
+    ) -> ItemGetCurrentQuantityResponse:
+        return await self.api.call(
+            self.PATH_GET_CURRENT_QUANTITY,
+            req,
+            ItemGetCurrentQuantityResponse,
+        )
+
+    async def get_short(self, req: ItemGetRequest) -> ItemGetShortResponse:
+        return await self.api.call(self.PATH_GET_SHORT, req, ItemGetShortResponse)

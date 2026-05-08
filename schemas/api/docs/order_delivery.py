@@ -7,7 +7,7 @@ from typing import List, Optional
 
 from pydantic import ConfigDict, Field as PydField, field_validator
 
-from schemas.api.base import APIBaseResponse, BaseSchema
+from schemas.api.base import APIBaseResponse, AddResult, ArrayResult, BaseSchema
 from schemas.api.common.sort_orders import SortOrders
 from schemas.api.references.delivery_courier import DeliveryCourier
 from schemas.api.references.delivery_from import DeliveryFrom
@@ -17,6 +17,7 @@ from schemas.api.references.price_type import PriceType
 from schemas.api.references.retail_card import RetailCard
 from schemas.api.references.retail_customer import RetailCustomer
 from schemas.api.references.stock import Stock
+from schemas.api.references.item import Item
 
 
 class DocumentStatus(BaseSchema):
@@ -59,6 +60,7 @@ class DocOrderDelivery(BaseSchema):
     )
     amount: Optional[Decimal] = PydField(default=None, description="Total amount.")
     status: Optional[DocumentStatus] = PydField(default=None, description="Status.")
+    status_id: Optional[int] = PydField(default=None, description="Status id.")
     delivery_date: Optional[int] = PydField(
         default=None, description="Delivery date (unix time)."
     )
@@ -117,6 +119,60 @@ class DocOrderDeliveryOperation(BaseSchema):
     )
     quantity: Decimal = PydField(..., description="Quantity.")
     price: Decimal = PydField(..., description="Price.")
+
+
+class DocOrderDeliveryOperationGetRequest(BaseSchema):
+    """Request for OrderDeliveryOperation/get."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ids: Optional[List[int]] = PydField(default=None, description="Operation ids.")
+    item_ids: Optional[List[int]] = PydField(default=None, description="Item ids.")
+    document_id: int = PydField(..., ge=1, description="Document id.")
+    search: Optional[str] = PydField(default=None, description="Search string.")
+    limit: Optional[int] = PydField(default=None, ge=1, description="Limit.")
+    offset: Optional[int] = PydField(default=None, ge=0, description="Offset.")
+
+
+class DocOrderDeliveryOperationRead(BaseSchema):
+    """Order delivery operation read model."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: Optional[int] = PydField(default=None, description="Operation id.")
+    document_id: Optional[int] = PydField(default=None, description="Document id.")
+    item: Optional[Item] = PydField(default=None, description="Item.")
+    quantity: Decimal = PydField(default=Decimal("0"), description="Quantity.")
+    quantity_const: Optional[Decimal] = PydField(default=None, description="Constant quantity.")
+    price: Decimal = PydField(default=Decimal("0"), description="Price.")
+    actual_quantity: Optional[Decimal] = PydField(default=None, description="Actual quantity.")
+    actual_price: Optional[Decimal] = PydField(default=None, description="Actual price.")
+    vat_value: Optional[Decimal] = PydField(default=None, description="VAT value.")
+    last_update: Optional[int] = PydField(default=None, description="Last update.")
+
+
+class DocOrderDeliveryOperationGetResponse(
+    APIBaseResponse[List[DocOrderDeliveryOperationRead]]
+):
+    """Response for OrderDeliveryOperation/get."""
+
+    model_config = ConfigDict(extra="ignore")
+
+
+class DocOrderDeliverySetStatusRequest(BaseSchema):
+    """Request for DocOrderDelivery/SetStatus."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: int = PydField(..., ge=1, description="Document id.")
+    status: int = PydField(..., ge=1, description="Status id.")
+
+
+class DocOrderDeliverySetStatusResponse(APIBaseResponse[ArrayResult]):
+    """Response for DocOrderDelivery/SetStatus."""
+
+    model_config = ConfigDict(extra="ignore")
+
 
 class DocOrderDeliveryAddRequest(BaseSchema):
     """Payload for DocOrderDelivery/Add (embedded in AddFull)."""
@@ -218,13 +274,25 @@ class DocOrderDeliveryGetResponse(APIBaseResponse[List[DocOrderDelivery]]):
     model_config = ConfigDict(extra="ignore")
 
 
+class DocOrderDeliveryAddFullResponse(APIBaseResponse[AddResult]):
+    """Response for DocOrderDelivery/AddFull."""
+
+    model_config = ConfigDict(extra="ignore")
+
+
 __all__ = [
     "DocOrderDelivery",
+    "DocOrderDeliveryAddFullResponse",
     "DocOrderDeliveryAddFullRequest",
     "DocOrderDeliveryAddRequest",
     "DocOrderDeliveryGetRequest",
     "DocOrderDeliveryGetResponse",
     "DocOrderDeliveryOperation",
+    "DocOrderDeliveryOperationGetRequest",
+    "DocOrderDeliveryOperationGetResponse",
+    "DocOrderDeliveryOperationRead",
+    "DocOrderDeliverySetStatusRequest",
+    "DocOrderDeliverySetStatusResponse",
     "DocumentStatus",
     "Location",
 ]

@@ -32,6 +32,9 @@ from clients.meta_leadgen_crm_channel.main import MetaLeadgenCrmChannelIntegrati
 from clients.external_chat_crm_channel.main import ExternalChatCrmChannelIntegration
 from clients.gpt_crm_chat_assistant.main import GptCrmChatAssistantIntegration
 from clients.tsd.main import TsdIntegration
+from clients.marketplace_yandex_eats.main import YandexEatsIntegration
+from clients.marketplace_uzum_tezkor.main import UzumTezkorIntegration
+from clients.marketplace_toserver.main import MarketplaceToServerIntegration
 
 router = APIRouter()
 logger = setup_logger("clients_route")
@@ -53,6 +56,9 @@ INTEGRATION_CLASSES = {
     "external_chat_crm_channel": ExternalChatCrmChannelIntegration,
     "gpt_crm_chat_assistant": GptCrmChatAssistantIntegration,
     "tsd": TsdIntegration,
+    "marketplace_yandex_eats": YandexEatsIntegration,
+    "marketplace_uzum_tezkor": UzumTezkorIntegration,
+    "marketplace_toserver": MarketplaceToServerIntegration,
 }
 
 # Служебные заголовки, которые не нужно прокидывать обработчикам
@@ -501,8 +507,14 @@ async def handel_ui(
     methods=["GET", "POST", "PUT", "DELETE"],
     include_in_schema=False,
 )
+@router.api_route(
+    "/clients/{client}/external/{external_path:path}",
+    methods=["GET", "POST", "PUT", "DELETE"],
+    include_in_schema=False,
+)
 async def handle_external(
     client: str = Path(..., description="Название интеграции"),
+    external_path: Optional[str] = None,
     request: Request = ...,
     connected_integration_id: Optional[str] = Header(
         None, alias="connected-integration-id"
@@ -560,6 +572,7 @@ async def handle_external(
         "method": request.method,
         "url": str(request.url),
         "path": request.url.path,
+        "external_path": str(external_path or "").strip("/"),
         "query": dict(request.query_params),
         "headers": headers,
         "body": body_data,
