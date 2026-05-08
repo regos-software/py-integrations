@@ -43,6 +43,8 @@ INTEGRATION_CLASSES = {
     "email_sender": EmailSenderIntegration,
     "regos_telegram_notifier": TelegramBotNotificationIntegration,
     "regos_telegram_minquantity": TelegramBotMinQuantityIntegration,
+    "telegram_bot_min_quantity": TelegramBotMinQuantityIntegration,
+    "telegram_bot_quantity": TelegramBotMinQuantityIntegration,
     "telegram_bot_orders": TelegramBotOrdersIntegration,
     "telegram_bot_crm_channel": TelegramBotCrmChannelIntegration,
     "asterisk_crm_channel": AsteriskCrmChannelIntegration,

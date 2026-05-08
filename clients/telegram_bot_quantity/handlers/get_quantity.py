@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
 from io import BytesIO
 from typing import List, Optional
@@ -182,7 +183,8 @@ async def handle_get_quantity(
             )
             continue
 
-        xlsx_bytes = _build_excel_bytes(
+        xlsx_bytes = await asyncio.to_thread(
+            _build_excel_bytes,
             stock_name=stock_name,
             rows=rows,
         )

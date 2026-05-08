@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     telegram_orders_stream_batch_size: int = 50
     telegram_orders_stream_maxlen: int = 100000
     telegram_orders_send_concurrency: int = 20
+    telegram_min_quantity_stream_workers: int = 2
+    telegram_min_quantity_stream_batch_size: int = 50
+    telegram_min_quantity_stream_maxlen: int = 100000
+    telegram_min_quantity_stream_retry_limit: int = 3
+    telegram_min_quantity_send_concurrency: int = 20
     telegram_crm_channel_stream_workers: int = 2
     telegram_crm_channel_stream_batch_size: int = 50
     telegram_crm_channel_stream_maxlen: int = 100000

@@ -5,6 +5,7 @@ import base64
 import binascii
 import hashlib
 import html
+import httpx
 import json
 import re
 import time
@@ -110,7 +111,10 @@ class ExternalChatCrmChannelConfig:
     SETTINGS_LOCK_WAIT_SEC = 2.0
     RUNTIME_LOCAL_TTL_SEC = min(30, max(5, SETTINGS_TTL_SEC // 4))
     CONTEXT_TTL_SEC = 7 * 24 * 60 * 60
-    ACTIVE_CACHE_TTL_SEC = 30
+    ACTIVE_CACHE_TTL_SEC = max(int(app_settings.redis_cache_ttl or 60), 60)
+    ACTIVE_STALE_CACHE_TTL_SEC = max(ACTIVE_CACHE_TTL_SEC * 10, 10 * 60)
+    ACTIVE_LOCK_TTL_SEC = 10
+    ACTIVE_LOCK_WAIT_SEC = 0.5
     DEFAULT_HISTORY_LIMIT = 50
     MAX_HISTORY_LIMIT = 200
     MAX_MESSAGE_LENGTH = 4000
@@ -1117,6 +1121,7 @@ class ConnectedIntegrationInactiveError(RuntimeError):
 
 class ExternalChatCrmChannelIntegration(ClientBase):
     _ACTIVE_CACHE: Dict[str, Tuple[bool, float]] = {}
+    _ACTIVE_STALE_CACHE: Dict[str, Tuple[bool, float]] = {}
     _FILE_META_CACHE: Dict[str, Tuple[Dict[str, Any], float]] = {}
     _UI_TEMPLATE_CACHE: Optional[str] = None
     _UI_CSS_TEMPLATE_CACHE: Optional[str] = None
@@ -1170,6 +1175,14 @@ class ExternalChatCrmChannelIntegration(ClientBase):
     @classmethod
     def _active_cache_key(cls, connected_integration_id: str) -> str:
         return cls._redis_key("active", connected_integration_id)
+
+    @classmethod
+    def _active_stale_cache_key(cls, connected_integration_id: str) -> str:
+        return cls._redis_key("active_stale", connected_integration_id)
+
+    @classmethod
+    def _active_fetch_lock_key(cls, connected_integration_id: str) -> str:
+        return cls._stream_redis_key("al", connected_integration_id)
 
     @classmethod
     def _stream_key(cls) -> str:
@@ -1604,6 +1617,69 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         return events
 
     @classmethod
+    async def _read_active_stale_cache(
+        cls,
+        connected_integration_id: str,
+    ) -> Optional[bool]:
+        ci = str(connected_integration_id or "").strip()
+        if not ci:
+            return None
+
+        now = time.monotonic()
+        async with cls._ACTIVE_CACHE_LOCK:
+            cached = cls._ACTIVE_STALE_CACHE.get(ci)
+        if cached and cached[1] > now:
+            return cached[0]
+
+        cached_raw = await cls._redis_get(cls._active_stale_cache_key(ci))
+        if cached_raw not in {"0", "1"}:
+            return None
+
+        active = cached_raw == "1"
+        async with cls._ACTIVE_CACHE_LOCK:
+            cls._ACTIVE_STALE_CACHE[ci] = (
+                active,
+                now + ExternalChatCrmChannelConfig.ACTIVE_STALE_CACHE_TTL_SEC,
+            )
+        return active
+
+    @classmethod
+    async def _write_active_cache(
+        cls,
+        connected_integration_id: str,
+        active: bool,
+    ) -> None:
+        ci = str(connected_integration_id or "").strip()
+        if not ci:
+            return
+
+        now = time.monotonic()
+        active_value = bool(active)
+        async with cls._ACTIVE_CACHE_LOCK:
+            cls._ACTIVE_CACHE[ci] = (
+                active_value,
+                now + ExternalChatCrmChannelConfig.ACTIVE_CACHE_TTL_SEC,
+            )
+            cls._ACTIVE_STALE_CACHE[ci] = (
+                active_value,
+                now + ExternalChatCrmChannelConfig.ACTIVE_STALE_CACHE_TTL_SEC,
+            )
+
+        serialized = "1" if active_value else "0"
+        await asyncio.gather(
+            cls._redis_set(
+                cls._active_cache_key(ci),
+                serialized,
+                ExternalChatCrmChannelConfig.ACTIVE_CACHE_TTL_SEC,
+            ),
+            cls._redis_set(
+                cls._active_stale_cache_key(ci),
+                serialized,
+                ExternalChatCrmChannelConfig.ACTIVE_STALE_CACHE_TTL_SEC,
+            ),
+        )
+
+    @classmethod
     async def _is_connected_integration_active(
         cls,
         connected_integration_id: str,
@@ -1634,8 +1710,34 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                     )
                 return active
 
+        lock_token = await cls._acquire_lock_wait(
+            cls._active_fetch_lock_key(ci),
+            ExternalChatCrmChannelConfig.ACTIVE_LOCK_TTL_SEC,
+            wait_seconds=(
+                ExternalChatCrmChannelConfig.SETTINGS_LOCK_WAIT_SEC
+                if force_refresh
+                else ExternalChatCrmChannelConfig.ACTIVE_LOCK_WAIT_SEC
+            ),
+        )
+        if not lock_token:
+            stale = await cls._read_active_stale_cache(ci)
+            if stale is not None:
+                return stale
+            raise TimeoutError(f"Timed out waiting for active check lock for ID {ci}")
+
         detected: Optional[bool] = None
         try:
+            if not force_refresh:
+                cached_raw = await cls._redis_get(cache_key)
+                if cached_raw in {"0", "1"}:
+                    active = cached_raw == "1"
+                    async with cls._ACTIVE_CACHE_LOCK:
+                        cls._ACTIVE_CACHE[ci] = (
+                            active,
+                            now + ExternalChatCrmChannelConfig.ACTIVE_CACHE_TTL_SEC,
+                        )
+                    return active
+
             async with RegosAPI(connected_integration_id=ci) as api:
                 response = await api.integrations.connected_integration.get(
                     ConnectedIntegrationGetRequest(
@@ -1660,19 +1762,43 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 ci,
                 error,
             )
-            raise
+            if isinstance(error, httpx.HTTPStatusError):
+                status_code = (
+                    int(error.response.status_code)
+                    if error.response is not None
+                    else None
+                )
+                if status_code in {401, 403, 404}:
+                    await cls._write_active_cache(ci, False)
+                    return False
+            stale = await cls._read_active_stale_cache(ci)
+            if stale is not None:
+                logger.warning(
+                    "Using stale ConnectedIntegration active cache after active check failure: ci=%s active=%s",
+                    ci,
+                    stale,
+                )
+                return stale
+            logger.warning(
+                "No stale ConnectedIntegration active cache after active check failure; assuming active for short ttl: ci=%s",
+                ci,
+            )
+            async with cls._ACTIVE_CACHE_LOCK:
+                cls._ACTIVE_CACHE[ci] = (
+                    True,
+                    time.monotonic() + ExternalChatCrmChannelConfig.ACTIVE_CACHE_TTL_SEC,
+                )
+            await cls._redis_set(
+                cache_key,
+                "1",
+                ExternalChatCrmChannelConfig.ACTIVE_CACHE_TTL_SEC,
+            )
+            return True
+        finally:
+            await cls._release_lock(cls._active_fetch_lock_key(ci), lock_token)
 
         active = bool(detected)
-        async with cls._ACTIVE_CACHE_LOCK:
-            cls._ACTIVE_CACHE[ci] = (
-                active,
-                now + ExternalChatCrmChannelConfig.ACTIVE_CACHE_TTL_SEC,
-            )
-        await cls._redis_set(
-            cache_key,
-            "1" if active else "0",
-            ExternalChatCrmChannelConfig.ACTIVE_CACHE_TTL_SEC,
-        )
+        await cls._write_active_cache(ci, active)
         return active
 
     @classmethod
@@ -1762,6 +1888,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         try:
             async with cls._ACTIVE_CACHE_LOCK:
                 cls._ACTIVE_CACHE.pop(ci, None)
+                cls._ACTIVE_STALE_CACHE.pop(ci, None)
             _SETTINGS_LOCAL_CACHE.pop(cls._settings_cache_key(ci), None)
             _SETTINGS_LOCAL_CACHE.pop(cls._settings_stale_cache_key(ci), None)
             async with _RUNTIME_LOCAL_LOCK:
@@ -1770,6 +1897,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 cls._settings_cache_key(ci),
                 cls._settings_stale_cache_key(ci),
                 cls._active_cache_key(ci),
+                cls._active_stale_cache_key(ci),
             )
         finally:
             await cls._release_lock(cls._settings_fetch_lock_key(ci), lock_token)
