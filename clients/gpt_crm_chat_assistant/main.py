@@ -15,7 +15,7 @@ from config.settings import settings as app_settings
 from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
 from core.redis import (
-    redis_client,
+    redis_ops,
     redis_error_contains,
     redis_expire_if_due,
     redis_sadd_with_ttl,
@@ -148,7 +148,7 @@ class RuntimeConfig:
 
 
 def _redis_enabled() -> bool:
-    return bool(app_settings.redis_enabled and redis_client is not None)
+    return bool(app_settings.redis_enabled and redis_ops)
 
 
 def _require_redis() -> None:
@@ -416,24 +416,24 @@ class GptCrmChatAssistantIntegration(ClientBase):
     @staticmethod
     async def _redis_get(key: str) -> Optional[str]:
         _require_redis()
-        return await redis_client.get(key)
+        return await redis_ops.get(key)
 
     @staticmethod
     async def _redis_set(key: str, value: str, ttl_sec: int) -> None:
         _require_redis()
-        await redis_client.set(key, value, ex=max(int(ttl_sec), 1))
+        await redis_ops.set(key, value, ex=max(int(ttl_sec), 1))
 
     @staticmethod
     async def _redis_set_nx(key: str, value: str, ttl_sec: int) -> bool:
         _require_redis()
-        return bool(await redis_client.set(key, value, ex=max(int(ttl_sec), 1), nx=True))
+        return bool(await redis_ops.set(key, value, ex=max(int(ttl_sec), 1), nx=True))
 
     @staticmethod
     async def _redis_delete(*keys: str) -> None:
         _require_redis()
         rows = [str(key).strip() for key in keys if str(key or "").strip()]
         if rows:
-            await redis_client.delete(*rows)
+            await redis_ops.delete(*rows)
 
     @classmethod
     async def _acquire_redis_lock(
@@ -463,7 +463,7 @@ class GptCrmChatAssistantIntegration(ClientBase):
             "then return redis.call('del', KEYS[1]) else return 0 end"
         )
         try:
-            await redis_client.eval(script, 1, key, token)
+            await redis_ops.eval(script, 1, key, token)
         except Exception as error:
             logger.warning("Failed to release Redis lock %s: %s", key, error)
 
@@ -549,12 +549,12 @@ class GptCrmChatAssistantIntegration(ClientBase):
         ci = str(connected_integration_id or "").strip()
         if not ci:
             return
-        await redis_client.srem(cls._active_ci_ids_key(), ci)
+        await redis_ops.srem(cls._active_ci_ids_key(), ci)
 
     @classmethod
     async def _set_worker_heartbeat(cls, worker_index: int) -> None:
         _require_redis()
-        await redis_client.setex(
+        await redis_ops.setex(
             cls._worker_heartbeat_key(worker_index),
             GptCrmChatAssistantConfig.WORKER_HEARTBEAT_TTL_SEC,
             str(_now_ts()),
@@ -570,7 +570,7 @@ class GptCrmChatAssistantIntegration(ClientBase):
     ) -> None:
         _require_redis()
         key = cls._debounce_key(connected_integration_id, chat_id)
-        await redis_client.setex(
+        await redis_ops.setex(
             key,
             GptCrmChatAssistantConfig.DEBOUNCE_TTL_SEC,
             str(message_id),
@@ -586,7 +586,7 @@ class GptCrmChatAssistantIntegration(ClientBase):
         _require_redis()
         key = cls._debounce_key(connected_integration_id, chat_id)
         latest = str(
-            await redis_client.get(key)
+            await redis_ops.get(key)
             or ""
         ).strip()
         return not latest or latest == str(message_id or "").strip()
@@ -1252,7 +1252,7 @@ class GptCrmChatAssistantIntegration(ClientBase):
         await cls._ensure_stream_workers()
 
         try:
-            raw_ids = await redis_client.smembers(cls._active_ci_ids_key())
+            raw_ids = await redis_ops.smembers(cls._active_ci_ids_key())
         except Exception as error:
             logger.warning("Failed to read active GPT assistant integrations set: %s", error)
             return {"total": 0, "workers": len(_WORKER_TASKS)}
@@ -1297,7 +1297,7 @@ class GptCrmChatAssistantIntegration(ClientBase):
 
     @classmethod
     async def _ack_stream_entry(cls, stream_key: str, entry_id: str) -> None:
-        await redis_client.xack(
+        await redis_ops.xack(
             stream_key,
             GptCrmChatAssistantConfig.STREAM_GROUP,
             entry_id,
@@ -1310,7 +1310,7 @@ class GptCrmChatAssistantIntegration(ClientBase):
         consumer: str,
     ) -> List[Tuple[str, Dict[str, Any]]]:
         try:
-            claimed_raw = await redis_client.xautoclaim(
+            claimed_raw = await redis_ops.xautoclaim(
                 stream_key,
                 GptCrmChatAssistantConfig.STREAM_GROUP,
                 consumer,
@@ -1366,7 +1366,7 @@ class GptCrmChatAssistantIntegration(ClientBase):
                         block_ms = GptCrmChatAssistantConfig.STREAM_READ_BLOCK_MS
                         if pending_entries:
                             block_ms = min(block_ms, 500)
-                        records = await redis_client.xreadgroup(
+                        records = await redis_ops.xreadgroup(
                             groupname=GptCrmChatAssistantConfig.STREAM_GROUP,
                             consumername=consumer,
                             streams={stream_key: ">"},
@@ -3047,9 +3047,9 @@ class GptCrmChatAssistantIntegration(ClientBase):
         max_per_hour = runtime.assistant_auto_send_max_per_chat_hour
         if max_per_hour > 0:
             try:
-                sent_count = int(await redis_client.incr(hour_key))
+                sent_count = int(await redis_ops.incr(hour_key))
                 if sent_count == 1:
-                    await redis_client.expire(hour_key, 3700)
+                    await redis_ops.expire(hour_key, 3700)
                 if sent_count > max_per_hour:
                     return False
             except Exception as error:

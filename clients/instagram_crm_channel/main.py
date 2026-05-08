@@ -20,7 +20,7 @@ from config.settings import settings as app_settings
 from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
 from core.redis import (
-    redis_client,
+    redis_ops,
     redis_error_contains,
     redis_expire_if_due,
     redis_sadd_with_ttl,
@@ -197,7 +197,7 @@ def _headers_ci(headers: Dict[str, Any], key: str) -> Optional[str]:
 
 
 def _redis_enabled() -> bool:
-    return bool(app_settings.redis_enabled and redis_client is not None)
+    return bool(app_settings.redis_enabled and redis_ops)
 
 
 class InstagramCrmChannelIntegration(ClientBase):
@@ -301,21 +301,21 @@ class InstagramCrmChannelIntegration(ClientBase):
     async def _redis_get(key: str) -> Optional[str]:
         if not _redis_enabled():
             return None
-        return await redis_client.get(key)
+        return await redis_ops.get(key)
 
     @staticmethod
     async def _redis_set(key: str, value: str, ttl_sec: int, min_ttl_sec: int = 60) -> None:
         if not _redis_enabled():
             return
         ttl = max(_to_int(ttl_sec, min_ttl_sec) or min_ttl_sec, min_ttl_sec)
-        await redis_client.set(key, value, ex=ttl)
+        await redis_ops.set(key, value, ex=ttl)
 
     @staticmethod
     async def _redis_set_nx(key: str, value: str, ttl_sec: int, min_ttl_sec: int = 60) -> bool:
         if not _redis_enabled():
             return False
         ttl = max(_to_int(ttl_sec, min_ttl_sec) or min_ttl_sec, min_ttl_sec)
-        return bool(await redis_client.set(key, value, ex=ttl, nx=True))
+        return bool(await redis_ops.set(key, value, ex=ttl, nx=True))
 
     @staticmethod
     async def _redis_delete(*keys: str) -> None:
@@ -323,7 +323,7 @@ class InstagramCrmChannelIntegration(ClientBase):
             return
         rows = [str(key).strip() for key in keys if str(key or "").strip()]
         if rows:
-            await redis_client.delete(*rows)
+            await redis_ops.delete(*rows)
 
     @classmethod
     def _resolve_stream_ttl(cls) -> int:
@@ -406,13 +406,13 @@ class InstagramCrmChannelIntegration(ClientBase):
             return
         ci = str(connected_integration_id or "").strip()
         if ci:
-            await redis_client.srem(cls._active_ci_ids_key(), ci)
+            await redis_ops.srem(cls._active_ci_ids_key(), ci)
 
     @classmethod
     async def _set_worker_heartbeat(cls, connected_integration_id: str) -> None:
         if not _redis_enabled():
             return
-        await redis_client.setex(
+        await redis_ops.setex(
             cls._worker_heartbeat_key(connected_integration_id),
             InstagramCrmChannelConfig.WORKER_HEARTBEAT_TTL_SEC,
             str(_now_ts()),
@@ -1658,7 +1658,7 @@ class InstagramCrmChannelIntegration(ClientBase):
         if not _redis_enabled():
             return []
         try:
-            raw_ids = await redis_client.smembers(cls._active_ci_ids_key())
+            raw_ids = await redis_ops.smembers(cls._active_ci_ids_key())
         except Exception as error:
             logger.warning("Failed to read active Instagram integrations set: %s", error)
             return []
@@ -1790,7 +1790,7 @@ class InstagramCrmChannelIntegration(ClientBase):
 
     @classmethod
     async def _ack_stream_entry(cls, stream_key: str, entry_id: str) -> None:
-        await redis_client.xack(
+        await redis_ops.xack(
             stream_key,
             InstagramCrmChannelConfig.STREAM_GROUP,
             entry_id,
@@ -1803,7 +1803,7 @@ class InstagramCrmChannelIntegration(ClientBase):
         consumer: str,
     ) -> List[Tuple[str, Dict[str, Any]]]:
         try:
-            claimed_raw = await redis_client.xautoclaim(
+            claimed_raw = await redis_ops.xautoclaim(
                 stream_key,
                 InstagramCrmChannelConfig.STREAM_GROUP,
                 consumer,
@@ -1854,7 +1854,7 @@ class InstagramCrmChannelIntegration(ClientBase):
                         )
 
                     try:
-                        records = await redis_client.xreadgroup(
+                        records = await redis_ops.xreadgroup(
                             groupname=InstagramCrmChannelConfig.STREAM_GROUP,
                             consumername=consumer,
                             streams={stream_key: ">"},

@@ -32,7 +32,7 @@ from config.settings import settings as app_settings
 from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
 from core.redis import (
-    redis_client,
+    redis_ops,
     redis_error_contains,
     redis_expire_if_due,
     redis_sadd_with_ttl,
@@ -265,7 +265,7 @@ def _json_loads(raw: str) -> Any:
 
 
 def _redis_enabled() -> bool:
-    return bool(app_settings.redis_enabled and redis_client is not None)
+    return bool(app_settings.redis_enabled and redis_ops)
 
 
 def _require_redis() -> None:
@@ -1290,7 +1290,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             _now_ts() + TelegramBotCrmChannelConfig.WEBHOOK_LOCAL_TTL
         )
         try:
-            await redis_client.setex(
+            await redis_ops.setex(
                 cls._webhook_refresh_cache_key(connected_integration_id),
                 TelegramBotCrmChannelConfig.WEBHOOK_REFRESH_TTL,
                 "1",
@@ -1305,7 +1305,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         _require_redis()
         _WEBHOOK_LOCAL_CACHE.pop(cls._webhook_refresh_cache_key(connected_integration_id), None)
         try:
-            await redis_client.delete(
+            await redis_ops.delete(
                 cls._webhook_refresh_cache_key(connected_integration_id)
             )
         except Exception as error:
@@ -1341,7 +1341,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             return
         if not force:
             try:
-                if await redis_client.exists(cache_key):
+                if await redis_ops.exists(cache_key):
                     _WEBHOOK_LOCAL_CACHE[cache_key] = (
                         _now_ts() + TelegramBotCrmChannelConfig.WEBHOOK_LOCAL_TTL
                     )
@@ -1364,7 +1364,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         try:
             if not force:
                 try:
-                    if await redis_client.exists(cache_key):
+                    if await redis_ops.exists(cache_key):
                         _WEBHOOK_LOCAL_CACHE[cache_key] = (
                             _now_ts() + TelegramBotCrmChannelConfig.WEBHOOK_LOCAL_TTL
                         )
@@ -1600,23 +1600,23 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         resolved_ttl = _parse_int(str(ttl_sec or ""), None)
         if not resolved_ttl or resolved_ttl <= 0:
             resolved_ttl = TelegramBotCrmChannelConfig.DEFAULT_STATE_TTL_SEC
-        await redis_client.set(key, value, ex=max(resolved_ttl, 1))
+        await redis_ops.set(key, value, ex=max(resolved_ttl, 1))
 
     @staticmethod
     async def _redis_get(key: str) -> Optional[str]:
         _require_redis()
-        return await redis_client.get(key)
+        return await redis_ops.get(key)
 
     @staticmethod
     async def _redis_set_nx_with_ttl(key: str, value: str, ttl_sec: int) -> bool:
         _require_redis()
-        result = await redis_client.set(key, value, ex=max(ttl_sec, 1), nx=True)
+        result = await redis_ops.set(key, value, ex=max(ttl_sec, 1), nx=True)
         return bool(result)
 
     @staticmethod
     async def _redis_set_with_ttl(key: str, value: str, ttl_sec: int) -> None:
         _require_redis()
-        await redis_client.set(key, value, ex=max(ttl_sec, 1))
+        await redis_ops.set(key, value, ex=max(ttl_sec, 1))
 
     @staticmethod
     async def _redis_delete(*keys: str) -> None:
@@ -1624,7 +1624,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         valid_keys = [str(k).strip() for k in keys if str(k).strip()]
         if not valid_keys:
             return
-        await redis_client.delete(*valid_keys)
+        await redis_ops.delete(*valid_keys)
 
     @staticmethod
     async def _acquire_lock(
@@ -1637,7 +1637,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         token = uuid.uuid4().hex
         deadline = asyncio.get_running_loop().time() + max(float(wait_seconds or 0.0), 0.0)
         while True:
-            ok = await redis_client.set(key, token, ex=max(ttl_sec, 1), nx=True)
+            ok = await redis_ops.set(key, token, ex=max(ttl_sec, 1), nx=True)
             if ok:
                 return token
             if asyncio.get_running_loop().time() >= deadline:
@@ -1653,7 +1653,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             "then return redis.call('del', KEYS[1]) else return 0 end"
         )
         try:
-            await redis_client.eval(script, 1, key, token)
+            await redis_ops.eval(script, 1, key, token)
         except Exception:
             pass
 
@@ -1788,7 +1788,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 settings_map,
             )
             try:
-                async with redis_client.pipeline(transaction=True) as pipe:
+                async with redis_ops.pipeline(transaction=True) as pipe:
                     await pipe.setex(
                         cache_key,
                         TelegramBotCrmChannelConfig.SETTINGS_TTL,
@@ -2586,7 +2586,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         await cls._ensure_stream_workers()
 
         try:
-            raw_ids = await redis_client.smembers(cls._active_ci_ids_key())
+            raw_ids = await redis_ops.smembers(cls._active_ci_ids_key())
         except Exception as error:
             logger.warning("Failed to read active Telegram integrations set: %s", error)
             return {"total": 0, "restored": 0, "failed": 0}
@@ -2627,7 +2627,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 restored += 1
             except ConnectedIntegrationInactiveError:
                 failed += 1
-                await redis_client.srem(cls._active_ci_ids_key(), connected_integration_id)
+                await redis_ops.srem(cls._active_ci_ids_key(), connected_integration_id)
                 logger.info(
                     "Telegram auto-restore skipped inactive integration: ci=%s",
                     connected_integration_id,
@@ -2732,7 +2732,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             try:
                 await self._stop_pollers_for_ci(self.connected_integration_id)
                 await self._stop_stream_workers(self.connected_integration_id)
-                await redis_client.srem(
+                await redis_ops.srem(
                     self._active_ci_ids_key(), self.connected_integration_id
                 )
                 async with _RUNTIME_LOCAL_LOCK:
@@ -2804,7 +2804,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
 
             await self._clear_webhook_refresh_cache(self.connected_integration_id)
             await self._stop_stream_workers(self.connected_integration_id)
-            await redis_client.srem(self._active_ci_ids_key(), self.connected_integration_id)
+            await redis_ops.srem(self._active_ci_ids_key(), self.connected_integration_id)
             async with _RUNTIME_LOCAL_LOCK:
                 _RUNTIME_LOCAL_CACHE.pop(str(self.connected_integration_id or "").strip(), None)
             return {"status": "disconnected"}
@@ -4844,7 +4844,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
     @classmethod
     async def _set_worker_heartbeat(cls, kind: str, worker_index: int) -> None:
         _require_redis()
-        await redis_client.setex(
+        await redis_ops.setex(
             cls._worker_heartbeat_key(kind, worker_index), 30, str(_now_ts())
         )
         await cls._touch_active_ci_ids_ttl()
@@ -4868,7 +4868,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                         await cls._process_claimed_entries(stream_key, consumer, kind)
                     await cls._touch_stream_ttl(stream_key)
                     try:
-                        records = await redis_client.xreadgroup(
+                        records = await redis_ops.xreadgroup(
                             groupname=TelegramBotCrmChannelConfig.STREAM_GROUP,
                             consumername=consumer,
                             streams={stream_key: ">"},
@@ -4921,7 +4921,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         kind: str,
     ) -> None:
         try:
-            claimed_raw = await redis_client.xautoclaim(
+            claimed_raw = await redis_ops.xautoclaim(
                 stream_key,
                 TelegramBotCrmChannelConfig.STREAM_GROUP,
                 consumer,
@@ -5010,7 +5010,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
     ) -> None:
         connected_integration_id = str(fields.get("connected_integration_id") or "").strip()
         if not connected_integration_id:
-            await redis_client.xack(
+            await redis_ops.xack(
                 stream_key, TelegramBotCrmChannelConfig.STREAM_GROUP, message_id
             )
             logger.warning(
@@ -5041,7 +5041,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 await cls._process_send_messages_event(connected_integration_id, fields)
             else:
                 raise ValueError(f"Unsupported stream kind: {kind}")
-            await redis_client.xack(
+            await redis_ops.xack(
                 stream_key, TelegramBotCrmChannelConfig.STREAM_GROUP, message_id
             )
             logger.debug(
@@ -5051,10 +5051,10 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 message_id,
             )
         except ConnectedIntegrationInactiveError as error:
-            await redis_client.xack(
+            await redis_ops.xack(
                 stream_key, TelegramBotCrmChannelConfig.STREAM_GROUP, message_id
             )
-            await redis_client.srem(cls._active_ci_ids_key(), connected_integration_id)
+            await redis_ops.srem(cls._active_ci_ids_key(), connected_integration_id)
             async with _RUNTIME_LOCAL_LOCK:
                 _RUNTIME_LOCAL_CACHE.pop(connected_integration_id, None)
             logger.info(
@@ -5080,7 +5080,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                         fields=fields,
                         error_text=str(error),
                     )
-                await redis_client.xack(
+                await redis_ops.xack(
                     stream_key, TelegramBotCrmChannelConfig.STREAM_GROUP, message_id
                 )
                 logger.error(
@@ -5096,7 +5096,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             retry_payload["attempt"] = str(attempts)
             retry_payload["last_error"] = str(error)
             await cls._enqueue(stream_key, retry_payload)
-            await redis_client.xack(
+            await redis_ops.xack(
                 stream_key, TelegramBotCrmChannelConfig.STREAM_GROUP, message_id
             )
             logger.warning(
@@ -5143,16 +5143,16 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                                 f"ConnectedIntegration {connected_integration_id} is inactive"
                             )
                         last_active_check = now
-                    acquired = await redis_client.set(
+                    acquired = await redis_ops.set(
                         lock_key,
                         owner,
                         ex=TelegramBotCrmChannelConfig.POLLING_LOCK_TTL_SEC,
                         nx=True,
                     )
                     if not acquired:
-                        current_owner = await redis_client.get(lock_key)
+                        current_owner = await redis_ops.get(lock_key)
                         if current_owner == owner:
-                            await redis_client.expire(
+                            await redis_ops.expire(
                                 lock_key, TelegramBotCrmChannelConfig.POLLING_LOCK_TTL_SEC
                             )
                             acquired = True
@@ -5205,7 +5205,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                         error,
                     )
                     if _redis_enabled():
-                        await redis_client.srem(
+                        await redis_ops.srem(
                             cls._active_ci_ids_key(),
                             connected_integration_id,
                         )

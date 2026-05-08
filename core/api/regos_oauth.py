@@ -11,15 +11,9 @@ import httpx
 
 from config.settings import settings
 from core.logger import setup_logger
+from core.redis import redis_ops as SHARED_REDIS
 
 logger = setup_logger("regos_oauth")
-
-
-try:
-    # ваш общий Redis-клиент, если есть
-    from core.redis import redis_client as SHARED_REDIS  # type: ignore
-except Exception:
-    SHARED_REDIS = None
 
 
 class RegosOAuthProvider:
@@ -41,7 +35,7 @@ class RegosOAuthProvider:
         client_secret: Optional[str] = None,
         http_client: Optional[httpx.AsyncClient] = None,
         http_timeout: int = 30,
-        redis_client=None,
+        redis_backend=None,
     ) -> None:
         # Где брать токен
         self._token_url = token_url or f"{settings.oauth_endpoint.rstrip('/')}/oauth/token"
@@ -53,16 +47,7 @@ class RegosOAuthProvider:
         self._owns_http = http_client is None
 
         # Redis (опционально)
-        self._redis = redis_client or SHARED_REDIS
-        if not self._redis and settings.redis_enabled:
-            import redis.asyncio as redis  # локальный импорт
-            self._redis = redis.Redis(
-                host=settings.redis_host,
-                port=settings.redis_port,
-                db=settings.redis_db,
-                password=settings.redis_password or None,
-                decode_responses=True,
-            )
+        self._redis = redis_backend or SHARED_REDIS
 
         # Ключи в Redis зависят от token_url + client_id
         digest = hashlib.sha1(f"{self._token_url}|{self._client_id}".encode()).hexdigest()

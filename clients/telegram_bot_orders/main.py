@@ -23,7 +23,7 @@ from config.settings import settings as app_settings
 from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
 from core.redis import (
-    redis_client,
+    redis_ops,
     redis_error_contains,
     redis_expire_if_due,
     redis_stream_add_with_ttl,
@@ -210,7 +210,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
 
     @staticmethod
     def _redis_enabled() -> bool:
-        return bool(app_settings.redis_enabled and redis_client)
+        return bool(app_settings.redis_enabled and redis_ops)
 
     @classmethod
     def _require_redis(cls) -> None:
@@ -298,7 +298,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         cls._require_redis()
         valid = [str(key).strip() for key in keys if str(key or "").strip()]
         if valid:
-            await redis_client.delete(*valid)
+            await redis_ops.delete(*valid)
 
     @classmethod
     async def _touch_stream_ttl(cls, stream_key: str, *, force: bool = False) -> None:
@@ -368,7 +368,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         field_args: List[str] = []
         for key, value in cls._serialize_stream_fields(fields).items():
             field_args.extend([key, value])
-        result = await redis_client.eval(
+        result = await redis_ops.eval(
             _ENQUEUE_DEDUPE_LUA,
             2,
             dedupe_key,
@@ -541,7 +541,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
 
     @classmethod
     async def _ack_stream_entry(cls, stream_key: str, entry_id: str) -> None:
-        await redis_client.xack(stream_key, TelegramBotOrdersConfig.STREAM_GROUP, entry_id)
+        await redis_ops.xack(stream_key, TelegramBotOrdersConfig.STREAM_GROUP, entry_id)
 
     @classmethod
     async def _process_claimed_entries(
@@ -550,7 +550,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         consumer: str,
     ) -> List[Tuple[str, Dict[str, Any]]]:
         try:
-            claimed_raw = await redis_client.xautoclaim(
+            claimed_raw = await redis_ops.xautoclaim(
                 stream_key,
                 TelegramBotOrdersConfig.STREAM_GROUP,
                 consumer,
@@ -595,7 +595,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                             )
 
                     try:
-                        records = await redis_client.xreadgroup(
+                        records = await redis_ops.xreadgroup(
                             groupname=TelegramBotOrdersConfig.STREAM_GROUP,
                             consumername=consumer,
                             streams={stream_key: ">"},
@@ -739,7 +739,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         token = uuid.uuid4().hex
         deadline = asyncio.get_running_loop().time() + max(float(wait_seconds or 0.0), 0.0)
         while True:
-            ok = await redis_client.set(key, token, ex=max(int(ttl_sec), 1), nx=True)
+            ok = await redis_ops.set(key, token, ex=max(int(ttl_sec), 1), nx=True)
             if ok:
                 return token
             if asyncio.get_running_loop().time() >= deadline:
@@ -755,7 +755,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             "then return redis.call('del', KEYS[1]) else return 0 end"
         )
         try:
-            await redis_client.eval(script, 1, key, token)
+            await redis_ops.eval(script, 1, key, token)
         except Exception as error:
             logger.warning("Failed to release Redis lock %s: %s", key, error)
 
@@ -799,7 +799,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         if local is not None:
             return local
         try:
-            cached = await redis_client.get(cache_key)
+            cached = await redis_ops.get(cache_key)
             if cached:
                 if isinstance(cached, (bytes, bytearray)):
                     cached = cached.decode("utf-8")
@@ -823,7 +823,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             )
 
         try:
-            cached = await redis_client.get(cache_key)
+            cached = await redis_ops.get(cache_key)
             if cached:
                 if isinstance(cached, (bytes, bytearray)):
                     cached = cached.decode("utf-8")
@@ -846,7 +846,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             payload = _json_dumps(settings_map)
             self._write_local_settings_cache(cache_key, settings_map)
             self._write_local_settings_cache(self._settings_stale_cache_key(), settings_map)
-            async with redis_client.pipeline(transaction=True) as pipe:
+            async with redis_ops.pipeline(transaction=True) as pipe:
                 await pipe.setex(cache_key, TelegramBotOrdersConfig.SETTINGS_TTL, payload)
                 await pipe.setex(
                     self._settings_stale_cache_key(),
@@ -869,7 +869,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         if local is not None:
             return local
         try:
-            cached = await redis_client.get(key)
+            cached = await redis_ops.get(key)
             if not cached:
                 return None
             if isinstance(cached, (bytes, bytearray)):
@@ -885,7 +885,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         keys = [self._settings_cache_key(), self._settings_stale_cache_key()]
         for key in keys:
             _SETTINGS_LOCAL_CACHE.pop(key, None)
-        await redis_client.delete(*keys)
+        await redis_ops.delete(*keys)
 
     async def _write_settings_cache(self, settings_map: Dict[str, str]) -> None:
         self._require_redis()
@@ -893,7 +893,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         payload = _json_dumps(normalized)
         self._write_local_settings_cache(self._settings_cache_key(), normalized)
         self._write_local_settings_cache(self._settings_stale_cache_key(), normalized)
-        async with redis_client.pipeline(transaction=True) as pipe:
+        async with redis_ops.pipeline(transaction=True) as pipe:
             await pipe.setex(self._settings_cache_key(), TelegramBotOrdersConfig.SETTINGS_TTL, payload)
             await pipe.setex(
                 self._settings_stale_cache_key(),
@@ -1003,7 +1003,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             _now_ts() + TelegramBotOrdersConfig.WEBHOOK_LOCAL_TTL
         )
         try:
-            await redis_client.setex(
+            await redis_ops.setex(
                 self._webhook_refresh_cache_key(),
                 TelegramBotOrdersConfig.WEBHOOK_REFRESH_TTL,
                 "1",
@@ -1017,7 +1017,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         self._require_redis()
         _WEBHOOK_LOCAL_CACHE.pop(self._webhook_refresh_cache_key(), None)
         try:
-            await redis_client.delete(self._webhook_refresh_cache_key())
+            await redis_ops.delete(self._webhook_refresh_cache_key())
         except Exception as error:
             logger.warning("Failed to clear webhook refresh cache: %s", error)
 
@@ -1030,7 +1030,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             return
         if not force:
             try:
-                if await redis_client.exists(cache_key):
+                if await redis_ops.exists(cache_key):
                     _WEBHOOK_LOCAL_CACHE[cache_key] = (
                         _now_ts() + TelegramBotOrdersConfig.WEBHOOK_LOCAL_TTL
                     )
@@ -1054,7 +1054,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         try:
             if not force:
                 try:
-                    if await redis_client.exists(cache_key):
+                    if await redis_ops.exists(cache_key):
                         _WEBHOOK_LOCAL_CACHE[cache_key] = (
                             _now_ts() + TelegramBotOrdersConfig.WEBHOOK_LOCAL_TTL
                         )
@@ -1579,7 +1579,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
     async def _get_cart(self, chat_id: str) -> List[dict]:
         self._require_redis()
         key = self._cart_key(chat_id)
-        cached = await redis_client.get(key)
+        cached = await redis_ops.get(key)
         if cached:
             if isinstance(cached, (bytes, bytearray)):
                 cached = cached.decode("utf-8")
@@ -1589,18 +1589,18 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
     async def _save_cart(self, chat_id: str, cart: List[dict]) -> None:
         self._require_redis()
         key = self._cart_key(chat_id)
-        await redis_client.setex(key, TelegramBotOrdersConfig.CART_TTL, _json_dumps(cart))
+        await redis_ops.setex(key, TelegramBotOrdersConfig.CART_TTL, _json_dumps(cart))
 
     async def _clear_cart(self, chat_id: str) -> None:
         self._require_redis()
         key = self._cart_key(chat_id)
-        await redis_client.delete(key)
+        await redis_ops.delete(key)
 
     async def _get_cart_state(self, chat_id: str) -> Dict[str, Any]:
         self._require_redis()
         key = self._cart_state_key(chat_id)
         defaults = {"awaiting_remove": False, "item_ids": [], "item_buttons": []}
-        cached = await redis_client.get(key)
+        cached = await redis_ops.get(key)
         if cached:
             if isinstance(cached, (bytes, bytearray)):
                 cached = cached.decode("utf-8")
@@ -1613,12 +1613,12 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         key = self._cart_state_key(chat_id)
         state = await self._get_cart_state(chat_id)
         state.update(extra)
-        await redis_client.setex(key, TelegramBotOrdersConfig.CART_TTL, _json_dumps(state))
+        await redis_ops.setex(key, TelegramBotOrdersConfig.CART_TTL, _json_dumps(state))
 
     async def _clear_cart_state(self, chat_id: str) -> None:
         self._require_redis()
         key = self._cart_state_key(chat_id)
-        await redis_client.delete(key)
+        await redis_ops.delete(key)
 
     async def _save_catalog_state(
         self, chat_id: str, search: Optional[str], offset: int, **extra: Any
@@ -1633,7 +1633,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             }
         )
         state.update(extra)
-        await redis_client.setex(key, TelegramBotOrdersConfig.CATALOG_TTL, _json_dumps(state))
+        await redis_ops.setex(key, TelegramBotOrdersConfig.CATALOG_TTL, _json_dumps(state))
 
     async def _get_catalog_state(self, chat_id: str) -> Dict[str, Any]:
         self._require_redis()
@@ -1653,7 +1653,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             "selected_item_id": None,
             "category_map": {},
         }
-        cached = await redis_client.get(key)
+        cached = await redis_ops.get(key)
         if cached:
             if isinstance(cached, (bytes, bytearray)):
                 cached = cached.decode("utf-8")
@@ -1664,7 +1664,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
     async def _get_order_state(self, chat_id: str) -> Dict[str, Any]:
         self._require_redis()
         key = self._order_state_key(chat_id)
-        cached = await redis_client.get(key)
+        cached = await redis_ops.get(key)
         if cached:
             if isinstance(cached, (bytes, bytearray)):
                 cached = cached.decode("utf-8")
@@ -1674,7 +1674,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
     async def _get_customer_phone(self, chat_id: str) -> Optional[str]:
         self._require_redis()
         key = self._customer_phone_key(chat_id)
-        cached = await redis_client.get(key)
+        cached = await redis_ops.get(key)
         if cached:
             if isinstance(cached, (bytes, bytearray)):
                 cached = cached.decode("utf-8")
@@ -1689,7 +1689,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             "view": None,
             "order_buttons": [],
         }
-        cached = await redis_client.get(key)
+        cached = await redis_ops.get(key)
         if cached:
             if isinstance(cached, (bytes, bytearray)):
                 cached = cached.decode("utf-8")
@@ -1721,13 +1721,13 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         self._require_redis()
         key = self._order_state_key(chat_id)
         ttl = await self._get_order_state_ttl()
-        await redis_client.setex(key, ttl, _json_dumps(state))
+        await redis_ops.setex(key, ttl, _json_dumps(state))
 
     async def _save_customer_phone(self, chat_id: str, phone: str) -> None:
         self._require_redis()
         key = self._customer_phone_key(chat_id)
         ttl = await self._get_order_state_ttl()
-        await redis_client.setex(key, ttl, phone)
+        await redis_ops.setex(key, ttl, phone)
 
     async def _save_orders_state(self, chat_id: str, **extra: Any) -> None:
         self._require_redis()
@@ -1735,22 +1735,22 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         state = await self._get_orders_state(chat_id)
         state.update(extra)
         ttl = await self._get_order_state_ttl()
-        await redis_client.setex(key, ttl, _json_dumps(state))
+        await redis_ops.setex(key, ttl, _json_dumps(state))
 
     async def _clear_order_state(self, chat_id: str) -> None:
         self._require_redis()
         key = self._order_state_key(chat_id)
-        await redis_client.delete(key)
+        await redis_ops.delete(key)
 
     async def _clear_customer_phone(self, chat_id: str) -> None:
         self._require_redis()
         key = self._customer_phone_key(chat_id)
-        await redis_client.delete(key)
+        await redis_ops.delete(key)
 
     async def _clear_orders_state(self, chat_id: str) -> None:
         self._require_redis()
         key = self._orders_state_key(chat_id)
-        await redis_client.delete(key)
+        await redis_ops.delete(key)
 
     @staticmethod
     def _md_escape(value: Optional[str]) -> str:
@@ -2424,7 +2424,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         key_hash = hashlib.sha1(hash_input.encode("utf-8")).hexdigest()
         cache_key = self._redis_key("cc", self.connected_integration_id, key_hash)
         self._require_redis()
-        cached = await redis_client.get(cache_key)
+        cached = await redis_ops.get(cache_key)
         if cached:
             if isinstance(cached, (bytes, bytearray)):
                 cached = cached.decode("utf-8")
@@ -2464,7 +2464,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                 ]
 
         cache_payload = [item.model_dump(mode="json") for item in result]
-        await redis_client.setex(
+        await redis_ops.setex(
             cache_key,
             TelegramBotOrdersConfig.CATALOG_TTL,
             _json_dumps(cache_payload),
@@ -2480,7 +2480,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         )
         cache_key = self._redis_key("cg", self.connected_integration_id)
         self._require_redis()
-        cached = await redis_client.get(cache_key)
+        cached = await redis_ops.get(cache_key)
         if cached:
             if isinstance(cached, (bytes, bytearray)):
                 cached = cached.decode("utf-8")
@@ -2496,7 +2496,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             groups = [group for group in result if group.name]
             groups.sort(key=lambda group: group.name.lower())
             payload = [group.model_dump(mode="json") for group in groups]
-            await redis_client.setex(
+            await redis_ops.setex(
                 cache_key,
                 TelegramBotOrdersConfig.GROUPS_TTL,
                 _json_dumps(payload),
@@ -2508,7 +2508,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
     async def _fetch_delivery_types(self) -> List[DeliveryType]:
         cache_key = self._redis_key("dt", self.connected_integration_id)
         self._require_redis()
-        cached = await redis_client.get(cache_key)
+        cached = await redis_ops.get(cache_key)
         if cached:
             if isinstance(cached, (bytes, bytearray)):
                 cached = cached.decode("utf-8")
@@ -2525,7 +2525,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             types_list = [entry for entry in result if getattr(entry, "name", None)]
             types_list.sort(key=lambda entry: entry.name.lower())
             payload = [entry.model_dump(mode="json") for entry in types_list]
-            await redis_client.setex(
+            await redis_ops.setex(
                 cache_key,
                 TelegramBotOrdersConfig.DELIVERY_TYPES_TTL,
                 _json_dumps(payload),
@@ -3025,7 +3025,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             price_type_id,
         )
         self._require_redis()
-        cached = await redis_client.get(cache_key)
+        cached = await redis_ops.get(cache_key)
         if cached:
             if isinstance(cached, (bytes, bytearray)):
                 cached = cached.decode("utf-8")
@@ -3043,7 +3043,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             resp = await api.references.item.get_ext(payload)
             item = resp.result[0] if resp.result else None
             if item:
-                await redis_client.setex(
+                await redis_ops.setex(
                     cache_key,
                     TelegramBotOrdersConfig.CATALOG_TTL,
                     _json_dumps(item.model_dump(mode="json")),

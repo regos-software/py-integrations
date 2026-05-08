@@ -47,7 +47,7 @@ from clients.base import ClientBase
 from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
 from core.redis import (
-    redis_client,
+    redis_ops,
     redis_error_contains,
     redis_expire_if_due,
     redis_stream_add_with_ttl,
@@ -299,7 +299,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
 
     async def _wait_chat_send_turn(self, chat_id: str) -> None:
         self._require_redis()
-        raw = await redis_client.get(self._chat_send_next_key(chat_id))
+        raw = await redis_ops.get(self._chat_send_next_key(chat_id))
         if not raw:
             return
         try:
@@ -316,7 +316,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         if delay <= 0:
             return
         ttl = max(int(delay) + 60, 60)
-        await redis_client.set(
+        await redis_ops.set(
             self._chat_send_next_key(chat_id),
             str(time.time() + delay),
             ex=ttl,
@@ -505,7 +505,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
 
     @staticmethod
     def _redis_enabled() -> bool:
-        return bool(settings.redis_enabled and redis_client)
+        return bool(settings.redis_enabled and redis_ops)
 
     @classmethod
     def _require_redis(cls) -> None:
@@ -590,12 +590,12 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         cls._require_redis()
         valid = [str(key).strip() for key in keys if str(key or "").strip()]
         if valid:
-            await redis_client.delete(*valid)
+            await redis_ops.delete(*valid)
 
     @classmethod
     async def _redis_set_nx(cls, key: str, value: str, ttl_sec: int) -> bool:
         cls._require_redis()
-        inserted = await redis_client.set(key, value, ex=max(int(ttl_sec or 1), 1), nx=True)
+        inserted = await redis_ops.set(key, value, ex=max(int(ttl_sec or 1), 1), nx=True)
         return bool(inserted)
 
     @classmethod
@@ -672,7 +672,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         field_args: List[str] = []
         for key, value in serialized.items():
             field_args.extend([key, value])
-        result = await redis_client.eval(
+        result = await redis_ops.eval(
             _ENQUEUE_DEDUPE_LUA,
             2,
             dedupe_key,
@@ -890,7 +890,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
 
     @classmethod
     async def _ack_stream_entry(cls, stream_key: str, entry_id: str) -> None:
-        await redis_client.xack(stream_key, TelegramBotConfig.STREAM_GROUP, entry_id)
+        await redis_ops.xack(stream_key, TelegramBotConfig.STREAM_GROUP, entry_id)
 
     @classmethod
     async def _process_claimed_entries(
@@ -899,7 +899,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         consumer: str,
     ) -> List[Tuple[str, Dict[str, Any]]]:
         try:
-            claimed_raw = await redis_client.xautoclaim(
+            claimed_raw = await redis_ops.xautoclaim(
                 stream_key,
                 TelegramBotConfig.STREAM_GROUP,
                 consumer,
@@ -944,7 +944,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                             )
 
                     try:
-                        records = await redis_client.xreadgroup(
+                        records = await redis_ops.xreadgroup(
                             groupname=TelegramBotConfig.STREAM_GROUP,
                             consumername=consumer,
                             streams={stream_key: ">"},
@@ -1095,7 +1095,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         deadline = asyncio.get_running_loop().time() + max(float(wait_seconds or 0.0), 0.0)
         while True:
             try:
-                ok = await redis_client.set(key, token, ex=max(int(ttl_sec), 1), nx=True)
+                ok = await redis_ops.set(key, token, ex=max(int(ttl_sec), 1), nx=True)
                 if ok:
                     return token
             except Exception as error:
@@ -1114,7 +1114,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             "then return redis.call('del', KEYS[1]) else return 0 end"
         )
         try:
-            await redis_client.eval(script, 1, key, token)
+            await redis_ops.eval(script, 1, key, token)
         except Exception as error:
             logger.warning("Failed to release Redis lock %s: %s", key, error)
 
@@ -1158,7 +1158,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             return local
         self._require_redis()
         try:
-            cached_data = await redis_client.get(cache_key)
+            cached_data = await redis_ops.get(cache_key)
             if not cached_data:
                 return None
             if isinstance(cached_data, (bytes, bytearray)):
@@ -1180,7 +1180,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         self._write_local_settings_cache(cache_key, normalized)
         self._write_local_settings_cache(self._settings_stale_cache_key(), normalized)
         try:
-            async with redis_client.pipeline(transaction=True) as pipe:
+            async with redis_ops.pipeline(transaction=True) as pipe:
                 await pipe.setex(cache_key, TelegramBotConfig.SETTINGS_TTL, payload)
                 await pipe.setex(
                     self._settings_stale_cache_key(),
@@ -1201,7 +1201,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             if key:
                 _SETTINGS_LOCAL_CACHE.pop(key, None)
         try:
-            await redis_client.delete(*[key for key in keys if key])
+            await redis_ops.delete(*[key for key in keys if key])
         except Exception as error:
             logger.warning("Failed to clear settings cache: %s", error)
 
@@ -1212,7 +1212,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             _now_ts() + TelegramBotConfig.WEBHOOK_LOCAL_TTL
         )
         try:
-            await redis_client.setex(
+            await redis_ops.setex(
                 self._webhook_refresh_cache_key(),
                 TelegramBotConfig.WEBHOOK_REFRESH_TTL,
                 "1",
@@ -1225,7 +1225,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             return
         _WEBHOOK_LOCAL_CACHE.pop(self._webhook_refresh_cache_key(), None)
         try:
-            await redis_client.delete(self._webhook_refresh_cache_key())
+            await redis_ops.delete(self._webhook_refresh_cache_key())
         except Exception as error:
             logger.warning("Failed to clear webhook refresh cache: %s", error)
 
@@ -1238,7 +1238,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             return
         if self._redis_enabled() and not force:
             try:
-                if await redis_client.exists(cache_key):
+                if await redis_ops.exists(cache_key):
                     _WEBHOOK_LOCAL_CACHE[cache_key] = (
                         _now_ts() + TelegramBotConfig.WEBHOOK_LOCAL_TTL
                     )
@@ -1263,7 +1263,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         try:
             if self._redis_enabled() and not force:
                 try:
-                    if await redis_client.exists(cache_key):
+                    if await redis_ops.exists(cache_key):
                         _WEBHOOK_LOCAL_CACHE[cache_key] = (
                             _now_ts() + TelegramBotConfig.WEBHOOK_LOCAL_TTL
                         )
@@ -1378,7 +1378,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         if not self._redis_enabled():
             return
         try:
-            await redis_client.setex(
+            await redis_ops.setex(
                 self._invalid_bot_token_cache_key(bot_token),
                 TelegramBotConfig.INVALID_TOKEN_TTL,
                 "1",
@@ -1390,7 +1390,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         if not self._redis_enabled():
             return False
         try:
-            return bool(await redis_client.exists(self._invalid_bot_token_cache_key(bot_token)))
+            return bool(await redis_ops.exists(self._invalid_bot_token_cache_key(bot_token)))
         except Exception as error:
             logger.warning("Failed to read invalid Telegram bot token marker: %s", error)
             return False

@@ -14,7 +14,7 @@ from schemas.integration.base import (
 from clients.base import ClientBase
 from core.logger import setup_logger
 from config.settings import settings
-from core.redis import redis_client
+from core.redis import redis_ops
 
 logger = setup_logger("getsms")
 
@@ -53,9 +53,9 @@ class GetSmsIntegration(IntegrationSmsBase, ClientBase):
     async def _get_settings(self, cache_key: str) -> dict:
         """Получение настроек GETSMS из Redis или API"""
         # 1. Пробуем Redis
-        if settings.redis_enabled and redis_client:
+        if settings.redis_enabled and redis_ops:
             try:
-                cached_data = await redis_client.get(cache_key)
+                cached_data = await redis_ops.get(cache_key)
                 if cached_data:
                     logger.debug(f"Настройки получены из Redis: {cache_key}")
                     if isinstance(cached_data, (bytes, bytearray)):
@@ -82,9 +82,9 @@ class GetSmsIntegration(IntegrationSmsBase, ClientBase):
             settings_map = {item.key.lower(): item.value for item in settings_response}
 
             # 3. Сохраняем в Redis
-            if settings.redis_enabled and redis_client:
+            if settings.redis_enabled and redis_ops:
                 try:
-                    await redis_client.setex(
+                    await redis_ops.setex(
                         cache_key, self.SETTINGS_TTL, json.dumps(settings_map)
                     )
                 except Exception as error:
