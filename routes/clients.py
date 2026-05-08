@@ -297,8 +297,13 @@ async def handle_integration(
 
     try:
         integration_instance = integration_class()
-        if connected_integration_id:
-            integration_instance.connected_integration_id = connected_integration_id
+        resolved_connected_integration_id = (
+            connected_integration_id
+            or str(request_body.connected_integration_id or "").strip()
+            or None
+        )
+        if resolved_connected_integration_id:
+            integration_instance.connected_integration_id = resolved_connected_integration_id
         logger.debug(f"Инстанс интеграции '{client}' успешно создан.")
     except Exception as e:
         logger.exception(f"Ошибка при инициализации интеграции '{client}': {e}")
@@ -323,14 +328,14 @@ async def handle_integration(
         )
 
     action_key = camel_to_snake(request_body.action)
-    if connected_integration_id and action_key not in {"disconnect"}:
+    if resolved_connected_integration_id and action_key not in {"disconnect"}:
         is_active = await _is_connected_integration_active(
-            connected_integration_id,
+            resolved_connected_integration_id,
             force_refresh=action_key in {"connect", "reconnect", "update_settings"},
         )
         if not is_active:
             await _cleanup_integration(integration_instance)
-            return _inactive_integration_error(connected_integration_id)
+            return _inactive_integration_error(resolved_connected_integration_id)
 
     try:
         logger.info(
