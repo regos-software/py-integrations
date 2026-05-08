@@ -241,6 +241,13 @@ def _sanitize_headers(headers) -> Dict[str, str]:
     }
 
 
+def _connected_integration_id_from_external_path(external_path: Optional[str]) -> Optional[str]:
+    first_segment = str(external_path or "").strip("/").split("/", 1)[0].strip()
+    if re.fullmatch(r"[0-9a-fA-F]{32}", first_segment):
+        return first_segment
+    return None
+
+
 async def _read_body_safely(request: Request) -> Any:
     """Считываем тело: пробуем JSON, затем текст, иначе bytes/None."""
     raw = await request.body()
@@ -502,6 +509,11 @@ async def handel_ui(
 
 
 @router.api_route(
+    "/clients/{client}/{external_path:path}",
+    methods=["GET", "POST", "PUT", "DELETE"],
+    include_in_schema=False,
+)
+@router.api_route(
     "/clients/{client}/external",
     methods=["GET", "POST", "PUT", "DELETE"],
     tags=["Integration"],
@@ -528,7 +540,11 @@ async def handle_external(
     logger.info(
         f"[external] Обработка внешнего запроса для '{client}' {request.method} {request.url}"
     )
-    logger.info(f"[external] Connected-Integration-Id: {connected_integration_id}")
+    resolved_connected_integration_id = (
+        connected_integration_id
+        or _connected_integration_id_from_external_path(external_path)
+    )
+    logger.info(f"[external] Connected-Integration-Id: {resolved_connected_integration_id}")
 
     integration_instance = None
     result = None
@@ -544,8 +560,8 @@ async def handle_external(
     # 2) Инстанс интеграции
     try:
         integration_instance = integration_class()
-        if connected_integration_id:
-            integration_instance.connected_integration_id = connected_integration_id
+        if resolved_connected_integration_id:
+            integration_instance.connected_integration_id = resolved_connected_integration_id
     except Exception as e:
         logger.exception(f"[external] Ошибка инициализации интеграции '{client}': {e}")
         return JSONResponse(
@@ -553,8 +569,8 @@ async def handle_external(
             content={"error": 500, "description": "Ошибка инициализации интеграции"},
         )
 
-    if connected_integration_id:
-        is_active = await _is_connected_integration_active(connected_integration_id)
+    if resolved_connected_integration_id:
+        is_active = await _is_connected_integration_active(resolved_connected_integration_id)
         if not is_active:
             await _cleanup_integration(integration_instance)
             return JSONResponse(
@@ -567,8 +583,8 @@ async def handle_external(
 
     # 3) Envelope: заголовки (без служебных) + Connected-Integration-Id, тело, query, и т.п.
     headers = _sanitize_headers(request.headers)
-    if connected_integration_id:
-        headers["Connected-Integration-Id"] = str(connected_integration_id)
+    if resolved_connected_integration_id:
+        headers["Connected-Integration-Id"] = str(resolved_connected_integration_id)
 
     raw_body = await request.body()
     body_data = await _read_body_safely(request)
