@@ -1,11 +1,14 @@
+import asyncio
 import hashlib
 import importlib
 import json
+import time
+import uuid
 from datetime import datetime, time as dt_time
 from decimal import Decimal
 from io import BytesIO
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.client.default import DefaultBotProperties
@@ -19,7 +22,14 @@ from clients.telegram_polling import telegram_polling_manager
 from config.settings import settings as app_settings
 from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
-from core.redis import redis_client
+from core.redis import (
+    redis_client,
+    redis_error_contains,
+    redis_expire_if_due,
+    redis_stream_add_with_ttl,
+    redis_stream_group_create_with_ttl,
+    redis_ttl_seconds,
+)
 from schemas.api.integrations.connected_integration_setting import (
     ConnectedIntegrationSettingEditRequest,
     ConnectedIntegrationSettingRequest,
@@ -58,6 +68,41 @@ except Exception:  # pragma: no cover - optional dependency
 
 logger = setup_logger("telegram_bot_orders")
 
+_INSTANCE_ID = uuid.uuid4().hex[:12]
+_STREAM_WORKER_TASKS: Dict[str, asyncio.Task] = {}
+_STREAM_WORKER_LOCK = asyncio.Lock()
+_STREAM_TTL_TOUCH_TS: Dict[str, int] = {}
+_STREAM_GROUP_READY: Set[str] = set()
+_STREAM_CLAIM_TS: Dict[str, int] = {}
+_SETTINGS_LOCAL_CACHE: Dict[str, Tuple[int, Dict[str, str]]] = {}
+_WEBHOOK_LOCAL_CACHE: Dict[str, int] = {}
+_BOT_RUNTIME_CACHE: Dict[str, Tuple[str, Any]] = {}
+_BOT_RUNTIME_LOCK = asyncio.Lock()
+
+_ENQUEUE_DEDUPE_LUA = """
+local ok = redis.call('set', KEYS[1], '1', 'EX', ARGV[1], 'NX')
+if not ok then
+  return 0
+end
+redis.call('xadd', KEYS[2], 'MAXLEN', '~', ARGV[2], '*', unpack(ARGV, 5))
+if ARGV[4] == '1' then
+  redis.call('expire', KEYS[2], ARGV[3])
+end
+return 1
+"""
+
+
+def _now_ts() -> int:
+    return int(time.time())
+
+
+def _json_dumps(payload: Any) -> str:
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _json_loads(raw: str) -> Any:
+    return json.loads(raw)
+
 
 class TelegramOrdersSettings(Enum):
     BOT_TOKEN = "BOT_TOKEN"
@@ -84,7 +129,12 @@ class TelegramOrdersSettings(Enum):
 
 
 class TelegramBotOrdersConfig:
-    SETTINGS_TTL = app_settings.redis_cache_ttl
+    SETTINGS_TTL = max(int(app_settings.redis_cache_ttl or 0), 60)
+    SETTINGS_STALE_TTL = max(SETTINGS_TTL * 10, 10 * 60)
+    SETTINGS_LOCAL_TTL = min(30, max(5, SETTINGS_TTL // 4))
+    SETTINGS_LOCAL_MAX = 10000
+    SETTINGS_LOCK_TTL = 10
+    SETTINGS_LOCK_WAIT_SECONDS = 2.0
     CART_TTL = 86400
     CATALOG_TTL = 60
     GROUPS_TTL = 300
@@ -96,7 +146,21 @@ class TelegramBotOrdersConfig:
     WEBHOOK_BASE_URL = (
         f"{(app_settings.proxy_integration_url or app_settings.integration_url).rstrip('/')}/external"
     )
-    WEBHOOK_REFRESH_TTL = app_settings.telegram_webhook_refresh_ttl
+    WEBHOOK_REFRESH_TTL = max(int(app_settings.telegram_webhook_refresh_ttl or 0), 60)
+    WEBHOOK_LOCAL_TTL = min(300, WEBHOOK_REFRESH_TTL)
+    WEBHOOK_LOCK_TTL = 30
+    REDIS_PREFIX = "tbo"
+    STREAM_GROUP = "tbow"
+    STREAM_TTL_SEC = 24 * 60 * 60
+    STREAM_MAXLEN = max(int(app_settings.telegram_orders_stream_maxlen or 0), 10000)
+    STREAM_BATCH_SIZE = max(int(app_settings.telegram_orders_stream_batch_size or 0), 1)
+    STREAM_WORKERS_PER_STREAM = max(int(app_settings.telegram_orders_stream_workers or 0), 1)
+    STREAM_READ_BLOCK_MS = 5000
+    STREAM_MIN_IDLE_MS = 60_000
+    STREAM_CLAIM_INTERVAL_SEC = 30
+    STREAM_MAX_RETRIES = 3
+    DEDUPE_TTL_SEC = 24 * 60 * 60
+    SEND_CONCURRENCY = max(int(app_settings.telegram_orders_send_concurrency or 0), 1)
 
 
 def _extract_chat_id(payload: dict) -> Optional[str]:
@@ -121,67 +185,762 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         self.bot: Optional[Bot] = None
         self.dispatcher: Optional[Dispatcher] = None
         self.handlers_registered = False
-        self._memory_carts: Dict[str, List[dict]] = {}
-        self._memory_catalog_state: Dict[str, Dict[str, Any]] = {}
-        self._memory_order_state: Dict[str, Dict[str, Any]] = {}
-        self._memory_customer_phone: Dict[str, str] = {}
         self._telegram_field_supported: Optional[bool] = None
-        self._memory_cart_state: Dict[str, Dict[str, Any]] = {}
-        self._memory_orders_state: Dict[str, Dict[str, Any]] = {}
+        self._owns_bot_session = True
+        self._bot_token_fingerprint = ""
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self._owns_bot_session:
+            await self._close_bot_session()
+
+    async def _close_bot_session(self) -> None:
+        if self.bot and getattr(self.bot, "session", None):
+            try:
+                await self.bot.session.close()
+            except Exception as error:
+                logger.warning("Failed to close bot session: %s", error)
+        self.bot = None
+        self.dispatcher = None
+        self.handlers_registered = False
 
     def _error_response(self, code: int, description: str) -> IntegrationErrorResponse:
         return IntegrationErrorResponse(
             result=IntegrationErrorModel(error=code, description=description)
         )
 
-    async def _fetch_settings(self, cache_key: str) -> Dict[str, str]:
-        if app_settings.redis_enabled and redis_client:
-            try:
-                cached = await redis_client.get(cache_key)
-                if cached:
-                    if isinstance(cached, (bytes, bytearray)):
-                        cached = cached.decode("utf-8")
-                    return json.loads(cached)
-            except Exception as error:
-                logger.warning(Texts.log_redis_error(error))
+    @staticmethod
+    def _redis_enabled() -> bool:
+        return bool(app_settings.redis_enabled and redis_client)
 
-        async with RegosAPI(connected_integration_id=self.connected_integration_id) as api:
-            settings_response = (
-                await api.integrations.connected_integration_setting.get(
-                    ConnectedIntegrationSettingRequest(
-                        connected_integration_id=self.connected_integration_id,
+    @classmethod
+    def _require_redis(cls) -> None:
+        if not cls._redis_enabled():
+            raise RuntimeError("Redis is required for telegram_bot_orders")
+
+    @staticmethod
+    def _redis_key(*parts: Any) -> str:
+        tokens = [str(item).strip() for item in parts if str(item or "").strip()]
+        if not tokens:
+            return TelegramBotOrdersConfig.REDIS_PREFIX
+        return f"{TelegramBotOrdersConfig.REDIS_PREFIX}:{':'.join(tokens)}"
+
+    @staticmethod
+    def _token_fingerprint(token: str) -> str:
+        return hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()[:16]
+
+    @staticmethod
+    def _kind_code(kind: str) -> str:
+        return {
+            "telegram_update": "u",
+            "send_messages": "s",
+            "webhook": "w",
+        }.get(kind, "x")
+
+    def _settings_cache_key(self) -> str:
+        return self._redis_key("st", self.connected_integration_id)
+
+    def _settings_stale_cache_key(self) -> str:
+        return self._redis_key("st", self.connected_integration_id, "s")
+
+    def _settings_fetch_lock_key(self) -> str:
+        return self._redis_key("stl", self.connected_integration_id)
+
+    @classmethod
+    def _updates_stream_key(cls) -> str:
+        return cls._redis_key("s", "u")
+
+    @classmethod
+    def _jobs_stream_key(cls) -> str:
+        return cls._redis_key("s", "j")
+
+    @classmethod
+    def _dlq_stream_key(cls) -> str:
+        return cls._redis_key("s", "dlq")
+
+    @classmethod
+    def _stream_key_for_kind(cls, kind: str) -> str:
+        if kind == "telegram_update":
+            return cls._updates_stream_key()
+        return cls._jobs_stream_key()
+
+    @classmethod
+    def _dedupe_key(cls, connected_integration_id: str, kind: str, event_id: str) -> str:
+        event_hash = hashlib.sha256(str(event_id or "").encode("utf-8")).hexdigest()[:20]
+        return cls._redis_key("d", cls._kind_code(kind), connected_integration_id, event_hash)
+
+    @classmethod
+    def _retry_dedupe_key(
+        cls,
+        connected_integration_id: str,
+        kind: str,
+        event_id: str,
+        attempt: int,
+    ) -> str:
+        event_hash = hashlib.sha256(str(event_id or "").encode("utf-8")).hexdigest()[:20]
+        return cls._redis_key(
+            "r",
+            cls._kind_code(kind),
+            connected_integration_id,
+            event_hash,
+            str(max(int(attempt), 1)),
+        )
+
+    @classmethod
+    def _worker_task_key(cls, stream_key: str, worker_index: int = 0) -> str:
+        return f"{str(stream_key or '').strip()}:{int(worker_index)}"
+
+    @classmethod
+    def _resolve_stream_ttl(cls) -> int:
+        return redis_ttl_seconds(TelegramBotOrdersConfig.STREAM_TTL_SEC)
+
+    @classmethod
+    async def _redis_delete(cls, *keys: str) -> None:
+        cls._require_redis()
+        valid = [str(key).strip() for key in keys if str(key or "").strip()]
+        if valid:
+            await redis_client.delete(*valid)
+
+    @classmethod
+    async def _touch_stream_ttl(cls, stream_key: str, *, force: bool = False) -> None:
+        cls._require_redis()
+        await redis_expire_if_due(
+            stream_key,
+            cls._resolve_stream_ttl(),
+            _STREAM_TTL_TOUCH_TS,
+            _now_ts(),
+            min_refresh_sec=10,
+            force=force,
+        )
+
+    @classmethod
+    async def _ensure_consumer_group(cls, stream_key: str, *, force: bool = False) -> None:
+        cls._require_redis()
+        if not force and stream_key in _STREAM_GROUP_READY:
+            return
+        await redis_stream_group_create_with_ttl(
+            stream_key,
+            TelegramBotOrdersConfig.STREAM_GROUP,
+            ttl_sec=cls._resolve_stream_ttl(),
+            touch_ts_by_key=_STREAM_TTL_TOUCH_TS,
+            now_ts=_now_ts(),
+        )
+        _STREAM_GROUP_READY.add(stream_key)
+
+    @classmethod
+    def _serialize_stream_fields(cls, fields: Dict[str, Any]) -> Dict[str, str]:
+        serialized: Dict[str, str] = {}
+        for key, value in fields.items():
+            if isinstance(value, (dict, list)):
+                serialized[str(key)] = _json_dumps(value)
+            elif value is None:
+                serialized[str(key)] = ""
+            else:
+                serialized[str(key)] = str(value)
+        return serialized
+
+    @classmethod
+    async def _enqueue_stream(cls, stream_key: str, fields: Dict[str, Any]) -> None:
+        cls._require_redis()
+        await redis_stream_add_with_ttl(
+            stream_key,
+            cls._serialize_stream_fields(fields),
+            maxlen=TelegramBotOrdersConfig.STREAM_MAXLEN,
+            ttl_sec=cls._resolve_stream_ttl(),
+            touch_ts_by_key=_STREAM_TTL_TOUCH_TS,
+            now_ts=_now_ts(),
+        )
+
+    @classmethod
+    async def _enqueue_stream_deduped(
+        cls,
+        *,
+        stream_key: str,
+        dedupe_key: str,
+        fields: Dict[str, Any],
+    ) -> bool:
+        cls._require_redis()
+        now_ts = _now_ts()
+        stream_ttl = cls._resolve_stream_ttl()
+        should_touch = (
+            now_ts - int(_STREAM_TTL_TOUCH_TS.get(stream_key) or 0)
+            >= min(3600, max(10, stream_ttl // 4))
+        )
+        field_args: List[str] = []
+        for key, value in cls._serialize_stream_fields(fields).items():
+            field_args.extend([key, value])
+        result = await redis_client.eval(
+            _ENQUEUE_DEDUPE_LUA,
+            2,
+            dedupe_key,
+            stream_key,
+            str(TelegramBotOrdersConfig.DEDUPE_TTL_SEC),
+            str(TelegramBotOrdersConfig.STREAM_MAXLEN),
+            str(stream_ttl),
+            "1" if should_touch else "0",
+            *field_args,
+        )
+        if should_touch and int(result or 0) == 1:
+            _STREAM_TTL_TOUCH_TS[stream_key] = now_ts
+        return int(result or 0) == 1
+
+    @classmethod
+    async def _enqueue_event(
+        cls,
+        connected_integration_id: str,
+        *,
+        kind: str,
+        payload: Any,
+        action: Optional[str] = None,
+        event_id: Optional[str] = None,
+        attempt: int = 0,
+        last_error: Optional[str] = None,
+    ) -> bool:
+        ci = str(connected_integration_id or "").strip()
+        if not ci:
+            raise ValueError("connected_integration_id is required")
+        if kind not in {"telegram_update", "send_messages", "webhook"}:
+            raise ValueError(f"Unsupported stream kind: {kind}")
+        await cls._ensure_stream_workers(ensure_groups=False)
+        stream_key = cls._stream_key_for_kind(kind)
+        fields = {
+            "connected_integration_id": ci,
+            "kind": kind,
+            "payload": payload,
+            "action": action or "",
+            "event_id": event_id or "",
+            "attempt": str(max(int(attempt), 0)),
+            "last_error": last_error or "",
+            "enqueued_at": str(_now_ts()),
+        }
+        if event_id:
+            attempt_value = max(int(attempt or 0), 0)
+            dedupe_key = (
+                cls._dedupe_key(ci, kind, event_id)
+                if attempt_value <= 0
+                else cls._retry_dedupe_key(ci, kind, event_id, attempt_value)
+            )
+            return await cls._enqueue_stream_deduped(
+                stream_key=stream_key,
+                dedupe_key=dedupe_key,
+                fields=fields,
+            )
+        await cls._enqueue_stream(stream_key, fields)
+        return True
+
+    @classmethod
+    def _stream_worker_specs(cls) -> List[Tuple[str, int]]:
+        return [
+            (stream_key, index)
+            for stream_key in (cls._updates_stream_key(), cls._jobs_stream_key())
+            for index in range(TelegramBotOrdersConfig.STREAM_WORKERS_PER_STREAM)
+        ]
+
+    @classmethod
+    def _stream_workers_ready(cls) -> bool:
+        for stream_key, index in cls._stream_worker_specs():
+            task = _STREAM_WORKER_TASKS.get(cls._worker_task_key(stream_key, index))
+            if not task or task.done():
+                return False
+        return True
+
+    @classmethod
+    async def _close_bot_runtime_cache(cls, connected_integration_id: Optional[str] = None) -> int:
+        ci = str(connected_integration_id or "").strip()
+        async with _BOT_RUNTIME_LOCK:
+            if ci:
+                entries = [(_BOT_RUNTIME_CACHE.pop(ci, None))]
+            else:
+                entries = list(_BOT_RUNTIME_CACHE.values())
+                _BOT_RUNTIME_CACHE.clear()
+        closed = 0
+        for entry in entries:
+            if not entry:
+                continue
+            _, runtime = entry
+            if isinstance(runtime, TelegramBotOrdersIntegration):
+                await runtime._close_bot_session()
+                closed += 1
+        return closed
+
+    @classmethod
+    async def _ensure_stream_workers(cls, *, ensure_groups: bool = True) -> None:
+        cls._require_redis()
+        if not ensure_groups and cls._stream_workers_ready():
+            return
+        for stream_key, index in cls._stream_worker_specs():
+            if ensure_groups:
+                await cls._ensure_consumer_group(stream_key)
+            task_key = cls._worker_task_key(stream_key, index)
+            async with _STREAM_WORKER_LOCK:
+                task = _STREAM_WORKER_TASKS.get(task_key)
+                if task and not task.done():
+                    continue
+                _STREAM_WORKER_TASKS[task_key] = asyncio.create_task(
+                    cls._stream_worker_loop(stream_key, index),
+                    name=f"tbo_stream_{stream_key.rsplit(':', 1)[-1]}_{index}",
+                )
+
+    @classmethod
+    async def shutdown_all(cls) -> None:
+        async with _STREAM_WORKER_LOCK:
+            tasks = list(_STREAM_WORKER_TASKS.values())
+            _STREAM_WORKER_TASKS.clear()
+        for task in tasks:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("Error while stopping Telegram orders stream worker")
+        await cls._close_bot_runtime_cache()
+
+    @classmethod
+    async def restore_active_connections(cls) -> Dict[str, int]:
+        cls._require_redis()
+        await cls._ensure_stream_workers()
+        return {"streams": 2, "workers": len(_STREAM_WORKER_TASKS)}
+
+    @classmethod
+    def _decode_stream_payload(cls, raw: Any) -> Any:
+        if isinstance(raw, (dict, list)):
+            return raw
+        try:
+            return _json_loads(str(raw or ""))
+        except Exception:
+            return {}
+
+    @classmethod
+    def _stream_entry_attempt(cls, fields: Dict[str, Any]) -> int:
+        try:
+            return max(int(str(fields.get("attempt") or "0").strip()), 0)
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _is_error_result(result: Any) -> bool:
+        if isinstance(result, IntegrationErrorResponse):
+            return True
+        if isinstance(result, dict):
+            if result.get("ok") is False:
+                return True
+            payload = result.get("result")
+            return isinstance(payload, dict) and "error" in payload
+        return False
+
+    @staticmethod
+    def _result_error_text(result: Any) -> str:
+        if isinstance(result, IntegrationErrorResponse):
+            return str(result.result.description)
+        if isinstance(result, dict):
+            payload = result.get("result")
+            if isinstance(payload, dict):
+                return str(payload.get("description") or payload)
+            return str(result)
+        return str(result)
+
+    @classmethod
+    async def _ack_stream_entry(cls, stream_key: str, entry_id: str) -> None:
+        await redis_client.xack(stream_key, TelegramBotOrdersConfig.STREAM_GROUP, entry_id)
+
+    @classmethod
+    async def _process_claimed_entries(
+        cls,
+        stream_key: str,
+        consumer: str,
+    ) -> List[Tuple[str, Dict[str, Any]]]:
+        try:
+            claimed_raw = await redis_client.xautoclaim(
+                stream_key,
+                TelegramBotOrdersConfig.STREAM_GROUP,
+                consumer,
+                min_idle_time=TelegramBotOrdersConfig.STREAM_MIN_IDLE_MS,
+                start_id="0-0",
+                count=TelegramBotOrdersConfig.STREAM_BATCH_SIZE,
+            )
+        except Exception as error:
+            if redis_error_contains(error, "NOGROUP"):
+                await cls._ensure_consumer_group(stream_key, force=True)
+                return []
+            logger.warning("Telegram orders stream xautoclaim failed: stream=%s error=%s", stream_key, error)
+            return []
+
+        entries: List[Tuple[str, Dict[str, Any]]] = []
+        if isinstance(claimed_raw, (list, tuple)) and len(claimed_raw) >= 2:
+            entries = claimed_raw[1] or []
+        return [
+            (str(entry_id), fields if isinstance(fields, dict) else {})
+            for entry_id, fields in entries
+        ]
+
+    @classmethod
+    async def _stream_worker_loop(cls, stream_key: str, worker_index: int) -> None:
+        task_key = cls._worker_task_key(stream_key, worker_index)
+        consumer = f"{_INSTANCE_ID}:{stream_key.rsplit(':', 1)[-1]}:{worker_index}"
+        logger.info("Telegram orders stream worker started: stream=%s", stream_key)
+        try:
+            await cls._ensure_consumer_group(stream_key)
+            while True:
+                try:
+                    await cls._touch_stream_ttl(stream_key)
+                    now_ts = _now_ts()
+                    last_claim_ts = int(_STREAM_CLAIM_TS.get(stream_key) or 0)
+                    if now_ts - last_claim_ts >= TelegramBotOrdersConfig.STREAM_CLAIM_INTERVAL_SEC:
+                        _STREAM_CLAIM_TS[stream_key] = now_ts
+                        for entry_id, fields in await cls._process_claimed_entries(stream_key, consumer):
+                            await cls._process_stream_entry(
+                                stream_key=stream_key,
+                                entry_id=entry_id,
+                                fields=fields,
+                            )
+
+                    try:
+                        records = await redis_client.xreadgroup(
+                            groupname=TelegramBotOrdersConfig.STREAM_GROUP,
+                            consumername=consumer,
+                            streams={stream_key: ">"},
+                            count=TelegramBotOrdersConfig.STREAM_BATCH_SIZE,
+                            block=TelegramBotOrdersConfig.STREAM_READ_BLOCK_MS,
+                        )
+                    except Exception as error:
+                        if redis_error_contains(error, "NOGROUP"):
+                            await cls._ensure_consumer_group(stream_key, force=True)
+                            continue
+                        raise
+
+                    for _, entries in records or []:
+                        for entry_id, fields in entries or []:
+                            await cls._process_stream_entry(
+                                stream_key=stream_key,
+                                entry_id=str(entry_id),
+                                fields=fields if isinstance(fields, dict) else {},
+                            )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    logger.exception("Telegram orders stream worker error: stream=%s error=%s", stream_key, error)
+                    await asyncio.sleep(2)
+        finally:
+            async with _STREAM_WORKER_LOCK:
+                current = _STREAM_WORKER_TASKS.get(task_key)
+                if current is asyncio.current_task():
+                    _STREAM_WORKER_TASKS.pop(task_key, None)
+
+    @classmethod
+    async def _process_stream_entry(
+        cls,
+        *,
+        stream_key: str,
+        entry_id: str,
+        fields: Dict[str, Any],
+    ) -> None:
+        ci = str(fields.get("connected_integration_id") or "").strip()
+        kind = str(fields.get("kind") or "").strip()
+        action = str(fields.get("action") or "").strip() or None
+        event_id = str(fields.get("event_id") or "").strip()
+        payload = cls._decode_stream_payload(fields.get("payload"))
+        if not ci or kind not in {"telegram_update", "send_messages", "webhook"}:
+            logger.warning("Telegram orders stream entry has invalid payload: entry_id=%s fields=%s", entry_id, fields)
+            await cls._ack_stream_entry(stream_key, entry_id)
+            return
+
+        attempt = cls._stream_entry_attempt(fields)
+        worker = cls()
+        worker.connected_integration_id = ci
+        chat_lock_key = ""
+        chat_lock_token: Optional[str] = None
+        try:
+            if kind == "telegram_update":
+                if not isinstance(payload, dict):
+                    raise ValueError("Telegram update payload must be an object")
+                chat_id = _extract_chat_id(payload)
+                if chat_id:
+                    chat_lock_key = cls._redis_key("cl", ci, chat_id)
+                    chat_lock_token = await cls._acquire_redis_lock(
+                        chat_lock_key,
+                        30,
+                        wait_seconds=10.0,
                     )
-                )
-            ).result
+                    if not chat_lock_token:
+                        raise TimeoutError(f"Timed out waiting for Telegram orders chat lock {ci}:{chat_id}")
+                result = await worker._process_telegram_update(payload)
+            elif kind == "send_messages":
+                messages = payload.get("messages") if isinstance(payload, dict) else payload
+                if not isinstance(messages, list):
+                    raise ValueError("send_messages payload must contain messages list")
+                result = await worker._send_messages_now(messages)
+            else:
+                webhook_data = payload if isinstance(payload, dict) else {}
+                result = await worker._process_webhook(action=action, data=webhook_data)
 
-        settings_map = {item.key.lower(): item.value for item in settings_response}
-        if app_settings.redis_enabled and redis_client:
-            try:
-                await redis_client.setex(
-                    cache_key,
-                    TelegramBotOrdersConfig.SETTINGS_TTL,
-                    json.dumps(settings_map),
+            if cls._is_error_result(result):
+                raise RuntimeError(cls._result_error_text(result))
+
+            logger.debug(
+                "Telegram orders stream job processed: ci=%s kind=%s entry_id=%s status=%s",
+                ci,
+                kind,
+                entry_id,
+                result.get("status") if isinstance(result, dict) else result,
+            )
+            await cls._ack_stream_entry(stream_key, entry_id)
+        except Exception as error:
+            next_attempt = attempt + 1
+            if next_attempt >= TelegramBotOrdersConfig.STREAM_MAX_RETRIES:
+                dlq_payload = dict(fields)
+                dlq_payload["attempt"] = str(next_attempt)
+                dlq_payload["source_stream"] = stream_key
+                dlq_payload["source_entry_id"] = entry_id
+                dlq_payload["failed_at"] = str(_now_ts())
+                dlq_payload["error"] = str(error)
+                await cls._enqueue_stream(cls._dlq_stream_key(), dlq_payload)
+                if event_id:
+                    await cls._redis_delete(cls._dedupe_key(ci, kind, event_id))
+                await cls._ack_stream_entry(stream_key, entry_id)
+                logger.error(
+                    "Telegram orders stream job moved to DLQ: ci=%s kind=%s entry_id=%s error=%s",
+                    ci,
+                    kind,
+                    entry_id,
+                    error,
                 )
-            except Exception as error:
-                logger.warning(Texts.log_settings_cache_fail(error))
-        return settings_map
+                return
+            await cls._enqueue_event(
+                ci,
+                kind=kind,
+                payload=payload,
+                action=action,
+                event_id=event_id,
+                attempt=next_attempt,
+                last_error=str(error),
+            )
+            await cls._ack_stream_entry(stream_key, entry_id)
+            logger.warning(
+                "Telegram orders stream job requeued: ci=%s kind=%s entry_id=%s attempt=%s error=%s",
+                ci,
+                kind,
+                entry_id,
+                next_attempt,
+                error,
+            )
+        finally:
+            if chat_lock_key and chat_lock_token:
+                await cls._release_redis_lock(chat_lock_key, chat_lock_token)
+            await worker.__aexit__(None, None, None)
+
+    @staticmethod
+    async def _acquire_redis_lock(
+        key: str,
+        ttl_sec: int,
+        *,
+        wait_seconds: float = 0.0,
+    ) -> Optional[str]:
+        TelegramBotOrdersIntegration._require_redis()
+        token = uuid.uuid4().hex
+        deadline = asyncio.get_running_loop().time() + max(float(wait_seconds or 0.0), 0.0)
+        while True:
+            ok = await redis_client.set(key, token, ex=max(int(ttl_sec), 1), nx=True)
+            if ok:
+                return token
+            if asyncio.get_running_loop().time() >= deadline:
+                return None
+            await asyncio.sleep(0.05)
+
+    @staticmethod
+    async def _release_redis_lock(key: str, token: Optional[str]) -> None:
+        if not (TelegramBotOrdersIntegration._redis_enabled() and token):
+            return
+        script = (
+            "if redis.call('get', KEYS[1]) == ARGV[1] "
+            "then return redis.call('del', KEYS[1]) else return 0 end"
+        )
+        try:
+            await redis_client.eval(script, 1, key, token)
+        except Exception as error:
+            logger.warning("Failed to release Redis lock %s: %s", key, error)
+
+    @classmethod
+    def _read_local_settings_cache(cls, cache_key: str) -> Optional[Dict[str, str]]:
+        entry = _SETTINGS_LOCAL_CACHE.get(cache_key)
+        if not entry:
+            return None
+        expires_at, settings_map = entry
+        if expires_at <= _now_ts():
+            _SETTINGS_LOCAL_CACHE.pop(cache_key, None)
+            return None
+        return dict(settings_map)
+
+    @classmethod
+    def _write_local_settings_cache(cls, cache_key: str, settings_map: Dict[str, str]) -> None:
+        now_ts = _now_ts()
+        if len(_SETTINGS_LOCAL_CACHE) >= TelegramBotOrdersConfig.SETTINGS_LOCAL_MAX:
+            for key, (expires_at, _) in list(_SETTINGS_LOCAL_CACHE.items()):
+                if expires_at <= now_ts:
+                    _SETTINGS_LOCAL_CACHE.pop(key, None)
+            while len(_SETTINGS_LOCAL_CACHE) >= TelegramBotOrdersConfig.SETTINGS_LOCAL_MAX:
+                _SETTINGS_LOCAL_CACHE.pop(next(iter(_SETTINGS_LOCAL_CACHE)), None)
+        _SETTINGS_LOCAL_CACHE[cache_key] = (
+            now_ts + TelegramBotOrdersConfig.SETTINGS_LOCAL_TTL,
+            dict(settings_map),
+        )
+
+    @staticmethod
+    def _normalize_settings_map(raw: Dict[str, Any]) -> Dict[str, str]:
+        normalized: Dict[str, str] = {}
+        for key, value in (raw or {}).items():
+            normalized_key = str(key or "").strip().lower()
+            if normalized_key:
+                normalized[normalized_key] = str(value or "").strip()
+        return normalized
+
+    async def _fetch_settings(self, cache_key: str) -> Dict[str, str]:
+        self._require_redis()
+        local = self._read_local_settings_cache(cache_key)
+        if local is not None:
+            return local
+        try:
+            cached = await redis_client.get(cache_key)
+            if cached:
+                if isinstance(cached, (bytes, bytearray)):
+                    cached = cached.decode("utf-8")
+                cached_map = self._normalize_settings_map(_json_loads(cached))
+                self._write_local_settings_cache(cache_key, cached_map)
+                return cached_map
+        except Exception as error:
+            logger.warning(Texts.log_redis_error(error))
+
+        lock_token = await self._acquire_redis_lock(
+            self._settings_fetch_lock_key(),
+            TelegramBotOrdersConfig.SETTINGS_LOCK_TTL,
+            wait_seconds=TelegramBotOrdersConfig.SETTINGS_LOCK_WAIT_SECONDS,
+        )
+        if not lock_token:
+            stale = await self._read_settings_stale_cache()
+            if stale is not None:
+                return stale
+            raise TimeoutError(
+                f"Timed out waiting for Telegram orders settings refresh for ID {self.connected_integration_id}"
+            )
+
+        try:
+            cached = await redis_client.get(cache_key)
+            if cached:
+                if isinstance(cached, (bytes, bytearray)):
+                    cached = cached.decode("utf-8")
+                cached_map = self._normalize_settings_map(_json_loads(cached))
+                self._write_local_settings_cache(cache_key, cached_map)
+                return cached_map
+
+            async with RegosAPI(connected_integration_id=self.connected_integration_id) as api:
+                settings_response = (
+                    await api.integrations.connected_integration_setting.get(
+                        ConnectedIntegrationSettingRequest(
+                            connected_integration_id=self.connected_integration_id,
+                        )
+                    )
+                ).result
+
+            settings_map = self._normalize_settings_map(
+                {item.key: item.value for item in (settings_response or [])}
+            )
+            payload = _json_dumps(settings_map)
+            self._write_local_settings_cache(cache_key, settings_map)
+            self._write_local_settings_cache(self._settings_stale_cache_key(), settings_map)
+            async with redis_client.pipeline(transaction=True) as pipe:
+                await pipe.setex(cache_key, TelegramBotOrdersConfig.SETTINGS_TTL, payload)
+                await pipe.setex(
+                    self._settings_stale_cache_key(),
+                    TelegramBotOrdersConfig.SETTINGS_STALE_TTL,
+                    payload,
+                )
+                await pipe.execute()
+            return settings_map
+        except Exception:
+            stale = await self._read_settings_stale_cache()
+            if stale is not None:
+                return stale
+            raise
+        finally:
+            await self._release_redis_lock(self._settings_fetch_lock_key(), lock_token)
+
+    async def _read_settings_stale_cache(self) -> Optional[Dict[str, str]]:
+        key = self._settings_stale_cache_key()
+        local = self._read_local_settings_cache(key)
+        if local is not None:
+            return local
+        try:
+            cached = await redis_client.get(key)
+            if not cached:
+                return None
+            if isinstance(cached, (bytes, bytearray)):
+                cached = cached.decode("utf-8")
+            settings_map = self._normalize_settings_map(_json_loads(cached))
+            self._write_local_settings_cache(key, settings_map)
+            return settings_map
+        except Exception:
+            return None
+
+    async def _clear_settings_cache(self) -> None:
+        self._require_redis()
+        keys = [self._settings_cache_key(), self._settings_stale_cache_key()]
+        for key in keys:
+            _SETTINGS_LOCAL_CACHE.pop(key, None)
+        await redis_client.delete(*keys)
+
+    async def _write_settings_cache(self, settings_map: Dict[str, str]) -> None:
+        self._require_redis()
+        normalized = self._normalize_settings_map(settings_map)
+        payload = _json_dumps(normalized)
+        self._write_local_settings_cache(self._settings_cache_key(), normalized)
+        self._write_local_settings_cache(self._settings_stale_cache_key(), normalized)
+        async with redis_client.pipeline(transaction=True) as pipe:
+            await pipe.setex(self._settings_cache_key(), TelegramBotOrdersConfig.SETTINGS_TTL, payload)
+            await pipe.setex(
+                self._settings_stale_cache_key(),
+                TelegramBotOrdersConfig.SETTINGS_STALE_TTL,
+                payload,
+            )
+            await pipe.execute()
 
     async def _get_settings_map(self) -> Dict[str, str]:
-        cache_key = f"clients:settings:telegram_bot_orders:{self.connected_integration_id}"
-        return await self._fetch_settings(cache_key)
+        return await self._fetch_settings(self._settings_cache_key())
 
     async def _initialize_bot(self) -> None:
         if self.bot:
             return
-        cache_key = f"clients:settings:telegram_bot_orders:{self.connected_integration_id}"
-        settings_map = await self._fetch_settings(cache_key)
+        ci = str(self.connected_integration_id or "").strip()
+        if not ci:
+            raise ValueError(Texts.ERROR_CONNECTED_ID_MISSING)
+        settings_map = await self._get_settings_map()
         bot_token = settings_map.get(TelegramOrdersSettings.BOT_TOKEN.value.lower())
         if not bot_token:
             raise ValueError(Texts.ERROR_BOT_TOKEN_MISSING)
-        self.bot = Bot(
-            token=bot_token,
-            default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN),
-        )
+        token_fingerprint = self._token_fingerprint(bot_token)
+        async with _BOT_RUNTIME_LOCK:
+            cached = _BOT_RUNTIME_CACHE.get(ci)
+            if cached and cached[0] == token_fingerprint:
+                runtime = cached[1]
+                self.bot = runtime.bot
+                self.dispatcher = runtime.dispatcher
+                self.handlers_registered = runtime.handlers_registered
+                self._bot_token_fingerprint = token_fingerprint
+                self._owns_bot_session = False
+                return
+            if cached:
+                _BOT_RUNTIME_CACHE.pop(ci, None)
+                await cached[1]._close_bot_session()
+            try:
+                self.bot = Bot(
+                    token=bot_token,
+                    default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN),
+                )
+            except Exception as error:
+                logger.error("Failed to initialize Telegram orders bot: %s", error)
+                raise
+            self._bot_token_fingerprint = token_fingerprint
+            await self._setup_handlers()
+            self._owns_bot_session = False
+            _BOT_RUNTIME_CACHE[ci] = (token_fingerprint, self)
 
     @staticmethod
     def _parse_bool(value: Optional[str]) -> Optional[bool]:
@@ -231,16 +990,18 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         return f"{self._resolve_webhook_base_url()}/{self.connected_integration_id}/external/"
 
     def _webhook_refresh_cache_key(self) -> str:
-        return (
-            "clients:telegram:webhook-refresh:"
-            f"{TelegramBotOrdersConfig.INTEGRATION_KEY}:{self.connected_integration_id}"
-        )
+        return self._redis_key("wh", self.connected_integration_id)
+
+    def _webhook_refresh_lock_key(self) -> str:
+        return self._redis_key("whl", self.connected_integration_id)
 
     async def _touch_webhook_refresh_cache(self) -> None:
-        if not (
-            app_settings.redis_enabled and redis_client and self.connected_integration_id
-        ):
+        if not self.connected_integration_id:
             return
+        self._require_redis()
+        _WEBHOOK_LOCAL_CACHE[self._webhook_refresh_cache_key()] = (
+            _now_ts() + TelegramBotOrdersConfig.WEBHOOK_LOCAL_TTL
+        )
         try:
             await redis_client.setex(
                 self._webhook_refresh_cache_key(),
@@ -251,29 +1012,55 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             logger.warning("Failed to update webhook refresh cache: %s", error)
 
     async def _clear_webhook_refresh_cache(self) -> None:
-        if not (
-            app_settings.redis_enabled and redis_client and self.connected_integration_id
-        ):
+        if not self.connected_integration_id:
             return
+        self._require_redis()
+        _WEBHOOK_LOCAL_CACHE.pop(self._webhook_refresh_cache_key(), None)
         try:
             await redis_client.delete(self._webhook_refresh_cache_key())
         except Exception as error:
             logger.warning("Failed to clear webhook refresh cache: %s", error)
 
-    async def _ensure_webhook_from_regos(self) -> None:
+    async def _ensure_webhook_from_regos(self, *, force: bool = False) -> None:
         if self._is_longpolling_mode() or not self.bot or not self.connected_integration_id:
             return
 
         cache_key = self._webhook_refresh_cache_key()
-        if app_settings.redis_enabled and redis_client:
+        if not force and int(_WEBHOOK_LOCAL_CACHE.get(cache_key) or 0) > _now_ts():
+            return
+        if not force:
             try:
                 if await redis_client.exists(cache_key):
+                    _WEBHOOK_LOCAL_CACHE[cache_key] = (
+                        _now_ts() + TelegramBotOrdersConfig.WEBHOOK_LOCAL_TTL
+                    )
                     return
             except Exception as error:
                 logger.warning("Failed to read webhook refresh cache: %s", error)
 
+        lock_token = await self._acquire_redis_lock(
+            self._webhook_refresh_lock_key(),
+            TelegramBotOrdersConfig.WEBHOOK_LOCK_TTL,
+            wait_seconds=TelegramBotOrdersConfig.SETTINGS_LOCK_WAIT_SECONDS if force else 0.0,
+        )
+        if not lock_token:
+            logger.debug(
+                "Skipping Telegram orders webhook refresh for ID %s: another instance is refreshing it",
+                self.connected_integration_id,
+            )
+            return
+
         webhook_url = self._build_webhook_url()
         try:
+            if not force:
+                try:
+                    if await redis_client.exists(cache_key):
+                        _WEBHOOK_LOCAL_CACHE[cache_key] = (
+                            _now_ts() + TelegramBotOrdersConfig.WEBHOOK_LOCAL_TTL
+                        )
+                        return
+                except Exception as error:
+                    logger.warning("Failed to re-read webhook refresh cache: %s", error)
             info = await self.bot.get_webhook_info()
             current_url = (getattr(info, "url", "") or "").rstrip("/")
             if current_url != webhook_url.rstrip("/"):
@@ -282,6 +1069,10 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             await self._touch_webhook_refresh_cache()
         except Exception as error:
             logger.warning("Failed to refresh webhook from REGOS webhook: %s", error)
+            if force:
+                raise
+        finally:
+            await self._release_redis_lock(self._webhook_refresh_lock_key(), lock_token)
 
     def _is_work_time(self, settings_map: Dict[str, str]) -> bool:
         enabled = self._parse_bool(
@@ -550,11 +1341,9 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         await telegram_polling_manager.stop(self._polling_key())
 
         webhook_url = self._build_webhook_url()
-        # Важно: сначала удалить старое состояние, потом поставить
         try:
-            await self.bot.delete_webhook(drop_pending_updates=True)
-            await self.bot.set_webhook(url=webhook_url)
-            await self._touch_webhook_refresh_cache()
+            await self._ensure_webhook_from_regos(force=True)
+            await self._ensure_stream_workers()
             info = await self.bot.get_webhook_info()
             logger.info("Webhook set result url=%r", info.url)
             return {"status": "connected", "mode": "webhook", "webhook_url": info.url}
@@ -564,12 +1353,19 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
 
     async def disconnect(self, **kwargs) -> Dict[str, Any]:
         await telegram_polling_manager.stop(self._polling_key())
+        cached = _BOT_RUNTIME_CACHE.get(str(self.connected_integration_id or "").strip())
+        if not self.bot and cached:
+            runtime = cached[1]
+            self.bot = runtime.bot
+            self.dispatcher = runtime.dispatcher
         if not self.bot:
+            await self._clear_webhook_refresh_cache()
+            await self._close_bot_runtime_cache(self.connected_integration_id)
             return {"status": "disconnected", "message": "Bot not initialized"}
         try:
             await self.bot.delete_webhook(drop_pending_updates=True)
             await self._clear_webhook_refresh_cache()
-            await self.bot.close()
+            await self._close_bot_runtime_cache(self.connected_integration_id)
             self.bot = None
             self.dispatcher = None
             self.handlers_registered = False
@@ -586,36 +1382,36 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         incoming_settings: Optional[List[Dict]] = None,
         **kwargs,
     ) -> IntegrationSuccessResponse:
-        cache_key = f"clients:settings:telegram_bot_orders:{self.connected_integration_id}"
-        if app_settings.redis_enabled and redis_client:
-            try:
-                await redis_client.delete(cache_key)
-            except Exception as error:
-                logger.warning(f"Redis error while clearing settings cache: {error}")
+        await self._clear_settings_cache()
         await self._clear_webhook_refresh_cache()
+        await self._close_bot_runtime_cache(self.connected_integration_id)
         await self.connect()
         return IntegrationSuccessResponse(result={"status": "settings updated"})
 
     async def handle_webhook(
         self, action: Optional[str] = None, data: Optional[Dict] = None, **kwargs
     ) -> Dict[str, Any]:
-        logger.info(
+        if not self.connected_integration_id:
+            return self._error_response(1000, Texts.ERROR_CONNECTED_ID_MISSING).dict()
+        queued = await self._enqueue_event(
+            self.connected_integration_id,
+            kind="webhook",
+            action=action,
+            payload=data or {},
+        )
+        return {"status": "accepted", "queued": 1 if queued else 0, "kind": "webhook"}
+
+    async def _process_webhook(
+        self, action: Optional[str] = None, data: Optional[Dict] = None, **kwargs
+    ) -> Dict[str, Any]:
+        logger.debug(
             "Processing REGOS webhook for orders bot (ID=%s, action=%s)",
             self.connected_integration_id,
             action,
         )
-
         if self._is_longpolling_mode():
             return {"status": "webhook processed", "mode": "longpolling"}
-
-        try:
-            await self._initialize_bot()
-        except Exception as error:
-            logger.error("Failed to initialize bot for webhook refresh: %s", error)
-            return self._error_response(
-                1002, f"No bot token in settings or bot init failed: {error}"
-            ).dict()
-
+        await self._initialize_bot()
         await self._ensure_webhook_from_regos()
         return {"status": "webhook processed"}
 
@@ -639,24 +1435,53 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
 
         self.handlers_registered = True
 
+    @staticmethod
+    def _telegram_update_event_id(payload: Dict[str, Any]) -> str:
+        update_id = str(payload.get("update_id") or "").strip()
+        if update_id:
+            return update_id
+        return hashlib.sha256(_json_dumps(payload).encode("utf-8")).hexdigest()
+
     async def send_messages(self, messages: List[Dict]) -> Any:
         if not self.connected_integration_id:
             return self._error_response(1000, Texts.ERROR_CONNECTED_ID_MISSING)
+        for msg in messages:
+            if not msg.get("recipient") or not msg.get("message"):
+                return self._error_response(1001, Texts.ERROR_INVALID_MESSAGE_FORMAT)
+        queued = await self._enqueue_event(
+            self.connected_integration_id,
+            kind="send_messages",
+            payload={"messages": messages},
+        )
+        return {
+            "status": "accepted",
+            "queued": 1 if queued else 0,
+            "kind": "send_messages",
+            "messages": len(messages),
+        }
 
+    async def _send_messages_now(self, messages: List[Dict]) -> Any:
         await self._initialize_bot()
 
-        results = []
-        for msg in messages:
+        semaphore = asyncio.Semaphore(TelegramBotOrdersConfig.SEND_CONCURRENCY)
+
+        async def send_one(msg: Dict) -> Dict:
             chat_id = msg.get("recipient")
             text = msg.get("message")
             if not chat_id or not text:
-                return self._error_response(1001, Texts.ERROR_INVALID_MESSAGE_FORMAT)
+                return {"status": "error", "error": Texts.ERROR_INVALID_MESSAGE_FORMAT}
             try:
                 await self.bot.send_message(chat_id=chat_id, text=text)
-                results.append({"status": "sent", "chat_id": chat_id})
+                return {"status": "sent", "chat_id": chat_id}
             except Exception as error:
                 logger.error(Texts.log_send_message_error(chat_id, error))
-                results.append({"status": "error", "chat_id": chat_id, "error": str(error)})
+                return {"status": "error", "chat_id": chat_id, "error": str(error)}
+
+        async def guarded_send(msg: Dict) -> Dict:
+            async with semaphore:
+                return await send_one(msg)
+
+        results = await asyncio.gather(*(guarded_send(msg) for msg in messages))
 
         return {"sent": len([r for r in results if r["status"] == "sent"]), "details": results}
 
@@ -664,7 +1489,24 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         payload = envelope.get("body")
         if not isinstance(payload, dict):
             return self._error_response(400, Texts.ERROR_EXPECTED_JSON).dict()
+        if not self.connected_integration_id:
+            return self._error_response(1000, Texts.ERROR_CONNECTED_ID_MISSING).dict()
+        queued = await self._enqueue_event(
+            self.connected_integration_id,
+            kind="telegram_update",
+            payload=payload,
+            event_id=self._telegram_update_event_id(payload),
+        )
+        return {
+            "status": "accepted",
+            "queued": 1 if queued else 0,
+            "kind": "telegram_update",
+            "connected_integration_id": self.connected_integration_id,
+            "update_id": payload.get("update_id"),
+            "duplicate": not queued,
+        }
 
+    async def _process_telegram_update(self, payload: Dict) -> Dict:
         await self._initialize_bot()
         await self._setup_handlers()
 
@@ -717,93 +1559,71 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         return parts[1].strip() or None
 
     def _cart_key(self, chat_id: str) -> str:
-        return f"clients:cart:telegram_bot_orders:{self.connected_integration_id}:{chat_id}"
+        return self._redis_key("cart", self.connected_integration_id, chat_id)
 
     def _cart_state_key(self, chat_id: str) -> str:
-        return (
-            f"clients:cart_state:telegram_bot_orders:{self.connected_integration_id}:{chat_id}"
-        )
+        return self._redis_key("cs", self.connected_integration_id, chat_id)
 
     def _catalog_state_key(self, chat_id: str) -> str:
-        return f"clients:catalog_state:telegram_bot_orders:{self.connected_integration_id}:{chat_id}"
+        return self._redis_key("cat", self.connected_integration_id, chat_id)
 
     def _order_state_key(self, chat_id: str) -> str:
-        return f"clients:order_state:telegram_bot_orders:{self.connected_integration_id}:{chat_id}"
+        return self._redis_key("ord", self.connected_integration_id, chat_id)
 
     def _customer_phone_key(self, chat_id: str) -> str:
-        return (
-            "clients:customer_phone:telegram_bot_orders:"
-            f"{self.connected_integration_id}:{chat_id}"
-        )
+        return self._redis_key("phone", self.connected_integration_id, chat_id)
 
     def _orders_state_key(self, chat_id: str) -> str:
-        return (
-            f"clients:orders_state:telegram_bot_orders:{self.connected_integration_id}:{chat_id}"
-        )
+        return self._redis_key("ords", self.connected_integration_id, chat_id)
 
     async def _get_cart(self, chat_id: str) -> List[dict]:
+        self._require_redis()
         key = self._cart_key(chat_id)
-        if app_settings.redis_enabled and redis_client:
-            cached = await redis_client.get(key)
-            if cached:
-                if isinstance(cached, (bytes, bytearray)):
-                    cached = cached.decode("utf-8")
-                return json.loads(cached)
-            return []
-        return self._memory_carts.get(key, [])
+        cached = await redis_client.get(key)
+        if cached:
+            if isinstance(cached, (bytes, bytearray)):
+                cached = cached.decode("utf-8")
+            return _json_loads(cached)
+        return []
 
     async def _save_cart(self, chat_id: str, cart: List[dict]) -> None:
+        self._require_redis()
         key = self._cart_key(chat_id)
-        if app_settings.redis_enabled and redis_client:
-            await redis_client.setex(key, TelegramBotOrdersConfig.CART_TTL, json.dumps(cart))
-            return
-        self._memory_carts[key] = cart
+        await redis_client.setex(key, TelegramBotOrdersConfig.CART_TTL, _json_dumps(cart))
 
     async def _clear_cart(self, chat_id: str) -> None:
+        self._require_redis()
         key = self._cart_key(chat_id)
-        if app_settings.redis_enabled and redis_client:
-            await redis_client.delete(key)
-            return
-        self._memory_carts.pop(key, None)
+        await redis_client.delete(key)
 
     async def _get_cart_state(self, chat_id: str) -> Dict[str, Any]:
+        self._require_redis()
         key = self._cart_state_key(chat_id)
         defaults = {"awaiting_remove": False, "item_ids": [], "item_buttons": []}
-        if app_settings.redis_enabled and redis_client:
-            cached = await redis_client.get(key)
-            if cached:
-                if isinstance(cached, (bytes, bytearray)):
-                    cached = cached.decode("utf-8")
-                payload = json.loads(cached)
-                defaults.update(payload)
-                return defaults
-            return defaults
-        payload = self._memory_cart_state.get(key)
-        if payload:
+        cached = await redis_client.get(key)
+        if cached:
+            if isinstance(cached, (bytes, bytearray)):
+                cached = cached.decode("utf-8")
+            payload = _json_loads(cached)
             defaults.update(payload)
         return defaults
 
     async def _save_cart_state(self, chat_id: str, **extra: Any) -> None:
+        self._require_redis()
         key = self._cart_state_key(chat_id)
         state = await self._get_cart_state(chat_id)
         state.update(extra)
-        if app_settings.redis_enabled and redis_client:
-            await redis_client.setex(
-                key, TelegramBotOrdersConfig.CART_TTL, json.dumps(state)
-            )
-            return
-        self._memory_cart_state[key] = state
+        await redis_client.setex(key, TelegramBotOrdersConfig.CART_TTL, _json_dumps(state))
 
     async def _clear_cart_state(self, chat_id: str) -> None:
+        self._require_redis()
         key = self._cart_state_key(chat_id)
-        if app_settings.redis_enabled and redis_client:
-            await redis_client.delete(key)
-            return
-        self._memory_cart_state.pop(key, None)
+        await redis_client.delete(key)
 
     async def _save_catalog_state(
         self, chat_id: str, search: Optional[str], offset: int, **extra: Any
     ) -> None:
+        self._require_redis()
         key = self._catalog_state_key(chat_id)
         state = await self._get_catalog_state(chat_id)
         state.update(
@@ -813,14 +1633,10 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             }
         )
         state.update(extra)
-        if app_settings.redis_enabled and redis_client:
-            await redis_client.setex(
-                key, TelegramBotOrdersConfig.CATALOG_TTL, json.dumps(state)
-            )
-            return
-        self._memory_catalog_state[key] = state
+        await redis_client.setex(key, TelegramBotOrdersConfig.CATALOG_TTL, _json_dumps(state))
 
     async def _get_catalog_state(self, chat_id: str) -> Dict[str, Any]:
+        self._require_redis()
         key = self._catalog_state_key(chat_id)
         defaults = {
             "search": None,
@@ -837,60 +1653,47 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             "selected_item_id": None,
             "category_map": {},
         }
-        if app_settings.redis_enabled and redis_client:
-            cached = await redis_client.get(key)
-            if cached:
-                if isinstance(cached, (bytes, bytearray)):
-                    cached = cached.decode("utf-8")
-                payload = json.loads(cached)
-                defaults.update(payload)
-                return defaults
-            return defaults
-        payload = self._memory_catalog_state.get(key)
-        if payload:
+        cached = await redis_client.get(key)
+        if cached:
+            if isinstance(cached, (bytes, bytearray)):
+                cached = cached.decode("utf-8")
+            payload = _json_loads(cached)
             defaults.update(payload)
         return defaults
 
     async def _get_order_state(self, chat_id: str) -> Dict[str, Any]:
+        self._require_redis()
         key = self._order_state_key(chat_id)
-        if app_settings.redis_enabled and redis_client:
-            cached = await redis_client.get(key)
-            if cached:
-                if isinstance(cached, (bytes, bytearray)):
-                    cached = cached.decode("utf-8")
-                return json.loads(cached)
-            return {}
-        return self._memory_order_state.get(key, {})
+        cached = await redis_client.get(key)
+        if cached:
+            if isinstance(cached, (bytes, bytearray)):
+                cached = cached.decode("utf-8")
+            return _json_loads(cached)
+        return {}
 
     async def _get_customer_phone(self, chat_id: str) -> Optional[str]:
+        self._require_redis()
         key = self._customer_phone_key(chat_id)
-        if app_settings.redis_enabled and redis_client:
-            cached = await redis_client.get(key)
-            if cached:
-                if isinstance(cached, (bytes, bytearray)):
-                    cached = cached.decode("utf-8")
-                return str(cached)
-            return None
-        return self._memory_customer_phone.get(key)
+        cached = await redis_client.get(key)
+        if cached:
+            if isinstance(cached, (bytes, bytearray)):
+                cached = cached.decode("utf-8")
+            return str(cached)
+        return None
 
     async def _get_orders_state(self, chat_id: str) -> Dict[str, Any]:
+        self._require_redis()
         key = self._orders_state_key(chat_id)
         defaults = {
             "offset": 0,
             "view": None,
             "order_buttons": [],
         }
-        if app_settings.redis_enabled and redis_client:
-            cached = await redis_client.get(key)
-            if cached:
-                if isinstance(cached, (bytes, bytearray)):
-                    cached = cached.decode("utf-8")
-                payload = json.loads(cached)
-                defaults.update(payload)
-                return defaults
-            return defaults
-        payload = self._memory_orders_state.get(key)
-        if payload:
+        cached = await redis_client.get(key)
+        if cached:
+            if isinstance(cached, (bytes, bytearray)):
+                cached = cached.decode("utf-8")
+            payload = _json_loads(cached)
             defaults.update(payload)
         return defaults
 
@@ -915,53 +1718,39 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         return TelegramBotOrdersConfig.ORDER_STATE_TTL
 
     async def _save_order_state(self, chat_id: str, state: Dict[str, Any]) -> None:
+        self._require_redis()
         key = self._order_state_key(chat_id)
-        if app_settings.redis_enabled and redis_client:
-            ttl = await self._get_order_state_ttl()
-            await redis_client.setex(
-                key, ttl, json.dumps(state)
-            )
-            return
-        self._memory_order_state[key] = state
+        ttl = await self._get_order_state_ttl()
+        await redis_client.setex(key, ttl, _json_dumps(state))
 
     async def _save_customer_phone(self, chat_id: str, phone: str) -> None:
+        self._require_redis()
         key = self._customer_phone_key(chat_id)
-        if app_settings.redis_enabled and redis_client:
-            ttl = await self._get_order_state_ttl()
-            await redis_client.setex(key, ttl, phone)
-            return
-        self._memory_customer_phone[key] = phone
+        ttl = await self._get_order_state_ttl()
+        await redis_client.setex(key, ttl, phone)
 
     async def _save_orders_state(self, chat_id: str, **extra: Any) -> None:
+        self._require_redis()
         key = self._orders_state_key(chat_id)
         state = await self._get_orders_state(chat_id)
         state.update(extra)
-        if app_settings.redis_enabled and redis_client:
-            ttl = await self._get_order_state_ttl()
-            await redis_client.setex(key, ttl, json.dumps(state))
-            return
-        self._memory_orders_state[key] = state
+        ttl = await self._get_order_state_ttl()
+        await redis_client.setex(key, ttl, _json_dumps(state))
 
     async def _clear_order_state(self, chat_id: str) -> None:
+        self._require_redis()
         key = self._order_state_key(chat_id)
-        if app_settings.redis_enabled and redis_client:
-            await redis_client.delete(key)
-            return
-        self._memory_order_state.pop(key, None)
+        await redis_client.delete(key)
 
     async def _clear_customer_phone(self, chat_id: str) -> None:
+        self._require_redis()
         key = self._customer_phone_key(chat_id)
-        if app_settings.redis_enabled and redis_client:
-            await redis_client.delete(key)
-            return
-        self._memory_customer_phone.pop(key, None)
+        await redis_client.delete(key)
 
     async def _clear_orders_state(self, chat_id: str) -> None:
+        self._require_redis()
         key = self._orders_state_key(chat_id)
-        if app_settings.redis_enabled and redis_client:
-            await redis_client.delete(key)
-            return
-        self._memory_orders_state.pop(key, None)
+        await redis_client.delete(key)
 
     @staticmethod
     def _md_escape(value: Optional[str]) -> str:
@@ -1399,7 +2188,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         return False
 
     async def _send_catalog_detail(self, chat_id: str, item_id: int) -> None:
-        cache_key = f"clients:settings:telegram_bot_orders:{self.connected_integration_id}"
+        cache_key = self._settings_cache_key()
         settings_map = await self._fetch_settings(cache_key)
         item_ext = await self._fetch_item_ext(item_id, settings_map)
 
@@ -1633,16 +2422,14 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             sort_keys=True,
         )
         key_hash = hashlib.sha1(hash_input.encode("utf-8")).hexdigest()
-        cache_key = (
-            f"clients:cache:catalog:{self.connected_integration_id}:{key_hash}"
-        )
-        if app_settings.redis_enabled and redis_client:
-            cached = await redis_client.get(cache_key)
-            if cached:
-                if isinstance(cached, (bytes, bytearray)):
-                    cached = cached.decode("utf-8")
-                raw_items = json.loads(cached)
-                return [ItemExt.model_validate(item) for item in raw_items]
+        cache_key = self._redis_key("cc", self.connected_integration_id, key_hash)
+        self._require_redis()
+        cached = await redis_client.get(cache_key)
+        if cached:
+            if isinstance(cached, (bytes, bytearray)):
+                cached = cached.decode("utf-8")
+            raw_items = _json_loads(cached)
+            return [ItemExt.model_validate(item) for item in raw_items]
 
         request_group_ids: Optional[List[int]]
         if group_id:
@@ -1676,17 +2463,13 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                     and entry.item.group.id == group_id
                 ]
 
-        if app_settings.redis_enabled and redis_client:
-            try:
-                cache_payload = [item.model_dump(mode="json") for item in result]
-                await redis_client.setex(
-                    cache_key,
-                    TelegramBotOrdersConfig.CATALOG_TTL,
-                    json.dumps(cache_payload, ensure_ascii=False),
-                )
-            except Exception as error:
-                logger.warning(Texts.log_catalog_cache_error(error))
-            return result
+        cache_payload = [item.model_dump(mode="json") for item in result]
+        await redis_client.setex(
+            cache_key,
+            TelegramBotOrdersConfig.CATALOG_TTL,
+            _json_dumps(cache_payload),
+        )
+        return result
 
     async def _fetch_categories(self) -> List[ItemGroup]:
         settings_map = await self._get_settings_map()
@@ -1695,46 +2478,42 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                 settings_map.get(TelegramOrdersSettings.ITEM_GROUP_IDS.value.lower())
             )
         )
-        cache_key = f"clients:cache:item_groups:{self.connected_integration_id}"
-        if app_settings.redis_enabled and redis_client:
-            cached = await redis_client.get(cache_key)
-            if cached:
-                if isinstance(cached, (bytes, bytearray)):
-                    cached = cached.decode("utf-8")
-                raw_groups = json.loads(cached)
-                groups = [ItemGroup.model_validate(group) for group in raw_groups]
-                if allowed_group_ids:
-                    groups = [group for group in groups if group.id in allowed_group_ids]
-                return groups
+        cache_key = self._redis_key("cg", self.connected_integration_id)
+        self._require_redis()
+        cached = await redis_client.get(cache_key)
+        if cached:
+            if isinstance(cached, (bytes, bytearray)):
+                cached = cached.decode("utf-8")
+            raw_groups = _json_loads(cached)
+            groups = [ItemGroup.model_validate(group) for group in raw_groups]
+            if allowed_group_ids:
+                groups = [group for group in groups if group.id in allowed_group_ids]
+            return groups
 
         async with RegosAPI(connected_integration_id=self.connected_integration_id) as api:
             resp = await api.references.item_group.get(ItemGroupGetRequest())
             result = resp.result or []
             groups = [group for group in result if group.name]
             groups.sort(key=lambda group: group.name.lower())
-            if app_settings.redis_enabled and redis_client:
-                try:
-                    payload = [group.model_dump(mode="json") for group in groups]
-                    await redis_client.setex(
-                        cache_key,
-                        TelegramBotOrdersConfig.GROUPS_TTL,
-                        json.dumps(payload, ensure_ascii=False),
-                    )
-                except Exception as error:
-                    logger.warning(Texts.log_catalog_cache_error(error))
+            payload = [group.model_dump(mode="json") for group in groups]
+            await redis_client.setex(
+                cache_key,
+                TelegramBotOrdersConfig.GROUPS_TTL,
+                _json_dumps(payload),
+            )
             if allowed_group_ids:
                 groups = [group for group in groups if group.id in allowed_group_ids]
             return groups
 
     async def _fetch_delivery_types(self) -> List[DeliveryType]:
-        cache_key = f"clients:cache:delivery_types:{self.connected_integration_id}"
-        if app_settings.redis_enabled and redis_client:
-            cached = await redis_client.get(cache_key)
-            if cached:
-                if isinstance(cached, (bytes, bytearray)):
-                    cached = cached.decode("utf-8")
-                raw_types = json.loads(cached)
-                return [DeliveryType.model_validate(entry) for entry in raw_types]
+        cache_key = self._redis_key("dt", self.connected_integration_id)
+        self._require_redis()
+        cached = await redis_client.get(cache_key)
+        if cached:
+            if isinstance(cached, (bytes, bytearray)):
+                cached = cached.decode("utf-8")
+            raw_types = _json_loads(cached)
+            return [DeliveryType.model_validate(entry) for entry in raw_types]
 
         async with RegosAPI(connected_integration_id=self.connected_integration_id) as api:
             resp = await api.references.delivery_type.get(
@@ -1745,16 +2524,12 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
             result = resp.result if isinstance(resp.result, list) else []
             types_list = [entry for entry in result if getattr(entry, "name", None)]
             types_list.sort(key=lambda entry: entry.name.lower())
-            if app_settings.redis_enabled and redis_client:
-                try:
-                    payload = [entry.model_dump(mode="json") for entry in types_list]
-                    await redis_client.setex(
-                        cache_key,
-                        TelegramBotOrdersConfig.DELIVERY_TYPES_TTL,
-                        json.dumps(payload, ensure_ascii=False),
-                    )
-                except Exception as error:
-                    logger.warning(Texts.log_catalog_cache_error(error))
+            payload = [entry.model_dump(mode="json") for entry in types_list]
+            await redis_client.setex(
+                cache_key,
+                TelegramBotOrdersConfig.DELIVERY_TYPES_TTL,
+                _json_dumps(payload),
+            )
             return types_list
 
     async def _fetch_orders(
@@ -2242,16 +3017,19 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         price_type_id = self._parse_int(
             settings_map.get(TelegramOrdersSettings.PRICE_TYPE_ID.value.lower())
         )
-        cache_key = (
-            f"clients:cache:item_ext:{self.connected_integration_id}:{item_id}:"
-            f"{stock_id}:{price_type_id}"
+        cache_key = self._redis_key(
+            "it",
+            self.connected_integration_id,
+            item_id,
+            stock_id,
+            price_type_id,
         )
-        if app_settings.redis_enabled and redis_client:
-            cached = await redis_client.get(cache_key)
-            if cached:
-                if isinstance(cached, (bytes, bytearray)):
-                    cached = cached.decode("utf-8")
-                return ItemExt.model_validate(json.loads(cached))
+        self._require_redis()
+        cached = await redis_client.get(cache_key)
+        if cached:
+            if isinstance(cached, (bytes, bytearray)):
+                cached = cached.decode("utf-8")
+            return ItemExt.model_validate(_json_loads(cached))
         req = ItemGetExtRequest(
             ids=[item_id],
             stock_id=stock_id,
@@ -2264,21 +3042,18 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         async with RegosAPI(connected_integration_id=self.connected_integration_id) as api:
             resp = await api.references.item.get_ext(payload)
             item = resp.result[0] if resp.result else None
-            if item and app_settings.redis_enabled and redis_client:
-                try:
-                    await redis_client.setex(
-                        cache_key,
-                        TelegramBotOrdersConfig.CATALOG_TTL,
-                        json.dumps(item.model_dump(mode="json"), ensure_ascii=False),
-                    )
-                except Exception as error:
-                    logger.warning(Texts.log_item_cache_error(error))
+            if item:
+                await redis_client.setex(
+                    cache_key,
+                    TelegramBotOrdersConfig.CATALOG_TTL,
+                    _json_dumps(item.model_dump(mode="json")),
+                )
             return item
 
     async def _add_item_to_cart(
         self, chat_id: str, item_id: int, qty: Decimal
     ) -> Optional[str]:
-        cache_key = f"clients:settings:telegram_bot_orders:{self.connected_integration_id}"
+        cache_key = self._settings_cache_key()
         settings_map = await self._fetch_settings(cache_key)
         item_ext = await self._fetch_item_ext(item_id, settings_map)
         if not item_ext:
@@ -2470,7 +3245,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         *,
         include_telegram_field: bool = False,
     ) -> bool:
-        cache_key = f"clients:settings:telegram_bot_orders:{self.connected_integration_id}"
+        cache_key = self._settings_cache_key()
         settings_map = await self._fetch_settings(cache_key)
         group_id = self._parse_int(
             settings_map.get(TelegramOrdersSettings.CUSTOMER_GROUP_ID.value.lower())

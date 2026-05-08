@@ -178,7 +178,7 @@ async def _cleanup_integration(
             logger.warning("Cleanup via __aexit__ failed: %s", error)
 
     bot = getattr(integration_instance, "bot", None)
-    if bot:
+    if bot and getattr(integration_instance, "_owns_bot_session", True):
         session = getattr(bot, "session", None)
         if session:
             try:
