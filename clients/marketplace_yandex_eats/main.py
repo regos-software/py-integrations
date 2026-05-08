@@ -72,6 +72,10 @@ def _error(code: int, description: str) -> Dict[str, Any]:
     return {"code": int(code), "description": str(description)}
 
 
+def _error_json(code: int, description: str, status_code: int) -> JSONResponse:
+    return _json([_error(code, description)], status_code)
+
+
 def _to_int(value: Any, default: int = 0) -> int:
     if value is None:
         return default
@@ -100,6 +104,26 @@ def _text(value: Any, default: str = "") -> str:
     if value is None:
         return default
     return str(value)
+
+
+def _optional_text(value: Any) -> Optional[str]:
+    text = _text(value).strip()
+    return text or None
+
+
+def _to_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if not text:
+        return default
+    if text in {"1", "true", "yes", "y", "on", "enabled", "enable"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", "disabled", "disable"}:
+        return False
+    return default
 
 
 def _nested(data: Any, path: str, default: Any = None) -> Any:
@@ -140,6 +164,21 @@ def _lookup(data: Dict[str, Any], *names: str) -> Any:
         if name.lower() in lower:
             return lower[name.lower()]
     return None
+
+
+def _query_int(
+    query: Dict[str, Any],
+    name: str,
+    default: int,
+    *,
+    min_value: int = 0,
+    max_value: Optional[int] = None,
+) -> int:
+    value = _to_int(query.get(name), default)
+    value = max(value, min_value)
+    if max_value is not None:
+        value = min(value, max_value)
+    return value
 
 
 def _normalize_settings_map(raw: Dict[str, Any]) -> Dict[str, str]:
@@ -218,6 +257,30 @@ def _order_status_id(order: Dict[str, Any]) -> int:
 class YandexEatsIntegration(ClientBase):
     integration_key = "marketplace_yandex_eats"
     redis_prefix = "mp:ye"
+    TOKEN_EXPIRES_IN = 300
+    NOMENCLATURE_DEFAULT_LIMIT = 5000
+    NOMENCLATURE_MAX_LIMIT = 10000
+    NOMENCLATURE_PAGINATION_SETTING_KEYS = (
+        "nomenclature_pagination",
+        "nomenclature_pagination_enabled",
+        "pagination",
+        "pagination_enabled",
+    )
+    REGOS_PAGE_LIMIT = 10000
+    REGOS_STATUS_CANCELLED = 27
+    YANDEX_STATUS_CANCELLED = "CANCELLED"
+    YANDEX_STATUS_ACK_ONLY = frozenset({"TAKEN_BY_COURIER", "DELIVERED"})
+    YANDEX_STATUS_UPDATE_ALLOWED = frozenset({YANDEX_STATUS_CANCELLED}) | YANDEX_STATUS_ACK_ONLY
+    YANDEX_STATUS_BY_REGOS_STATUS = {
+        22: "NEW",
+        23: "ACCEPTED_BY_RESTAURANT",
+        24: "COOKING",
+        25: "COOKING",
+        26: "READY",
+        27: "CANCELLED",
+        28: "READY",
+        31: "READY",
+    }
 
     def __init__(self) -> None:
         self.connected_integration_id: Optional[str] = None
@@ -239,14 +302,26 @@ class YandexEatsIntegration(ClientBase):
     def _settings_lock_key(self) -> str:
         return self._redis_key("sl")
 
+    def _groups_cache_key(self) -> str:
+        return self._redis_key("g")
+
+    def _groups_lock_key(self) -> str:
+        return self._redis_key("gl")
+
     def _token_lock_key(self) -> str:
         return self._redis_key("tl")
+
+    def _access_token_key(self, token: str) -> str:
+        return self._redis_key("t", _sha1(token)[:16])
 
     def _order_lock_key(self, external_order_id: str) -> str:
         return self._redis_key("ol", _sha1(external_order_id)[:16])
 
     def _order_dedupe_key(self, external_order_id: str) -> str:
         return self._redis_key("od", _sha1(external_order_id)[:16])
+
+    def _order_meta_key(self, order_id: int) -> str:
+        return self._redis_key("om", int(order_id))
 
     async def handle_external(self, envelope: Optional[Dict[str, Any]] = None, **kwargs: Any) -> Any:
         if envelope is None:
@@ -261,16 +336,24 @@ class YandexEatsIntegration(ClientBase):
 
         try:
             if method == "POST" and path in {"v1/security/oauth/token", "security/oauth/token"}:
-                return _json({"access_token": await self._issue_token(_body(envelope))})
+                return _json(
+                    {
+                        "access_token": await self._issue_token(_body(envelope)),
+                        "expires_in": self.TOKEN_EXPIRES_IN,
+                    }
+                )
 
             valid, auth_error = await self._validate_token(_authorization(envelope))
             if not valid:
-                return _json(auth_error, 400 if auth_error["code"] != 500 else 500)
+                if auth_error["code"] == 401:
+                    return _json({"reason": auth_error["description"]}, 401)
+                status_code = 500 if auth_error["code"] == 500 else 400
+                return _json([auth_error], status_code)
 
             if method == "GET" and path.startswith("v1/nomenclature/"):
-                return await self._handle_nomenclature(path)
+                return await self._handle_nomenclature(path, envelope.get("query") or {})
             if method == "GET" and path.startswith("nomenclature/"):
-                return await self._handle_nomenclature(path)
+                return await self._handle_nomenclature(path, envelope.get("query") or {})
             if method == "POST" and path in {"v1/order", "order"}:
                 return _json(await self._create_order(_body(envelope)))
 
@@ -281,20 +364,20 @@ class YandexEatsIntegration(ClientBase):
                 if method == "GET" and subpath == "status":
                     return _json(await self._get_order_status(order_id))
                 if method == "PUT" and subpath == "status":
-                    await self._cancel_order(order_id)
+                    await self._update_order_status(order_id, _body(envelope))
                     return Response(status_code=204)
                 if method == "PUT" and subpath == "":
-                    return _json(_error(400, "Изменение заказа невозможно"), 400)
+                    return _error_json(400, "Изменение заказа невозможно", 400)
 
-            return _json(_error(404, "Route not found"), 404)
+            return _error_json(404, "Route not found", 404)
         except YandexEatsError as error:
-            return _json(_error(error.code, error.description), error.status_code)
+            return _error_json(error.code, error.description, error.status_code)
         except httpx.HTTPStatusError as error:
             logger.warning("YandexEats REGOS HTTP error: %s", error)
-            return _json(_error(500, "Внутренняя ошибка сервера"), 500)
+            return _error_json(500, "Внутренняя ошибка сервера", 500)
         except Exception as error:
             logger.exception("YandexEats external handling failed: %s", error)
-            return _json(_error(500, "Внутренняя ошибка сервера"), 500)
+            return _error_json(500, "Внутренняя ошибка сервера", 500)
 
     async def check(self) -> Dict[str, Any]:
         await self._load_integration()
@@ -306,7 +389,7 @@ class YandexEatsIntegration(ClientBase):
             return {"status": "error", "error": "connected_integration_id is required"}
         self._integration_key = None
         self._settings = None
-        await redis_delete_keys(self._active_cache_key(), self._settings_cache_key())
+        await redis_delete_keys(self._active_cache_key(), self._settings_cache_key(), self._groups_cache_key())
         return {"status": "settings updated"}
 
     async def _load_integration(self) -> str:
@@ -421,6 +504,12 @@ class YandexEatsIntegration(ClientBase):
     async def _issue_token(self, data: Dict[str, Any]) -> str:
         if not self._ci():
             raise YandexEatsError(100, "connected-integration-id не получен")
+        grant_type = _text(_lookup(data, "grant_type", "grantType")).strip().lower()
+        if grant_type != "client_credentials":
+            raise YandexEatsError(400, "Unsupported grant_type. Expected 'client_credentials'.")
+        scope = _text(_lookup(data, "scope")).strip()
+        if set(scope.split()) != {"read", "write"}:
+            raise YandexEatsError(400, "Unsupported scope. Expected 'read write'.")
         lock_token = await redis_acquire_lock(
             self._token_lock_key(),
             settings.marketplace_lock_ttl,
@@ -436,23 +525,36 @@ class YandexEatsIntegration(ClientBase):
             client_secret = _text(_lookup(data, "client_secret", "client_Secret", "Client_Secret", "clientSecret")).strip()
             if client_id != settings_map.get("client_id") or client_secret != settings_map.get("client_secret"):
                 raise YandexEatsError(100, "Invalid client credentials")
+            old_token = settings_map.get("access_token")
             token = uuid.uuid4().hex.lower()
             await self._edit_setting("ACCESS_TOKEN", token, lock=False)
+            await redis_set_json(
+                self._access_token_key(token),
+                {"active": True},
+                self.TOKEN_EXPIRES_IN,
+                local_ttl_sec=0,
+            )
+            if old_token and old_token != token:
+                await redis_delete_keys(self._access_token_key(old_token))
             return token
         finally:
             await redis_release_lock(self._token_lock_key(), lock_token)
 
     async def _validate_token(self, authorization: str) -> Tuple[bool, Dict[str, Any]]:
         if not authorization:
-            return False, _error(400, "Authorization header is missing")
+            return False, _error(401, "Authorization header is missing")
         if not authorization.startswith("Bearer "):
-            return False, _error(400, "Invalid token format")
+            return False, _error(401, "Invalid token format")
         settings_map = await self._load_settings()
         access_token = settings_map.get("access_token")
         if not access_token:
-            return False, _error(400, "Settings or AccessToken not found")
-        if authorization.split(" ", 1)[1].strip() != access_token:
-            return False, _error(400, "Invalid AccessToken")
+            return False, _error(500, "Settings or AccessToken not found")
+        token = authorization.split(" ", 1)[1].strip()
+        if token != access_token:
+            return False, _error(401, "Invalid AccessToken")
+        token_state = await redis_get_json(self._access_token_key(token), local_ttl_sec=0)
+        if not isinstance(token_state, dict):
+            return False, _error(401, "Access token has been expired. You should request a new one")
         return True, {}
 
     async def _read_order_dedupe(self, external_order_id: str) -> int:
@@ -468,19 +570,51 @@ class YandexEatsIntegration(ClientBase):
                 local_ttl_sec=0,
             )
 
-    async def _handle_nomenclature(self, path: str) -> JSONResponse:
-        parts = path.split("/")
-        if parts[0] == "v1":
-            store_id = _to_int(parts[2]) if len(parts) > 2 else 0
-            action = parts[3] if len(parts) > 3 else ""
-        else:
-            store_id = _to_int(parts[1]) if len(parts) > 1 else 0
-            action = parts[2] if len(parts) > 2 else ""
+    @staticmethod
+    def _order_meta_from_payload(order: Dict[str, Any]) -> Dict[str, Any]:
+        return _drop_none(
+            {
+                "discriminator": _optional_text(order.get("discriminator") or order.get("Discriminator")) or "yandex",
+                "platform": _optional_text(order.get("platform") or order.get("Platform")),
+                "restaurantId": _optional_text(order.get("restaurantId") or order.get("RestaurantId")),
+                "paymentInfo": order.get("paymentInfo") or order.get("PaymentInfo"),
+                "deliveryInfo": order.get("deliveryInfo") or order.get("DeliveryInfo"),
+                "comment": _optional_text(order.get("comment") or order.get("Comment")),
+            }
+        )
+
+    async def _write_order_meta(self, order_id: int, order: Dict[str, Any]) -> None:
+        if order_id <= 0:
+            return
+        await redis_set_json(
+            self._order_meta_key(order_id),
+            self._order_meta_from_payload(order),
+            settings.marketplace_order_dedupe_ttl,
+            local_ttl_sec=0,
+        )
+
+    async def _read_order_meta(self, order_id: int) -> Dict[str, Any]:
+        cached = await redis_get_json(self._order_meta_key(order_id), local_ttl_sec=0)
+        return cached if isinstance(cached, dict) else {}
+
+    async def _handle_nomenclature(self, path: str, query: Dict[str, Any]) -> JSONResponse:
+        parts = [part for part in path.split("/") if part]
+        if parts and parts[0] == "v1":
+            parts = parts[1:]
+        if len(parts) == 2 and parts[0] == "nomenclature" and parts[1] == "composition":
+            return _json(await self._brand_composition(query))
+        if len(parts) < 3 or parts[0] != "nomenclature":
+            return _error_json(404, "Route not found", 404)
+
+        store_id = _to_int(parts[1])
+        action = parts[2]
         if action == "composition":
-            return _json(await self._composition(store_id))
+            return _json(await self._composition(store_id, query))
         if action == "availability":
             return _json(await self._availability(store_id))
-        return _json(_error(404, "Route not found"), 404)
+        if action == "prices":
+            return _json(await self._prices(store_id))
+        return _error_json(404, "Route not found", 404)
 
     async def _price_type(self) -> int:
         settings_map = await self._load_settings()
@@ -489,106 +623,290 @@ class YandexEatsIntegration(ClientBase):
             raise YandexEatsError(113422, f"{await self._load_integration()} PRICE_TYPE not set")
         return price_type
 
-    async def _item_ext_all(self, stock_id: int, price_type_id: int, *, zero_price: bool) -> List[Dict[str, Any]]:
+    def _nomenclature_page(self, query: Dict[str, Any]) -> Tuple[int, int]:
+        return (
+            _query_int(
+                query,
+                "limit",
+                self.NOMENCLATURE_DEFAULT_LIMIT,
+                min_value=1,
+                max_value=self.NOMENCLATURE_MAX_LIMIT,
+            ),
+            _query_int(query, "offset", 0, min_value=0),
+        )
+
+    async def _nomenclature_pagination_enabled(self) -> bool:
+        settings_map = await self._load_settings()
+        for key in self.NOMENCLATURE_PAGINATION_SETTING_KEYS:
+            if key in settings_map:
+                return _to_bool(settings_map.get(key), default=False)
+        return False
+
+    @staticmethod
+    def _catalog_categories(groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        categories: List[Dict[str, Any]] = []
+        for group in groups:
+            group_id = _to_int(group.get("id"))
+            parent_id = _to_int(group.get("parent_id"))
+            if group_id <= 0:
+                continue
+            categories.append(
+                {
+                    "id": str(group_id),
+                    "name": _text(group.get("name")),
+                    "parentId": str(parent_id) if parent_id > 0 else None,
+                    "sortOrder": 1,
+                }
+            )
+        return categories
+
+    @staticmethod
+    def _vat_value(item: Dict[str, Any]) -> int:
+        vat = _to_int(_nested(item, "vat.value"), -1)
+        return vat if vat in {-1, 5, 7, 10, 20, 22} else -1
+
+    async def _item_ext_page(
+        self,
+        *,
+        stock_id: Optional[int],
+        price_type_id: Optional[int],
+        zero_price: bool,
+        limit: int,
+        offset: int,
+        include_images: bool,
+        has_image: Optional[bool] = None,
+    ) -> Tuple[List[Dict[str, Any]], int, int]:
+        async with RegosAPI(self._ci()) as api:
+            return await self._item_ext_page_api(
+                api,
+                stock_id=stock_id,
+                price_type_id=price_type_id,
+                zero_price=zero_price,
+                limit=limit,
+                offset=offset,
+                include_images=include_images,
+                has_image=has_image,
+            )
+
+    async def _item_ext_page_api(
+        self,
+        api: RegosAPI,
+        *,
+        stock_id: Optional[int],
+        price_type_id: Optional[int],
+        zero_price: bool,
+        limit: int,
+        offset: int,
+        include_images: bool,
+        has_image: Optional[bool] = None,
+    ) -> Tuple[List[Dict[str, Any]], int, int]:
+        response = await api.references.item.get_ext(
+            ItemGetExtRequest(
+                stock_id=stock_id if stock_id and stock_id > 0 else None,
+                price_type_id=price_type_id if price_type_id and price_type_id > 0 else None,
+                offset=max(int(offset or 0), 0),
+                limit=max(int(limit or 1), 1),
+                image_size=ItemGetExtImageSize.Large if include_images else None,
+                zero_price=zero_price,
+                zero_quantity=True,
+                deleted_mark=False,
+                has_image=has_image,
+                type="Item",
+            )
+        )
+        if not response.ok:
+            raise YandexEatsError(111321, "REGOS item ext request rejected")
+        result = [
+            row.model_dump(mode="json", by_alias=True)
+            for row in (response.result or [])
+        ]
+        return result, _to_int(response.total, len(result)), _to_int(response.next_offset)
+
+    async def _item_ext_all(
+        self,
+        stock_id: Optional[int],
+        price_type_id: Optional[int],
+        *,
+        zero_price: bool,
+        include_images: bool = False,
+        has_image: Optional[bool] = None,
+    ) -> List[Dict[str, Any]]:
         result: List[Dict[str, Any]] = []
         offset = 0
         total = 0
         async with RegosAPI(self._ci()) as api:
             while True:
-                response = await api.references.item.get_ext(
-                    ItemGetExtRequest(
-                        stock_id=stock_id,
-                        price_type_id=price_type_id,
-                        offset=offset,
-                        limit=10000,
-                        has_image=True,
-                        image_size=ItemGetExtImageSize.Large,
-                        zero_price=zero_price,
-                        zero_quantity=True,
-                        deleted_mark=False,
-                        type="Item",
-                    )
+                chunk, total, next_offset = await self._item_ext_page_api(
+                    api,
+                    stock_id=stock_id,
+                    price_type_id=price_type_id,
+                    zero_price=zero_price,
+                    limit=self.REGOS_PAGE_LIMIT,
+                    offset=offset,
+                    include_images=include_images,
+                    has_image=has_image,
                 )
-                if not response.ok:
-                    raise YandexEatsError(111321, "REGOS item ext request rejected")
-                chunk = [
-                    row.model_dump(mode="json", by_alias=True)
-                    for row in (response.result or [])
-                ]
                 result.extend(chunk)
-                next_offset = _to_int(response.next_offset)
-                total = _to_int(response.total, total)
-                if next_offset == 0 or next_offset == offset or (total > 0 and next_offset >= total):
+                if not chunk or next_offset == 0 or next_offset <= offset or (total > 0 and next_offset >= total):
                     break
                 offset = next_offset
         return result
 
-    async def _composition(self, store_id: int) -> Dict[str, Any]:
+    async def _brand_composition(self, query: Dict[str, Any]) -> Dict[str, Any]:
+        pagination_enabled = await self._nomenclature_pagination_enabled()
+        if pagination_enabled:
+            limit, offset = self._nomenclature_page(query)
+            groups, page = await asyncio.gather(
+                self._item_groups(),
+                self._item_ext_page(
+                    stock_id=None,
+                    price_type_id=None,
+                    zero_price=True,
+                    limit=limit,
+                    offset=offset,
+                    include_images=True,
+                    has_image=True,
+                ),
+            )
+            items, total, _ = page
+        else:
+            groups, items = await asyncio.gather(
+                self._item_groups(),
+                self._item_ext_all(
+                    None,
+                    None,
+                    zero_price=True,
+                    include_images=True,
+                    has_image=True,
+                ),
+            )
+            total = len(items)
+        return {
+            "categories": self._catalog_categories(groups),
+            "items": [x for x in (self._map_catalog_item(i, include_price=False) for i in items) if x],
+            "totalCount": total,
+        }
+
+    async def _composition(self, store_id: int, query: Dict[str, Any]) -> Dict[str, Any]:
         if store_id <= 0:
             raise YandexEatsError(400, "Неверный формат storeId")
         price_type = await self._price_type()
-        groups, items = await asyncio.gather(
-            self._item_groups(),
-            self._item_ext_all(store_id, price_type, zero_price=False),
-        )
-        categories = []
-        for group in groups:
-            group_id = _to_int(group.get("id"))
-            parent_id = _to_int(group.get("parent_id"))
-            if group_id > 0:
-                categories.append(
-                    {
-                        "id": str(group_id),
-                        "name": _text(group.get("name")),
-                        "parentId": str(parent_id) if parent_id > 0 else None,
-                        "sortOrder": 1,
-                    }
-                )
-        return {"categories": categories, "items": [x for x in (self._map_catalog_item(i) for i in items) if x]}
+        pagination_enabled = await self._nomenclature_pagination_enabled()
+        if pagination_enabled:
+            limit, offset = self._nomenclature_page(query)
+            groups, page = await asyncio.gather(
+                self._item_groups(),
+                self._item_ext_page(
+                    stock_id=store_id,
+                    price_type_id=price_type,
+                    zero_price=False,
+                    limit=limit,
+                    offset=offset,
+                    include_images=True,
+                    has_image=True,
+                ),
+            )
+            items, total, _ = page
+        else:
+            groups, items = await asyncio.gather(
+                self._item_groups(),
+                self._item_ext_all(
+                    store_id,
+                    price_type,
+                    zero_price=False,
+                    include_images=True,
+                    has_image=True,
+                ),
+            )
+            total = len(items)
+        return {
+            "categories": self._catalog_categories(groups),
+            "items": [x for x in (self._map_catalog_item(i, include_price=True) for i in items) if x],
+            "totalCount": total,
+        }
 
-    def _map_catalog_item(self, ext: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _map_catalog_item(self, ext: Dict[str, Any], *, include_price: bool) -> Optional[Dict[str, Any]]:
         item = ext.get("item") if isinstance(ext, dict) else None
         if not isinstance(item, dict):
             return None
+        item_id = _to_int(item.get("id"))
+        if item_id <= 0:
+            return None
         price = _to_decimal(ext.get("price"))
         barcode = _text(item.get("base_barcode")).strip()
-        if price <= 0 or not barcode:
+        if include_price and price <= 0:
             return None
         is_pcs = _is_pcs(_nested(item, "unit.type"))
         image_url = _text(ext.get("image_url")).strip()
-        images = [{"url": image_url, "hash": _sha1(image_url)}] if image_url else [{"url": "", "hash": None}]
-        return {
-            "barcode": {"type": "ean13", "value": barcode, "values": [barcode], "weightEncoding": "none"},
+        barcode_value = barcode or str(item_id)
+        payload = {
+            "barcode": {
+                "type": "ean13" if barcode else "code128",
+                "value": barcode_value,
+                "values": [barcode_value],
+                "weightEncoding": "none",
+            },
             "categoryId": str(_to_int(_nested(item, "group.id"))),
             "description": {
                 "general": _text(item.get("description")),
                 "vendorCountry": _text(_nested(item, "country.name")),
                 "nutritionalValue": _text(_nested(item, "producer.name")),
             },
-            "id": str(_to_int(item.get("id"))),
-            "images": images,
+            "id": str(item_id),
+            "images": [{"url": image_url, "order": 0}] if image_url else None,
             "isCatchWeight": not is_pcs,
             "measure": {"quantum": None if is_pcs else Decimal("0.1"), "unit": "GRM", "value": 1 if is_pcs else 1000},
             "name": _text(item.get("name")),
-            "oldPrice": None,
-            "price": float(price),
             "sortOrder": 0,
-            "vat": _to_int(_nested(item, "vat.value")),
+            "vat": self._vat_value(item),
             "serviceCodesUz": {"mxikCodeUz": _text(item.get("icps"))},
             "vendorCode": str(_to_int(item.get("code"))).zfill(6),
         }
+        if include_price:
+            payload.update(
+                {
+                    "oldPrice": None,
+                    "price": price,
+                    "pickupOldPrice": None,
+                    "pickupPrice": price,
+                }
+            )
+        return payload
 
     async def _availability(self, store_id: int) -> Dict[str, Any]:
         if store_id <= 0:
             raise YandexEatsError(400, "Неверный формат storeId")
-        price_type = await self._price_type()
-        items = await self._item_ext_all(store_id, price_type, zero_price=True)
+        items = await self._item_ext_all(store_id, None, zero_price=True, has_image=True)
         result = []
         for ext in items:
             item_id = _to_int(_nested(ext, "item.id"))
             if item_id <= 0:
                 continue
             result.append({"id": str(item_id), "stock": _to_decimal(_nested(ext, "quantity.allowed"))})
+        return {"items": result}
+
+    async def _prices(self, store_id: int) -> Dict[str, Any]:
+        if store_id <= 0:
+            raise YandexEatsError(400, "Invalid storeId")
+        price_type = await self._price_type()
+        items = await self._item_ext_all(store_id, price_type, zero_price=False, has_image=True)
+        result = []
+        for ext in items:
+            item = ext.get("item") if isinstance(ext, dict) else None
+            if not isinstance(item, dict):
+                continue
+            item_id = _to_int(item.get("id"))
+            price = _to_decimal(ext.get("price"))
+            if item_id <= 0 or price <= 0:
+                continue
+            result.append(
+                {
+                    "id": str(item_id),
+                    "price": price,
+                    "pickupPrice": price,
+                    "vat": self._vat_value(item),
+                }
+            )
         return {"items": result}
 
     async def _create_order(self, order: Dict[str, Any]) -> Dict[str, Any]:
@@ -620,7 +938,9 @@ class YandexEatsIntegration(ClientBase):
                 return {"result": "OK", "orderId": str(existing_id)}
 
             result = await self._create_order_unlocked(order)
-            await self._write_order_dedupe(eats_id, _to_int(result.get("orderId")))
+            order_id = _to_int(result.get("orderId"))
+            await self._write_order_dedupe(eats_id, order_id)
+            await self._write_order_meta(order_id, order)
             return result
         finally:
             await redis_release_lock(lock_key, lock_token)
@@ -691,14 +1011,34 @@ class YandexEatsIntegration(ClientBase):
         return {"result": "OK", "orderId": str(doc_id)}
 
     async def _item_groups(self) -> List[Dict[str, Any]]:
-        async with RegosAPI(self._ci()) as api:
-            response = await api.references.item_group.get(ItemGroupGetRequest())
-        if not response.ok:
-            raise YandexEatsError(111321, "REGOS item groups request rejected")
-        return [
-            row.model_dump(mode="json", by_alias=True)
-            for row in (response.result or [])
-        ]
+        cached = await redis_get_json(self._groups_cache_key())
+        if isinstance(cached, list):
+            return cached
+
+        lock_token = await redis_acquire_lock(
+            self._groups_lock_key(),
+            settings.marketplace_lock_ttl,
+            wait_timeout_sec=settings.marketplace_lock_wait_timeout,
+        )
+        if not lock_token:
+            raise YandexEatsError(113423, "Item groups cache lock timeout")
+        try:
+            cached = await redis_get_json(self._groups_cache_key())
+            if isinstance(cached, list):
+                return cached
+
+            async with RegosAPI(self._ci()) as api:
+                response = await api.references.item_group.get(ItemGroupGetRequest())
+            if not response.ok:
+                raise YandexEatsError(111321, "REGOS item groups request rejected")
+            groups = [
+                row.model_dump(mode="json", by_alias=True)
+                for row in (response.result or [])
+            ]
+            await redis_set_json(self._groups_cache_key(), groups, settings.marketplace_cache_ttl)
+            return groups
+        finally:
+            await redis_release_lock(self._groups_lock_key(), lock_token)
 
     async def _item_short_all(self, item_ids: List[int]) -> List[Dict[str, Any]]:
         if not item_ids:
@@ -746,6 +1086,12 @@ class YandexEatsIntegration(ClientBase):
         ]
         return rows[0] if rows else None
 
+    async def _order_doc_or_404(self, order_id: int) -> Dict[str, Any]:
+        order = await self._order_doc(order_id=order_id)
+        if not order:
+            raise YandexEatsError(404, "Order not found", status_code=404)
+        return order
+
     async def _order_operations(self, order_id: int) -> List[Dict[str, Any]]:
         async with RegosAPI(self._ci()) as api:
             response = await api.docs.order_delivery.get_operations(
@@ -758,61 +1104,84 @@ class YandexEatsIntegration(ClientBase):
             for row in (response.result or [])
         ]
 
+    @classmethod
+    def _yandex_status_from_order(cls, order: Dict[str, Any]) -> str:
+        status_id = _order_status_id(order)
+        status = cls.YANDEX_STATUS_BY_REGOS_STATUS.get(status_id)
+        if not status:
+            raise YandexEatsError(500, f"Unsupported REGOS order status {status_id}", status_code=500)
+        return status
+
+    @staticmethod
+    def _status_payload_text(data: Dict[str, Any], *names: str) -> str:
+        return _text(_lookup(data, *names)).strip()
+
+    async def _set_regos_order_status(self, order_id: int, target_status: int) -> None:
+        async with RegosAPI(self._ci()) as api:
+            response = await api.docs.order_delivery.set_status(
+                DocOrderDeliverySetStatusRequest(id=order_id, status=target_status)
+            )
+        if not response.ok:
+            raise YandexEatsError(111321, "REGOS order status update rejected")
+
     async def _get_order(self, order_id: int) -> Dict[str, Any]:
-        order = await self._order_doc(order_id=order_id)
-        if not order:
-            raise YandexEatsError(400, "Заказ не найден")
+        order = await self._order_doc_or_404(order_id)
+        meta = await self._read_order_meta(order_id)
         operations = await self._order_operations(_to_int(order.get("id")))
         return {
-            "discriminator": "yandex",
+            "discriminator": _text(meta.get("discriminator") or "yandex"),
             "eatsId": _text(order.get("external_code")),
-            "restaurantId": str(_to_int(_nested(order, "stock.id"))),
+            "restaurantId": _text(meta.get("restaurantId") or str(_to_int(_nested(order, "stock.id")))),
+            "platform": _text(meta.get("platform") or "YE"),
+            "paymentInfo": meta.get("paymentInfo"),
+            "deliveryInfo": meta.get("deliveryInfo"),
             "items": [
                 {
                     "id": str(_to_int(_nested(op, "item.id"))),
                     "name": _text(_nested(op, "item.name")),
                     "quantity": _to_decimal(op.get("quantity")),
                     "price": _to_decimal(op.get("price")),
+                    "originPrice": _to_decimal(op.get("price")),
                 }
                 for op in operations
             ],
-            "comment": _text(order.get("description")),
+            "comment": _text(meta.get("comment") or order.get("description")),
         }
 
-    async def _cancel_order(self, order_id: int) -> Dict[str, Any]:
-        order = await self._order_doc(order_id=order_id)
-        if not order:
-            raise YandexEatsError(400, "Заказ не найден")
-        if _order_status_id(order) != 27:
-            async with RegosAPI(self._ci()) as api:
-                response = await api.docs.order_delivery.set_status(
-                    DocOrderDeliverySetStatusRequest(id=_to_int(order.get("id")), status=27)
-                )
-            if not response.ok:
-                raise YandexEatsError(111321, "REGOS order status update rejected")
-        return {"result": "OK"}
+    async def _update_order_status(self, order_id: int, data: Dict[str, Any]) -> None:
+        if not isinstance(data, dict):
+            raise YandexEatsError(400, "Invalid order status payload")
+        status = self._status_payload_text(data, "status", "Status").upper()
+        if status not in self.YANDEX_STATUS_UPDATE_ALLOWED:
+            raise YandexEatsError(400, "Unsupported order status")
+        order = await self._order_doc_or_404(order_id)
+        if status in self.YANDEX_STATUS_ACK_ONLY:
+            logger.warning(
+                "YandexEats order status acknowledged without REGOS update: ci=%s order_id=%s status=%s regos_status=%s",
+                self._ci(),
+                order_id,
+                status,
+                _order_status_id(order),
+            )
+            return
+        if _order_status_id(order) != self.REGOS_STATUS_CANCELLED:
+            await self._set_regos_order_status(_to_int(order.get("id")), self.REGOS_STATUS_CANCELLED)
 
     async def _get_order_status(self, order_id: int) -> Dict[str, Any]:
-        order = await self._order_doc(order_id=order_id)
-        if not order:
-            raise YandexEatsError(400, "Заказ не найден")
-        status = {
-            22: "NEW",
-            23: "ACCEPTED_BY_RESTAURANT",
-            24: "COOKING",
-            25: "COOKING",
-            26: "READY",
-            28: "READY",
-            31: "READY",
-            27: "CANCELLED",
-        }.get(_order_status_id(order), "ERROR")
-        return {"status": status, "comment": None, "updatedAt": _format_unix(order.get("last_update"))}
+        order = await self._order_doc_or_404(order_id)
+        return {
+            "status": self._yandex_status_from_order(order),
+            "comment": None,
+            "updatedAt": _format_unix(order.get("last_update")),
+        }
 
     @staticmethod
     def _parse_order_path(path: str) -> Tuple[Optional[int], str]:
         parts = path.split("/")
         if len(parts) >= 3 and parts[0] == "v1" and parts[1] == "order":
-            return _to_int(parts[2]), "/".join(parts[3:])
+            order_id = _to_int(parts[2])
+            return (order_id if order_id > 0 else None), "/".join(parts[3:])
         if len(parts) >= 2 and parts[0] == "order":
-            return _to_int(parts[1]), "/".join(parts[2:])
+            order_id = _to_int(parts[1])
+            return (order_id if order_id > 0 else None), "/".join(parts[2:])
         return None, ""

@@ -15,6 +15,9 @@ from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import Command
 from aiogram.types import Update as TelegramUpdate
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from clients.telegram_bot_notification.services.send_messages import (
+    send_messages as send_message_batch,
+)
 from clients.telegram_bot_notification.services.message_formatters import (
     format_cheque_details,
     format_cheque_notification,
@@ -285,8 +288,8 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         if retry_after is not None:
             try:
                 return max(int(retry_after), 1)
-            except Exception:
-                pass
+            except (TypeError, ValueError):
+                retry_after = None
         match = re.search(
             r"retry(?:\s+in|\s+after)?\s+(\d+)",
             str(error or ""),
@@ -2380,51 +2383,25 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         await self._initialize_bot(settings_map)
         await self._setup_handlers()
 
-        async def send_one(message: Dict) -> Dict:
-            chat_id = str(message["recipient"])
-            text = str(message["message"])
-            try:
-                await self._send_message_markdown_with_plain_fallback(
-                    chat_id=chat_id,
-                    text=text,
-                )
-                logger.debug("Sent Telegram message to chat %s", chat_id)
-                return {"status": "sent", "chat_id": chat_id, "message": text}
-            except Exception as error:
-                logger.error("Telegram send error for chat %s: %s", chat_id, error)
-                result = {
-                    "status": "error",
-                    "chat_id": chat_id,
-                    "message": text,
-                    "error": str(error),
-                }
-                migrated_to = self._migrate_to_chat_id(error)
-                if migrated_to:
-                    result["migrate_to_chat_id"] = str(migrated_to)
-                return result
-
-        semaphore = asyncio.Semaphore(TelegramBotConfig.SEND_CONCURRENCY)
-
-        async def guarded_send(message: Dict) -> Dict:
-            async with semaphore:
-                return await send_one(message)
+        async def throttled_sender(chat_id: str, text: str) -> None:
+            await self._send_message_markdown_with_plain_fallback(
+                chat_id=chat_id,
+                text=text,
+            )
 
         results = []
         for i in range(0, len(messages), TelegramBotConfig.BATCH_SIZE):
             batch = messages[i : i + TelegramBotConfig.BATCH_SIZE]
             logger.debug(f"Sending batch {i}-{i + len(batch)}")
             try:
-                details = await asyncio.gather(
-                    *(guarded_send(message) for message in batch)
+                result = await send_message_batch(
+                    messages=batch,
+                    sleep_between=0.0,
+                    logger=logger,
+                    concurrency=TelegramBotConfig.SEND_CONCURRENCY,
+                    sender=throttled_sender,
                 )
-                results.append(
-                    {
-                        "sent_messages": sum(
-                            1 for item in details if item.get("status") == "sent"
-                        ),
-                        "details": details,
-                    }
-                )
+                results.append(result)
             except Exception as error:
                 logger.error(f"Error sending batch {i}: {error}")
                 results.append({"error": str(error), "batch_index": i})

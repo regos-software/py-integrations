@@ -13,7 +13,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command, BaseFilter
 from aiogram.types import Update as TelegramUpdate
 from aiogram.types import BotCommand
-from clients.telegram_bot_notification.services import send_messages
+from clients.telegram_bot_quantity.services.send_messages import send_messages
 from clients.telegram_polling import telegram_polling_manager
 from .utils import parse_chat_ids, extract_chat_id
 from .handlers.get_quantity import handle_get_quantity

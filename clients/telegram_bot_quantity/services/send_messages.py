@@ -1,18 +1,14 @@
 import asyncio
-from typing import Any, Awaitable, Callable, Dict, List, Optional
-
-
-MessageSender = Callable[[str, str], Awaitable[Any]]
+from typing import Dict, List
 
 
 async def send_messages(
     *,
-    bot=None,
+    bot,
     messages: List[Dict[str, str]],
     sleep_between: float,
     logger,
     concurrency: int = 10,
-    sender: Optional[MessageSender] = None,
 ) -> Dict:
     """
     Send Telegram messages. If sleep_between is zero, messages are sent concurrently
@@ -30,28 +26,23 @@ async def send_messages(
         text = msg["message"]
 
         try:
-            if sender:
-                await sender(chat_id, text)
-            else:
-                if bot is None:
-                    raise RuntimeError("Telegram bot or sender is required")
-                try:
-                    await bot.send_message(chat_id=chat_id, text=text)
-                except Exception as error:
-                    error_text = str(error or "").lower()
-                    if not (
-                        "can't parse entities" in error_text
-                        or "can't find end of the entity" in error_text
-                        or "unsupported start tag" in error_text
-                        or "parse entities" in error_text
-                    ):
-                        raise
-                    logger.warning(
-                        "Telegram markdown send rejected, retrying as plain text: chat=%s error=%s",
-                        chat_id,
-                        error,
-                    )
-                    await bot.send_message(chat_id=chat_id, text=text, parse_mode=None)
+            try:
+                await bot.send_message(chat_id=chat_id, text=text)
+            except Exception as error:
+                error_text = str(error or "").lower()
+                if not (
+                    "can't parse entities" in error_text
+                    or "can't find end of the entity" in error_text
+                    or "unsupported start tag" in error_text
+                    or "parse entities" in error_text
+                ):
+                    raise
+                logger.warning(
+                    "Telegram markdown send rejected, retrying as plain text: chat=%s error=%s",
+                    chat_id,
+                    error,
+                )
+                await bot.send_message(chat_id=chat_id, text=text, parse_mode=None)
             logger.debug("Sent Telegram message to chat %s", chat_id)
             return {"status": "sent", "chat_id": chat_id, "message": text}
         except Exception as error:
