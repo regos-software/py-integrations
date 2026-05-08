@@ -658,6 +658,32 @@ class InstagramCrmChannelIntegration(ClientBase):
         )
 
     @classmethod
+    async def _try_save_authorization_state(
+        cls,
+        connected_integration_id: str,
+        *,
+        authorized: bool,
+        authorization_url: str = "",
+        generated_at: Optional[int] = None,
+    ) -> bool:
+        try:
+            await cls._save_authorization_state(
+                connected_integration_id,
+                authorized=authorized,
+                authorization_url=authorization_url,
+                generated_at=generated_at,
+            )
+            return True
+        except Exception as error:
+            logger.warning(
+                "Instagram authorization state sync failed: ci=%s authorized=%s error=%s",
+                connected_integration_id,
+                authorized,
+                error,
+            )
+            return False
+
+    @classmethod
     def _authorization_url_is_fresh(cls, settings_map: Dict[str, str]) -> bool:
         generated_at = _to_int(
             settings_map.get(InstagramCrmChannelConfig.SETTING_AUTHORIZATION_URL_GENERATED_AT),
@@ -680,7 +706,7 @@ class InstagramCrmChannelIntegration(ClientBase):
                 or settings_map.get(InstagramCrmChannelConfig.SETTING_AUTHORIZATION_STATUS) != "authorized"
                 or settings_map.get(InstagramCrmChannelConfig.SETTING_AUTHORIZATION_URL)
             ):
-                await cls._save_authorization_state(connected_integration_id, authorized=True)
+                await cls._try_save_authorization_state(connected_integration_id, authorized=True)
             return ""
 
         existing_url = str(
@@ -691,7 +717,7 @@ class InstagramCrmChannelIntegration(ClientBase):
 
         generated_at = _now_ts()
         authorization_url = await cls._build_oauth_url(connected_integration_id)
-        await cls._save_authorization_state(
+        await cls._try_save_authorization_state(
             connected_integration_id,
             authorized=False,
             authorization_url=authorization_url,
@@ -2054,11 +2080,11 @@ class InstagramCrmChannelIntegration(ClientBase):
             authorized = self._is_runtime_authorized(runtime)
             if authorized:
                 authorization_url = ""
-                await self._save_authorization_state(ci, authorized=True)
+                await self._try_save_authorization_state(ci, authorized=True)
             else:
                 generated_at = _now_ts()
                 authorization_url = await self._build_oauth_url(ci)
-                await self._save_authorization_state(
+                await self._try_save_authorization_state(
                     ci,
                     authorized=False,
                     authorization_url=authorization_url,
