@@ -11,11 +11,10 @@ from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_t
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.filters import Command
 from aiogram.types import Update as TelegramUpdate
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from clients.telegram_bot_notification.services import send_messages
 from clients.telegram_bot_notification.services.message_formatters import (
     format_cheque_details,
     format_cheque_notification,
@@ -122,7 +121,6 @@ class TelegramBotConfig:
     RETRY_ATTEMPTS = 3  # Number of retry attempts for failed requests
     RETRY_WAIT_SECONDS = 2  # Seconds to wait between retries
     INTEGRATION_KEY = "regos_telegram_notifier"
-    SLEEP_BETWEEN_MESSAGES = 0.0  # Delay between sending messages (adjust if needed)
     REDIS_PREFIX = "tbn"
     STREAM_GROUP = "tbnw"
     STREAM_TTL_SEC = 24 * 60 * 60
@@ -137,6 +135,11 @@ class TelegramBotConfig:
     SETTINGS_LOCAL_TTL = min(30, max(5, SETTINGS_TTL // 4))
     SETTINGS_LOCAL_MAX = 10000
     SEND_CONCURRENCY = max(int(settings.telegram_notification_send_concurrency or 0), 1)
+    CHAT_MIN_INTERVAL_SEC = max(float(settings.telegram_notification_chat_min_interval_sec or 0), 0.0)
+    FLOOD_RETRY_ATTEMPTS = max(int(settings.telegram_notification_flood_retry_attempts or 0), 1)
+    FLOOD_EXTRA_DELAY_SEC = max(float(settings.telegram_notification_flood_extra_delay_sec or 0), 0.0)
+    SEND_LOCK_TTL = 120
+    SEND_LOCK_WAIT_SECONDS = 30.0
 
 
 class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
@@ -274,6 +277,76 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             or "parse entities" in text
         )
 
+    @staticmethod
+    def _telegram_retry_after_seconds(error: object) -> Optional[int]:
+        if isinstance(error, TelegramRetryAfter):
+            return max(int(error.retry_after), 1)
+        retry_after = getattr(error, "retry_after", None)
+        if retry_after is not None:
+            try:
+                return max(int(retry_after), 1)
+            except Exception:
+                pass
+        match = re.search(
+            r"retry(?:\s+in|\s+after)?\s+(\d+)",
+            str(error or ""),
+            flags=re.IGNORECASE,
+        )
+        return max(int(match.group(1)), 1) if match else None
+
+    async def _wait_chat_send_turn(self, chat_id: str) -> None:
+        self._require_redis()
+        raw = await redis_client.get(self._chat_send_next_key(chat_id))
+        if not raw:
+            return
+        try:
+            send_after = float(raw)
+        except Exception:
+            return
+        delay = send_after - time.time()
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+    async def _mark_chat_send_after(self, chat_id: str, delay_seconds: float) -> None:
+        self._require_redis()
+        delay = max(float(delay_seconds or 0), 0.0)
+        if delay <= 0:
+            return
+        ttl = max(int(delay) + 60, 60)
+        await redis_client.set(
+            self._chat_send_next_key(chat_id),
+            str(time.time() + delay),
+            ex=ttl,
+        )
+
+    async def _send_message_once(
+        self,
+        *,
+        chat_id: str,
+        text: str,
+        reply_markup: Optional[InlineKeyboardMarkup],
+    ) -> Any:
+        try:
+            return await self.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=reply_markup if reply_markup else None,
+            )
+        except Exception as error:
+            if self._is_parse_entities_error(error):
+                logger.warning(
+                    "Telegram markdown send rejected, retrying as plain text: chat_id=%s error=%s",
+                    chat_id,
+                    error,
+                )
+                return await self.bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    parse_mode=None,
+                    reply_markup=reply_markup if reply_markup else None,
+                )
+            raise
+
     async def _edit_text_markdown_with_plain_fallback(
         self,
         message: Any,
@@ -299,26 +372,49 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         text: str,
         reply_markup: Optional[InlineKeyboardMarkup] = None,
     ) -> Any:
+        self._require_redis()
+        lock_key = self._chat_send_lock_key(chat_id)
+        lock_token = await self._acquire_redis_lock(
+            lock_key,
+            TelegramBotConfig.SEND_LOCK_TTL,
+            wait_seconds=TelegramBotConfig.SEND_LOCK_WAIT_SECONDS,
+        )
+        if not lock_token:
+            raise TimeoutError(f"Timed out waiting for Telegram send lock: chat_id={chat_id}")
         try:
-            return await self.bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                reply_markup=reply_markup if reply_markup else None,
-            )
-        except Exception as error:
-            if self._is_parse_entities_error(error):
-                logger.warning(
-                    "Telegram markdown send rejected, retrying as plain text: chat_id=%s error=%s",
-                    chat_id,
-                    error,
-                )
-                return await self.bot.send_message(
-                    chat_id=chat_id,
-                    text=text,
-                    parse_mode=None,
-                    reply_markup=reply_markup if reply_markup else None,
-                )
-            raise
+            last_error: Optional[Exception] = None
+            for attempt in range(TelegramBotConfig.FLOOD_RETRY_ATTEMPTS):
+                await self._wait_chat_send_turn(chat_id)
+                try:
+                    result = await self._send_message_once(
+                        chat_id=chat_id,
+                        text=text,
+                        reply_markup=reply_markup,
+                    )
+                    await self._mark_chat_send_after(
+                        chat_id,
+                        TelegramBotConfig.CHAT_MIN_INTERVAL_SEC,
+                    )
+                    return result
+                except Exception as error:
+                    retry_after = self._telegram_retry_after_seconds(error)
+                    if retry_after is None:
+                        raise
+                    last_error = error
+                    delay = retry_after + TelegramBotConfig.FLOOD_EXTRA_DELAY_SEC
+                    await self._mark_chat_send_after(chat_id, delay)
+                    logger.warning(
+                        "Telegram flood control: chat_id=%s retry_after=%s attempt=%s/%s",
+                        chat_id,
+                        retry_after,
+                        attempt + 1,
+                        TelegramBotConfig.FLOOD_RETRY_ATTEMPTS,
+                    )
+            if last_error:
+                raise last_error
+            raise RuntimeError(f"Telegram message was not sent: chat_id={chat_id}")
+        finally:
+            await self._release_redis_lock(lock_key, lock_token)
 
     async def _answer_callback_query(
         self,
@@ -390,6 +486,19 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
 
     def _invalid_bot_token_cache_key(self, bot_token: str) -> str:
         return self._redis_key("bt", self.connected_integration_id, self._token_fingerprint(bot_token))
+
+    def _telegram_send_identity(self) -> str:
+        return self._bot_token_fingerprint or str(self.connected_integration_id or "").strip()
+
+    def _chat_send_key(self, chat_id: str, suffix: str) -> str:
+        chat_hash = hashlib.sha256(str(chat_id or "").encode("utf-8")).hexdigest()[:16]
+        return self._redis_key("snd", suffix, self._telegram_send_identity(), chat_hash)
+
+    def _chat_send_lock_key(self, chat_id: str) -> str:
+        return self._chat_send_key(chat_id, "l")
+
+    def _chat_send_next_key(self, chat_id: str) -> str:
+        return self._chat_send_key(chat_id, "n")
 
     @staticmethod
     def _redis_enabled() -> bool:
@@ -2271,19 +2380,51 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         await self._initialize_bot(settings_map)
         await self._setup_handlers()
 
+        async def send_one(message: Dict) -> Dict:
+            chat_id = str(message["recipient"])
+            text = str(message["message"])
+            try:
+                await self._send_message_markdown_with_plain_fallback(
+                    chat_id=chat_id,
+                    text=text,
+                )
+                logger.debug("Sent Telegram message to chat %s", chat_id)
+                return {"status": "sent", "chat_id": chat_id, "message": text}
+            except Exception as error:
+                logger.error("Telegram send error for chat %s: %s", chat_id, error)
+                result = {
+                    "status": "error",
+                    "chat_id": chat_id,
+                    "message": text,
+                    "error": str(error),
+                }
+                migrated_to = self._migrate_to_chat_id(error)
+                if migrated_to:
+                    result["migrate_to_chat_id"] = str(migrated_to)
+                return result
+
+        semaphore = asyncio.Semaphore(TelegramBotConfig.SEND_CONCURRENCY)
+
+        async def guarded_send(message: Dict) -> Dict:
+            async with semaphore:
+                return await send_one(message)
+
         results = []
         for i in range(0, len(messages), TelegramBotConfig.BATCH_SIZE):
             batch = messages[i : i + TelegramBotConfig.BATCH_SIZE]
             logger.debug(f"Sending batch {i}-{i + len(batch)}")
             try:
-                result = await send_messages(
-                    bot=self.bot,
-                    messages=batch,
-                    sleep_between=TelegramBotConfig.SLEEP_BETWEEN_MESSAGES,
-                    logger=logger,
-                    concurrency=TelegramBotConfig.SEND_CONCURRENCY,
+                details = await asyncio.gather(
+                    *(guarded_send(message) for message in batch)
                 )
-                results.append(result)
+                results.append(
+                    {
+                        "sent_messages": sum(
+                            1 for item in details if item.get("status") == "sent"
+                        ),
+                        "details": details,
+                    }
+                )
             except Exception as error:
                 logger.error(f"Error sending batch {i}: {error}")
                 results.append({"error": str(error), "batch_index": i})
