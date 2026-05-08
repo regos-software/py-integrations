@@ -26,6 +26,7 @@ class ConnectedIntegrationHandlerEnum(str, Enum):
     EDO = "EDO"
     SMS = "SMS"
     TG_BOT = "TG_BOT"
+    ChatBot = "ChatBot"
     Custom = "Custom"
 
 
