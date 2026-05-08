@@ -70,7 +70,7 @@ def _now_ts() -> int:
 
 class InstagramCrmChannelConfig:
     INTEGRATION_KEY = "instagram_crm_channel"
-    REDIS_PREFIX = "clients:instagram_crm_channel:"
+    REDIS_PREFIX = "igc:"
 
     GRAPH_BASE_URL = "https://graph.instagram.com/v20.0"
     OAUTH_DIALOG_URL = "https://www.instagram.com/oauth/authorize"
@@ -526,12 +526,10 @@ class InstagramCrmChannelIntegration(ClientBase):
             last_error = error
         if detected is None:
             if last_error is not None:
-                logger.warning(
-                    "ConnectedIntegration/Get failed for active check, fallback active=true: ci=%s error=%s",
-                    ci,
-                    last_error,
-                )
-            detected = True
+                raise RuntimeError(
+                    f"ConnectedIntegration/Get failed for active check: ci={ci} error={last_error}"
+                ) from last_error
+            detected = False
 
         active = bool(detected)
         async with cls._ACTIVE_CACHE_LOCK:

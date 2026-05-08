@@ -50,6 +50,7 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
     """
 
     INTEGRATION_KEY = "email_sender"
+    REDIS_PREFIX = "em"
 
     # Таймауты короче, чтобы не зависать и укладываться в SLA
     CONNECT_TIMEOUT = 5
@@ -86,6 +87,10 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
         return IntegrationErrorResponse(
             result=IntegrationErrorModel(error=code, description=description)
         )
+
+    @classmethod
+    def _settings_cache_key(cls, connected_integration_id: str) -> str:
+        return f"{cls.REDIS_PREFIX}:settings:{connected_integration_id}"
 
     @staticmethod
     def _to_bool(value: Any) -> bool:
@@ -207,9 +212,7 @@ class EmailSenderIntegration(IntegrationEmailBase, ClientBase):
                 )
 
         # Fetch SMTP settings
-        cache_key = (
-            f"clients:settings:{self.INTEGRATION_KEY}:{self.connected_integration_id}"
-        )
+        cache_key = self._settings_cache_key(self.connected_integration_id)
         try:
             settings_map = await self._fetch_settings(cache_key)
             host = settings_map.get(self.SETTINGS_KEYS["host"])

@@ -21,6 +21,7 @@ logger = setup_logger("getsms")
 
 class GetSmsIntegration(IntegrationSmsBase, ClientBase):
     BASE_URL = "http://185.8.212.184/smsgateway/"
+    REDIS_PREFIX = "gs"
     DEFAULT_TIMEOUT = 15
     BATCH_SIZE = 50
     SETTINGS_TTL = settings.redis_cache_ttl
@@ -44,6 +45,10 @@ class GetSmsIntegration(IntegrationSmsBase, ClientBase):
         return IntegrationErrorResponse(
             result=IntegrationErrorModel(error=code, description=description)
         )
+
+    @classmethod
+    def _settings_cache_key(cls, connected_integration_id: str) -> str:
+        return f"{cls.REDIS_PREFIX}:settings:{connected_integration_id}"
 
     async def _get_settings(self, cache_key: str) -> dict:
         """Получение настроек GETSMS из Redis или API"""
@@ -119,7 +124,7 @@ class GetSmsIntegration(IntegrationSmsBase, ClientBase):
         if not self.connected_integration_id:
             return self._error_response(1000, "connected_integration_id не указан")
 
-        cache_key = f"clients:settings:getsms:{self.connected_integration_id}"
+        cache_key = self._settings_cache_key(self.connected_integration_id)
         try:
             settings_map = await self._get_settings(cache_key)
             login = settings_map.get(self.SETTINGS_KEYS["login"])

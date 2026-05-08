@@ -5,7 +5,7 @@ from config.settings import settings as app_settings
 
 class MetaLeadgenCrmChannelConfig:
     INTEGRATION_KEY = "meta_leadgen_crm_channel"
-    REDIS_PREFIX = "clients:meta_leadgen_crm_channel:"
+    REDIS_PREFIX = "mlg:"
 
     GRAPH_API_VERSION = str(
         getattr(app_settings, "meta_leadgen_graph_version", "") or "v20.0"

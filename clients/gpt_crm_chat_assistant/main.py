@@ -56,8 +56,9 @@ _CHAT_ENTITY_TYPE_CLIENT = ChatEntityTypeEnum.Client.value.lower()
 
 _INSTANCE_ID = uuid.uuid4().hex[:12]
 _MANAGER_LOCK = asyncio.Lock()
-_WORKER_TASKS: Dict[str, asyncio.Task] = {}
+_WORKER_TASKS: Dict[int, asyncio.Task] = {}
 _REDIS_TTL_TOUCH_TS: Dict[str, int] = {}
+_STREAM_CLAIM_TS: Dict[str, int] = {}
 
 
 def _now_ts() -> int:
@@ -66,7 +67,8 @@ def _now_ts() -> int:
 
 class GptCrmChatAssistantConfig:
     INTEGRATION_KEY = "gpt_crm_chat_assistant"
-    REDIS_PREFIX = "clients:gpt_crm_chat_assistant:"
+    REDIS_PREFIX = "gca:"
+    STREAM_REDIS_PREFIX = "gca"
 
     SETTINGS_TTL_SEC = max(int(app_settings.redis_cache_ttl or 60), 60)
     BOT_CACHE_TTL_SEC = 24 * 60 * 60
@@ -98,18 +100,24 @@ class GptCrmChatAssistantConfig:
     MAX_QUICK_REPLIES_FETCH = 100
     MAX_QUICK_REPLIES_IN_PROMPT = 10
     MAX_QUICK_REPLY_TEXT_LEN = 200
-    STREAM_GROUP = "gpt_crm_chat_assistant_workers"
+    STREAM_GROUP = "gcaw"
     STREAM_TTL_SEC = 24 * 60 * 60
-    STREAM_MAXLEN = 10000
-    STREAM_BATCH_SIZE = 10
+    STREAM_MAXLEN = max(int(app_settings.gpt_crm_chat_assistant_stream_maxlen or 0), 10000)
+    STREAM_BATCH_SIZE = max(int(app_settings.gpt_crm_chat_assistant_stream_batch_size or 0), 1)
+    STREAM_WORKERS = max(int(app_settings.gpt_crm_chat_assistant_stream_workers or 0), 1)
     STREAM_READ_BLOCK_MS = 5000
     STREAM_MIN_IDLE_MS = 60_000
-    STREAM_MAX_RETRIES = 3
+    STREAM_CLAIM_INTERVAL_SEC = 30
+    STREAM_MAX_RETRIES = max(int(app_settings.gpt_crm_chat_assistant_stream_retry_limit or 0), 1)
     STREAM_RETRY_BASE_DELAY_SEC = 5
+    EVENT_CONCURRENCY = max(int(app_settings.gpt_crm_chat_assistant_event_concurrency or 0), 1)
     DEBOUNCE_SEC = 2
     DEBOUNCE_TTL_SEC = 10 * 60
     ACTIVE_CI_IDS_TTL_SEC = 7 * 24 * 60 * 60
     WORKER_HEARTBEAT_TTL_SEC = 60
+    ACTIVE_CACHE_TTL_SEC = max(int(app_settings.redis_cache_ttl or 60), 60)
+    ACTIVE_LOCK_TTL_SEC = 10
+    ACTIVE_LOCK_WAIT_SEC = 0.5
 
     THREAD_FIELD_ENTITY_TYPES = ("Lead", "Deal", "Task", "Client", "Ticket")
     THREAD_FIELD_KEY = "gpt_thread_id"
@@ -141,6 +149,11 @@ class RuntimeConfig:
 
 def _redis_enabled() -> bool:
     return bool(app_settings.redis_enabled and redis_client is not None)
+
+
+def _require_redis() -> None:
+    if not _redis_enabled():
+        raise RuntimeError("Redis is required for gpt_crm_chat_assistant")
 
 
 def _parse_bool(value: Any, default: bool = False) -> bool:
@@ -307,9 +320,6 @@ class GptCrmChatAssistantIntegration(ClientBase):
     _ACTIVE_CACHE: Dict[str, Tuple[bool, float]] = {}
     _ACTIVE_CACHE_LOCK = asyncio.Lock()
 
-    _LOCAL_DEDUPE: Dict[str, float] = {}
-    _LOCAL_DEDUPE_LOCK = asyncio.Lock()
-
     _LOCAL_BOT_CACHE: Dict[str, Tuple[int, float]] = {}
     _LOCAL_BOT_CACHE_LOCK = asyncio.Lock()
     _LOCAL_FILE_CACHE: Dict[str, Tuple[Dict[str, Any], float]] = {}
@@ -318,10 +328,6 @@ class GptCrmChatAssistantIntegration(ClientBase):
     _LOCAL_FIELDS_READY_LOCK = asyncio.Lock()
     _LOCAL_QUICK_REPLIES_CACHE: Dict[str, Tuple[List[str], float]] = {}
     _LOCAL_QUICK_REPLIES_LOCK = asyncio.Lock()
-    _LOCAL_AUTO_SEND_COOLDOWN: Dict[str, float] = {}
-    _LOCAL_AUTO_SEND_HOURLY: Dict[str, int] = {}
-    _LOCAL_AUTO_SEND_LOCK = asyncio.Lock()
-
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.http_client = httpx.AsyncClient(timeout=GptCrmChatAssistantConfig.OPENAI_TIMEOUT_SEC)
@@ -343,6 +349,12 @@ class GptCrmChatAssistantIntegration(ClientBase):
         tokens = [str(item).strip() for item in parts if str(item or "").strip()]
         return f"{GptCrmChatAssistantConfig.REDIS_PREFIX}{':'.join(tokens)}"
 
+    @staticmethod
+    def _stream_redis_key(*parts: Any) -> str:
+        tokens = [str(item).strip(":") for item in parts if str(item or "").strip()]
+        prefix = GptCrmChatAssistantConfig.STREAM_REDIS_PREFIX
+        return f"{prefix}:{':'.join(tokens)}" if tokens else prefix
+
     @classmethod
     def _settings_cache_key(cls, connected_integration_id: str) -> str:
         return cls._redis_key("settings", connected_integration_id)
@@ -350,6 +362,10 @@ class GptCrmChatAssistantIntegration(ClientBase):
     @classmethod
     def _ci_active_cache_key(cls, connected_integration_id: str) -> str:
         return cls._redis_key("ci_active", connected_integration_id)
+
+    @classmethod
+    def _ci_active_lock_key(cls, connected_integration_id: str) -> str:
+        return cls._stream_redis_key("al", connected_integration_id)
 
     @classmethod
     def _bot_cache_key(cls, connected_integration_id: str, chat_id: str) -> str:
@@ -372,16 +388,18 @@ class GptCrmChatAssistantIntegration(ClientBase):
         return cls._redis_key("file", connected_integration_id, int(file_id))
 
     @classmethod
-    def _stream_key(cls, connected_integration_id: str) -> str:
-        return cls._redis_key("stream", connected_integration_id)
+    def _stream_key(cls, connected_integration_id: Optional[str] = None) -> str:
+        _ = connected_integration_id
+        return cls._stream_redis_key("s", "j")
 
     @classmethod
-    def _dlq_stream_key(cls, connected_integration_id: str) -> str:
-        return cls._redis_key("stream", "dlq", connected_integration_id)
+    def _dlq_stream_key(cls, connected_integration_id: Optional[str] = None) -> str:
+        _ = connected_integration_id
+        return cls._stream_redis_key("s", "d")
 
     @classmethod
-    def _worker_heartbeat_key(cls, connected_integration_id: str) -> str:
-        return cls._redis_key("worker", "heartbeat", connected_integration_id)
+    def _worker_heartbeat_key(cls, worker_index: int) -> str:
+        return cls._stream_redis_key("w", int(worker_index), _INSTANCE_ID)
 
     @classmethod
     def _debounce_key(cls, connected_integration_id: str, chat_id: str) -> str:
@@ -397,29 +415,57 @@ class GptCrmChatAssistantIntegration(ClientBase):
 
     @staticmethod
     async def _redis_get(key: str) -> Optional[str]:
-        if not _redis_enabled():
-            return None
+        _require_redis()
         return await redis_client.get(key)
 
     @staticmethod
     async def _redis_set(key: str, value: str, ttl_sec: int) -> None:
-        if not _redis_enabled():
-            return
+        _require_redis()
         await redis_client.set(key, value, ex=max(int(ttl_sec), 1))
 
     @staticmethod
     async def _redis_set_nx(key: str, value: str, ttl_sec: int) -> bool:
-        if not _redis_enabled():
-            return False
+        _require_redis()
         return bool(await redis_client.set(key, value, ex=max(int(ttl_sec), 1), nx=True))
 
     @staticmethod
     async def _redis_delete(*keys: str) -> None:
-        if not _redis_enabled():
-            return
+        _require_redis()
         rows = [str(key).strip() for key in keys if str(key or "").strip()]
         if rows:
             await redis_client.delete(*rows)
+
+    @classmethod
+    async def _acquire_redis_lock(
+        cls,
+        key: str,
+        ttl_sec: int,
+        *,
+        wait_seconds: float = 0.0,
+    ) -> Optional[str]:
+        _require_redis()
+        token = uuid.uuid4().hex
+        deadline = asyncio.get_running_loop().time() + max(float(wait_seconds or 0.0), 0.0)
+        while True:
+            if await cls._redis_set_nx(key, token, ttl_sec):
+                return token
+            if asyncio.get_running_loop().time() >= deadline:
+                return None
+            await asyncio.sleep(0.05)
+
+    @staticmethod
+    async def _release_redis_lock(key: str, token: Optional[str]) -> None:
+        if not token:
+            return
+        _require_redis()
+        script = (
+            "if redis.call('get', KEYS[1]) == ARGV[1] "
+            "then return redis.call('del', KEYS[1]) else return 0 end"
+        )
+        try:
+            await redis_client.eval(script, 1, key, token)
+        except Exception as error:
+            logger.warning("Failed to release Redis lock %s: %s", key, error)
 
     @classmethod
     def _resolve_stream_ttl(cls, ttl_sec: Optional[int] = None) -> int:
@@ -429,8 +475,7 @@ class GptCrmChatAssistantIntegration(ClientBase):
 
     @classmethod
     async def _touch_stream_ttl(cls, stream_key: str, *, force: bool = False) -> None:
-        if not _redis_enabled():
-            return
+        _require_redis()
         await redis_expire_if_due(
             stream_key,
             cls._resolve_stream_ttl(),
@@ -442,8 +487,7 @@ class GptCrmChatAssistantIntegration(ClientBase):
 
     @classmethod
     async def _ensure_consumer_group(cls, stream_key: str) -> None:
-        if not _redis_enabled():
-            return
+        _require_redis()
         await redis_stream_group_create_with_ttl(
             stream_key,
             GptCrmChatAssistantConfig.STREAM_GROUP,
@@ -454,8 +498,7 @@ class GptCrmChatAssistantIntegration(ClientBase):
 
     @classmethod
     async def _enqueue(cls, stream_key: str, fields: Dict[str, Any]) -> None:
-        if not _redis_enabled():
-            raise RuntimeError("Redis is not enabled")
+        _require_redis()
 
         serialized: Dict[str, str] = {}
         for key, value in fields.items():
@@ -481,8 +524,7 @@ class GptCrmChatAssistantIntegration(ClientBase):
 
     @classmethod
     async def _mark_ci_active(cls, connected_integration_id: str) -> None:
-        if not _redis_enabled():
-            return
+        _require_redis()
         ci = str(connected_integration_id or "").strip()
         if not ci:
             return
@@ -491,8 +533,7 @@ class GptCrmChatAssistantIntegration(ClientBase):
 
     @classmethod
     async def _touch_active_ci_ids_ttl(cls, *, force: bool = False) -> None:
-        if not _redis_enabled():
-            return
+        _require_redis()
         await redis_expire_if_due(
             cls._active_ci_ids_key(),
             cls._active_ci_ids_ttl(),
@@ -504,19 +545,17 @@ class GptCrmChatAssistantIntegration(ClientBase):
 
     @classmethod
     async def _mark_ci_inactive(cls, connected_integration_id: str) -> None:
-        if not _redis_enabled():
-            return
+        _require_redis()
         ci = str(connected_integration_id or "").strip()
         if not ci:
             return
         await redis_client.srem(cls._active_ci_ids_key(), ci)
 
     @classmethod
-    async def _set_worker_heartbeat(cls, connected_integration_id: str) -> None:
-        if not _redis_enabled():
-            return
+    async def _set_worker_heartbeat(cls, worker_index: int) -> None:
+        _require_redis()
         await redis_client.setex(
-            cls._worker_heartbeat_key(connected_integration_id),
+            cls._worker_heartbeat_key(worker_index),
             GptCrmChatAssistantConfig.WORKER_HEARTBEAT_TTL_SEC,
             str(_now_ts()),
         )
@@ -529,10 +568,10 @@ class GptCrmChatAssistantIntegration(ClientBase):
         chat_id: str,
         message_id: str,
     ) -> None:
-        if not _redis_enabled():
-            return
+        _require_redis()
+        key = cls._debounce_key(connected_integration_id, chat_id)
         await redis_client.setex(
-            cls._debounce_key(connected_integration_id, chat_id),
+            key,
             GptCrmChatAssistantConfig.DEBOUNCE_TTL_SEC,
             str(message_id),
         )
@@ -544,10 +583,10 @@ class GptCrmChatAssistantIntegration(ClientBase):
         chat_id: str,
         message_id: str,
     ) -> bool:
-        if not _redis_enabled():
-            return True
+        _require_redis()
+        key = cls._debounce_key(connected_integration_id, chat_id)
         latest = str(
-            await redis_client.get(cls._debounce_key(connected_integration_id, chat_id))
+            await redis_client.get(key)
             or ""
         ).strip()
         return not latest or latest == str(message_id or "").strip()
@@ -615,12 +654,41 @@ class GptCrmChatAssistantIntegration(ClientBase):
             if cached_raw in {"0", "1"}:
                 cached_value = cached_raw == "1"
                 async with cls._ACTIVE_CACHE_LOCK:
-                    cls._ACTIVE_CACHE[ci] = (cached_value, now + 60)
+                    cls._ACTIVE_CACHE[ci] = (
+                        cached_value,
+                        now + GptCrmChatAssistantConfig.ACTIVE_CACHE_TTL_SEC,
+                    )
                 return cached_value
+
+        lock_token = await cls._acquire_redis_lock(
+            cls._ci_active_lock_key(ci),
+            GptCrmChatAssistantConfig.ACTIVE_LOCK_TTL_SEC,
+            wait_seconds=(
+                GptCrmChatAssistantConfig.ACTIVE_LOCK_WAIT_SEC
+                if not force_refresh
+                else GptCrmChatAssistantConfig.ACTIVE_LOCK_TTL_SEC
+            ),
+        )
+        if not lock_token:
+            cached_raw = await cls._redis_get(cls._ci_active_cache_key(ci))
+            if cached_raw in {"0", "1"}:
+                return cached_raw == "1"
+            raise TimeoutError(f"Timed out waiting for active check lock for ID {ci}")
 
         detected: Optional[bool] = None
         last_error: Optional[Exception] = None
         try:
+            if not force_refresh:
+                cached_raw = await cls._redis_get(cls._ci_active_cache_key(ci))
+                if cached_raw in {"0", "1"}:
+                    cached_value = cached_raw == "1"
+                    async with cls._ACTIVE_CACHE_LOCK:
+                        cls._ACTIVE_CACHE[ci] = (
+                            cached_value,
+                            now + GptCrmChatAssistantConfig.ACTIVE_CACHE_TTL_SEC,
+                        )
+                    return cached_value
+
             async with RegosAPI(connected_integration_id=ci) as api:
                 response = await api.integrations.connected_integration.get(
                     ConnectedIntegrationGetRequest(
@@ -650,21 +718,28 @@ class GptCrmChatAssistantIntegration(ClientBase):
                 detected = False
         except Exception as error:
             last_error = error
+        finally:
+            await cls._release_redis_lock(cls._ci_active_lock_key(ci), lock_token)
 
         if detected is None:
             if last_error is not None:
-                logger.warning(
-                    "ConnectedIntegration/Get failed for active check, fallback active=true: ci=%s error=%s",
-                    ci,
-                    last_error,
-                )
-            detected = True
+                raise RuntimeError(
+                    f"ConnectedIntegration/Get failed for active check: ci={ci} error={last_error}"
+                ) from last_error
+            detected = False
 
         active = bool(detected)
 
         async with cls._ACTIVE_CACHE_LOCK:
-            cls._ACTIVE_CACHE[ci] = (active, now + 60)
-        await cls._redis_set(cls._ci_active_cache_key(ci), "1" if active else "0", 60)
+            cls._ACTIVE_CACHE[ci] = (
+                active,
+                now + GptCrmChatAssistantConfig.ACTIVE_CACHE_TTL_SEC,
+            )
+        await cls._redis_set(
+            cls._ci_active_cache_key(ci),
+            "1" if active else "0",
+            GptCrmChatAssistantConfig.ACTIVE_CACHE_TTL_SEC,
+        )
         return active
 
     @classmethod
@@ -1107,8 +1182,8 @@ class GptCrmChatAssistantIntegration(ClientBase):
         ci = str(connected_integration_id or "").strip()
         if not ci:
             raise ValueError("connected_integration_id is required")
-        stream_key = cls._stream_key(ci)
-        await cls._ensure_stream_worker(ci)
+        stream_key = cls._stream_key()
+        await cls._ensure_stream_workers()
         await cls._mark_ci_active(ci)
         if update_debounce:
             await cls._set_debounce_latest(ci, chat_id, message_id)
@@ -1132,35 +1207,29 @@ class GptCrmChatAssistantIntegration(ClientBase):
         )
 
     @classmethod
-    async def _ensure_stream_worker(cls, connected_integration_id: str) -> None:
-        ci = str(connected_integration_id or "").strip()
-        if not ci or not _redis_enabled():
-            return
+    async def _ensure_stream_worker(cls, connected_integration_id: str = "") -> None:
+        _ = connected_integration_id
+        await cls._ensure_stream_workers()
+
+    @classmethod
+    async def _ensure_stream_workers(cls) -> None:
+        _require_redis()
+        stream_key = cls._stream_key()
+        await cls._ensure_consumer_group(stream_key)
         async with _MANAGER_LOCK:
-            task = _WORKER_TASKS.get(ci)
-            if task and not task.done():
-                return
-            _WORKER_TASKS[ci] = asyncio.create_task(
-                cls._stream_worker_loop(ci),
-                name=f"gpt_crm_chat_assistant_stream_{ci}",
-            )
+            for index in range(GptCrmChatAssistantConfig.STREAM_WORKERS):
+                task = _WORKER_TASKS.get(index)
+                if task and not task.done():
+                    continue
+                _WORKER_TASKS[index] = asyncio.create_task(
+                    cls._stream_worker_loop(index),
+                    name=f"gca_stream_{index}",
+                )
 
     @classmethod
     async def _stop_stream_worker(cls, connected_integration_id: str) -> None:
-        ci = str(connected_integration_id or "").strip()
-        if not ci:
-            return
-        async with _MANAGER_LOCK:
-            task = _WORKER_TASKS.pop(ci, None)
-        if not task:
-            return
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            logger.exception("Error while stopping GPT assistant stream worker: ci=%s", ci)
+        _ = connected_integration_id
+        return
 
     @classmethod
     async def shutdown_all(cls) -> None:
@@ -1179,49 +1248,29 @@ class GptCrmChatAssistantIntegration(ClientBase):
 
     @classmethod
     async def restore_active_connections(cls) -> Dict[str, int]:
-        if not _redis_enabled():
-            return {"total": 0, "restored": 0, "failed": 0}
+        _require_redis()
+        await cls._ensure_stream_workers()
 
         try:
             raw_ids = await redis_client.smembers(cls._active_ci_ids_key())
         except Exception as error:
             logger.warning("Failed to read active GPT assistant integrations set: %s", error)
-            return {"total": 0, "restored": 0, "failed": 0}
+            return {"total": 0, "workers": len(_WORKER_TASKS)}
 
         ci_ids = sorted(
             str(value or "").strip()
             for value in (raw_ids or set())
             if str(value or "").strip()
         )
-        if not ci_ids:
-            logger.info("GPT assistant auto-restore: no active integrations found")
-            return {"total": 0, "restored": 0, "failed": 0}
-        await cls._touch_active_ci_ids_ttl(force=True)
-
-        restored = 0
-        failed = 0
-        for ci in ci_ids:
-            try:
-                if not await cls._is_connected_integration_active(ci, force_refresh=True):
-                    await cls._mark_ci_inactive(ci)
-                    failed += 1
-                    logger.info("GPT assistant auto-restore skipped inactive integration: ci=%s", ci)
-                    continue
-                await cls._ensure_consumer_group(cls._stream_key(ci))
-                await cls._ensure_stream_worker(ci)
-                await cls._mark_ci_active(ci)
-                restored += 1
-            except Exception as error:
-                failed += 1
-                logger.exception("GPT assistant auto-restore failed: ci=%s error=%s", ci, error)
+        if ci_ids:
+            await cls._touch_active_ci_ids_ttl(force=True)
 
         logger.info(
-            "GPT assistant auto-restore completed: total=%s restored=%s failed=%s",
+            "GPT assistant shared stream restored: active_ci=%s workers=%s",
             len(ci_ids),
-            restored,
-            failed,
+            len(_WORKER_TASKS),
         )
-        return {"total": len(ci_ids), "restored": restored, "failed": failed}
+        return {"total": len(ci_ids), "workers": len(_WORKER_TASKS)}
 
     @classmethod
     def _stream_entry_attempt(cls, fields: Dict[str, Any]) -> int:
@@ -1259,7 +1308,6 @@ class GptCrmChatAssistantIntegration(ClientBase):
         cls,
         stream_key: str,
         consumer: str,
-        connected_integration_id: str,
     ) -> List[Tuple[str, Dict[str, Any]]]:
         try:
             claimed_raw = await redis_client.xautoclaim(
@@ -1275,8 +1323,8 @@ class GptCrmChatAssistantIntegration(ClientBase):
                 await cls._ensure_consumer_group(stream_key)
                 return []
             logger.warning(
-                "GPT assistant stream xautoclaim failed: ci=%s error=%s",
-                connected_integration_id,
+                "GPT assistant stream xautoclaim failed: stream=%s error=%s",
+                stream_key,
                 error,
             )
             return []
@@ -1290,31 +1338,29 @@ class GptCrmChatAssistantIntegration(ClientBase):
         ]
 
     @classmethod
-    async def _stream_worker_loop(cls, connected_integration_id: str) -> None:
-        ci = str(connected_integration_id or "").strip()
-        stream_key = cls._stream_key(ci)
-        consumer = f"{_INSTANCE_ID}:{ci[:8]}"
+    async def _stream_worker_loop(cls, worker_index: int) -> None:
+        stream_key = cls._stream_key()
+        consumer = f"{_INSTANCE_ID}:{int(worker_index)}"
         worker = cls()
-        worker.connected_integration_id = ci
-        logger.info("GPT assistant stream worker started: ci=%s", ci)
+        logger.info("GPT assistant stream worker started: index=%s", worker_index)
         pending_entries: List[Tuple[str, Dict[str, Any]]] = []
         try:
             await cls._ensure_consumer_group(stream_key)
+            semaphore = asyncio.Semaphore(GptCrmChatAssistantConfig.EVENT_CONCURRENCY)
             while True:
                 try:
-                    if not await cls._is_connected_integration_active(ci):
-                        await cls._mark_ci_inactive(ci)
-                        logger.info("GPT assistant stream worker stopped for inactive integration: ci=%s", ci)
-                        break
-                    await cls._set_worker_heartbeat(ci)
+                    await cls._set_worker_heartbeat(worker_index)
                     await cls._touch_stream_ttl(stream_key)
-                    claimed_entries = await cls._process_claimed_entries(
-                        stream_key,
-                        consumer,
-                        ci,
-                    )
-                    if claimed_entries:
-                        pending_entries.extend(claimed_entries)
+                    last_claim_ts = int(_STREAM_CLAIM_TS.get(stream_key) or 0)
+                    now_ts = _now_ts()
+                    if now_ts - last_claim_ts >= GptCrmChatAssistantConfig.STREAM_CLAIM_INTERVAL_SEC:
+                        _STREAM_CLAIM_TS[stream_key] = now_ts
+                        claimed_entries = await cls._process_claimed_entries(
+                            stream_key,
+                            consumer,
+                        )
+                        if claimed_entries:
+                            pending_entries.extend(claimed_entries)
 
                     try:
                         block_ms = GptCrmChatAssistantConfig.STREAM_READ_BLOCK_MS
@@ -1348,17 +1394,22 @@ class GptCrmChatAssistantIntegration(ClientBase):
                     if not ready_entries:
                         continue
 
-                    for entry_id, fields in ready_entries:
-                        await cls._process_stream_entry(
-                            worker=worker,
-                            stream_key=stream_key,
-                            entry_id=entry_id,
-                            fields=fields,
-                        )
+                    async def _process_ready(entry_id: str, fields: Dict[str, Any]) -> None:
+                        async with semaphore:
+                            await cls._process_stream_entry(
+                                worker=worker,
+                                stream_key=stream_key,
+                                entry_id=entry_id,
+                                fields=fields,
+                            )
+
+                    await asyncio.gather(
+                        *(_process_ready(entry_id, fields) for entry_id, fields in ready_entries)
+                    )
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
-                    logger.exception("GPT assistant stream worker error: ci=%s error=%s", ci, error)
+                    logger.exception("GPT assistant stream worker error: index=%s error=%s", worker_index, error)
                     await asyncio.sleep(2)
         finally:
             try:
@@ -1366,9 +1417,9 @@ class GptCrmChatAssistantIntegration(ClientBase):
             except Exception:
                 logger.exception("Error while closing GPT assistant worker HTTP client")
             async with _MANAGER_LOCK:
-                current = _WORKER_TASKS.get(ci)
+                current = _WORKER_TASKS.get(int(worker_index))
                 if current is asyncio.current_task():
-                    _WORKER_TASKS.pop(ci, None)
+                    _WORKER_TASKS.pop(int(worker_index), None)
 
     @classmethod
     async def _process_stream_entry(
@@ -1379,12 +1430,22 @@ class GptCrmChatAssistantIntegration(ClientBase):
         entry_id: str,
         fields: Dict[str, Any],
     ) -> None:
-        ci = str(fields.get("connected_integration_id") or worker.connected_integration_id or "").strip()
+        ci = str(fields.get("connected_integration_id") or "").strip()
         chat_id = str(fields.get("chat_id") or "").strip()
         message_id = str(fields.get("message_id") or "").strip()
         event_id = str(fields.get("event_id") or "").strip() or None
         if not ci or not chat_id or not message_id:
             logger.warning("GPT assistant stream entry has invalid payload: entry_id=%s fields=%s", entry_id, fields)
+            await cls._ack_stream_entry(stream_key, entry_id)
+            return
+
+        if not await cls._is_connected_integration_active(ci):
+            await cls._mark_ci_inactive(ci)
+            logger.info(
+                "GPT assistant stream job skipped for inactive integration: ci=%s entry_id=%s",
+                ci,
+                entry_id,
+            )
             await cls._ack_stream_entry(stream_key, entry_id)
             return
 
@@ -1495,22 +1556,20 @@ class GptCrmChatAssistantIntegration(ClientBase):
                 return self._error_response(1003, str(error)).dict()
 
         subscribe_result = await self._subscribe_required_webhooks(ci)
-        queue_enabled = _redis_enabled()
-        if queue_enabled:
-            await self._mark_ci_active(ci)
-            try:
-                await self._ensure_consumer_group(self._stream_key(ci))
-                await self._ensure_stream_worker(ci)
-            except Exception:
-                await self._mark_ci_inactive(ci)
-                raise
+        _require_redis()
+        await self._mark_ci_active(ci)
+        try:
+            await self._ensure_stream_workers()
+        except Exception:
+            await self._mark_ci_inactive(ci)
+            raise
         return {
             "status": "connected",
             "integration_key": GptCrmChatAssistantConfig.INTEGRATION_KEY,
             "model": runtime.assistant_model,
             "context_source": runtime.assistant_context_source,
             "webhooks_subscription": subscribe_result,
-            "queue_enabled": queue_enabled,
+            "queue_enabled": True,
             "required_fields": field_ensure_result,
             "auto_join_enabled": runtime.assistant_auto_join_enabled,
             "auto_join_entities": sorted(runtime.assistant_auto_join_entities),
@@ -1588,25 +1647,12 @@ class GptCrmChatAssistantIntegration(ClientBase):
         event_key: str,
     ) -> bool:
         dedupe_key = self._dedupe_key(connected_integration_id, event_key)
-        if _redis_enabled():
-            inserted = await self._redis_set_nx(
-                dedupe_key,
-                "1",
-                GptCrmChatAssistantConfig.DEDUPE_TTL_SEC,
-            )
-            return not inserted
-
-        now = time.monotonic()
-        async with self._LOCAL_DEDUPE_LOCK:
-            expired_keys = [
-                key for key, expires_at in self._LOCAL_DEDUPE.items() if expires_at <= now
-            ]
-            for key in expired_keys:
-                self._LOCAL_DEDUPE.pop(key, None)
-            if dedupe_key in self._LOCAL_DEDUPE:
-                return True
-            self._LOCAL_DEDUPE[dedupe_key] = now + GptCrmChatAssistantConfig.DEDUPE_TTL_SEC
-        return False
+        inserted = await self._redis_set_nx(
+            dedupe_key,
+            "1",
+            GptCrmChatAssistantConfig.DEDUPE_TTL_SEC,
+        )
+        return not inserted
 
     async def _release_duplicate_event(
         self,
@@ -1623,41 +1669,18 @@ class GptCrmChatAssistantIntegration(ClientBase):
         message_id: str,
         event_id: Optional[str],
     ) -> Dict[str, Any]:
-        if _redis_enabled():
-            await self._enqueue_chat_message_job(
-                connected_integration_id=connected_integration_id,
-                chat_id=chat_id,
-                message_id=message_id,
-                event_id=event_id,
-            )
-            return {
-                "status": "queued",
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "debounce_sec": GptCrmChatAssistantConfig.DEBOUNCE_SEC,
-            }
-
-        try:
-            runtime = await self._load_runtime(connected_integration_id)
-        except Exception as error:
-            return self._error_response(1001, str(error)).dict()
-
-        if runtime.assistant_context_source == "conversation":
-            try:
-                await self._ensure_thread_fields_ready(connected_integration_id, force=False)
-            except Exception as error:
-                logger.warning(
-                    "Required CRM field ensure failed on webhook: ci=%s error=%s",
-                    connected_integration_id,
-                    error,
-                )
-                return self._error_response(1003, str(error)).dict()
-
-        return await self._process_chat_message_added(
-            runtime=runtime,
+        await self._enqueue_chat_message_job(
+            connected_integration_id=connected_integration_id,
             chat_id=chat_id,
             message_id=message_id,
+            event_id=event_id,
         )
+        return {
+            "status": "queued",
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "debounce_sec": GptCrmChatAssistantConfig.DEBOUNCE_SEC,
+        }
 
     async def handle_webhook(
         self, action: Optional[str] = None, data: Optional[Dict[str, Any]] = None, **kwargs: Any
@@ -1691,8 +1714,7 @@ class GptCrmChatAssistantIntegration(ClientBase):
                 event_id=event_id,
             )
         except Exception as error:
-            if _redis_enabled():
-                await self._release_duplicate_event(ci, event_key)
+            await self._release_duplicate_event(ci, event_key)
             logger.exception(
                 "ChatMessageAdded processing failed: ci=%s chat_id=%s message_id=%s",
                 ci,
@@ -3012,68 +3034,31 @@ class GptCrmChatAssistantIntegration(ClientBase):
         cooldown_key = self._auto_send_cooldown_key(runtime.connected_integration_id, chat_id)
         hour_key = self._auto_send_hour_key(runtime.connected_integration_id, chat_id, hour_bucket)
 
-        if _redis_enabled():
-            if runtime.assistant_auto_send_cooldown_sec > 0:
-                ok = await self._redis_set_nx(
-                    cooldown_key,
-                    str(now_unix),
-                    runtime.assistant_auto_send_cooldown_sec,
+        _require_redis()
+        if runtime.assistant_auto_send_cooldown_sec > 0:
+            ok = await self._redis_set_nx(
+                cooldown_key,
+                str(now_unix),
+                runtime.assistant_auto_send_cooldown_sec,
+            )
+            if not ok:
+                return False
+
+        max_per_hour = runtime.assistant_auto_send_max_per_chat_hour
+        if max_per_hour > 0:
+            try:
+                sent_count = int(await redis_client.incr(hour_key))
+                if sent_count == 1:
+                    await redis_client.expire(hour_key, 3700)
+                if sent_count > max_per_hour:
+                    return False
+            except Exception as error:
+                logger.warning(
+                    "Failed to enforce redis auto-send hour limit: ci=%s chat_id=%s error=%s",
+                    runtime.connected_integration_id,
+                    chat_id,
+                    error,
                 )
-                if not ok:
-                    return False
-
-            max_per_hour = runtime.assistant_auto_send_max_per_chat_hour
-            if max_per_hour > 0:
-                try:
-                    sent_count = int(await redis_client.incr(hour_key))
-                    if sent_count == 1:
-                        await redis_client.expire(hour_key, 3700)
-                    if sent_count > max_per_hour:
-                        return False
-                except Exception as error:
-                    logger.warning(
-                        "Failed to enforce redis auto-send hour limit: ci=%s chat_id=%s error=%s",
-                        runtime.connected_integration_id,
-                        chat_id,
-                        error,
-                    )
-            return True
-
-        async with self._LOCAL_AUTO_SEND_LOCK:
-            now_mono = time.monotonic()
-
-            expired_cooldowns = [
-                key
-                for key, expires_at in self._LOCAL_AUTO_SEND_COOLDOWN.items()
-                if expires_at <= now_mono
-            ]
-            for key in expired_cooldowns:
-                self._LOCAL_AUTO_SEND_COOLDOWN.pop(key, None)
-
-            old_hour_keys: List[str] = []
-            for key in self._LOCAL_AUTO_SEND_HOURLY.keys():
-                try:
-                    key_hour = int(str(key).rsplit(":", 1)[-1])
-                except Exception:
-                    key_hour = hour_bucket
-                if key_hour < hour_bucket - 1:
-                    old_hour_keys.append(key)
-            for key in old_hour_keys:
-                self._LOCAL_AUTO_SEND_HOURLY.pop(key, None)
-
-            if runtime.assistant_auto_send_cooldown_sec > 0:
-                if cooldown_key in self._LOCAL_AUTO_SEND_COOLDOWN:
-                    return False
-                self._LOCAL_AUTO_SEND_COOLDOWN[cooldown_key] = (
-                    now_mono + runtime.assistant_auto_send_cooldown_sec
-                )
-
-            max_per_hour = runtime.assistant_auto_send_max_per_chat_hour
-            if max_per_hour > 0:
-                count = int(self._LOCAL_AUTO_SEND_HOURLY.get(hour_key, 0)) + 1
-                self._LOCAL_AUTO_SEND_HOURLY[hour_key] = count
-                if count > max_per_hour:
-                    return False
 
         return True
 

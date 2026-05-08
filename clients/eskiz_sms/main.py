@@ -22,6 +22,7 @@ logger = setup_logger("eskiz_sms")
 
 class EskizSmsIntegration(IntegrationSmsBase, ClientBase):
     BASE_URL = "https://notify.eskiz.uz/api"
+    REDIS_PREFIX = "ez"
     SETTINGS_TTL = settings.redis_cache_ttl
     ENDPOINTS = {
         "login": f"{BASE_URL}/auth/login",
@@ -47,6 +48,14 @@ class EskizSmsIntegration(IntegrationSmsBase, ClientBase):
         return IntegrationErrorResponse(
             result=IntegrationErrorModel(error=code, description=description)
         )
+
+    @classmethod
+    def _settings_cache_key(cls, connected_integration_id: str) -> str:
+        return f"{cls.REDIS_PREFIX}:settings:{connected_integration_id}"
+
+    @classmethod
+    def _token_cache_key(cls, connected_integration_id: str) -> str:
+        return f"{cls.REDIS_PREFIX}:token:{connected_integration_id}"
 
     async def _get_settings(self, cache_key: str) -> dict:
         """Получение настроек из Redis или API"""
@@ -127,7 +136,7 @@ class EskizSmsIntegration(IntegrationSmsBase, ClientBase):
             raise
 
     async def get_token(self, email: str, password: str) -> str:
-        token_cache_key = f"clients:token:eskiz:{self.connected_integration_id}"
+        token_cache_key = self._token_cache_key(self.connected_integration_id)
 
         if settings.redis_enabled and redis_client:
             cached_token = await redis_client.get(token_cache_key)
@@ -154,7 +163,7 @@ class EskizSmsIntegration(IntegrationSmsBase, ClientBase):
             raise
 
     async def refresh_token(self) -> Optional[str]:
-        token_cache_key = f"clients:token:eskiz:{self.connected_integration_id}"
+        token_cache_key = self._token_cache_key(self.connected_integration_id)
         token = await redis_client.get(token_cache_key)
 
         if not token:
@@ -190,7 +199,7 @@ class EskizSmsIntegration(IntegrationSmsBase, ClientBase):
         if not self.connected_integration_id:
             return self._error_response(1000, "connected_integration_id не указан")
 
-        cache_key = f"clients:settings:eskiz:{self.connected_integration_id}"
+        cache_key = self._settings_cache_key(self.connected_integration_id)
         try:
             settings_map = await self._get_settings(cache_key)
             email = settings_map.get("eskiz_email")
