@@ -11,7 +11,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -57,23 +57,33 @@ logger = setup_logger("asterisk_crm_channel")
 class AsteriskCrmChannelConfig:
     INTEGRATION_KEY = "asterisk_crm_channel"
     REDIS_PREFIX = "clients:asterisk_crm_channel:"
+    STREAM_REDIS_PREFIX = "acc"
     DEFAULT_AMI_PORT = 5038
 
     SETTINGS_TTL = max(int(app_settings.redis_cache_ttl or 60), 60)
+    SETTINGS_STALE_TTL = max(SETTINGS_TTL * 10, 10 * 60)
+    SETTINGS_LOCAL_TTL = min(30, max(5, SETTINGS_TTL // 4))
+    SETTINGS_LOCAL_MAX = 10000
+    SETTINGS_LOCK_TTL_SEC = 10
+    SETTINGS_LOCK_WAIT_SEC = 2.0
+    RUNTIME_LOCAL_TTL = min(30, max(5, SETTINGS_TTL // 4))
     CI_ACTIVE_MEMORY_TTL_SEC = 5
     DEFAULT_DEDUPE_TTL_SEC = 6 * 60 * 60
     DEFAULT_STATE_TTL_SEC = 6 * 60 * 60
-    STREAM_TTL_SEC = DEFAULT_STATE_TTL_SEC
+    STREAM_TTL_SEC = 24 * 60 * 60
     ACTIVE_CI_IDS_TTL_SEC = 30 * 24 * 60 * 60
     OPERATOR_NOT_FOUND_CACHE_TTL_SEC = 10 * 60
     STORE_DECISION_TRACE = bool(getattr(app_settings, "debug", False))
 
-    STREAM_GROUP = "asterisk_crm_channel_workers"
-    STREAM_MAXLEN = 10000
-    STREAM_BATCH_SIZE = 20
+    STREAM_GROUP = "accw"
+    STREAM_MAXLEN = max(int(app_settings.asterisk_crm_channel_stream_maxlen or 0), 10000)
+    STREAM_BATCH_SIZE = max(int(app_settings.asterisk_crm_channel_stream_batch_size or 0), 1)
+    STREAM_WORKERS = max(int(app_settings.asterisk_crm_channel_stream_workers or 0), 1)
     STREAM_READ_BLOCK_MS = 5000
     STREAM_MIN_IDLE_MS = 60_000
-    STREAM_MAX_RETRIES = 5
+    STREAM_CLAIM_INTERVAL_SEC = 30
+    STREAM_MAX_RETRIES = max(int(app_settings.asterisk_crm_channel_stream_retry_limit or 0), 1)
+    EVENT_CONCURRENCY = max(int(app_settings.asterisk_crm_channel_event_concurrency or 0), 1)
     STREAM_EVENT_REORDER_WINDOW_SEC = 3
     STREAM_MAX_FUTURE_SKEW_SEC = 30
 
@@ -177,13 +187,30 @@ class NonRetryableCallEventError(RuntimeError):
 
 
 _MANAGER_LOCK = asyncio.Lock()
-_WORKER_TASKS: Dict[str, asyncio.Task] = {}
+_WORKER_TASKS: Dict[int, asyncio.Task] = {}
 _AMI_TASKS: Dict[str, asyncio.Task] = {}
 _INSTANCE_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
 _HTTP_CLIENT: Optional[httpx.AsyncClient] = None
 _CI_ACTIVE_MEMORY_CACHE: Dict[str, Tuple[bool, int]] = {}
 _CI_ACTIVE_LOCKS: Dict[str, asyncio.Lock] = {}
 _REDIS_TTL_TOUCH_TS: Dict[str, int] = {}
+_STREAM_GROUP_READY: Set[str] = set()
+_STREAM_CLAIM_TS: Dict[str, int] = {}
+_SETTINGS_LOCAL_CACHE: Dict[str, Tuple[int, Dict[str, str]]] = {}
+_RUNTIME_LOCAL_CACHE: Dict[str, Tuple[int, RuntimeConfig]] = {}
+_RUNTIME_LOCAL_LOCK = asyncio.Lock()
+
+_ENQUEUE_DEDUPE_LUA = """
+local ok = redis.call('set', KEYS[1], '1', 'EX', ARGV[1], 'NX')
+if not ok then
+  return 0
+end
+redis.call('xadd', KEYS[2], 'MAXLEN', '~', ARGV[2], '*', unpack(ARGV, 5))
+if ARGV[4] == '1' then
+  redis.call('expire', KEYS[2], ARGV[3])
+end
+return 1
+"""
 
 
 def _now_ts() -> int:
@@ -200,6 +227,11 @@ def _json_loads(raw: str) -> Any:
 
 def _redis_enabled() -> bool:
     return bool(app_settings.redis_enabled and redis_client is not None)
+
+
+def _require_redis() -> None:
+    if not _redis_enabled():
+        raise RuntimeError("Redis is required for asterisk_crm_channel")
 
 
 def _to_int(value: Any, default: Optional[int] = None) -> Optional[int]:
@@ -574,8 +606,35 @@ class AsteriskCrmChannelIntegration(ClientBase):
         return f"{prefix}:{':'.join(normalized_parts)}" if normalized_parts else f"{prefix}:"
 
     @staticmethod
+    def _stream_redis_key(*parts: Any) -> str:
+        normalized_parts: List[str] = []
+        for part in parts:
+            if part is None:
+                continue
+            text = str(part).strip()
+            if text:
+                normalized_parts.append(text.strip(":"))
+        if not normalized_parts:
+            return AsteriskCrmChannelConfig.STREAM_REDIS_PREFIX
+        return f"{AsteriskCrmChannelConfig.STREAM_REDIS_PREFIX}:{':'.join(normalized_parts)}"
+
+    @staticmethod
     def _settings_cache_key(connected_integration_id: str) -> str:
         return AsteriskCrmChannelIntegration._redis_key("settings", connected_integration_id)
+
+    @staticmethod
+    def _settings_stale_cache_key(connected_integration_id: str) -> str:
+        return AsteriskCrmChannelIntegration._redis_key(
+            "settings_stale",
+            connected_integration_id,
+        )
+
+    @staticmethod
+    def _settings_fetch_lock_key(connected_integration_id: str) -> str:
+        return AsteriskCrmChannelIntegration._stream_redis_key(
+            "stl",
+            connected_integration_id,
+        )
 
     @staticmethod
     def _ci_active_cache_key(connected_integration_id: str) -> str:
@@ -626,8 +685,7 @@ class AsteriskCrmChannelIntegration(ClientBase):
 
     @classmethod
     async def _touch_active_ci_ids_ttl(cls, *, force: bool = False) -> None:
-        if not _redis_enabled():
-            return
+        _require_redis()
         await redis_expire_if_due(
             cls._active_ci_ids_key(),
             cls._active_ci_ids_ttl(),
@@ -638,23 +696,18 @@ class AsteriskCrmChannelIntegration(ClientBase):
         )
 
     @staticmethod
-    def _stream_key(connected_integration_id: str) -> str:
-        return AsteriskCrmChannelIntegration._redis_key(
-            "stream",
-            "asterisk_in",
-            connected_integration_id,
-        )
+    def _stream_key(connected_integration_id: Optional[str] = None) -> str:
+        return AsteriskCrmChannelIntegration._stream_redis_key("s", "e")
 
     @staticmethod
-    def _dlq_stream_key(connected_integration_id: str) -> str:
-        return AsteriskCrmChannelIntegration._redis_key("stream", "dlq", connected_integration_id)
+    def _dlq_stream_key(connected_integration_id: Optional[str] = None) -> str:
+        return AsteriskCrmChannelIntegration._stream_redis_key("s", "dlq")
 
     @staticmethod
-    def _worker_heartbeat_key(connected_integration_id: str) -> str:
-        return AsteriskCrmChannelIntegration._redis_key(
-            "worker",
-            "heartbeat",
-            connected_integration_id,
+    def _worker_heartbeat_key(worker_index: int) -> str:
+        return AsteriskCrmChannelIntegration._stream_redis_key(
+            "w",
+            worker_index,
             _INSTANCE_ID,
         )
 
@@ -663,6 +716,13 @@ class AsteriskCrmChannelIntegration(ClientBase):
         return AsteriskCrmChannelIntegration._redis_key(
             "lock",
             "ami_owner",
+            connected_integration_id,
+        )
+
+    @staticmethod
+    def _connect_lock_key(connected_integration_id: str) -> str:
+        return AsteriskCrmChannelIntegration._stream_redis_key(
+            "cl",
             connected_integration_id,
         )
 
@@ -687,6 +747,15 @@ class AsteriskCrmChannelIntegration(ClientBase):
             "event",
             connected_integration_id,
             event_id,
+        )
+
+    @staticmethod
+    def _enqueue_dedupe_event_key(connected_integration_id: str, event_id: str) -> str:
+        event_hash = hashlib.sha256(str(event_id or "").encode("utf-8")).hexdigest()[:20]
+        return AsteriskCrmChannelIntegration._stream_redis_key(
+            "d",
+            connected_integration_id,
+            event_hash,
         )
 
     @staticmethod
@@ -829,8 +898,7 @@ class AsteriskCrmChannelIntegration(ClientBase):
 
     @staticmethod
     async def _redis_get(key: str) -> Optional[str]:
-        if not _redis_enabled():
-            return None
+        _require_redis()
         return await redis_client.get(key)
 
     @staticmethod
@@ -841,8 +909,7 @@ class AsteriskCrmChannelIntegration(ClientBase):
         *,
         min_ttl_sec: int,
     ) -> None:
-        if not _redis_enabled():
-            return
+        _require_redis()
         ttl = max(_to_int(ttl_sec, min_ttl_sec) or min_ttl_sec, min_ttl_sec)
         await redis_client.set(key, value, ex=ttl)
 
@@ -870,16 +937,14 @@ class AsteriskCrmChannelIntegration(ClientBase):
         *,
         min_ttl_sec: int,
     ) -> bool:
-        if not _redis_enabled():
-            return False
+        _require_redis()
         ttl = max(_to_int(ttl_sec, min_ttl_sec) or min_ttl_sec, min_ttl_sec)
         result = await redis_client.set(key, value, ex=ttl, nx=True)
         return bool(result)
 
     @staticmethod
     async def _redis_delete(*keys: str) -> None:
-        if not _redis_enabled():
-            return
+        _require_redis()
         rows = [str(key).strip() for key in keys if str(key or "").strip()]
         if not rows:
             return
@@ -887,8 +952,7 @@ class AsteriskCrmChannelIntegration(ClientBase):
 
     @classmethod
     async def _mark_ci_active(cls, connected_integration_id: str) -> None:
-        if not _redis_enabled():
-            return
+        _require_redis()
         ci = str(connected_integration_id or "").strip()
         if not ci:
             return
@@ -898,12 +962,14 @@ class AsteriskCrmChannelIntegration(ClientBase):
 
     @classmethod
     async def _mark_ci_inactive(cls, connected_integration_id: str) -> None:
-        if not _redis_enabled():
-            return
+        _require_redis()
         ci = str(connected_integration_id or "").strip()
         if not ci:
             return
         await redis_client.srem(cls._active_ci_ids_key(), ci)
+        _CI_ACTIVE_MEMORY_CACHE.pop(ci, None)
+        async with _RUNTIME_LOCAL_LOCK:
+            _RUNTIME_LOCAL_CACHE.pop(ci, None)
 
     @classmethod
     async def _acquire_lock(cls, lock_key: str, ttl_sec: int) -> Optional[str]:
@@ -916,12 +982,34 @@ class AsteriskCrmChannelIntegration(ClientBase):
         )
         return token if ok else None
 
+    @classmethod
+    async def _acquire_lock_wait(
+        cls,
+        lock_key: str,
+        ttl_sec: int,
+        *,
+        wait_seconds: float = 0.0,
+    ) -> Optional[str]:
+        token = uuid.uuid4().hex
+        deadline = asyncio.get_running_loop().time() + max(float(wait_seconds or 0.0), 0.0)
+        while True:
+            ok = await cls._redis_set_nx_with_ttl(
+                lock_key,
+                token,
+                ttl_sec,
+                min_ttl_sec=AsteriskCrmChannelConfig.LOCK_TTL_SEC,
+            )
+            if ok:
+                return token
+            if asyncio.get_running_loop().time() >= deadline:
+                return None
+            await asyncio.sleep(0.05)
+
     @staticmethod
     async def _release_lock(lock_key: str, token: Optional[str]) -> None:
-        if not _redis_enabled():
-            return
         if not lock_key or not token:
             return
+        _require_redis()
         script = """
 if redis.call('GET', KEYS[1]) == ARGV[1] then
     return redis.call('DEL', KEYS[1])
@@ -937,10 +1025,9 @@ return 0
 
     @classmethod
     async def _refresh_lock(cls, lock_key: str, token: Optional[str], ttl_sec: int) -> bool:
-        if not _redis_enabled():
-            return False
         if not lock_key or not token:
             return False
+        _require_redis()
         ttl = max(
             _to_int(ttl_sec, AsteriskCrmChannelConfig.LOCK_TTL_SEC)
             or AsteriskCrmChannelConfig.LOCK_TTL_SEC,
@@ -994,17 +1081,17 @@ return 0
         if not ci:
             raise ValueError("connected_integration_id is required")
 
+        _require_redis()
         cache_key = cls._ci_active_cache_key(ci)
         if not force_refresh:
             memory_cached = cls._ci_active_memory_cache_get(ci)
             if memory_cached is not None:
                 return memory_cached
-            if _redis_enabled():
-                cached = str(await redis_client.get(cache_key) or "").strip().lower()
-                if cached in {"1", "0"}:
-                    detected = cached == "1"
-                    cls._ci_active_memory_cache_set(ci, detected)
-                    return detected
+            cached = str(await redis_client.get(cache_key) or "").strip().lower()
+            if cached in {"1", "0"}:
+                detected = cached == "1"
+                cls._ci_active_memory_cache_set(ci, detected)
+                return detected
 
         active_lock = cls._ci_active_lock(ci)
         async with active_lock:
@@ -1012,12 +1099,11 @@ return 0
                 memory_cached = cls._ci_active_memory_cache_get(ci)
                 if memory_cached is not None:
                     return memory_cached
-                if _redis_enabled():
-                    cached = str(await redis_client.get(cache_key) or "").strip().lower()
-                    if cached in {"1", "0"}:
-                        detected = cached == "1"
-                        cls._ci_active_memory_cache_set(ci, detected)
-                        return detected
+                cached = str(await redis_client.get(cache_key) or "").strip().lower()
+                if cached in {"1", "0"}:
+                    detected = cached == "1"
+                    cls._ci_active_memory_cache_set(ci, detected)
+                    return detected
 
             detected: Optional[bool] = None
             last_error: Optional[Exception] = None
@@ -1054,19 +1140,16 @@ return 0
 
             if detected is None:
                 if last_error is not None:
-                    logger.warning(
-                        "ConnectedIntegration/Get failed for active check, fallback active=true: ci=%s error=%s",
-                        ci,
-                        last_error,
-                    )
-                detected = True
+                    raise RuntimeError(
+                        f"ConnectedIntegration/Get failed for active check: ci={ci} error={last_error}"
+                    ) from last_error
+                detected = False
 
-            if _redis_enabled():
-                await redis_client.set(
-                    cache_key,
-                    "1" if detected else "0",
-                    ex=AsteriskCrmChannelConfig.SETTINGS_TTL,
-                )
+            await redis_client.set(
+                cache_key,
+                "1" if detected else "0",
+                ex=AsteriskCrmChannelConfig.SETTINGS_TTL,
+            )
             cls._ci_active_memory_cache_set(ci, bool(detected))
             return bool(detected)
 
@@ -1088,31 +1171,129 @@ return 0
         )
 
     @staticmethod
-    async def _fetch_settings_map(connected_integration_id: str) -> Dict[str, str]:
+    def _normalize_settings_map(raw: Dict[str, Any]) -> Dict[str, str]:
+        normalized: Dict[str, str] = {}
+        for key, value in (raw or {}).items():
+            normalized_key = str(key or "").strip().lower()
+            if normalized_key:
+                normalized[normalized_key] = str(value or "").strip()
+        return normalized
+
+    @classmethod
+    def _read_local_settings_cache(cls, cache_key: str) -> Optional[Dict[str, str]]:
+        entry = _SETTINGS_LOCAL_CACHE.get(cache_key)
+        if not entry:
+            return None
+        expires_at, settings_map = entry
+        if expires_at <= _now_ts():
+            _SETTINGS_LOCAL_CACHE.pop(cache_key, None)
+            return None
+        return dict(settings_map)
+
+    @classmethod
+    def _write_local_settings_cache(cls, cache_key: str, settings_map: Dict[str, str]) -> None:
+        now_ts = _now_ts()
+        if len(_SETTINGS_LOCAL_CACHE) >= AsteriskCrmChannelConfig.SETTINGS_LOCAL_MAX:
+            for key, (expires_at, _) in list(_SETTINGS_LOCAL_CACHE.items()):
+                if expires_at <= now_ts:
+                    _SETTINGS_LOCAL_CACHE.pop(key, None)
+            while len(_SETTINGS_LOCAL_CACHE) >= AsteriskCrmChannelConfig.SETTINGS_LOCAL_MAX:
+                _SETTINGS_LOCAL_CACHE.pop(next(iter(_SETTINGS_LOCAL_CACHE)), None)
+        _SETTINGS_LOCAL_CACHE[cache_key] = (
+            now_ts + AsteriskCrmChannelConfig.SETTINGS_LOCAL_TTL,
+            dict(settings_map),
+        )
+
+    @classmethod
+    async def _read_settings_stale_cache(
+        cls,
+        connected_integration_id: str,
+    ) -> Optional[Dict[str, str]]:
+        stale_key = cls._settings_stale_cache_key(connected_integration_id)
+        local = cls._read_local_settings_cache(stale_key)
+        if local is not None:
+            return local
+        try:
+            cached = await redis_client.get(stale_key)
+            if not cached:
+                return None
+            settings_map = cls._normalize_settings_map(_json_loads(cached))
+            cls._write_local_settings_cache(stale_key, settings_map)
+            return settings_map
+        except Exception:
+            return None
+
+    @classmethod
+    async def _fetch_settings_map(cls, connected_integration_id: str) -> Dict[str, str]:
+        _require_redis()
         cache_key = AsteriskCrmChannelIntegration._settings_cache_key(
             connected_integration_id
         )
-        if _redis_enabled():
-            cached = await redis_client.get(cache_key)
-            if cached:
-                try:
-                    loaded = _json_loads(cached)
-                    if isinstance(loaded, dict):
-                        return {str(k).lower(): str(v or "") for k, v in loaded.items()}
-                except Exception:
-                    pass
+        local = cls._read_local_settings_cache(cache_key)
+        if local is not None:
+            return local
+        cached = await redis_client.get(cache_key)
+        if cached:
+            try:
+                loaded = _json_loads(cached)
+                if isinstance(loaded, dict):
+                    settings_map = cls._normalize_settings_map(loaded)
+                    cls._write_local_settings_cache(cache_key, settings_map)
+                    return settings_map
+            except Exception:
+                pass
+
+        lock_token = await cls._acquire_lock_wait(
+            cls._settings_fetch_lock_key(connected_integration_id),
+            AsteriskCrmChannelConfig.SETTINGS_LOCK_TTL_SEC,
+            wait_seconds=AsteriskCrmChannelConfig.SETTINGS_LOCK_WAIT_SEC,
+        )
+        if not lock_token:
+            stale = await cls._read_settings_stale_cache(connected_integration_id)
+            if stale is not None:
+                return stale
+            raise TimeoutError(
+                f"Timed out waiting for Asterisk settings refresh for ID {connected_integration_id}"
+            )
 
         try:
+            cached = await redis_client.get(cache_key)
+            if cached:
+                loaded = _json_loads(cached)
+                if isinstance(loaded, dict):
+                    settings_map = cls._normalize_settings_map(loaded)
+                    cls._write_local_settings_cache(cache_key, settings_map)
+                    return settings_map
             async with RegosAPI(connected_integration_id=connected_integration_id) as api:
                 response = await api.integrations.connected_integration_setting.get(
                     ConnectedIntegrationSettingRequest(
                         connected_integration_id=connected_integration_id,
                     )
                 )
+            settings_map = cls._normalize_settings_map(
+                {
+                    str(item.key or "").strip().lower(): str(item.value or "")
+                    for item in (response.result or [])
+                    if item and item.key
+                }
+            )
+            payload = _json_dumps(settings_map)
+            stale_key = cls._settings_stale_cache_key(connected_integration_id)
+            cls._write_local_settings_cache(cache_key, settings_map)
+            cls._write_local_settings_cache(stale_key, settings_map)
+            async with redis_client.pipeline(transaction=True) as pipe:
+                await pipe.set(cache_key, payload, ex=AsteriskCrmChannelConfig.SETTINGS_TTL)
+                await pipe.set(
+                    stale_key,
+                    payload,
+                    ex=AsteriskCrmChannelConfig.SETTINGS_STALE_TTL,
+                )
+                await pipe.execute()
+            return settings_map
         except httpx.HTTPStatusError as error:
             status_code = error.response.status_code if error.response is not None else None
             if status_code in {401, 403, 404}:
-                is_active = await AsteriskCrmChannelIntegration._is_connected_integration_active(
+                is_active = await cls._is_connected_integration_active(
                     connected_integration_id,
                     force_refresh=True,
                 )
@@ -1121,20 +1302,20 @@ return 0
                         f"ConnectedIntegration {connected_integration_id} is inactive "
                         f"(settings unavailable, status={status_code})"
                     ) from error
+            stale = await cls._read_settings_stale_cache(connected_integration_id)
+            if stale is not None:
+                return stale
             raise
-        settings_map = {
-            str(item.key or "").strip().lower(): str(item.value or "")
-            for item in (response.result or [])
-            if item and item.key
-        }
-
-        if _redis_enabled():
-            await redis_client.set(
-                cache_key,
-                _json_dumps(settings_map),
-                ex=AsteriskCrmChannelConfig.SETTINGS_TTL,
+        except Exception:
+            stale = await cls._read_settings_stale_cache(connected_integration_id)
+            if stale is not None:
+                return stale
+            raise
+        finally:
+            await cls._release_lock(
+                cls._settings_fetch_lock_key(connected_integration_id),
+                lock_token,
             )
-        return settings_map
 
     @staticmethod
     def _parse_allowed_did_set(raw: Optional[str], country_code: str) -> set[str]:
@@ -1149,11 +1330,22 @@ return 0
 
     @staticmethod
     async def _load_runtime(connected_integration_id: str) -> RuntimeConfig:
+        ci = str(connected_integration_id or "").strip()
+        if not ci:
+            raise ValueError("connected_integration_id is required")
         await AsteriskCrmChannelIntegration._ensure_connected_integration_active(
-            connected_integration_id
+            ci
         )
+        now_ts = _now_ts()
+        async with _RUNTIME_LOCAL_LOCK:
+            cached = _RUNTIME_LOCAL_CACHE.get(ci)
+            if cached and cached[0] > now_ts:
+                return cached[1]
+            if cached:
+                _RUNTIME_LOCAL_CACHE.pop(ci, None)
+
         settings_map = await AsteriskCrmChannelIntegration._fetch_settings_map(
-            connected_integration_id
+            ci
         )
 
         ami_host, ami_port = _parse_ami_host_port(
@@ -1187,9 +1379,9 @@ return 0
         if default_responsible_user_id is not None and default_responsible_user_id <= 0:
             raise ValueError("asterisk_default_responsible_user_id must be > 0")
 
-        return RuntimeConfig(
-            connected_integration_id=connected_integration_id,
-            asterisk_hash=_hash_scope_key(connected_integration_id),
+        runtime = RuntimeConfig(
+            connected_integration_id=ci,
+            asterisk_hash=_hash_scope_key(ci),
             ami_host=ami_host,
             ami_port=ami_port,
             ami_user=ami_user,
@@ -1222,6 +1414,12 @@ return 0
                 False,
             ),
         )
+        async with _RUNTIME_LOCAL_LOCK:
+            _RUNTIME_LOCAL_CACHE[ci] = (
+                _now_ts() + AsteriskCrmChannelConfig.RUNTIME_LOCAL_TTL,
+                runtime,
+            )
+        return runtime
 
     @staticmethod
     def _payload_get(payload: Dict[str, Any], path: str) -> Any:
@@ -1997,17 +2195,12 @@ return 0
             )
             for candidate in candidates
         ]
-        if _redis_enabled():
-            aliases_raw = await redis_client.mget(*alias_keys)
-            for alias_raw in aliases_raw:
-                alias = cls._normalize_call_id(alias_raw)
-                if alias:
-                    resolved_aliases.append(alias)
-        else:
-            for alias_key in alias_keys:
-                alias = cls._normalize_call_id(await cls._redis_get(alias_key))
-                if alias:
-                    resolved_aliases.append(alias)
+        _require_redis()
+        aliases_raw = await redis_client.mget(*alias_keys)
+        for alias_raw in aliases_raw:
+            alias = cls._normalize_call_id(alias_raw)
+            if alias:
+                resolved_aliases.append(alias)
 
         if preferred_linked:
             canonical = preferred_linked
@@ -2017,30 +2210,16 @@ return 0
             canonical = candidates[0]
 
         aliases_to_write = {canonical, *candidates, *resolved_aliases}
-        if _redis_enabled():
-            ttl = max(_to_int(runtime.state_ttl_sec, 300) or 300, 300)
-            pipeline = redis_client.pipeline()
-            for candidate in aliases_to_write:
-                alias_key = cls._call_alias_key(
-                    runtime.connected_integration_id,
-                    runtime.asterisk_hash,
-                    candidate,
-                )
-                pipeline.set(alias_key, canonical, ex=ttl)
-            await pipeline.execute()
-        else:
-            for candidate in aliases_to_write:
-                alias_key = cls._call_alias_key(
-                    runtime.connected_integration_id,
-                    runtime.asterisk_hash,
-                    candidate,
-                )
-                await cls._redis_set_with_ttl(
-                    alias_key,
-                    canonical,
-                    runtime.state_ttl_sec,
-                    min_ttl_sec=300,
-                )
+        ttl = max(_to_int(runtime.state_ttl_sec, 300) or 300, 300)
+        pipeline = redis_client.pipeline()
+        for candidate in aliases_to_write:
+            alias_key = cls._call_alias_key(
+                runtime.connected_integration_id,
+                runtime.asterisk_hash,
+                candidate,
+            )
+            pipeline.set(alias_key, canonical, ex=ttl)
+        await pipeline.execute()
         return canonical
 
     @classmethod
@@ -2059,22 +2238,24 @@ return 0
         cls,
         runtime: RuntimeConfig,
         event: CallEvent,
-    ) -> None:
-        await cls._enqueue(
-            cls._stream_key(runtime.connected_integration_id),
+    ) -> bool:
+        return await cls._enqueue_event(
+            runtime.connected_integration_id,
+            event,
             {
                 "connected_integration_id": runtime.connected_integration_id,
                 "event_ts": str(_to_int(event.event_ts, _now_ts()) or _now_ts()),
+                "state_ttl_sec": str(runtime.state_ttl_sec),
                 "event": cls._event_to_dict(event),
                 "attempt": "0",
                 "enqueued_at": str(_now_ts()),
             },
-            stream_ttl_sec=runtime.state_ttl_sec,
         )
 
     @classmethod
-    async def _ensure_consumer_group(cls, stream_key: str) -> None:
-        if not _redis_enabled():
+    async def _ensure_consumer_group(cls, stream_key: str, *, force: bool = False) -> None:
+        _require_redis()
+        if not force and stream_key in _STREAM_GROUP_READY:
             return
         await redis_stream_group_create_with_ttl(
             stream_key,
@@ -2083,16 +2264,10 @@ return 0
             touch_ts_by_key=_REDIS_TTL_TOUCH_TS,
             now_ts=_now_ts(),
         )
+        _STREAM_GROUP_READY.add(stream_key)
 
     @classmethod
-    async def _enqueue(
-        cls,
-        stream_key: str,
-        fields: Dict[str, Any],
-        stream_ttl_sec: int,
-    ) -> None:
-        if not _redis_enabled():
-            raise RuntimeError("Redis is not enabled")
+    def _serialize_stream_fields(cls, fields: Dict[str, Any]) -> Dict[str, str]:
         serialized: Dict[str, str] = {}
         for key, value in fields.items():
             if isinstance(value, (dict, list)):
@@ -2101,14 +2276,76 @@ return 0
                 serialized[key] = ""
             else:
                 serialized[key] = str(value)
+        return serialized
 
+    @classmethod
+    async def _enqueue(
+        cls,
+        stream_key: str,
+        fields: Dict[str, Any],
+        stream_ttl_sec: Optional[int] = None,
+    ) -> None:
+        _require_redis()
         await redis_stream_add_with_ttl(
             stream_key,
-            serialized,
+            cls._serialize_stream_fields(fields),
             maxlen=AsteriskCrmChannelConfig.STREAM_MAXLEN,
             ttl_sec=cls._resolve_stream_ttl(stream_ttl_sec),
             touch_ts_by_key=_REDIS_TTL_TOUCH_TS,
             now_ts=_now_ts(),
+        )
+
+    @classmethod
+    async def _enqueue_deduped(
+        cls,
+        stream_key: str,
+        dedupe_key: str,
+        fields: Dict[str, Any],
+        stream_ttl_sec: Optional[int] = None,
+    ) -> bool:
+        _require_redis()
+        now_ts = _now_ts()
+        stream_ttl = cls._resolve_stream_ttl(stream_ttl_sec)
+        should_touch = (
+            now_ts - int(_REDIS_TTL_TOUCH_TS.get(stream_key) or 0)
+            >= min(3600, max(10, stream_ttl // 4))
+        )
+        field_args: List[str] = []
+        for key, value in cls._serialize_stream_fields(fields).items():
+            field_args.extend([key, value])
+        result = await redis_client.eval(
+            _ENQUEUE_DEDUPE_LUA,
+            2,
+            dedupe_key,
+            stream_key,
+            str(AsteriskCrmChannelConfig.DEFAULT_DEDUPE_TTL_SEC),
+            str(AsteriskCrmChannelConfig.STREAM_MAXLEN),
+            str(stream_ttl),
+            "1" if should_touch else "0",
+            *field_args,
+        )
+        if should_touch and int(result or 0) == 1:
+            _REDIS_TTL_TOUCH_TS[stream_key] = now_ts
+        return int(result or 0) == 1
+
+    @classmethod
+    async def _enqueue_event(
+        cls,
+        connected_integration_id: str,
+        event: CallEvent,
+        fields: Dict[str, Any],
+    ) -> bool:
+        ci = str(connected_integration_id or "").strip()
+        if not ci:
+            raise ValueError("connected_integration_id is required")
+        await cls._ensure_stream_workers(ensure_groups=False)
+        stream_key = cls._stream_key()
+        dedupe_key = cls._enqueue_dedupe_event_key(ci, event.event_id)
+        return await cls._enqueue_deduped(
+            stream_key,
+            dedupe_key,
+            fields,
+            stream_ttl_sec=fields.get("state_ttl_sec"),
         )
 
     @staticmethod
@@ -2128,8 +2365,7 @@ return 0
         *,
         force: bool = False,
     ) -> None:
-        if not _redis_enabled():
-            return
+        _require_redis()
         await redis_expire_if_due(
             stream_key,
             cls._resolve_stream_ttl(stream_ttl_sec),
@@ -2140,26 +2376,35 @@ return 0
         )
 
     @classmethod
-    async def _set_worker_heartbeat(cls, connected_integration_id: str) -> None:
-        if not _redis_enabled():
-            return
+    async def _set_worker_heartbeat(cls, worker_index: int) -> None:
+        _require_redis()
         await redis_client.setex(
-            cls._worker_heartbeat_key(connected_integration_id),
+            cls._worker_heartbeat_key(worker_index),
             AsteriskCrmChannelConfig.HEARTBEAT_TTL_SEC,
             str(_now_ts()),
         )
         await cls._touch_active_ci_ids_ttl()
 
     @classmethod
-    async def _ensure_stream_worker(cls, connected_integration_id: str) -> None:
+    async def _ensure_stream_workers(
+        cls,
+        connected_integration_id: Optional[str] = None,
+        *,
+        ensure_groups: bool = True,
+    ) -> None:
+        _require_redis()
         async with _MANAGER_LOCK:
-            task = _WORKER_TASKS.get(connected_integration_id)
-            if task and not task.done():
-                return
-            _WORKER_TASKS[connected_integration_id] = asyncio.create_task(
-                cls._stream_worker_loop(connected_integration_id),
-                name=f"asterisk_crm_stream_{connected_integration_id}",
-            )
+            stream_key = cls._stream_key()
+            if ensure_groups:
+                await cls._ensure_consumer_group(stream_key)
+            for index in range(AsteriskCrmChannelConfig.STREAM_WORKERS):
+                task = _WORKER_TASKS.get(index)
+                if task and not task.done():
+                    continue
+                _WORKER_TASKS[index] = asyncio.create_task(
+                    cls._stream_worker_loop(index),
+                    name=f"asterisk_crm_stream_{index}",
+                )
 
     @classmethod
     async def _ensure_ami_worker(cls, runtime: RuntimeConfig) -> None:
@@ -2198,11 +2443,18 @@ return 0
                 await http_client.aclose()
             except Exception:
                 logger.exception("Error while closing Asterisk shared http client")
+        _STREAM_GROUP_READY.clear()
+        _STREAM_CLAIM_TS.clear()
+        _SETTINGS_LOCAL_CACHE.clear()
+        _CI_ACTIVE_MEMORY_CACHE.clear()
+        async with _RUNTIME_LOCAL_LOCK:
+            _RUNTIME_LOCAL_CACHE.clear()
 
     @classmethod
     async def restore_active_connections(cls) -> Dict[str, int]:
         if not _redis_enabled():
             return {"total": 0, "restored": 0, "failed": 0}
+        await cls._ensure_stream_workers()
 
         try:
             raw_ids = await redis_client.smembers(cls._active_ci_ids_key())
@@ -2217,7 +2469,12 @@ return 0
         )
         if not ci_ids:
             logger.info("Asterisk auto-restore: no active integrations found")
-            return {"total": 0, "restored": 0, "failed": 0}
+            return {
+                "total": 0,
+                "restored": 0,
+                "failed": 0,
+                "stream_workers": len(_WORKER_TASKS),
+            }
         await cls._touch_active_ci_ids_ttl(force=True)
 
         restored = 0
@@ -2225,8 +2482,6 @@ return 0
         for connected_integration_id in ci_ids:
             try:
                 runtime = await cls._load_runtime(connected_integration_id)
-                await cls._ensure_consumer_group(cls._stream_key(connected_integration_id))
-                await cls._ensure_stream_worker(connected_integration_id)
                 await cls._ensure_ami_worker(runtime)
                 restored += 1
             except ConnectedIntegrationInactiveError:
@@ -2250,21 +2505,28 @@ return 0
             restored,
             failed,
         )
-        return {"total": len(ci_ids), "restored": restored, "failed": failed}
+        return {
+            "total": len(ci_ids),
+            "restored": restored,
+            "failed": failed,
+            "stream_workers": len(_WORKER_TASKS),
+        }
 
     @classmethod
-    async def _stop_stream_worker(cls, connected_integration_id: str) -> None:
-        async with _MANAGER_LOCK:
-            task = _WORKER_TASKS.pop(connected_integration_id, None)
-        if not task:
+    async def _stop_stream_worker(cls, connected_integration_id: Optional[str] = None) -> None:
+        if connected_integration_id:
             return
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            logger.exception("Error while stopping stream worker: ci=%s", connected_integration_id)
+        async with _MANAGER_LOCK:
+            tasks = list(_WORKER_TASKS.values())
+            _WORKER_TASKS.clear()
+        for task in tasks:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("Error while stopping stream worker")
 
     @classmethod
     async def _stop_ami_worker(cls, connected_integration_id: str) -> None:
@@ -2398,7 +2660,7 @@ return 0
                             _INSTANCE_ID,
                         )
 
-                    await cls._ensure_stream_worker(connected_integration_id)
+                    await cls._ensure_stream_workers()
                     reader, writer = await asyncio.wait_for(
                         asyncio.open_connection(runtime.ami_host, runtime.ami_port),
                         timeout=AsteriskCrmChannelConfig.AMI_CONNECT_TIMEOUT_SEC,
@@ -2455,7 +2717,7 @@ return 0
                                 continue
                             try:
                                 await cls._enqueue_runtime_event(runtime, event)
-                                await cls._ensure_stream_worker(connected_integration_id)
+                                await cls._ensure_stream_workers()
                             except Exception as enqueue_error:
                                 logger.exception(
                                     "AMI event enqueue failed: ci=%s event_id=%s error=%s",
@@ -2478,7 +2740,6 @@ return 0
                         error,
                     )
                     await cls._mark_ci_inactive(connected_integration_id)
-                    await cls._stop_stream_worker(connected_integration_id)
                     break
                 except Exception as error:
                     logger.warning(
@@ -2504,69 +2765,87 @@ return 0
                     _AMI_TASKS.pop(connected_integration_id, None)
 
     @classmethod
-    async def _stream_worker_loop(cls, connected_integration_id: str) -> None:
-        stream_key = cls._stream_key(connected_integration_id)
-        consumer = f"{_INSTANCE_ID}:asterisk"
+    async def _stream_worker_loop(cls, worker_index: int) -> None:
+        stream_key = cls._stream_key()
+        consumer = f"{_INSTANCE_ID}:asterisk:{worker_index}"
         await cls._ensure_consumer_group(stream_key)
-        logger.info("Asterisk stream worker started: ci=%s", connected_integration_id)
+        logger.info("Asterisk stream worker started: index=%s", worker_index)
         pending_entries: List[Tuple[str, Dict[str, str]]] = []
+        semaphore = asyncio.Semaphore(AsteriskCrmChannelConfig.EVENT_CONCURRENCY)
 
-        while True:
-            try:
-                await cls._set_worker_heartbeat(connected_integration_id)
-                await cls._touch_stream_ttl(stream_key)
-                claimed_entries = await cls._process_claimed_entries(
-                    stream_key=stream_key,
-                    consumer=consumer,
-                )
-                if claimed_entries:
-                    pending_entries.extend(claimed_entries)
-
+        try:
+            while True:
                 try:
-                    block_ms = AsteriskCrmChannelConfig.STREAM_READ_BLOCK_MS
-                    if pending_entries:
-                        block_ms = min(block_ms, 500)
-                    records = await redis_client.xreadgroup(
-                        groupname=AsteriskCrmChannelConfig.STREAM_GROUP,
-                        consumername=consumer,
-                        streams={stream_key: ">"},
-                        count=AsteriskCrmChannelConfig.STREAM_BATCH_SIZE,
-                        block=block_ms,
-                    )
-                except Exception as error:
-                    if redis_error_contains(error, "NOGROUP"):
-                        await cls._ensure_consumer_group(stream_key)
-                        await asyncio.sleep(0.1)
+                    await cls._set_worker_heartbeat(worker_index)
+                    await cls._touch_stream_ttl(stream_key)
+                    claim_key = f"{stream_key}:{worker_index}"
+                    now_ts = _now_ts()
+                    last_claim_ts = int(_STREAM_CLAIM_TS.get(claim_key) or 0)
+                    if now_ts - last_claim_ts >= AsteriskCrmChannelConfig.STREAM_CLAIM_INTERVAL_SEC:
+                        _STREAM_CLAIM_TS[claim_key] = now_ts
+                        claimed_entries = await cls._process_claimed_entries(
+                            stream_key=stream_key,
+                            consumer=consumer,
+                        )
+                        if claimed_entries:
+                            pending_entries.extend(claimed_entries)
+
+                    try:
+                        block_ms = AsteriskCrmChannelConfig.STREAM_READ_BLOCK_MS
+                        if pending_entries:
+                            block_ms = min(block_ms, 500)
+                        records = await redis_client.xreadgroup(
+                            groupname=AsteriskCrmChannelConfig.STREAM_GROUP,
+                            consumername=consumer,
+                            streams={stream_key: ">"},
+                            count=AsteriskCrmChannelConfig.STREAM_BATCH_SIZE,
+                            block=block_ms,
+                        )
+                    except Exception as error:
+                        if redis_error_contains(error, "NOGROUP"):
+                            await cls._ensure_consumer_group(stream_key, force=True)
+                            await asyncio.sleep(0.1)
+                            continue
+                        raise
+
+                    if records:
+                        for _, entries in records:
+                            pending_entries.extend(
+                                (str(message_id), fields if isinstance(fields, dict) else {})
+                                for message_id, fields in entries
+                            )
+
+                    if not pending_entries:
                         continue
+
+                    ready_entries, pending_entries = cls._select_ready_stream_entries(pending_entries)
+                    if not ready_entries:
+                        continue
+
+                    async def guarded_process(entry: Tuple[str, Dict[str, str]]) -> None:
+                        async with semaphore:
+                            message_id, fields = entry
+                            await cls._process_stream_entry(
+                                stream_key=stream_key,
+                                message_id=message_id,
+                                fields=fields,
+                            )
+
+                    await asyncio.gather(*(guarded_process(entry) for entry in ready_entries))
+                except asyncio.CancelledError:
                     raise
-
-                if records:
-                    for _, entries in records:
-                        pending_entries.extend(entries)
-
-                if not pending_entries:
-                    continue
-
-                ready_entries, pending_entries = cls._select_ready_stream_entries(pending_entries)
-                if not ready_entries:
-                    continue
-
-                for message_id, fields in ready_entries:
-                    await cls._process_stream_entry(
-                        stream_key=stream_key,
-                        message_id=message_id,
-                        fields=fields,
-                        connected_integration_id=connected_integration_id,
+                except Exception as error:
+                    logger.exception(
+                        "Asterisk stream worker error: index=%s error=%s",
+                        worker_index,
+                        error,
                     )
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                logger.exception(
-                    "Asterisk stream worker error: ci=%s error=%s",
-                    connected_integration_id,
-                    error,
-                )
-                await asyncio.sleep(1.0)
+                    await asyncio.sleep(1.0)
+        finally:
+            current_task = asyncio.current_task()
+            async with _MANAGER_LOCK:
+                if _WORKER_TASKS.get(worker_index) is current_task:
+                    _WORKER_TASKS.pop(worker_index, None)
 
     @classmethod
     async def _process_claimed_entries(
@@ -2585,7 +2864,7 @@ return 0
             )
         except Exception as error:
             if redis_error_contains(error, "NOGROUP"):
-                await cls._ensure_consumer_group(stream_key)
+                await cls._ensure_consumer_group(stream_key, force=True)
                 return []
             raise
 
@@ -2670,15 +2949,51 @@ return 0
         return ready_entries, pending_entries
 
     @classmethod
+    async def _clear_enqueue_dedupe_for_fields(
+        cls,
+        connected_integration_id: str,
+        fields: Dict[str, str],
+    ) -> None:
+        raw_event = fields.get("event")
+        if not raw_event:
+            return
+        try:
+            event_payload = _json_loads(raw_event)
+        except Exception:
+            return
+        if not isinstance(event_payload, dict):
+            return
+        event_id = str(event_payload.get("event_id") or "").strip()
+        if not event_id:
+            return
+        await cls._redis_delete(
+            cls._enqueue_dedupe_event_key(connected_integration_id, event_id)
+        )
+
+    @classmethod
     async def _process_stream_entry(
         cls,
         stream_key: str,
         message_id: str,
         fields: Dict[str, str],
-        connected_integration_id: str,
     ) -> None:
+        connected_integration_id = str(fields.get("connected_integration_id") or "").strip()
+        if not connected_integration_id:
+            await redis_client.xack(
+                stream_key,
+                AsteriskCrmChannelConfig.STREAM_GROUP,
+                message_id,
+            )
+            logger.warning(
+                "Asterisk stream entry skipped without connected_integration_id: message_id=%s",
+                message_id,
+            )
+            return
         attempts = _to_int(fields.get("attempt"), 0) or 0
-        state_ttl_sec = AsteriskCrmChannelConfig.DEFAULT_STATE_TTL_SEC
+        state_ttl_sec = (
+            _to_int(fields.get("state_ttl_sec"), None)
+            or AsteriskCrmChannelConfig.DEFAULT_STATE_TTL_SEC
+        )
         try:
             raw_event = fields.get("event")
             if not raw_event:
@@ -2716,6 +3031,7 @@ return 0
                 AsteriskCrmChannelConfig.STREAM_GROUP,
                 message_id,
             )
+            await cls._mark_ci_inactive(connected_integration_id)
             logger.info(
                 "Asterisk event skipped for inactive integration: ci=%s message_id=%s reason=%s",
                 connected_integration_id,
@@ -2734,6 +3050,7 @@ return 0
                 dlq_payload,
                 stream_ttl_sec=state_ttl_sec,
             )
+            await cls._clear_enqueue_dedupe_for_fields(connected_integration_id, fields)
             await redis_client.xack(
                 stream_key,
                 AsteriskCrmChannelConfig.STREAM_GROUP,
@@ -2759,6 +3076,7 @@ return 0
                     dlq_payload,
                     stream_ttl_sec=state_ttl_sec,
                 )
+                await cls._clear_enqueue_dedupe_for_fields(connected_integration_id, fields)
                 await redis_client.xack(
                     stream_key,
                     AsteriskCrmChannelConfig.STREAM_GROUP,
@@ -4520,34 +4838,38 @@ return 0
         if not _redis_enabled():
             return self._error_response(1001, "Redis is required for this integration").dict()
 
+        lock_key = self._connect_lock_key(self.connected_integration_id)
+        lock_token = await self._acquire_lock_wait(lock_key, AsteriskCrmChannelConfig.LOCK_TTL_SEC)
+        if not lock_token:
+            return self._error_response(1002, "connect is already running").dict()
         try:
-            await self._ensure_connected_integration_active(
-                self.connected_integration_id,
-                force_refresh=True,
-            )
-            runtime = await self._load_runtime(self.connected_integration_id)
-        except ConnectedIntegrationInactiveError as error:
-            return self._error_response(1004, str(error)).dict()
-        await self._mark_ci_active(self.connected_integration_id)
-        try:
-            await self._ensure_consumer_group(self._stream_key(self.connected_integration_id))
-            await self._ensure_stream_worker(self.connected_integration_id)
+            try:
+                await self._ensure_connected_integration_active(
+                    self.connected_integration_id,
+                    force_refresh=True,
+                )
+                runtime = await self._load_runtime(self.connected_integration_id)
+            except ConnectedIntegrationInactiveError as error:
+                return self._error_response(1004, str(error)).dict()
+            await self._mark_ci_active(self.connected_integration_id)
+            await self._ensure_stream_workers()
             await self._ensure_ami_worker(runtime)
+            return {
+                "status": "connected",
+                "mode": "ami_with_external_fallback",
+                "instance_id": _INSTANCE_ID,
+            }
         except Exception:
             await self._mark_ci_inactive(self.connected_integration_id)
             raise
-        return {
-            "status": "connected",
-            "mode": "ami_with_external_fallback",
-            "instance_id": _INSTANCE_ID,
-        }
+        finally:
+            await self._release_lock(lock_key, lock_token)
 
     async def disconnect(self, **_: Any) -> Any:
         if not self.connected_integration_id:
             return self._error_response(1000, "connected_integration_id is required").dict()
         await self._mark_ci_inactive(self.connected_integration_id)
         await self._stop_ami_worker(self.connected_integration_id)
-        await self._stop_stream_worker(self.connected_integration_id)
         return {"status": "disconnected"}
 
     async def reconnect(self, **_: Any) -> Any:
@@ -4559,10 +4881,27 @@ return 0
     async def update_settings(self, settings: Optional[dict] = None, **_: Any) -> Any:
         if not self.connected_integration_id:
             return self._error_response(1000, "connected_integration_id is required").dict()
-        await self._redis_delete(
-            self._settings_cache_key(self.connected_integration_id),
-            self._ci_active_cache_key(self.connected_integration_id),
+        lock_key = self._settings_fetch_lock_key(self.connected_integration_id)
+        lock_token = await self._acquire_lock_wait(
+            lock_key,
+            AsteriskCrmChannelConfig.SETTINGS_LOCK_TTL_SEC,
+            wait_seconds=AsteriskCrmChannelConfig.SETTINGS_LOCK_WAIT_SEC,
         )
+        if not lock_token:
+            return self._error_response(1002, "settings update is already running").dict()
+        try:
+            await self._redis_delete(
+                self._settings_cache_key(self.connected_integration_id),
+                self._settings_stale_cache_key(self.connected_integration_id),
+                self._ci_active_cache_key(self.connected_integration_id),
+            )
+            _CI_ACTIVE_MEMORY_CACHE.pop(str(self.connected_integration_id or "").strip(), None)
+            _SETTINGS_LOCAL_CACHE.pop(self._settings_cache_key(self.connected_integration_id), None)
+            _SETTINGS_LOCAL_CACHE.pop(self._settings_stale_cache_key(self.connected_integration_id), None)
+            async with _RUNTIME_LOCAL_LOCK:
+                _RUNTIME_LOCAL_CACHE.pop(str(self.connected_integration_id or "").strip(), None)
+        finally:
+            await self._release_lock(lock_key, lock_token)
         reconnect_result = await self.reconnect()
         return {"status": "settings updated", "reconnect": reconnect_result}
 
@@ -4603,10 +4942,13 @@ return 0
                 ignored += 1
                 continue
 
-            await self._enqueue_runtime_event(runtime, normalized)
-            accepted += 1
+            queued = await self._enqueue_runtime_event(runtime, normalized)
+            if queued:
+                accepted += 1
+            else:
+                ignored += 1
 
-        await self._ensure_stream_worker(self.connected_integration_id)
+        await self._ensure_stream_workers()
         return {
             "status": "accepted" if accepted else "ignored",
             "accepted": accepted,

@@ -32,6 +32,16 @@ class Settings(BaseSettings):
     telegram_crm_channel_stream_batch_size: int = 50
     telegram_crm_channel_stream_maxlen: int = 100000
     telegram_crm_channel_send_concurrency: int = 20
+    asterisk_crm_channel_stream_workers: int = 2
+    asterisk_crm_channel_stream_batch_size: int = 50
+    asterisk_crm_channel_stream_maxlen: int = 100000
+    asterisk_crm_channel_stream_retry_limit: int = 5
+    asterisk_crm_channel_event_concurrency: int = 20
+    external_chat_crm_channel_stream_workers: int = 2
+    external_chat_crm_channel_stream_batch_size: int = 50
+    external_chat_crm_channel_stream_maxlen: int = 100000
+    external_chat_crm_channel_stream_retry_limit: int = 5
+    external_chat_crm_channel_event_concurrency: int = 20
     instagram_app_id: str = ""
     instagram_app_secret: str = ""
     instagram_redirect_uri: str = ""

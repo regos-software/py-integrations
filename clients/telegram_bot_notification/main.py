@@ -117,6 +117,7 @@ class TelegramBotConfig:
     WEBHOOK_LOCAL_TTL = min(300, WEBHOOK_REFRESH_TTL)
     SUBSCRIBER_LOCK_TTL = 15
     INVALID_TOKEN_TTL = 5 * 60
+    MISCONFIG_LOG_TTL = 5 * 60
     BATCH_SIZE = 50  # Number of messages to process in one batch
     RETRY_ATTEMPTS = 3  # Number of retry attempts for failed requests
     RETRY_WAIT_SECONDS = 2  # Seconds to wait between retries
@@ -263,6 +264,62 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         text = str(error).lower()
         return "message is not modified" in text
 
+    @staticmethod
+    def _is_parse_entities_error(error: object) -> bool:
+        text = str(error or "").lower()
+        return (
+            "can't parse entities" in text
+            or "can't find end of the entity" in text
+            or "unsupported start tag" in text
+            or "parse entities" in text
+        )
+
+    async def _edit_text_markdown_with_plain_fallback(
+        self,
+        message: Any,
+        *,
+        text: str,
+    ) -> None:
+        try:
+            await message.edit_text(text=text, parse_mode=ParseMode.MARKDOWN)
+        except Exception as error:
+            if self._is_parse_entities_error(error):
+                logger.warning(
+                    "Telegram markdown edit rejected, retrying as plain text: %s",
+                    error,
+                )
+                await message.edit_text(text=text, parse_mode=None)
+                return
+            raise
+
+    async def _send_message_markdown_with_plain_fallback(
+        self,
+        *,
+        chat_id: str,
+        text: str,
+        reply_markup: Optional[InlineKeyboardMarkup] = None,
+    ) -> Any:
+        try:
+            return await self.bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=reply_markup if reply_markup else None,
+            )
+        except Exception as error:
+            if self._is_parse_entities_error(error):
+                logger.warning(
+                    "Telegram markdown send rejected, retrying as plain text: chat_id=%s error=%s",
+                    chat_id,
+                    error,
+                )
+                return await self.bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    parse_mode=None,
+                    reply_markup=reply_markup if reply_markup else None,
+                )
+            raise
+
     async def _answer_callback_query(
         self,
         callback_query: types.CallbackQuery,
@@ -407,11 +464,27 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         )
 
     @classmethod
+    def _misconfiguration_log_key(
+        cls,
+        connected_integration_id: str,
+        kind: str,
+        error_text: str,
+    ) -> str:
+        error_hash = hashlib.sha256(str(error_text or "").encode("utf-8")).hexdigest()[:16]
+        return cls._redis_key("cfg", cls._kind_code(kind), connected_integration_id, error_hash)
+
+    @classmethod
     async def _redis_delete(cls, *keys: str) -> None:
         cls._require_redis()
         valid = [str(key).strip() for key in keys if str(key or "").strip()]
         if valid:
             await redis_client.delete(*valid)
+
+    @classmethod
+    async def _redis_set_nx(cls, key: str, value: str, ttl_sec: int) -> bool:
+        cls._require_redis()
+        inserted = await redis_client.set(key, value, ex=max(int(ttl_sec or 1), 1), nx=True)
+        return bool(inserted)
 
     @classmethod
     def _resolve_stream_ttl(cls) -> int:
@@ -667,6 +740,42 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             return str(result)
         return str(result)
 
+    @staticmethod
+    def _is_non_retryable_configuration_error(error_text: str) -> bool:
+        text = str(error_text or "").strip().lower()
+        return any(
+            marker in text
+            for marker in (
+                "no bot token in settings",
+                "bot token not found",
+                "token is invalid",
+                "settings retrieval error: token is invalid",
+            )
+        )
+
+    @classmethod
+    async def _log_non_retryable_configuration_skip(
+        cls,
+        *,
+        connected_integration_id: str,
+        kind: str,
+        entry_id: str,
+        error_text: str,
+    ) -> None:
+        should_log = await cls._redis_set_nx(
+            cls._misconfiguration_log_key(connected_integration_id, kind, error_text),
+            str(_now_ts()),
+            TelegramBotConfig.MISCONFIG_LOG_TTL,
+        )
+        if should_log:
+            logger.warning(
+                "Telegram notification stream job skipped due to integration configuration: ci=%s kind=%s entry_id=%s error=%s",
+                connected_integration_id,
+                kind,
+                entry_id,
+                error_text,
+            )
+
     @classmethod
     async def _ack_stream_entry(cls, stream_key: str, entry_id: str) -> None:
         await redis_client.xack(stream_key, TelegramBotConfig.STREAM_GROUP, entry_id)
@@ -791,7 +900,17 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                 result = await worker._send_messages_now(messages)
 
             if cls._is_error_result(result):
-                raise RuntimeError(cls._result_error_text(result))
+                error_text = cls._result_error_text(result)
+                if cls._is_non_retryable_configuration_error(error_text):
+                    await cls._log_non_retryable_configuration_skip(
+                        connected_integration_id=ci,
+                        kind=kind,
+                        entry_id=entry_id,
+                        error_text=error_text,
+                    )
+                    await cls._ack_stream_entry(stream_key, entry_id)
+                    return
+                raise RuntimeError(error_text)
 
             logger.debug(
                 "Telegram notification stream job processed: ci=%s kind=%s entry_id=%s status=%s",
@@ -802,6 +921,15 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             )
             await cls._ack_stream_entry(stream_key, entry_id)
         except Exception as error:
+            if cls._is_non_retryable_configuration_error(str(error)):
+                await cls._log_non_retryable_configuration_skip(
+                    connected_integration_id=ci,
+                    kind=kind,
+                    entry_id=entry_id,
+                    error_text=str(error),
+                )
+                await cls._ack_stream_entry(stream_key, entry_id)
+                return
             next_attempt = attempt + 1
             if next_attempt >= TelegramBotConfig.STREAM_MAX_RETRIES:
                 dlq_payload = dict(fields)
@@ -1470,8 +1598,9 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             )
 
             try:
-                await callback_query.message.edit_text(
-                    text=message_text, parse_mode=ParseMode.MARKDOWN
+                await self._edit_text_markdown_with_plain_fallback(
+                    callback_query.message,
+                    text=message_text,
                 )
             except Exception as error:
                 if self._is_message_not_modified_error(error):
@@ -1565,8 +1694,9 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             )
 
             try:
-                await callback_query.message.edit_text(
-                    text=message_text, parse_mode=ParseMode.MARKDOWN
+                await self._edit_text_markdown_with_plain_fallback(
+                    callback_query.message,
+                    text=message_text,
                 )
             except Exception as error:
                 if self._is_message_not_modified_error(error):
@@ -1807,7 +1937,8 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                     }
 
         except Exception as error:
-            logger.error(f"Error fetching settings: {error}")
+            if not self._is_non_retryable_configuration_error(str(error)):
+                logger.error(f"Error fetching settings: {error}")
             return self._create_error_response(
                 1001, f"Settings retrieval error: {error}"
             )
@@ -2034,7 +2165,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         keyboard: Optional[InlineKeyboardMarkup],
     ) -> Dict:
         try:
-            await self.bot.send_message(
+            await self._send_message_markdown_with_plain_fallback(
                 chat_id=chat_id,
                 text=message_text,
                 reply_markup=keyboard if keyboard else None,
@@ -2054,7 +2185,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                         replace_error,
                     )
                 try:
-                    await self.bot.send_message(
+                    await self._send_message_markdown_with_plain_fallback(
                         chat_id=migrated_to,
                         text=message_text,
                         reply_markup=keyboard if keyboard else None,

@@ -396,6 +396,12 @@ def _parse_ticket_external_dialog_id(value: Any) -> Tuple[Optional[str], Optiona
         if route_ci and route_tg:
             return route_ci, route_tg
         return None, None
+    for prefix in ("tg:", "telegram:", "telegram_chat:", "chat:"):
+        if text.startswith(prefix):
+            route_tg = text[len(prefix) :].strip()
+            return (None, route_tg) if route_tg else (None, None)
+    if text.lstrip("-").isdigit():
+        return None, text
     return None, None
 
 
@@ -3786,7 +3792,8 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         if not rendered_text.strip():
             return None
         bot = await cls._get_bot(bot_cfg.token)
-        await bot.send_message(
+        await cls._telegram_send_with_optional_reply(
+            bot.send_message,
             chat_id=_tg_chat_id_cast(tg_chat_id),
             text=rendered_text,
             parse_mode=parse_mode,
@@ -7363,16 +7370,16 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         ticket_channel_id = _parse_int(str(getattr(ticket, "channel_id", None) or ""), None)
         if not ticket_id or not client_id or not ticket_channel_id:
             return None
-        if not route_ci or not tg_chat_id:
+        if not tg_chat_id:
             logger.debug(
-                "Skip outbound relay: ticket has no pinned route ci: ci=%s chat_id=%s ticket_id=%s external_dialog_id=%s",
+                "Skip outbound relay: ticket has no telegram route: ci=%s chat_id=%s ticket_id=%s external_dialog_id=%s",
                 connected_integration_id,
                 chat_id,
                 ticket_id,
                 getattr(ticket, "external_dialog_id", None),
             )
             return None
-        if route_ci != connected_integration_id:
+        if route_ci and route_ci != connected_integration_id:
             logger.debug(
                 "Skip outbound relay by pinned route ci: ci=%s chat_id=%s ticket_id=%s route_ci=%s",
                 connected_integration_id,
@@ -7381,6 +7388,14 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 route_ci,
             )
             return None
+        if not route_ci:
+            logger.debug(
+                "Resolved outbound relay from legacy external_dialog_id: ci=%s chat_id=%s ticket_id=%s external_dialog_id=%s",
+                connected_integration_id,
+                chat_id,
+                ticket_id,
+                getattr(ticket, "external_dialog_id", None),
+            )
         bot_hash = cls._resolve_bot_hash_by_channel(
             runtime,
             ticket_channel_id,
@@ -7518,9 +7533,26 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         reply_to_message_id: Optional[int] = None,
         **kwargs: Any,
     ) -> Any:
+        async def send_with_parse_fallback(**send_kwargs: Any) -> Any:
+            try:
+                return await send_callable(**send_kwargs)
+            except Exception as error:
+                if (
+                    send_kwargs.get("parse_mode") is not None
+                    and cls._is_telegram_parse_entities_error(error)
+                ):
+                    retry_kwargs = dict(send_kwargs)
+                    retry_kwargs["parse_mode"] = None
+                    logger.warning(
+                        "Telegram send parse_mode rejected, retrying without parse_mode: error=%s",
+                        error,
+                    )
+                    return await send_callable(**retry_kwargs)
+                raise
+
         if reply_to_message_id and reply_to_message_id > 0:
             try:
-                return await send_callable(
+                return await send_with_parse_fallback(
                     **kwargs,
                     reply_to_message_id=int(reply_to_message_id),
                     allow_sending_without_reply=True,
@@ -7544,7 +7576,17 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     reply_to_message_id,
                     error,
                 )
-        return await send_callable(**kwargs)
+        return await send_with_parse_fallback(**kwargs)
+
+    @staticmethod
+    def _is_telegram_parse_entities_error(error: object) -> bool:
+        text = str(error or "").lower()
+        return (
+            "can't parse entities" in text
+            or "can't find end of the entity" in text
+            or "unsupported start tag" in text
+            or "parse entities" in text
+        )
 
     @classmethod
     async def _send_chat_message_to_telegram(
