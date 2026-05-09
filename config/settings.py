@@ -18,6 +18,15 @@ class Settings(BaseSettings):
     redis_db: int = 0
     redis_password: str = "psw"
     redis_cache_ttl: int = 60
+    mariadb_enabled: bool = False
+    mariadb_host: str = "host"
+    mariadb_port: int = 3306
+    mariadb_database: str = ""
+    mariadb_user: str = ""
+    mariadb_password: str = ""
+    mariadb_pool_min_size: int = 1
+    mariadb_pool_max_size: int = 10
+    mariadb_connect_timeout: int = 10
     telegram_webhook_refresh_ttl: int = 86400
     telegram_update_mode: str = "webhook"
     telegram_notification_stream_workers: int = 2
@@ -55,6 +64,10 @@ class Settings(BaseSettings):
     gpt_crm_chat_assistant_stream_maxlen: int = 100000
     gpt_crm_chat_assistant_stream_retry_limit: int = 5
     gpt_crm_chat_assistant_event_concurrency: int = 20
+    instagram_crm_channel_stream_workers: int = 2
+    instagram_crm_channel_stream_batch_size: int = 50
+    instagram_crm_channel_stream_maxlen: int = 100000
+    instagram_crm_channel_stream_retry_limit: int = 3
     marketplace_external_timeout: int = 60
     marketplace_unload_page_size: int = 250
     marketplace_cache_ttl: int = 300

@@ -5,6 +5,7 @@ requests
 uvicorn
 python-dotenv
 redis
+asyncmy
 pydantic-settings
 aiogram
 tenacity

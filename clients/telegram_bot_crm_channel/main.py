@@ -396,12 +396,6 @@ def _parse_ticket_external_dialog_id(value: Any) -> Tuple[Optional[str], Optiona
         if route_ci and route_tg:
             return route_ci, route_tg
         return None, None
-    for prefix in ("tg:", "telegram:", "telegram_chat:", "chat:"):
-        if text.startswith(prefix):
-            route_tg = text[len(prefix) :].strip()
-            return (None, route_tg) if route_tg else (None, None)
-    if text.lstrip("-").isdigit():
-        return None, text
     return None, None
 
 
@@ -1492,6 +1486,12 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
     def _rating_lock_key(connected_integration_id: str, ticket_id: int) -> str:
         return TelegramBotCrmChannelIntegration._redis_key(
             "lock", "rating", connected_integration_id, ticket_id
+        )
+
+    @staticmethod
+    def _rating_prompt_sent_key(connected_integration_id: str, ticket_id: int) -> str:
+        return TelegramBotCrmChannelIntegration._redis_key(
+            "rating", "prompt_sent", connected_integration_id, ticket_id
         )
 
     @staticmethod
@@ -4590,15 +4590,21 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         ]
 
     @classmethod
-    def _build_client_external_id(cls, tg_chat_id: str) -> Optional[str]:
+    def _build_client_external_id(
+        cls,
+        connected_integration_id: str,
+        tg_chat_id: str,
+    ) -> Optional[str]:
+        ci = str(connected_integration_id or "").strip()
         telegram_field_value = cls._normalize_telegram_chat_id_value(tg_chat_id)
-        if not telegram_field_value:
+        if not ci or not telegram_field_value:
             return None
-        return f"telegram:{telegram_field_value}"
+        return f"ci:{ci}:telegram:{telegram_field_value}"
 
     @classmethod
     def _build_lead_contact_payload(
         cls,
+        connected_integration_id: str,
         bot_cfg: BotSlotConfig,
         message: Dict[str, Any],
         tg_chat_id: str,
@@ -4617,7 +4623,10 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             TelegramBotCrmChannelConfig.TELEGRAM_FIELD_FULL_KEY: (
                 cls._normalize_telegram_chat_id_value(tg_chat_id)
             ),
-            "external_id": cls._build_client_external_id(tg_chat_id),
+            "external_id": cls._build_client_external_id(
+                connected_integration_id,
+                tg_chat_id,
+            ),
             "name": client_name,
             "phone": client_phone,
             "email": client_email,
@@ -4742,7 +4751,12 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         tg_chat_id: str,
         message: Dict[str, Any],
     ) -> None:
-        desired_payload = cls._build_lead_contact_payload(bot_cfg, message, tg_chat_id)
+        desired_payload = cls._build_lead_contact_payload(
+            connected_integration_id,
+            bot_cfg,
+            message,
+            tg_chat_id,
+        )
         cache_key = cls._lead_sync_cache_key(connected_integration_id, lead_id)
         now_ts = _now_ts()
         avatar_url = cls._normalize_text_value(
@@ -5735,14 +5749,14 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 route_ci, route_tg_chat_id = _parse_ticket_external_dialog_id(
                     getattr(ticket, "external_dialog_id", None)
                 )
-                if route_ci and route_ci != connected_integration_id:
+                if route_ci != connected_integration_id:
                     await cls._answer_rating_callback_best_effort(
                         bot_cfg=bot_cfg,
                         callback_query_id=callback_query_id,
                         text=TelegramBotCrmChannelConfig.RATING_ERROR_ACK_TEXT,
                     )
                     return
-                if route_tg_chat_id and tg_chat_id and route_tg_chat_id != tg_chat_id:
+                if not route_tg_chat_id or route_tg_chat_id != tg_chat_id:
                     await cls._answer_rating_callback_best_effort(
                         bot_cfg=bot_cfg,
                         callback_query_id=callback_query_id,
@@ -6469,12 +6483,16 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
     async def _find_client_for_telegram_dialog(
         cls,
         api: RegosAPI,
+        connected_integration_id: str,
         tg_chat_id: str,
         *,
         client_phone: Optional[str] = None,
         client_email: Optional[str] = None,
     ) -> Optional[Client]:
-        client_external_id = cls._build_client_external_id(tg_chat_id)
+        client_external_id = cls._build_client_external_id(
+            connected_integration_id,
+            tg_chat_id,
+        )
         telegram_field_id = cls._normalize_telegram_chat_id_value(tg_chat_id)
         normalized_phone = _normalize_phone(client_phone)
         normalized_email = _normalize_email(client_email)
@@ -6651,12 +6669,16 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             client_photo_url = cls._normalize_text_value(
                 await cls._resolve_client_photo_url(bot_cfg, message)
             )
-            client_external_id = cls._build_client_external_id(tg_chat_id)
+            client_external_id = cls._build_client_external_id(
+                connected_integration_id,
+                tg_chat_id,
+            )
             client_telegram_fields = cls._build_client_telegram_fields(tg_chat_id)
 
             async with RegosAPI(connected_integration_id=connected_integration_id) as api:
                 client = await cls._find_client_for_telegram_dialog(
                     api,
+                    connected_integration_id,
                     tg_chat_id,
                     client_phone=client_phone,
                     client_email=client_email,
@@ -6677,6 +6699,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                         # In race conditions another worker can create the client first.
                         client = await cls._find_client_for_telegram_dialog(
                             api,
+                            connected_integration_id,
                             tg_chat_id,
                             client_phone=client_phone,
                             client_email=client_email,
@@ -6713,6 +6736,8 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     client_patch["email"] = client_email
                 if client_photo_url and not cls._normalize_text_value(client.photo_url):
                     client_patch["photo_url"] = client_photo_url
+                if client_external_id and not cls._normalize_text_value(client.external_id):
+                    client_patch["external_id"] = client_external_id
                 if client_telegram_fields and not cls._extract_client_telegram_field_value(client):
                     client_patch["fields"] = client_telegram_fields
                 if client_patch:
@@ -6770,6 +6795,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
             client = await cls._find_client_for_telegram_dialog(
                 api,
+                connected_integration_id,
                 tg_chat_id,
             )
             if not client or not client.id:
@@ -7370,7 +7396,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         ticket_channel_id = _parse_int(str(getattr(ticket, "channel_id", None) or ""), None)
         if not ticket_id or not client_id or not ticket_channel_id:
             return None
-        if not tg_chat_id:
+        if route_ci != connected_integration_id or not tg_chat_id:
             logger.debug(
                 "Skip outbound relay: ticket has no telegram route: ci=%s chat_id=%s ticket_id=%s external_dialog_id=%s",
                 connected_integration_id,
@@ -7379,23 +7405,6 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 getattr(ticket, "external_dialog_id", None),
             )
             return None
-        if route_ci and route_ci != connected_integration_id:
-            logger.debug(
-                "Skip outbound relay by pinned route ci: ci=%s chat_id=%s ticket_id=%s route_ci=%s",
-                connected_integration_id,
-                chat_id,
-                ticket_id,
-                route_ci,
-            )
-            return None
-        if not route_ci:
-            logger.debug(
-                "Resolved outbound relay from legacy external_dialog_id: ci=%s chat_id=%s ticket_id=%s external_dialog_id=%s",
-                connected_integration_id,
-                chat_id,
-                ticket_id,
-                getattr(ticket, "external_dialog_id", None),
-            )
         bot_hash = cls._resolve_bot_hash_by_channel(
             runtime,
             ticket_channel_id,
@@ -7926,22 +7935,28 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     )
 
             if channel_settings.rating_enabled and channel_settings.rating_message:
-                rating_keyboard = cls._build_rating_keyboard(int(ticket_id))
-                rating_prompt_text = await cls._send_channel_message_to_telegram(
-                    bot_cfg=bot_cfg,
-                    tg_chat_id=tg_chat_id,
-                    text=channel_settings.rating_message,
-                    reply_markup=rating_keyboard,
+                prompt_allowed = await cls._redis_set_nx_with_ttl(
+                    cls._rating_prompt_sent_key(connected_integration_id, int(ticket_id)),
+                    "1",
+                    TelegramBotCrmChannelConfig.RATING_STATE_TTL_SEC,
                 )
-                if rating_prompt_text:
-                    await cls._send_phone_system_message_best_effort(
-                        connected_integration_id=connected_integration_id,
-                        chat_id=chat_id,
-                        external_message_id=(
-                            f"tgsys:channel_rating_prompt_sent:{bot_cfg.bot_hash}:{tg_chat_id}:{chat_id}:{int(ticket_id)}"
-                        ),
-                        text=rating_prompt_text,
+                if prompt_allowed:
+                    rating_keyboard = cls._build_rating_keyboard(int(ticket_id))
+                    rating_prompt_text = await cls._send_channel_message_to_telegram(
+                        bot_cfg=bot_cfg,
+                        tg_chat_id=tg_chat_id,
+                        text=channel_settings.rating_message,
+                        reply_markup=rating_keyboard,
                     )
+                    if rating_prompt_text:
+                        await cls._send_phone_system_message_best_effort(
+                            connected_integration_id=connected_integration_id,
+                            chat_id=chat_id,
+                            external_message_id=(
+                                f"tgsys:channel_rating_prompt_sent:{bot_cfg.bot_hash}:{tg_chat_id}:{chat_id}:{int(ticket_id)}"
+                            ),
+                            text=rating_prompt_text,
+                        )
         except Exception as error:
             logger.warning(
                 "Failed to send ticket close auto message(s): ci=%s ticket_id=%s channel_id=%s tg_chat_id=%s error=%s",

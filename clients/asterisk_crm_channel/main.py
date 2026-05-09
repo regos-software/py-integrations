@@ -372,8 +372,8 @@ def _hash_scope_key(value: str) -> str:
     return hashlib.md5(str(value or "").encode("utf-8")).hexdigest()
 
 
-def _external_id(asterisk_hash: str, normalized_phone: str) -> str:
-    return f"ast:{asterisk_hash}:{normalized_phone}"
+def _external_id(connected_integration_id: str, normalized_phone: str) -> str:
+    return f"ci:{connected_integration_id}:asterisk:{normalized_phone}"
 
 
 def _phone_filter_candidates(
@@ -1436,6 +1436,13 @@ return 0
             return None
         text = str(value or "").strip()
         return text or None
+
+    @classmethod
+    def _ticket_external_dialog_id(cls, runtime: RuntimeConfig, external_call_id: str) -> Optional[str]:
+        normalized_call_id = cls._normalize_call_id(external_call_id)
+        if not normalized_call_id:
+            return None
+        return f"ci:{runtime.connected_integration_id}:asterisk:{normalized_call_id}"
 
     @classmethod
     def _payload_pick(cls, payload: Dict[str, Any], *paths: str) -> Any:
@@ -4282,7 +4289,10 @@ return 0
                 ClientAddRequest(
                     phone=normalized_phone,
                     name=normalized_phone,
-                    external_id=_external_id(runtime.asterisk_hash, normalized_phone),
+                    external_id=_external_id(
+                        runtime.connected_integration_id,
+                        normalized_phone,
+                    ),
                 )
             )
             add_result = cls._row_to_dict(add_response.result)
@@ -4306,11 +4316,14 @@ return 0
         normalized_call_id = cls._normalize_call_id(external_call_id)
         if not normalized_call_id:
             return None
+        external_dialog_id = cls._ticket_external_dialog_id(runtime, normalized_call_id)
+        if not external_dialog_id:
+            return None
         filters = [
             Filter(
                 field="external_dialog_id",
                 operator=FilterOperator.Equal,
-                value=normalized_call_id,
+                value=external_dialog_id,
             ),
         ]
         async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
@@ -4342,6 +4355,9 @@ return 0
         normalized_call_id = cls._normalize_call_id(event.external_call_id)
         if not normalized_call_id:
             raise NonRetryableCallEventError("external_call_id is required for Ticket flow")
+        external_dialog_id = cls._ticket_external_dialog_id(runtime, normalized_call_id)
+        if not external_dialog_id:
+            raise NonRetryableCallEventError("external_call_id is required for Ticket flow")
         reused = await cls._find_ticket_by_external_call(
             runtime,
             normalized_call_id,
@@ -4359,7 +4375,7 @@ return 0
                 if event.direction == "outbound"
                 else TicketDirectionEnum.Inbound
             ),
-            external_dialog_id=normalized_call_id,
+            external_dialog_id=external_dialog_id,
             responsible_user_id=runtime.default_responsible_user_id,
             subject=_safe_subject(
                 runtime.subject_template,

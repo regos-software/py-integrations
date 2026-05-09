@@ -1,0 +1,123 @@
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+from typing import Optional
+
+from core.logger import setup_logger
+from core.mariadb import mariadb_is_enabled, mariadb_ops
+
+
+logger = setup_logger("instagram_crm_channel.storage")
+
+_SCHEMA_LOCK = asyncio.Lock()
+_SCHEMA_READY = False
+_MIGRATIONS_DIR = Path(__file__).with_name("migrations")
+_BUSINESS_MAP_TABLE = mariadb_ops.table_name("igc", "business", "map")
+
+
+def instagram_mariadb_enabled() -> bool:
+    return mariadb_is_enabled()
+
+
+async def ensure_schema(*, force: bool = False) -> bool:
+    global _SCHEMA_READY
+    if not instagram_mariadb_enabled():
+        return False
+    if _SCHEMA_READY and not force:
+        return True
+
+    async with _SCHEMA_LOCK:
+        if _SCHEMA_READY and not force:
+            return True
+
+        for migration_path in sorted(_MIGRATIONS_DIR.glob("*.sql")):
+            sql = migration_path.read_text(encoding="utf-8").strip()
+            if not sql:
+                continue
+            await mariadb_ops.execute(sql)
+            logger.info("Applied Instagram MariaDB migration: %s", migration_path.name)
+
+        _SCHEMA_READY = True
+        return True
+
+
+async def upsert_business_map(
+    *,
+    connected_integration_id: str,
+    business_id: str,
+    username: Optional[str] = None,
+    is_active: bool = True,
+) -> bool:
+    ci = str(connected_integration_id or "").strip()
+    business = str(business_id or "").strip()
+    if not ci or not business or not instagram_mariadb_enabled():
+        return False
+
+    await ensure_schema()
+    await mariadb_ops.execute(
+        f"""
+        INSERT INTO {_BUSINESS_MAP_TABLE}
+            (`business_id`, `connected_integration_id`, `username`, `is_active`)
+        VALUES (%s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            `connected_integration_id` = VALUES(`connected_integration_id`),
+            `username` = VALUES(`username`),
+            `is_active` = VALUES(`is_active`),
+            `updated_at` = CURRENT_TIMESTAMP
+        """,
+        (business, ci, str(username or "").strip() or None, 1 if is_active else 0),
+    )
+    return True
+
+
+async def resolve_ci_by_business_id(business_id: str) -> Optional[str]:
+    business = str(business_id or "").strip()
+    if not business or not instagram_mariadb_enabled():
+        return None
+
+    await ensure_schema()
+    row = await mariadb_ops.fetchone(
+        f"""
+        SELECT `connected_integration_id`
+        FROM {_BUSINESS_MAP_TABLE}
+        WHERE `business_id` = %s AND `is_active` = 1
+        LIMIT 1
+        """,
+        (business,),
+    )
+    if not row:
+        return None
+    return str(row[0] or "").strip() or None
+
+
+async def mark_business_map_inactive(
+    *,
+    connected_integration_id: str,
+    business_id: Optional[str] = None,
+) -> bool:
+    ci = str(connected_integration_id or "").strip()
+    business = str(business_id or "").strip()
+    if not ci or not instagram_mariadb_enabled():
+        return False
+
+    await ensure_schema()
+    if business:
+        await mariadb_ops.execute(
+            f"""
+            UPDATE {_BUSINESS_MAP_TABLE}
+            SET `is_active` = 0, `updated_at` = CURRENT_TIMESTAMP
+            WHERE `connected_integration_id` = %s AND `business_id` = %s
+            """,
+            (ci, business),
+        )
+    else:
+        await mariadb_ops.execute(
+            f"""
+            UPDATE {_BUSINESS_MAP_TABLE}
+            SET `is_active` = 0, `updated_at` = CURRENT_TIMESTAMP
+            WHERE `connected_integration_id` = %s
+            """,
+            (ci,),
+        )
+    return True
