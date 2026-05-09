@@ -1911,13 +1911,12 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         incoming_settings: Optional[List[Dict]] = None,
         **kwargs,
     ) -> IntegrationSuccessResponse:
-        """Update integration settings and refresh the connection."""
+        """Update cached integration settings."""
         logger.info(f"Updating settings (ID: {self.connected_integration_id})")
         cache_key = self._settings_cache_key()
         await self._clear_settings_cache(cache_key)
         await self._clear_webhook_refresh_cache()
         await self._close_bot_runtime_cache(self.connected_integration_id)
-        await self.connect()
         return IntegrationSuccessResponse(result={"status": "settings updated"})
 
     @staticmethod
