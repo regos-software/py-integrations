@@ -47,6 +47,11 @@ def _normalize_params(params: Optional[Any]) -> Any:
     return params
 
 
+async def _commit_if_needed(connection: Any) -> None:
+    if not bool(connection.get_autocommit()):
+        await connection.commit()
+
+
 async def init_mariadb_pool():
     global _mariadb_pool
     if _mariadb_pool is not None:
@@ -100,7 +105,7 @@ async def mariadb_connection() -> AsyncIterator[Any]:
 @asynccontextmanager
 async def mariadb_transaction() -> AsyncIterator[Any]:
     async with mariadb_connection() as connection:
-        previous_autocommit = getattr(connection, "get_autocommit", lambda: True)()
+        previous_autocommit = bool(connection.get_autocommit())
         if previous_autocommit:
             await connection.autocommit(False)
         try:
@@ -118,20 +123,24 @@ async def mariadb_execute(sql: str, params: Optional[Any] = None) -> MariaDBResu
     async with mariadb_connection() as connection:
         async with connection.cursor() as cursor:
             await cursor.execute(sql, _normalize_params(params))
-            return MariaDBResult(
+            result = MariaDBResult(
                 rowcount=int(cursor.rowcount or 0),
                 lastrowid=getattr(cursor, "lastrowid", None),
             )
+            await _commit_if_needed(connection)
+            return result
 
 
 async def mariadb_executemany(sql: str, params: Iterable[Any]) -> MariaDBResult:
     async with mariadb_connection() as connection:
         async with connection.cursor() as cursor:
             await cursor.executemany(sql, list(params))
-            return MariaDBResult(
+            result = MariaDBResult(
                 rowcount=int(cursor.rowcount or 0),
                 lastrowid=getattr(cursor, "lastrowid", None),
             )
+            await _commit_if_needed(connection)
+            return result
 
 
 async def mariadb_fetchone(sql: str, params: Optional[Any] = None) -> Optional[Tuple[Any, ...]]:
