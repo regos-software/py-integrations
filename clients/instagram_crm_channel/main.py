@@ -114,10 +114,7 @@ class InstagramCrmChannelConfig:
 
     SUPPORTED_INBOUND_WEBHOOKS = {"ChatMessageAdded"}
 
-    SETTING_AUTHORIZATION_URL = "instagram_authorization_url"
-    SETTING_AUTHORIZATION_URL_GENERATED_AT = "instagram_authorization_url_generated_at"
     SETTING_AUTHORIZATION_STATUS = "instagram_authorization_status"
-    SETTING_AUTHORIZED = "instagram_authorized"
 
 
 @dataclass
@@ -237,6 +234,10 @@ class InstagramCrmChannelIntegration(ClientBase):
     @classmethod
     def _settings_cache_key(cls, connected_integration_id: str) -> str:
         return cls._redis_key("settings", connected_integration_id)
+
+    @classmethod
+    def _authorization_url_cache_key(cls, connected_integration_id: str) -> str:
+        return cls._redis_key("oauth_url", connected_integration_id)
 
     @classmethod
     def _ci_active_cache_key(cls, connected_integration_id: str) -> str:
@@ -623,6 +624,21 @@ class InstagramCrmChannelIntegration(ClientBase):
             'state': cls._encode_oauth_state(connected_integration_id, nonce),
         })}"
 
+    @classmethod
+    async def _cached_oauth_url(cls, connected_integration_id: str) -> str:
+        cache_key = cls._authorization_url_cache_key(connected_integration_id)
+        cached = await cls._redis_get(cache_key)
+        if cached:
+            return cached
+        authorization_url = await cls._build_oauth_url(connected_integration_id)
+        await cls._redis_set(
+            cache_key,
+            authorization_url,
+            max(InstagramCrmChannelConfig.OAUTH_STATE_TTL_SEC - 60, 30),
+            min_ttl_sec=30,
+        )
+        return authorization_url
+
     @staticmethod
     def _is_runtime_authorized(runtime: RuntimeConfig) -> bool:
         return bool(runtime.instagram_business_account_id and runtime.access_token)
@@ -632,108 +648,24 @@ class InstagramCrmChannelIntegration(ClientBase):
         cls,
         *,
         authorized: bool,
-        authorization_url: str = "",
-        generated_at: Optional[int] = None,
     ) -> Dict[str, str]:
         if authorized:
             return {
-                InstagramCrmChannelConfig.SETTING_AUTHORIZED: "true",
                 InstagramCrmChannelConfig.SETTING_AUTHORIZATION_STATUS: "authorized",
-                InstagramCrmChannelConfig.SETTING_AUTHORIZATION_URL: "",
-                InstagramCrmChannelConfig.SETTING_AUTHORIZATION_URL_GENERATED_AT: "",
             }
         return {
-            InstagramCrmChannelConfig.SETTING_AUTHORIZED: "false",
             InstagramCrmChannelConfig.SETTING_AUTHORIZATION_STATUS: "authorization_required",
-            InstagramCrmChannelConfig.SETTING_AUTHORIZATION_URL: str(authorization_url or "").strip(),
-            InstagramCrmChannelConfig.SETTING_AUTHORIZATION_URL_GENERATED_AT: str(generated_at or ""),
         }
 
     @classmethod
-    async def _save_authorization_state(
-        cls,
-        connected_integration_id: str,
-        *,
-        authorized: bool,
-        authorization_url: str = "",
-        generated_at: Optional[int] = None,
-    ) -> None:
-        await cls._edit_settings(
-            connected_integration_id,
-            cls._authorization_settings_patch(
-                authorized=authorized,
-                authorization_url=authorization_url,
-                generated_at=generated_at,
-            ),
-        )
-
-    @classmethod
-    async def _try_save_authorization_state(
-        cls,
-        connected_integration_id: str,
-        *,
-        authorized: bool,
-        authorization_url: str = "",
-        generated_at: Optional[int] = None,
-    ) -> bool:
-        try:
-            await cls._save_authorization_state(
-                connected_integration_id,
-                authorized=authorized,
-                authorization_url=authorization_url,
-                generated_at=generated_at,
-            )
-            return True
-        except Exception as error:
-            logger.warning(
-                "Instagram authorization state sync failed: ci=%s authorized=%s error=%s",
-                connected_integration_id,
-                authorized,
-                error,
-            )
-            return False
-
-    @classmethod
-    def _authorization_url_is_fresh(cls, settings_map: Dict[str, str]) -> bool:
-        generated_at = _to_int(
-            settings_map.get(InstagramCrmChannelConfig.SETTING_AUTHORIZATION_URL_GENERATED_AT),
-            None,
-        )
-        if not generated_at:
-            return False
-        return _now_ts() < int(generated_at) + InstagramCrmChannelConfig.OAUTH_STATE_TTL_SEC - 60
-
-    @classmethod
-    async def _get_or_refresh_authorization_url(
+    async def _authorization_url(
         cls,
         connected_integration_id: str,
         runtime: RuntimeConfig,
-        settings_map: Dict[str, str],
     ) -> str:
         if cls._is_runtime_authorized(runtime):
-            if (
-                settings_map.get(InstagramCrmChannelConfig.SETTING_AUTHORIZED) != "true"
-                or settings_map.get(InstagramCrmChannelConfig.SETTING_AUTHORIZATION_STATUS) != "authorized"
-                or settings_map.get(InstagramCrmChannelConfig.SETTING_AUTHORIZATION_URL)
-            ):
-                await cls._try_save_authorization_state(connected_integration_id, authorized=True)
             return ""
-
-        existing_url = str(
-            settings_map.get(InstagramCrmChannelConfig.SETTING_AUTHORIZATION_URL) or ""
-        ).strip()
-        if existing_url and cls._authorization_url_is_fresh(settings_map):
-            return existing_url
-
-        generated_at = _now_ts()
-        authorization_url = await cls._build_oauth_url(connected_integration_id)
-        await cls._try_save_authorization_state(
-            connected_integration_id,
-            authorized=False,
-            authorization_url=authorization_url,
-            generated_at=generated_at,
-        )
-        return authorization_url
+        return await cls._cached_oauth_url(connected_integration_id)
 
     @classmethod
     async def _sync_reverse_indexes(cls, runtime: RuntimeConfig) -> None:
@@ -2184,16 +2116,8 @@ class InstagramCrmChannelIntegration(ClientBase):
             authorized = self._is_runtime_authorized(runtime)
             if authorized:
                 authorization_url = ""
-                await self._try_save_authorization_state(ci, authorized=True)
             else:
-                generated_at = _now_ts()
-                authorization_url = await self._build_oauth_url(ci)
-                await self._try_save_authorization_state(
-                    ci,
-                    authorized=False,
-                    authorization_url=authorization_url,
-                    generated_at=generated_at,
-                )
+                authorization_url = await self._cached_oauth_url(ci)
             await self._mark_ci_active(ci)
             try:
                 await self._ensure_stream_workers()
@@ -2264,6 +2188,7 @@ class InstagramCrmChannelIntegration(ClientBase):
         await self._redis_delete(
             self._settings_cache_key(ci),
             self._ci_active_cache_key(ci),
+            self._authorization_url_cache_key(ci),
         )
         return {"status": "disconnected"}
 
@@ -2326,8 +2251,7 @@ class InstagramCrmChannelIntegration(ClientBase):
                     require_access_token=False,
                     require_business_id=False,
                 )
-                settings_map = await self._fetch_settings_map(ci, force_refresh=True)
-                authorization_url = await self._get_or_refresh_authorization_url(ci, runtime, settings_map)
+                authorization_url = await self._authorization_url(ci, runtime)
             except Exception:
                 authorization_url = ""
             return HTMLResponse(
@@ -2348,7 +2272,6 @@ class InstagramCrmChannelIntegration(ClientBase):
                 require_business_id=False,
             )
             await self._sync_reverse_indexes(runtime)
-            settings_map = await self._fetch_settings_map(ci)
         except Exception as error:
             return HTMLResponse(self._ui_message_page(self._ui_settings_error_message(error)), status_code=400)
 
@@ -2374,6 +2297,7 @@ class InstagramCrmChannelIntegration(ClientBase):
                         self._ui_message_page("Сессия подключения истекла. Вернитесь к интеграции и попробуйте снова."),
                         status_code=400,
                     )
+                await self._redis_delete(self._authorization_url_cache_key(ci))
 
             try:
                 short_token, oauth_user_id = await self._instagram_exchange_code(oauth_code)
@@ -2386,6 +2310,7 @@ class InstagramCrmChannelIntegration(ClientBase):
                     "instagram_username": username or "",
                     **self._authorization_settings_patch(authorized=True),
                 })
+                await self._redis_delete(self._authorization_url_cache_key(ci))
                 runtime = await self._load_runtime(ci, require_access_token=True)
                 await self._sync_reverse_indexes(runtime)
                 await self._mark_ci_active(ci)
@@ -2407,7 +2332,7 @@ class InstagramCrmChannelIntegration(ClientBase):
                     status_code=500,
                 )
 
-        authorization_url = await self._get_or_refresh_authorization_url(ci, runtime, settings_map)
+        authorization_url = await self._authorization_url(ci, runtime)
         authorized = self._is_runtime_authorized(runtime)
         return HTMLResponse(
             self._ui_page(
