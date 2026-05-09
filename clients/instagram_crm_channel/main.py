@@ -2097,12 +2097,14 @@ class InstagramCrmChannelIntegration(ClientBase):
         authorized: bool,
         authorization_url: str,
         username: Optional[str],
+        connected_integration_id: str,
     ) -> str:
         safe_title = html.escape(title)
         account_name = str(username or "").strip()
         account_label = f"@{account_name.lstrip('@')}" if account_name else "Аккаунт Instagram"
         safe_account = html.escape(account_label)
         safe_url = html.escape(authorization_url or "", quote=True)
+        safe_ci = html.escape(connected_integration_id or "", quote=True)
         status_text = (
             "Аккаунт Instagram подключен. Сообщения клиентов будут поступать в CRM, а ответы операторов отправляться в Instagram."
             if authorized
@@ -2110,7 +2112,16 @@ class InstagramCrmChannelIntegration(ClientBase):
         )
         safe_status_text = html.escape(status_text)
         action_html = (
-            "<span class='badge ok'>Подключено</span>"
+            f"""
+            <div class="actions">
+              <span class="badge ok">Подключено</span>
+              <form method="get">
+                <input type="hidden" name="ci" value="{safe_ci}">
+                <input type="hidden" name="action" value="disconnect">
+                <button class="button danger" type="submit" onclick="return confirm('Отключить Instagram?')">Отключить</button>
+              </form>
+            </div>
+            """
             if authorized
             else f"<a class='button' href='{safe_url}'>Подключить Instagram</a>"
             if authorization_url
@@ -2129,7 +2140,10 @@ class InstagramCrmChannelIntegration(ClientBase):
     h1 {{ font-size: 24px; margin: 0 0 8px; }}
     p {{ margin: 0 0 20px; color: #536176; }}
     .account {{ margin: 0 0 22px; color: #172033; font-weight: 600; overflow-wrap: anywhere; }}
-    .button {{ display: inline-block; padding: 10px 14px; border-radius: 6px; background: #1769e0; color: #fff; text-decoration: none; font-weight: 600; }}
+    .actions {{ display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }}
+    form {{ margin: 0; }}
+    .button {{ display: inline-block; padding: 10px 14px; border: 0; border-radius: 6px; background: #1769e0; color: #fff; text-decoration: none; font: inherit; font-weight: 600; cursor: pointer; }}
+    .danger {{ background: #c93535; }}
     .badge {{ display: inline-block; padding: 8px 10px; border-radius: 6px; font-weight: 600; }}
     .ok {{ background: #e7f7ee; color: #0d6b3f; }}
     .warn {{ background: #fff4d8; color: #7a5200; }}
@@ -2202,9 +2216,10 @@ class InstagramCrmChannelIntegration(ClientBase):
     async def disconnect(self, **_: Any) -> Any:
         if not self.connected_integration_id:
             return self._error_response(1000, "connected_integration_id is required").dict()
+        ci = str(self.connected_integration_id)
         try:
             runtime = await self._load_runtime(
-                str(self.connected_integration_id),
+                ci,
                 require_access_token=False,
                 require_business_id=False,
             )
@@ -2213,13 +2228,13 @@ class InstagramCrmChannelIntegration(ClientBase):
                 keys.append(self._redis_key("map", "business_ci", runtime.instagram_business_account_id))
             try:
                 await mark_business_map_inactive(
-                    connected_integration_id=str(self.connected_integration_id),
+                    connected_integration_id=ci,
                     business_id=runtime.instagram_business_account_id or None,
                 )
             except Exception as error:
                 logger.warning(
                     "Failed to mark Instagram business mapping inactive: ci=%s error=%s",
-                    self.connected_integration_id,
+                    ci,
                     error,
                 )
             if keys:
@@ -2227,18 +2242,28 @@ class InstagramCrmChannelIntegration(ClientBase):
         except Exception:
             try:
                 await mark_business_map_inactive(
-                    connected_integration_id=str(self.connected_integration_id),
+                    connected_integration_id=ci,
                 )
             except Exception as error:
                 logger.warning(
                     "Failed to mark Instagram business mappings inactive by ci: ci=%s error=%s",
-                    self.connected_integration_id,
+                    ci,
                     error,
                 )
-        await self._mark_ci_inactive(str(self.connected_integration_id))
+        await self._edit_settings(
+            ci,
+            {
+                "instagram_business_account_id": "",
+                "instagram_access_token": "",
+                "instagram_access_token_expires_at": "",
+                "instagram_username": "",
+                **self._authorization_settings_patch(authorized=False),
+            },
+        )
+        await self._mark_ci_inactive(ci)
         await self._redis_delete(
-            self._settings_cache_key(str(self.connected_integration_id)),
-            self._ci_active_cache_key(str(self.connected_integration_id)),
+            self._settings_cache_key(ci),
+            self._ci_active_cache_key(ci),
         )
         return {"status": "disconnected"}
 
@@ -2284,6 +2309,36 @@ class InstagramCrmChannelIntegration(ClientBase):
             return HTMLResponse(
                 self._ui_message_page("Интеграция отключена. Включите ее и попробуйте снова."),
                 status_code=403,
+            )
+
+        action = _query_get(query, "action")
+        if action == "disconnect":
+            self.connected_integration_id = ci
+            result = await self.disconnect()
+            if isinstance(result, dict) and "result" in result:
+                return HTMLResponse(
+                    self._ui_message_page("Не удалось отключить аккаунт Instagram. Попробуйте еще раз."),
+                    status_code=500,
+                )
+            try:
+                runtime = await self._load_runtime(
+                    ci,
+                    require_access_token=False,
+                    require_business_id=False,
+                )
+                settings_map = await self._fetch_settings_map(ci, force_refresh=True)
+                authorization_url = await self._get_or_refresh_authorization_url(ci, runtime, settings_map)
+            except Exception:
+                authorization_url = ""
+            return HTMLResponse(
+                self._ui_page(
+                    title="Подключение Instagram",
+                    authorized=False,
+                    authorization_url=authorization_url,
+                    username=None,
+                    connected_integration_id=ci,
+                ),
+                status_code=200,
             )
 
         try:
@@ -2333,12 +2388,15 @@ class InstagramCrmChannelIntegration(ClientBase):
                 })
                 runtime = await self._load_runtime(ci, require_access_token=True)
                 await self._sync_reverse_indexes(runtime)
+                await self._mark_ci_active(ci)
+                await self._ensure_stream_workers()
                 return HTMLResponse(
                     self._ui_page(
                         title="Подключение Instagram",
                         authorized=True,
                         authorization_url="",
                         username=runtime.username,
+                        connected_integration_id=ci,
                     ),
                     status_code=200,
                 )
@@ -2357,6 +2415,7 @@ class InstagramCrmChannelIntegration(ClientBase):
                 authorized=authorized,
                 authorization_url=authorization_url,
                 username=runtime.username,
+                connected_integration_id=ci,
             ),
             status_code=200,
         )
