@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings
-from pydantic import field_validator
+from pydantic import AliasChoices, Field, field_validator
 
 
 class Settings(BaseSettings):
@@ -11,6 +11,25 @@ class Settings(BaseSettings):
     integration_rps: int = 2
     integration_burst: int = 50
     service_a_token: str = ""
+    scheduler_hostname: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "scheduler_hostname",
+            "SCHEDULER_HOSTNAME",
+            "SCHEDULER_HOST_NAME",
+            "Scheduler_HostName",
+        ),
+    )
+    scheduler_token: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "scheduler_token",
+            "SCHEDULER_TOKEN",
+            "Scheduler_Token",
+        ),
+    )
+    scheduler_timeout: int = 30
+    scheduler_verify_ssl: bool = False
     log_level: str = "DEBUG"
     redis_enabled: bool = False
     redis_host: str = "host"
@@ -68,6 +87,12 @@ class Settings(BaseSettings):
     instagram_crm_channel_stream_batch_size: int = 50
     instagram_crm_channel_stream_maxlen: int = 100000
     instagram_crm_channel_stream_retry_limit: int = 3
+    edo_fakturauz_stream_workers: int = 2
+    edo_fakturauz_stream_batch_size: int = 20
+    edo_fakturauz_stream_maxlen: int = 100000
+    edo_fakturauz_stream_retry_limit: int = 3
+    edo_fakturauz_stream_ttl: int = 604800
+    edo_fakturauz_token_cache_ttl: int = 240
     marketplace_external_timeout: int = 60
     marketplace_unload_page_size: int = 250
     marketplace_cache_ttl: int = 300

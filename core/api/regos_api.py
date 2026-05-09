@@ -171,6 +171,9 @@ class RegosAPI:
             from core.api.docs.movement import DocMovementService
             from core.api.docs.movement_operation import MovementOperationService
             from core.api.docs.order_delivery import DocOrderDeliveryService
+            from core.api.docs.doc_contract import DocContractService
+            from core.api.docs.doc_invoice import DocInvoiceService
+            from core.api.docs.invoice_operation import InvoiceOperationService
 
             # Initialize services
 
@@ -188,6 +191,9 @@ class RegosAPI:
             self.movement = DocMovementService(api)
             self.movement_operation = MovementOperationService(api)
             self.order_delivery = DocOrderDeliveryService(api)
+            self.doc_contract = DocContractService(api)
+            self.doc_invoice = DocInvoiceService(api)
+            self.invoice_operation = InvoiceOperationService(api)
 
     class Integrations:
         def __init__(self, api: "RegosAPI"):
@@ -248,6 +254,7 @@ class RegosAPI:
             from core.api.references.currency import CurrencyService
             from core.api.references.delivery_type import DeliveryTypeService
             from core.api.references.field import FieldService
+            from core.api.references.firm import FirmService
             from core.api.references.item import ItemService
             from core.api.references.item_group import ItemGroupService
             from core.api.references.partner import PartnerService
@@ -263,6 +270,7 @@ class RegosAPI:
             self.currency = CurrencyService(api)
             self.delivery_type = DeliveryTypeService(api)
             self.field = FieldService(api)
+            self.firm = FirmService(api)
             self.retail_customer = RetailCustomerService(api)
             self.item = ItemService(api)
             self.item_group = ItemGroupService(api)

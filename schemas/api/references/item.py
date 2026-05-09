@@ -37,6 +37,30 @@ class SortDirection(str, Enum):
     DESC = "DESC"
 
 
+class ItemImportComparationValue(str, Enum):
+    """Item import duplicate matching type."""
+
+    Default = "Default"
+    Code = "Code"
+    Name = "Name"
+    Articul = "Articul"
+    Barcode = "Barcode"
+    ICPS = "ICPS"
+    ICPSBarcode = "ICPSBarcode"
+
+
+class ItemMatchingType(str, Enum):
+    """Item matching type."""
+
+    Default = "Default"
+    Code = "Code"
+    Name = "Name"
+    Articul = "Articul"
+    Barcode = "Barcode"
+    ICPS = "ICPS"
+    ICPSBarcode = "ICPSBarcode"
+
+
 # ---------- Базовая номенклатура (рид-модель) ----------
 class Item(BaseSchema):
     """
@@ -442,6 +466,7 @@ class ItemImportData(BaseSchema):
     description: Optional[str] = PydField(None, description="Описание.")
     vat_name: Optional[str] = PydField(None, description="Ставка НДС (наименование).")
     icps: Optional[str] = PydField(None, description="ICPS.")
+    icpsbarcode: Optional[str] = PydField(None, description="ICPS plus barcode.")
     labeled: Optional[int] = PydField(
         None, description="Маркируемый (0/1)."
     )  # BC: тип int сохранён
@@ -469,6 +494,7 @@ class ItemImportData(BaseSchema):
         "description",
         "vat_name",
         "icps",
+        "icpsbarcode",
         mode="before",
     )
     @classmethod
@@ -483,8 +509,9 @@ class ItemImportRequest(BaseSchema):
 
     model_config = ConfigDict(extra="forbid")
 
-    comparation_value: str = PydField(
-        ..., description="Поле сравнения для поиска существующих записей."
+    comparation_value: ItemImportComparationValue | str = PydField(
+        default=ItemImportComparationValue.Default,
+        description="Duplicate matching type.",
     )
     # BC: поля с '= None' были типизированы как 'str = None'; переводим в Optional[str] = None без смены имени/значения по умолчанию
     group_separator: Optional[str] = PydField(
@@ -494,30 +521,126 @@ class ItemImportRequest(BaseSchema):
         None, description="Разделитель штрихкодов (напр. ',')."
     )  # BC
     group_id: Optional[int] = PydField(
-        None, ge=1, description="Группа по умолчанию для импорта."
+        None, ge=0, description="Группа по умолчанию для импорта."
     )  # BC
     unit_id: Optional[int] = PydField(
-        None, ge=1, description="Ед. измерения по умолчанию."
+        None, ge=0, description="Ед. измерения по умолчанию."
     )  # BC
     vat_value_id: Optional[int] = PydField(
-        None, ge=1, description="Ставка НДС по умолчанию."
+        None, ge=0, description="Ставка НДС по умолчанию."
     )  # BC
     # BC: раньше было data: List[ItemImportData] = [] — заменено на default_factory=list (та же семантика пустого списка)
     data: List[ItemImportData] = PydField(
         default_factory=list, description="Массив строк импорта."
     )  # BC
 
-    @field_validator(
-        "comparation_value", "group_separator", "barcode_separator", mode="before"
-    )
+    @field_validator("group_separator", "barcode_separator", mode="before")
     @classmethod
     def _strip_req(cls, v):
         return v.strip() if isinstance(v, str) else v
+
+    @field_validator("comparation_value", mode="before")
+    @classmethod
+    def _normalize_comparation(cls, v):
+        if isinstance(v, ItemImportComparationValue):
+            return v
+        if isinstance(v, str):
+            normalized = v.strip()
+            for item in ItemImportComparationValue:
+                if item.value.lower() == normalized.lower():
+                    return item
+            return normalized
+        return v
+
+
+class ItemImportResult(BaseSchema):
+    """Item import result row."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    success: Optional[bool] = PydField(default=None, description="Import success flag.")
+    index: Optional[str] = PydField(default=None, description="Source row index.")
+    item_id: Optional[int] = PydField(default=None, ge=0, description="Item id.")
+
+    @field_validator("index", mode="before")
+    @classmethod
+    def _normalize_index(cls, value):
+        if value is None:
+            return value
+        return str(value).strip()
+
+
+class ItemImportResponse(APIBaseResponse[List[ItemImportResult]]):
+    """Response for Item/Import."""
+
+    model_config = ConfigDict(extra="ignore")
+
+
+class ItemMatchingData(BaseSchema):
+    """Item matching request row."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    index: str = PydField(..., description="Source row index.")
+    value: str = PydField(..., min_length=1, description="Matching value.")
+
+    @field_validator("index", "value", mode="before")
+    @classmethod
+    def _normalize_match_data(cls, value):
+        if value is None:
+            return value
+        return str(value).strip()
+
+
+class ItemMatchingRequest(BaseSchema):
+    """Request for Item/Match."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: ItemMatchingType = PydField(..., description="Matching type.")
+    data: List[ItemMatchingData] = PydField(..., max_length=250, description="Rows to match.")
+
+    @field_validator("type", mode="before")
+    @classmethod
+    def _normalize_type(cls, v):
+        if isinstance(v, ItemMatchingType):
+            return v
+        if isinstance(v, str):
+            normalized = v.strip()
+            for item in ItemMatchingType:
+                if item.value.lower() == normalized.lower():
+                    return item
+        return v
+
+
+class ItemMatchingResult(BaseSchema):
+    """Item matching response row."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    index: Optional[str] = PydField(default=None, description="Source row index.")
+    item_id: Optional[int] = PydField(default=None, ge=0, description="Matched item id.")
+    value: Optional[str] = PydField(default=None, description="Matched value.")
+
+    @field_validator("index", "value", mode="before")
+    @classmethod
+    def _normalize_match_result(cls, value):
+        if value is None:
+            return value
+        return str(value).strip()
+
+
+class ItemMatchingResponse(APIBaseResponse[List[ItemMatchingResult]]):
+    """Response for Item/Match."""
+
+    model_config = ConfigDict(extra="ignore")
 
 
 __all__ = [
     "ItemType",
     "SortDirection",
+    "ItemImportComparationValue",
+    "ItemMatchingType",
     "Item",
     "ItemSearchRequest",
     "RedefinitionOption",
@@ -537,6 +660,12 @@ __all__ = [
     "ItemExt",
     "ItemImportData",
     "ItemImportRequest",
+    "ItemImportResult",
+    "ItemImportResponse",
+    "ItemMatchingData",
+    "ItemMatchingRequest",
+    "ItemMatchingResult",
+    "ItemMatchingResponse",
     "ItemGroup",
     "Department",
     "TaxVat",
