@@ -2821,8 +2821,9 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             return self._error_response(1000, "connected_integration_id is required").dict()
         await self._clear_settings_cache(self.connected_integration_id)
         await self._clear_webhook_refresh_cache(self.connected_integration_id)
-        result = await self.reconnect()
-        return {"status": "settings updated", "reconnect": result}
+        async with _RUNTIME_LOCAL_LOCK:
+            _RUNTIME_LOCAL_CACHE.pop(str(self.connected_integration_id or "").strip(), None)
+        return {"status": "settings updated"}
 
     async def send_messages(self, messages: List[Dict]) -> Any:
         if not self.connected_integration_id:

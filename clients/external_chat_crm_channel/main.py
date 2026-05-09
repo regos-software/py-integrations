@@ -4806,7 +4806,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             return self._error_response(1000, "connected_integration_id is required").dict()
         ci = str(self.connected_integration_id).strip()
         await self._clear_settings_runtime_cache(ci)
-        return {"status": "settings updated", "reconnect": await self.connect()}
+        return {"status": "settings updated"}
 
     @staticmethod
     def _normalize_regos_webhook_payload(

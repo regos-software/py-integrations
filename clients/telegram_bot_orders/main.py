@@ -1385,7 +1385,6 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         await self._clear_settings_cache()
         await self._clear_webhook_refresh_cache()
         await self._close_bot_runtime_cache(self.connected_integration_id)
-        await self.connect()
         return IntegrationSuccessResponse(result={"status": "settings updated"})
 
     async def handle_webhook(

@@ -244,6 +244,10 @@ class InstagramCrmChannelIntegration(ClientBase):
         return cls._redis_key("ci_active", connected_integration_id)
 
     @classmethod
+    def _webhooks_subscription_cache_key(cls, connected_integration_id: str) -> str:
+        return cls._redis_key("webhooks_subscribed", connected_integration_id)
+
+    @classmethod
     def _stream_key(cls, connected_integration_id: Optional[str] = None) -> str:
         _ = connected_integration_id
         return cls._redis_key("stream")
@@ -280,35 +284,6 @@ class InstagramCrmChannelIntegration(ClientBase):
             if key not in normalized or (value and not normalized[key]):
                 normalized[key] = value
         return normalized
-
-    @classmethod
-    async def _settings_key_case_map(cls, connected_integration_id: str) -> Dict[str, str]:
-        try:
-            async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-                response = await api.integrations.connected_integration_setting.get(
-                    ConnectedIntegrationSettingRequest(
-                        connected_integration_id=connected_integration_id
-                    )
-                )
-        except Exception as error:
-            logger.warning(
-                "Failed to read setting key case map, using patch keys: ci=%s error=%s",
-                connected_integration_id,
-                error,
-            )
-            return {}
-
-        key_case_map: Dict[str, str] = {}
-        for row in response.result or []:
-            data = _row_to_dict(row)
-            raw_key_value = data.get("key") if data else getattr(row, "key", "")
-            raw_key = str(raw_key_value or "").strip()
-            key = cls._normalize_setting_key(raw_key)
-            if not key:
-                continue
-            if key not in key_case_map or raw_key.isupper():
-                key_case_map[key] = raw_key
-        return key_case_map
 
     @staticmethod
     async def _redis_get(key: str) -> Optional[str]:
@@ -466,21 +441,41 @@ class InstagramCrmChannelIntegration(ClientBase):
         return settings_map
 
     @classmethod
-    async def _edit_settings(cls, connected_integration_id: str, patch: Dict[str, str]) -> None:
-        key_case_map = await cls._settings_key_case_map(connected_integration_id)
+    async def _cache_settings_map(cls, connected_integration_id: str, settings_map: Dict[Any, Any]) -> None:
+        await cls._redis_set(
+            cls._settings_cache_key(connected_integration_id),
+            _json_dumps(cls._normalize_settings_map(settings_map)),
+            InstagramCrmChannelConfig.SETTINGS_TTL_SEC,
+        )
+
+    @classmethod
+    async def _edit_settings(
+        cls,
+        connected_integration_id: str,
+        patch: Dict[str, str],
+        *,
+        settings_map: Optional[Dict[Any, Any]] = None,
+    ) -> Dict[str, str]:
         rows = [
             ConnectedIntegrationSettingEditItem(
                 connected_integration_id=connected_integration_id,
-                key=key_case_map.get(cls._normalize_setting_key(key), str(key)),
+                key=str(key),
                 value=str(value or ""),
             )
             for key, value in patch.items()
         ]
         if not rows:
-            return
+            return cls._normalize_settings_map(settings_map or {})
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
             await api.integrations.connected_integration_setting.edit(ConnectedIntegrationSettingEditRequest(rows))
-        await cls._redis_delete(cls._settings_cache_key(connected_integration_id))
+        if settings_map is None:
+            await cls._redis_delete(cls._settings_cache_key(connected_integration_id))
+            return {}
+
+        updated_settings = cls._normalize_settings_map(settings_map)
+        updated_settings.update(cls._normalize_settings_map(patch))
+        await cls._cache_settings_map(connected_integration_id, updated_settings)
+        return updated_settings
 
     @classmethod
     async def _is_connected_integration_active(cls, connected_integration_id: str, force_refresh: bool = False) -> bool:
@@ -558,7 +553,23 @@ class InstagramCrmChannelIntegration(ClientBase):
         require_business_id: bool = True,
     ) -> RuntimeConfig:
         settings_map = await cls._fetch_settings_map(connected_integration_id)
+        return cls._runtime_from_settings_map(
+            connected_integration_id,
+            settings_map,
+            require_access_token=require_access_token,
+            require_business_id=require_business_id,
+        )
 
+    @classmethod
+    def _runtime_from_settings_map(
+        cls,
+        connected_integration_id: str,
+        settings_map: Dict[Any, Any],
+        *,
+        require_access_token: bool,
+        require_business_id: bool = True,
+    ) -> RuntimeConfig:
+        settings_map = cls._normalize_settings_map(settings_map)
         business_id = str(settings_map.get("instagram_business_account_id") or "").strip()
         pipeline_id = _to_int(settings_map.get("instagram_pipeline_id"), None)
         channel_id = _to_int(settings_map.get("instagram_channel_id"), None)
@@ -695,6 +706,10 @@ class InstagramCrmChannelIntegration(ClientBase):
         cls,
         connected_integration_id: str,
     ) -> Dict[str, Any]:
+        cache_key = cls._webhooks_subscription_cache_key(connected_integration_id)
+        if await cls._redis_get(cache_key) == "1":
+            return {"status": "cached"}
+
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
             response = await api.integrations.connected_integration.edit(
                 ConnectedIntegrationEditRequest(
@@ -703,6 +718,7 @@ class InstagramCrmChannelIntegration(ClientBase):
                 )
             )
         if response.ok:
+            await cls._redis_set(cache_key, "1", InstagramCrmChannelConfig.SETTINGS_TTL_SEC)
             return {"status": "ok"}
         logger.warning(
             "Instagram webhook subscription rejected: ci=%s payload=%s",
@@ -2100,7 +2116,7 @@ class InstagramCrmChannelIntegration(ClientBase):
             return self._error_response(1001, "Redis is required for this integration").dict()
 
         ci = str(self.connected_integration_id)
-        if not await self._is_connected_integration_active(ci, force_refresh=True):
+        if not await self._is_connected_integration_active(ci):
             return self._error_response(1004, f"ConnectedIntegration '{ci}' is inactive").dict()
 
         try:
@@ -2189,6 +2205,7 @@ class InstagramCrmChannelIntegration(ClientBase):
             self._settings_cache_key(ci),
             self._ci_active_cache_key(ci),
             self._authorization_url_cache_key(ci),
+            self._webhooks_subscription_cache_key(ci),
         )
         return {"status": "disconnected"}
 
@@ -2202,8 +2219,9 @@ class InstagramCrmChannelIntegration(ClientBase):
         _ = settings
         if not self.connected_integration_id:
             return self._error_response(1000, "connected_integration_id is required").dict()
-        await self._redis_delete(self._settings_cache_key(str(self.connected_integration_id)))
-        return {"status": "settings updated", "reconnect": await self.reconnect()}
+        ci = str(self.connected_integration_id).strip()
+        await self._redis_delete(self._settings_cache_key(ci))
+        return {"status": "settings updated"}
 
     async def handle_ui(self, envelope: Dict[str, Any]) -> Any:
         if str(envelope.get("method") or "").upper() != "GET":
@@ -2266,8 +2284,10 @@ class InstagramCrmChannelIntegration(ClientBase):
             )
 
         try:
-            runtime = await self._load_runtime(
+            settings_map = await self._fetch_settings_map(ci)
+            runtime = self._runtime_from_settings_map(
                 ci,
+                settings_map,
                 require_access_token=False,
                 require_business_id=False,
             )
@@ -2303,15 +2323,19 @@ class InstagramCrmChannelIntegration(ClientBase):
                 short_token, oauth_user_id = await self._instagram_exchange_code(oauth_code)
                 long_token, expires_at = await self._instagram_exchange_long_lived(short_token)
                 business_id, username = await self._instagram_resolve_account(runtime, long_token, oauth_user_id)
-                await self._edit_settings(ci, {
+                updated_settings_map = await self._edit_settings(ci, {
                     "instagram_business_account_id": business_id,
                     "instagram_access_token": long_token,
                     "instagram_access_token_expires_at": str(expires_at or ""),
                     "instagram_username": username or "",
                     **self._authorization_settings_patch(authorized=True),
-                })
+                }, settings_map=settings_map)
                 await self._redis_delete(self._authorization_url_cache_key(ci))
-                runtime = await self._load_runtime(ci, require_access_token=True)
+                runtime = self._runtime_from_settings_map(
+                    ci,
+                    updated_settings_map,
+                    require_access_token=True,
+                )
                 await self._sync_reverse_indexes(runtime)
                 await self._mark_ci_active(ci)
                 await self._ensure_stream_workers()

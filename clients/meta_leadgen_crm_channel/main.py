@@ -871,7 +871,7 @@ class MetaLeadgenCrmChannelIntegration(ClientBase):
         await MetaLeadgenRedisState.delete(
             MetaLeadgenRedisState.settings_cache_key(str(self.connected_integration_id))
         )
-        return {"status": "settings updated", "reconnect": await self.reconnect()}
+        return {"status": "settings updated"}
 
     async def handle_ui(self, envelope: Dict[str, Any]) -> Any:
         if str(envelope.get("method") or "").upper() != "GET":

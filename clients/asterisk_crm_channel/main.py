@@ -4918,8 +4918,7 @@ return 0
                 _RUNTIME_LOCAL_CACHE.pop(str(self.connected_integration_id or "").strip(), None)
         finally:
             await self._release_lock(lock_key, lock_token)
-        reconnect_result = await self.reconnect()
-        return {"status": "settings updated", "reconnect": reconnect_result}
+        return {"status": "settings updated"}
 
     async def handle_webhook(
         self,

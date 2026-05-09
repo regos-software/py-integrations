@@ -338,10 +338,10 @@ async def handle_integration(
         )
 
     action_key = camel_to_snake(request_body.action)
-    if resolved_connected_integration_id and action_key not in {"disconnect"}:
+    if resolved_connected_integration_id and action_key not in {"disconnect", "update_settings"}:
         is_active = await _is_connected_integration_active(
             resolved_connected_integration_id,
-            force_refresh=action_key in {"connect", "reconnect", "update_settings"},
+            force_refresh=action_key in {"connect", "reconnect"},
         )
         if not is_active:
             await _cleanup_integration(integration_instance)

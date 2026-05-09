@@ -1152,7 +1152,7 @@ class EdoFakturaUzIntegration(ClientBase):
         return await self.connect(**kwargs)
 
     async def update_settings(self, **kwargs) -> Dict[str, Any]:
-        return await self.connect(**kwargs)
+        return {"status": "settings updated", "connected_integration_id": self._ci()}
 
     async def check(self, firm_id: Optional[int] = None, **kwargs) -> Dict[str, Any]:
         await self._ensure_active_integration()
