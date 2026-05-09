@@ -23,7 +23,7 @@ from config.settings import settings as app_settings
 from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
 from core.redis import (
-    redis_client,
+    redis_ops,
     redis_error_contains,
     redis_expire_if_due,
     redis_incr_with_ttl,
@@ -1012,7 +1012,7 @@ def _relative_query_with_ui_asset_version(query: Dict[str, Any]) -> str:
 
 
 def _redis_enabled() -> bool:
-    return bool(app_settings.redis_enabled and redis_client is not None)
+    return bool(app_settings.redis_enabled and redis_ops)
 
 
 def _require_redis() -> None:
@@ -1309,17 +1309,17 @@ class ExternalChatCrmChannelIntegration(ClientBase):
     @staticmethod
     async def _redis_get(key: str) -> Optional[str]:
         _require_redis()
-        return await redis_client.get(key)
+        return await redis_ops.get(key)
 
     @staticmethod
     async def _redis_set(key: str, value: str, ttl_sec: int) -> None:
         _require_redis()
-        await redis_client.set(key, value, ex=max(int(ttl_sec or 1), 1))
+        await redis_ops.set(key, value, ex=max(int(ttl_sec or 1), 1))
 
     @staticmethod
     async def _redis_set_nx(key: str, value: str, ttl_sec: int) -> bool:
         _require_redis()
-        inserted = await redis_client.set(
+        inserted = await redis_ops.set(
             key,
             value,
             ex=max(int(ttl_sec or 1), 1),
@@ -1338,7 +1338,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         valid = [str(key).strip() for key in keys if str(key or "").strip()]
         if not valid:
             return
-        await redis_client.delete(*valid)
+        await redis_ops.delete(*valid)
 
     @classmethod
     async def _acquire_lock_wait(
@@ -1369,11 +1369,11 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             "then return redis.call('del', KEYS[1]) else return 0 end"
         )
         try:
-            await redis_client.eval(script, 1, lock_key, token)
+            await redis_ops.eval(script, 1, lock_key, token)
         except Exception:
-            current = await redis_client.get(lock_key)
+            current = await redis_ops.get(lock_key)
             if current == token:
-                await redis_client.delete(lock_key)
+                await redis_ops.delete(lock_key)
 
     @staticmethod
     def _client_notice_kind(external_message_id: str) -> str:
@@ -1554,7 +1554,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         }
         event["id"] = f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
         serialized = _json_dumps(event)
-        async with redis_client.pipeline(transaction=True) as pipe:
+        async with redis_ops.pipeline(transaction=True) as pipe:
             await pipe.rpush(queue_key, serialized)
             await pipe.ltrim(queue_key, -max_items, -1)
             await pipe.expire(queue_key, ttl_sec)
@@ -1601,7 +1601,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             int(ExternalChatCrmChannelConfig.EVENT_BATCH_MAX_ITEMS),
         )
         ttl_sec = max(int(ExternalChatCrmChannelConfig.EVENT_QUEUE_TTL_SEC or 1), 1)
-        rows = await redis_client.eval(
+        rows = await redis_ops.eval(
             cls._EVENTS_DEQUEUE_LUA,
             1,
             queue_key,
@@ -1912,7 +1912,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             stale_key = cls._settings_stale_cache_key(connected_integration_id)
             cls._write_local_settings_cache(cache_key, settings_map)
             cls._write_local_settings_cache(stale_key, settings_map)
-            async with redis_client.pipeline(transaction=True) as pipe:
+            async with redis_ops.pipeline(transaction=True) as pipe:
                 await pipe.set(cache_key, payload, ex=ExternalChatCrmChannelConfig.SETTINGS_TTL_SEC)
                 await pipe.set(stale_key, payload, ex=ExternalChatCrmChannelConfig.SETTINGS_STALE_TTL_SEC)
                 await pipe.execute()
@@ -2341,7 +2341,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         current = await cls._redis_get(key)
         parsed = _parse_int(current, None)
         if parsed and parsed > 0:
-            await redis_client.expire(key, max(int(ExternalChatCrmChannelConfig.CONTEXT_TTL_SEC or 1), 1))
+            await redis_ops.expire(key, max(int(ExternalChatCrmChannelConfig.CONTEXT_TTL_SEC or 1), 1))
             return int(parsed)
         return default_revision
 
@@ -4414,7 +4414,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         field_args: List[str] = []
         for key, value in cls._serialize_stream_fields(fields).items():
             field_args.extend([key, value])
-        result = await redis_client.eval(
+        result = await redis_ops.eval(
             _ENQUEUE_DEDUPE_LUA,
             2,
             dedupe_key,
@@ -4475,7 +4475,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
     @classmethod
     async def _set_worker_heartbeat(cls, worker_index: int) -> None:
         _require_redis()
-        await redis_client.setex(
+        await redis_ops.setex(
             cls._worker_heartbeat_key(worker_index),
             ExternalChatCrmChannelConfig.HEARTBEAT_TTL_SEC,
             str(_now_ts()),
@@ -4540,7 +4540,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         consumer: str,
     ) -> List[Tuple[str, Dict[str, Any]]]:
         try:
-            claimed_raw = await redis_client.xautoclaim(
+            claimed_raw = await redis_ops.xautoclaim(
                 stream_key,
                 ExternalChatCrmChannelConfig.STREAM_GROUP,
                 consumer,
@@ -4587,7 +4587,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                             )
 
                     try:
-                        records = await redis_client.xreadgroup(
+                        records = await redis_ops.xreadgroup(
                             groupname=ExternalChatCrmChannelConfig.STREAM_GROUP,
                             consumername=consumer,
                             streams={stream_key: ">"},
@@ -4646,7 +4646,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
 
     @classmethod
     async def _ack_stream_entry(cls, stream_key: str, entry_id: str) -> None:
-        await redis_client.xack(stream_key, ExternalChatCrmChannelConfig.STREAM_GROUP, entry_id)
+        await redis_ops.xack(stream_key, ExternalChatCrmChannelConfig.STREAM_GROUP, entry_id)
 
     @classmethod
     async def _process_stream_entry(

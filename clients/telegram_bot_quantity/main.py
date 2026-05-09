@@ -13,7 +13,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command, BaseFilter
 from aiogram.types import Update as TelegramUpdate
 from aiogram.types import BotCommand
-from clients.telegram_bot_notification.services import send_messages
+from clients.telegram_bot_quantity.services.send_messages import send_messages
 from clients.telegram_polling import telegram_polling_manager
 from .utils import parse_chat_ids, extract_chat_id
 from .handlers.get_quantity import handle_get_quantity
@@ -32,7 +32,7 @@ from clients.base import ClientBase
 from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
 from core.redis import (
-    redis_client,
+    redis_ops,
     redis_error_contains,
     redis_expire_if_due,
     redis_stream_add_with_ttl,
@@ -151,17 +151,17 @@ class TelegramBotMinQuantityIntegration(IntegrationTelegramBase, ClientBase):
     async def _set_pending_get_quantity_search(self, chat_id: str) -> None:
         self._require_redis()
         key = self._pending_get_quantity_search_key(chat_id)
-        await redis_client.setex(key, PENDING_GET_QUANTITY_SEARCH_TTL_SECONDS, "1")
+        await redis_ops.setex(key, PENDING_GET_QUANTITY_SEARCH_TTL_SECONDS, "1")
 
     async def _clear_pending_get_quantity_search(self, chat_id: str) -> None:
         self._require_redis()
         key = self._pending_get_quantity_search_key(chat_id)
-        await redis_client.delete(key)
+        await redis_ops.delete(key)
 
     async def _has_pending_get_quantity_search(self, chat_id: str) -> bool:
         self._require_redis()
         key = self._pending_get_quantity_search_key(chat_id)
-        return bool(await redis_client.exists(key))
+        return bool(await redis_ops.exists(key))
 
     async def __aenter__(self):
         return self
@@ -237,7 +237,7 @@ class TelegramBotMinQuantityIntegration(IntegrationTelegramBase, ClientBase):
 
     @staticmethod
     def _redis_enabled() -> bool:
-        return bool(settings.redis_enabled and redis_client)
+        return bool(settings.redis_enabled and redis_ops)
 
     @staticmethod
     def _require_redis() -> None:
@@ -314,7 +314,7 @@ class TelegramBotMinQuantityIntegration(IntegrationTelegramBase, ClientBase):
         cls._require_redis()
         valid = [str(key).strip() for key in keys if str(key or "").strip()]
         if valid:
-            await redis_client.delete(*valid)
+            await redis_ops.delete(*valid)
 
     @classmethod
     async def _touch_stream_ttl(cls, stream_key: str, *, force: bool = False) -> None:
@@ -384,7 +384,7 @@ class TelegramBotMinQuantityIntegration(IntegrationTelegramBase, ClientBase):
         field_args: List[str] = []
         for key, value in cls._serialize_stream_fields(fields).items():
             field_args.extend([key, value])
-        result = await redis_client.eval(
+        result = await redis_ops.eval(
             _ENQUEUE_DEDUPE_LUA,
             2,
             dedupe_key,
@@ -565,7 +565,7 @@ class TelegramBotMinQuantityIntegration(IntegrationTelegramBase, ClientBase):
 
     @classmethod
     async def _ack_stream_entry(cls, stream_key: str, entry_id: str) -> None:
-        await redis_client.xack(stream_key, TelegramBotMinQuantityConfig.STREAM_GROUP, entry_id)
+        await redis_ops.xack(stream_key, TelegramBotMinQuantityConfig.STREAM_GROUP, entry_id)
 
     @classmethod
     async def _process_claimed_entries(
@@ -574,7 +574,7 @@ class TelegramBotMinQuantityIntegration(IntegrationTelegramBase, ClientBase):
         consumer: str,
     ) -> List[Tuple[str, Dict[str, Any]]]:
         try:
-            claimed_raw = await redis_client.xautoclaim(
+            claimed_raw = await redis_ops.xautoclaim(
                 stream_key,
                 TelegramBotMinQuantityConfig.STREAM_GROUP,
                 consumer,
@@ -619,7 +619,7 @@ class TelegramBotMinQuantityIntegration(IntegrationTelegramBase, ClientBase):
                             )
 
                     try:
-                        records = await redis_client.xreadgroup(
+                        records = await redis_ops.xreadgroup(
                             groupname=TelegramBotMinQuantityConfig.STREAM_GROUP,
                             consumername=consumer,
                             streams={stream_key: ">"},
@@ -765,7 +765,7 @@ class TelegramBotMinQuantityIntegration(IntegrationTelegramBase, ClientBase):
         token = uuid.uuid4().hex
         deadline = asyncio.get_running_loop().time() + max(float(wait_seconds or 0.0), 0.0)
         while True:
-            ok = await redis_client.set(key, token, ex=max(int(ttl_sec), 1), nx=True)
+            ok = await redis_ops.set(key, token, ex=max(int(ttl_sec), 1), nx=True)
             if ok:
                 return token
             if asyncio.get_running_loop().time() >= deadline:
@@ -781,7 +781,7 @@ class TelegramBotMinQuantityIntegration(IntegrationTelegramBase, ClientBase):
             "then return redis.call('del', KEYS[1]) else return 0 end"
         )
         try:
-            await redis_client.eval(script, 1, key, token)
+            await redis_ops.eval(script, 1, key, token)
         except Exception as error:
             logger.warning("Failed to release Redis lock %s: %s", key, error)
 
@@ -839,7 +839,7 @@ class TelegramBotMinQuantityIntegration(IntegrationTelegramBase, ClientBase):
         if local is not None:
             return local
         try:
-            cached_data = await redis_client.get(cache_key)
+            cached_data = await redis_ops.get(cache_key)
             if cached_data:
                 if isinstance(cached_data, (bytes, bytearray)):
                     cached_data = cached_data.decode("utf-8")
@@ -863,7 +863,7 @@ class TelegramBotMinQuantityIntegration(IntegrationTelegramBase, ClientBase):
             )
 
         try:
-            cached_data = await redis_client.get(cache_key)
+            cached_data = await redis_ops.get(cache_key)
             if cached_data:
                 if isinstance(cached_data, (bytes, bytearray)):
                     cached_data = cached_data.decode("utf-8")
@@ -900,7 +900,7 @@ class TelegramBotMinQuantityIntegration(IntegrationTelegramBase, ClientBase):
         if local is not None:
             return local
         try:
-            cached = await redis_client.get(key)
+            cached = await redis_ops.get(key)
             if not cached:
                 return None
             if isinstance(cached, (bytes, bytearray)):
@@ -916,7 +916,7 @@ class TelegramBotMinQuantityIntegration(IntegrationTelegramBase, ClientBase):
         keys = [self._settings_cache_key(), self._settings_stale_cache_key()]
         for key in keys:
             _SETTINGS_LOCAL_CACHE.pop(key, None)
-        await redis_client.delete(*keys)
+        await redis_ops.delete(*keys)
 
     async def _write_settings_cache(self, settings_map: Dict[str, str]) -> None:
         self._require_redis()
@@ -924,7 +924,7 @@ class TelegramBotMinQuantityIntegration(IntegrationTelegramBase, ClientBase):
         payload = _json_dumps(normalized)
         self._write_local_settings_cache(self._settings_cache_key(), normalized)
         self._write_local_settings_cache(self._settings_stale_cache_key(), normalized)
-        async with redis_client.pipeline(transaction=True) as pipe:
+        async with redis_ops.pipeline(transaction=True) as pipe:
             await pipe.setex(
                 self._settings_cache_key(),
                 TelegramBotMinQuantityConfig.SETTINGS_TTL,
@@ -1247,7 +1247,7 @@ class TelegramBotMinQuantityIntegration(IntegrationTelegramBase, ClientBase):
         _WEBHOOK_LOCAL_CACHE[self._webhook_refresh_cache_key()] = (
             _now_ts() + TelegramBotMinQuantityConfig.WEBHOOK_LOCAL_TTL
         )
-        await redis_client.setex(
+        await redis_ops.setex(
             self._webhook_refresh_cache_key(),
             TelegramBotMinQuantityConfig.WEBHOOK_REFRESH_TTL,
             "1",
@@ -1258,7 +1258,7 @@ class TelegramBotMinQuantityIntegration(IntegrationTelegramBase, ClientBase):
             return
         self._require_redis()
         _WEBHOOK_LOCAL_CACHE.pop(self._webhook_refresh_cache_key(), None)
-        await redis_client.delete(self._webhook_refresh_cache_key())
+        await redis_ops.delete(self._webhook_refresh_cache_key())
 
     async def _ensure_webhook_from_regos(self, *, force: bool = False) -> None:
         if self._is_longpolling_mode() or not self.bot or not self.connected_integration_id:
@@ -1267,7 +1267,7 @@ class TelegramBotMinQuantityIntegration(IntegrationTelegramBase, ClientBase):
         cache_key = self._webhook_refresh_cache_key()
         if not force and int(_WEBHOOK_LOCAL_CACHE.get(cache_key) or 0) > _now_ts():
             return
-        if not force and await redis_client.exists(cache_key):
+        if not force and await redis_ops.exists(cache_key):
             _WEBHOOK_LOCAL_CACHE[cache_key] = (
                 _now_ts() + TelegramBotMinQuantityConfig.WEBHOOK_LOCAL_TTL
             )
@@ -1287,7 +1287,7 @@ class TelegramBotMinQuantityIntegration(IntegrationTelegramBase, ClientBase):
 
         webhook_url = self._build_webhook_url()
         try:
-            if not force and await redis_client.exists(cache_key):
+            if not force and await redis_ops.exists(cache_key):
                 _WEBHOOK_LOCAL_CACHE[cache_key] = (
                     _now_ts() + TelegramBotMinQuantityConfig.WEBHOOK_LOCAL_TTL
                 )

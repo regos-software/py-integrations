@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse, Response
 from clients.base import ClientBase
 from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
-from core.redis import redis_client, redis_error_contains
+from core.redis import redis_ops, redis_error_contains
 from schemas.api.integrations.connected_integration import (
     ConnectedIntegrationGetRequest,
 )
@@ -563,7 +563,7 @@ class MetaLeadgenCrmChannelIntegration(ClientBase):
                         )
 
                     try:
-                        records = await redis_client.xreadgroup(
+                        records = await redis_ops.xreadgroup(
                             groupname=MetaLeadgenCrmChannelConfig.STREAM_GROUP,
                             consumername=consumer,
                             streams={stream_key: ">"},

@@ -19,6 +19,7 @@ from core.redis import (
     redis_release_lock,
     redis_set_json,
 )
+from core.scheduler import RegosSchedulerClient, SchedulerError
 from schemas.api.integrations.connected_integration import ConnectedIntegrationGetRequest
 from schemas.api.integrations.connected_integration_setting import ConnectedIntegrationSettingRequest
 from schemas.api.references.item import (
@@ -27,6 +28,7 @@ from schemas.api.references.item import (
     ItemGetExtRequest,
 )
 from schemas.api.references.stock import StockGetRequest
+from schemas.scheduler import AdapterSchedulerRequest, AdapterSchedulerUuidRequest, ScheduleAddRequest
 
 
 logger = setup_logger("marketplace_toserver")
@@ -212,18 +214,78 @@ class MarketplaceToServerIntegration(ClientBase):
     async def run(self, **_: Any) -> Dict[str, Any]:
         return await self.do_work()
 
+    async def schedule(self, **kwargs: Any) -> Any:
+        request = AdapterSchedulerRequest.model_validate(kwargs)
+        await self._ensure_scheduled()
+        scheduler = RegosSchedulerClient()
+        try:
+            if request.uuid:
+                await scheduler.schedule_delete(request.uuid)
+            return await scheduler.schedule_add(
+                ScheduleAddRequest(
+                    handler_id=1,
+                    start_date=request.start_date,
+                    end_date=request.end_date,
+                    api_login=request.api_login,
+                    connected_integration_id=self._ci(),
+                    data=request.data,
+                    period_type=request.period_type,
+                    period_value=request.period_value,
+                    run_immediately=False,
+                )
+            )
+        except SchedulerError as error:
+            raise MarketplaceToServerError(error.code, error.description) from error
+
+    async def schedule_get(self, **kwargs: Any) -> Optional[Dict[str, Any]]:
+        request = AdapterSchedulerUuidRequest.model_validate(kwargs)
+        await self._ensure_scheduled()
+        scheduler = RegosSchedulerClient()
+        try:
+            schedule = await scheduler.schedule_get_by_id(request.uuid)
+        except SchedulerError as error:
+            raise MarketplaceToServerError(error.code, error.description) from error
+        if schedule is None:
+            return None
+        return schedule.model_dump(mode="json", exclude_none=True)
+
+    async def schedule_delete(self, **kwargs: Any) -> Dict[str, Any]:
+        request = AdapterSchedulerUuidRequest.model_validate(kwargs)
+        await self._ensure_scheduled()
+        scheduler = RegosSchedulerClient()
+        try:
+            await scheduler.schedule_delete(request.uuid)
+        except SchedulerError as error:
+            raise MarketplaceToServerError(error.code, error.description) from error
+        return {"status": "deleted"}
+
     async def handle_external(self, envelope: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "ok"}
 
+    async def _ensure_scheduled(self) -> None:
+        state = await self._load_integration_state(require_scheduled=True)
+        if not bool(state.get("scheduled")):
+            raise MarketplaceToServerError(111350, "not scheduled")
+
     async def _ensure_active(self) -> str:
+        state = await self._load_integration_state()
+        return str(state.get("key") or self.integration_key)
+
+    async def _load_integration_state(self, *, require_scheduled: bool = False) -> Dict[str, Any]:
         ci = self._ci()
         if not ci:
-            raise MarketplaceToServerError(100, "connected-integration-id не получен")
+            raise MarketplaceToServerError(100, "connected_integration_id is required")
+
         cached = await redis_get_json(self._active_cache_key())
         if isinstance(cached, dict):
             if not bool(cached.get("active")):
                 raise MarketplaceToServerError(111350, "inactive")
-            return str(cached.get("key") or self.integration_key)
+            if not require_scheduled or "scheduled" in cached:
+                return {
+                    "active": True,
+                    "key": str(cached.get("key") or self.integration_key),
+                    "scheduled": bool(cached.get("scheduled")),
+                }
 
         async with RegosAPI(ci) as api:
             response = await api.integrations.connected_integration.get(
@@ -237,23 +299,23 @@ class MarketplaceToServerIntegration(ClientBase):
         row = rows[0] if rows else None
         if row is None:
             raise MarketplaceToServerError(111350, "not found")
-        if not bool(getattr(row, "is_active", False)):
+
+        state = {
+            "active": bool(getattr(row, "is_active", False)),
+            "key": str(getattr(row, "key", "") or "").strip() or self.integration_key,
+            "scheduled": bool(getattr(row, "scheduled", False)),
+        }
+        if not state["active"]:
             await redis_set_json(
                 self._active_cache_key(),
-                {"active": False, "key": self.integration_key},
+                {"active": False, "key": self.integration_key, "scheduled": False},
                 settings.marketplace_cache_ttl,
             )
             raise MarketplaceToServerError(111350, "inactive")
-        key = str(getattr(row, "key", "") or "").strip()
-        if key and key != self.integration_key:
-            logger.warning("Unexpected integration key for toserver: ci=%s key=%s", ci, key)
-        integration_key = key or self.integration_key
-        await redis_set_json(
-            self._active_cache_key(),
-            {"active": True, "key": integration_key},
-            settings.marketplace_cache_ttl,
-        )
-        return integration_key
+        if state["key"] != self.integration_key:
+            logger.warning("Unexpected integration key for toserver: ci=%s key=%s", ci, state["key"])
+        await redis_set_json(self._active_cache_key(), state, settings.marketplace_cache_ttl)
+        return state
 
     async def _load_settings(self) -> Dict[str, str]:
         if self._settings is not None:

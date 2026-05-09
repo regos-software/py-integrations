@@ -8,13 +8,13 @@ import redis.asyncio as redis
 
 from config.settings import settings
 
-redis_client = None
+_redis_client = None
 _LOCAL_JSON_CACHE: Dict[str, Tuple[float, Any]] = {}
 _LOCAL_JSON_CACHE_LOCK = asyncio.Lock()
 _LOCAL_JSON_CACHE_MAX_ITEMS = 10000
 
 if settings.redis_enabled:
-    redis_client = redis.Redis(
+    _redis_client = redis.Redis(
         host=settings.redis_host,
         port=settings.redis_port,
         db=settings.redis_db,
@@ -46,13 +46,71 @@ def redis_ttl_refresh_due(
 
 
 def _require_redis_client():
-    if redis_client is None:
+    if _redis_client is None:
         raise RuntimeError("Redis is not enabled")
-    return redis_client
+    return _redis_client
 
 
 def redis_is_enabled() -> bool:
-    return redis_client is not None
+    return _redis_client is not None
+
+
+class RedisOps:
+    """Thin Redis command facade so integrations never import the raw client."""
+
+    def __bool__(self) -> bool:
+        return redis_is_enabled()
+
+    def pipeline(self, *args: Any, **kwargs: Any):
+        return _require_redis_client().pipeline(*args, **kwargs)
+
+    def lock(self, *args: Any, **kwargs: Any):
+        return _require_redis_client().lock(*args, **kwargs)
+
+    async def get(self, *args: Any, **kwargs: Any):
+        return await _require_redis_client().get(*args, **kwargs)
+
+    async def set(self, *args: Any, **kwargs: Any):
+        return await _require_redis_client().set(*args, **kwargs)
+
+    async def setex(self, *args: Any, **kwargs: Any):
+        return await _require_redis_client().setex(*args, **kwargs)
+
+    async def delete(self, *args: Any, **kwargs: Any):
+        return await _require_redis_client().delete(*args, **kwargs)
+
+    async def exists(self, *args: Any, **kwargs: Any):
+        return await _require_redis_client().exists(*args, **kwargs)
+
+    async def expire(self, *args: Any, **kwargs: Any):
+        return await _require_redis_client().expire(*args, **kwargs)
+
+    async def eval(self, *args: Any, **kwargs: Any):
+        return await _require_redis_client().eval(*args, **kwargs)
+
+    async def smembers(self, *args: Any, **kwargs: Any):
+        return await _require_redis_client().smembers(*args, **kwargs)
+
+    async def srem(self, *args: Any, **kwargs: Any):
+        return await _require_redis_client().srem(*args, **kwargs)
+
+    async def mget(self, *args: Any, **kwargs: Any):
+        return await _require_redis_client().mget(*args, **kwargs)
+
+    async def incr(self, *args: Any, **kwargs: Any):
+        return await _require_redis_client().incr(*args, **kwargs)
+
+    async def xack(self, *args: Any, **kwargs: Any):
+        return await _require_redis_client().xack(*args, **kwargs)
+
+    async def xautoclaim(self, *args: Any, **kwargs: Any):
+        return await _require_redis_client().xautoclaim(*args, **kwargs)
+
+    async def xreadgroup(self, *args: Any, **kwargs: Any):
+        return await _require_redis_client().xreadgroup(*args, **kwargs)
+
+
+redis_ops = RedisOps()
 
 
 def redis_make_key(*parts: Any) -> str:

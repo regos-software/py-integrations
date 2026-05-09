@@ -35,6 +35,7 @@ from clients.tsd.main import TsdIntegration
 from clients.marketplace_yandex_eats.main import YandexEatsIntegration
 from clients.marketplace_uzum_tezkor.main import UzumTezkorIntegration
 from clients.marketplace_toserver.main import MarketplaceToServerIntegration
+from clients.edo_fakturauz.main import EdoFakturaUzIntegration
 
 router = APIRouter()
 logger = setup_logger("clients_route")
@@ -59,6 +60,7 @@ INTEGRATION_CLASSES = {
     "marketplace_yandex_eats": YandexEatsIntegration,
     "marketplace_uzum_tezkor": UzumTezkorIntegration,
     "marketplace_toserver": MarketplaceToServerIntegration,
+    "edo_fakturauz": EdoFakturaUzIntegration,
 }
 
 # Служебные заголовки, которые не нужно прокидывать обработчикам
@@ -126,11 +128,11 @@ async def _is_connected_integration_active(
     if detected is None:
         if last_error is not None:
             logger.warning(
-                "ConnectedIntegration/Get failed for active check, fallback active=true: ci=%s error=%s",
+                "ConnectedIntegration/Get failed for active check: ci=%s error=%s",
                 ci,
                 last_error,
             )
-        detected = True
+        detected = False
 
     active = bool(detected)
     async with _CONNECTED_INTEGRATION_ACTIVE_CACHE_LOCK:
@@ -364,6 +366,8 @@ async def handle_integration(
 
         logger.info(f"Метод '{action_name}' завершён успешно")
         logger.debug(f"Результат: {result}")
+        if isinstance(result, Response):
+            return result
         return IntegrationSuccessResponse(result=result)
 
     except Exception as e:
@@ -627,8 +631,18 @@ async def handle_external(
         if isinstance(result, (str, bytes)):
             return Response(status_code=200, content=result)
 
-        # fallback – сериализуем строкой
-        return JSONResponse(status_code=200, content={"result": str(result)})
+        logger.error(
+            "[external] Unsupported handle_external result type for '%s': %s",
+            client,
+            type(result).__name__,
+        )
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": 500,
+                "description": "Unsupported handle_external result type",
+            },
+        )
 
     except asyncio.TimeoutError:
         logger.error(

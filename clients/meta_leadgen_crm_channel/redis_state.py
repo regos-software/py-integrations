@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from config.settings import settings as app_settings
 from core.redis import (
-    redis_client,
+    redis_ops,
     redis_error_contains,
     redis_expire_if_due,
     redis_sadd_with_ttl,
@@ -21,7 +21,7 @@ _REDIS_TTL_TOUCH_TS: Dict[str, int] = {}
 
 
 def redis_enabled() -> bool:
-    return bool(app_settings.redis_enabled and redis_client is not None)
+    return bool(app_settings.redis_enabled and redis_ops)
 
 
 class MetaLeadgenRedisState:
@@ -82,21 +82,21 @@ class MetaLeadgenRedisState:
     async def get(key: str) -> Optional[str]:
         if not redis_enabled():
             return None
-        return await redis_client.get(key)
+        return await redis_ops.get(key)
 
     @staticmethod
     async def set(key: str, value: str, ttl_sec: int, min_ttl_sec: int = 60) -> None:
         if not redis_enabled():
             return
         ttl = max(to_int(ttl_sec, min_ttl_sec) or min_ttl_sec, min_ttl_sec)
-        await redis_client.set(key, value, ex=ttl)
+        await redis_ops.set(key, value, ex=ttl)
 
     @staticmethod
     async def set_nx(key: str, value: str, ttl_sec: int, min_ttl_sec: int = 60) -> bool:
         if not redis_enabled():
             return False
         ttl = max(to_int(ttl_sec, min_ttl_sec) or min_ttl_sec, min_ttl_sec)
-        return bool(await redis_client.set(key, value, ex=ttl, nx=True))
+        return bool(await redis_ops.set(key, value, ex=ttl, nx=True))
 
     @staticmethod
     async def delete(*keys: str) -> None:
@@ -104,7 +104,7 @@ class MetaLeadgenRedisState:
             return
         rows = [str(key).strip() for key in keys if str(key or "").strip()]
         if rows:
-            await redis_client.delete(*rows)
+            await redis_ops.delete(*rows)
 
     @classmethod
     async def set_json(cls, key: str, payload: Dict[str, Any], ttl_sec: int) -> None:
@@ -137,7 +137,7 @@ class MetaLeadgenRedisState:
             return
         ci = str(connected_integration_id or "").strip()
         if ci:
-            await redis_client.srem(cls.active_ci_ids_key(), ci)
+            await redis_ops.srem(cls.active_ci_ids_key(), ci)
 
     @classmethod
     async def touch_active_ci_ids_ttl(cls, *, force: bool = False) -> None:
@@ -156,7 +156,7 @@ class MetaLeadgenRedisState:
     async def active_ci_ids(cls) -> List[str]:
         if not redis_enabled():
             return []
-        raw_ids = await redis_client.smembers(cls.active_ci_ids_key())
+        raw_ids = await redis_ops.smembers(cls.active_ci_ids_key())
         return sorted(
             str(value or "").strip()
             for value in (raw_ids or set())
@@ -186,7 +186,7 @@ class MetaLeadgenRedisState:
     async def set_worker_heartbeat(cls, connected_integration_id: str) -> None:
         if not redis_enabled():
             return
-        await redis_client.setex(
+        await redis_ops.setex(
             cls.worker_heartbeat_key(connected_integration_id),
             MetaLeadgenCrmChannelConfig.WORKER_HEARTBEAT_TTL_SEC,
             str(now_ts()),
@@ -247,7 +247,7 @@ class MetaLeadgenRedisState:
 
     @classmethod
     async def ack_stream_entry(cls, stream_key: str, entry_id: str) -> None:
-        await redis_client.xack(
+        await redis_ops.xack(
             stream_key,
             MetaLeadgenCrmChannelConfig.STREAM_GROUP,
             entry_id,
@@ -260,7 +260,7 @@ class MetaLeadgenRedisState:
         consumer: str,
     ) -> List[Tuple[str, Dict[str, Any]]]:
         try:
-            claimed_raw = await redis_client.xautoclaim(
+            claimed_raw = await redis_ops.xautoclaim(
                 stream_key,
                 MetaLeadgenCrmChannelConfig.STREAM_GROUP,
                 consumer,

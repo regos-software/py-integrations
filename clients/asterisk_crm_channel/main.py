@@ -22,7 +22,7 @@ from config.settings import settings as app_settings
 from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
 from core.redis import (
-    redis_client,
+    redis_ops,
     redis_error_contains,
     redis_expire_if_due,
     redis_sadd_with_ttl,
@@ -226,7 +226,7 @@ def _json_loads(raw: str) -> Any:
 
 
 def _redis_enabled() -> bool:
-    return bool(app_settings.redis_enabled and redis_client is not None)
+    return bool(app_settings.redis_enabled and redis_ops)
 
 
 def _require_redis() -> None:
@@ -372,8 +372,8 @@ def _hash_scope_key(value: str) -> str:
     return hashlib.md5(str(value or "").encode("utf-8")).hexdigest()
 
 
-def _external_id(asterisk_hash: str, normalized_phone: str) -> str:
-    return f"ast:{asterisk_hash}:{normalized_phone}"
+def _external_id(connected_integration_id: str, normalized_phone: str) -> str:
+    return f"ci:{connected_integration_id}:asterisk:{normalized_phone}"
 
 
 def _phone_filter_candidates(
@@ -899,7 +899,7 @@ class AsteriskCrmChannelIntegration(ClientBase):
     @staticmethod
     async def _redis_get(key: str) -> Optional[str]:
         _require_redis()
-        return await redis_client.get(key)
+        return await redis_ops.get(key)
 
     @staticmethod
     async def _redis_set_with_ttl(
@@ -911,7 +911,7 @@ class AsteriskCrmChannelIntegration(ClientBase):
     ) -> None:
         _require_redis()
         ttl = max(_to_int(ttl_sec, min_ttl_sec) or min_ttl_sec, min_ttl_sec)
-        await redis_client.set(key, value, ex=ttl)
+        await redis_ops.set(key, value, ex=ttl)
 
     @classmethod
     async def _redis_set_json_with_ttl(
@@ -939,7 +939,7 @@ class AsteriskCrmChannelIntegration(ClientBase):
     ) -> bool:
         _require_redis()
         ttl = max(_to_int(ttl_sec, min_ttl_sec) or min_ttl_sec, min_ttl_sec)
-        result = await redis_client.set(key, value, ex=ttl, nx=True)
+        result = await redis_ops.set(key, value, ex=ttl, nx=True)
         return bool(result)
 
     @staticmethod
@@ -948,7 +948,7 @@ class AsteriskCrmChannelIntegration(ClientBase):
         rows = [str(key).strip() for key in keys if str(key or "").strip()]
         if not rows:
             return
-        await redis_client.delete(*rows)
+        await redis_ops.delete(*rows)
 
     @classmethod
     async def _mark_ci_active(cls, connected_integration_id: str) -> None:
@@ -966,7 +966,7 @@ class AsteriskCrmChannelIntegration(ClientBase):
         ci = str(connected_integration_id or "").strip()
         if not ci:
             return
-        await redis_client.srem(cls._active_ci_ids_key(), ci)
+        await redis_ops.srem(cls._active_ci_ids_key(), ci)
         _CI_ACTIVE_MEMORY_CACHE.pop(ci, None)
         async with _RUNTIME_LOCAL_LOCK:
             _RUNTIME_LOCAL_CACHE.pop(ci, None)
@@ -1017,11 +1017,11 @@ end
 return 0
 """
         try:
-            await redis_client.eval(script, 1, lock_key, token)
+            await redis_ops.eval(script, 1, lock_key, token)
         except Exception:
-            current = await redis_client.get(lock_key)
+            current = await redis_ops.get(lock_key)
             if current == token:
-                await redis_client.delete(lock_key)
+                await redis_ops.delete(lock_key)
 
     @classmethod
     async def _refresh_lock(cls, lock_key: str, token: Optional[str], ttl_sec: int) -> bool:
@@ -1040,14 +1040,14 @@ end
 return 0
 """
         try:
-            result = await redis_client.eval(script, 1, lock_key, token, str(ttl))
+            result = await redis_ops.eval(script, 1, lock_key, token, str(ttl))
             return bool(int(result or 0))
         except Exception:
             try:
-                current = await redis_client.get(lock_key)
+                current = await redis_ops.get(lock_key)
                 if current != token:
                     return False
-                return bool(await redis_client.expire(lock_key, ttl))
+                return bool(await redis_ops.expire(lock_key, ttl))
             except Exception:
                 return False
 
@@ -1087,7 +1087,7 @@ return 0
             memory_cached = cls._ci_active_memory_cache_get(ci)
             if memory_cached is not None:
                 return memory_cached
-            cached = str(await redis_client.get(cache_key) or "").strip().lower()
+            cached = str(await redis_ops.get(cache_key) or "").strip().lower()
             if cached in {"1", "0"}:
                 detected = cached == "1"
                 cls._ci_active_memory_cache_set(ci, detected)
@@ -1099,7 +1099,7 @@ return 0
                 memory_cached = cls._ci_active_memory_cache_get(ci)
                 if memory_cached is not None:
                     return memory_cached
-                cached = str(await redis_client.get(cache_key) or "").strip().lower()
+                cached = str(await redis_ops.get(cache_key) or "").strip().lower()
                 if cached in {"1", "0"}:
                     detected = cached == "1"
                     cls._ci_active_memory_cache_set(ci, detected)
@@ -1145,7 +1145,7 @@ return 0
                     ) from last_error
                 detected = False
 
-            await redis_client.set(
+            await redis_ops.set(
                 cache_key,
                 "1" if detected else "0",
                 ex=AsteriskCrmChannelConfig.SETTINGS_TTL,
@@ -1214,7 +1214,7 @@ return 0
         if local is not None:
             return local
         try:
-            cached = await redis_client.get(stale_key)
+            cached = await redis_ops.get(stale_key)
             if not cached:
                 return None
             settings_map = cls._normalize_settings_map(_json_loads(cached))
@@ -1232,7 +1232,7 @@ return 0
         local = cls._read_local_settings_cache(cache_key)
         if local is not None:
             return local
-        cached = await redis_client.get(cache_key)
+        cached = await redis_ops.get(cache_key)
         if cached:
             try:
                 loaded = _json_loads(cached)
@@ -1257,7 +1257,7 @@ return 0
             )
 
         try:
-            cached = await redis_client.get(cache_key)
+            cached = await redis_ops.get(cache_key)
             if cached:
                 loaded = _json_loads(cached)
                 if isinstance(loaded, dict):
@@ -1281,7 +1281,7 @@ return 0
             stale_key = cls._settings_stale_cache_key(connected_integration_id)
             cls._write_local_settings_cache(cache_key, settings_map)
             cls._write_local_settings_cache(stale_key, settings_map)
-            async with redis_client.pipeline(transaction=True) as pipe:
+            async with redis_ops.pipeline(transaction=True) as pipe:
                 await pipe.set(cache_key, payload, ex=AsteriskCrmChannelConfig.SETTINGS_TTL)
                 await pipe.set(
                     stale_key,
@@ -1436,6 +1436,13 @@ return 0
             return None
         text = str(value or "").strip()
         return text or None
+
+    @classmethod
+    def _ticket_external_dialog_id(cls, runtime: RuntimeConfig, external_call_id: str) -> Optional[str]:
+        normalized_call_id = cls._normalize_call_id(external_call_id)
+        if not normalized_call_id:
+            return None
+        return f"ci:{runtime.connected_integration_id}:asterisk:{normalized_call_id}"
 
     @classmethod
     def _payload_pick(cls, payload: Dict[str, Any], *paths: str) -> Any:
@@ -2196,7 +2203,7 @@ return 0
             for candidate in candidates
         ]
         _require_redis()
-        aliases_raw = await redis_client.mget(*alias_keys)
+        aliases_raw = await redis_ops.mget(*alias_keys)
         for alias_raw in aliases_raw:
             alias = cls._normalize_call_id(alias_raw)
             if alias:
@@ -2211,7 +2218,7 @@ return 0
 
         aliases_to_write = {canonical, *candidates, *resolved_aliases}
         ttl = max(_to_int(runtime.state_ttl_sec, 300) or 300, 300)
-        pipeline = redis_client.pipeline()
+        pipeline = redis_ops.pipeline()
         for candidate in aliases_to_write:
             alias_key = cls._call_alias_key(
                 runtime.connected_integration_id,
@@ -2313,7 +2320,7 @@ return 0
         field_args: List[str] = []
         for key, value in cls._serialize_stream_fields(fields).items():
             field_args.extend([key, value])
-        result = await redis_client.eval(
+        result = await redis_ops.eval(
             _ENQUEUE_DEDUPE_LUA,
             2,
             dedupe_key,
@@ -2378,7 +2385,7 @@ return 0
     @classmethod
     async def _set_worker_heartbeat(cls, worker_index: int) -> None:
         _require_redis()
-        await redis_client.setex(
+        await redis_ops.setex(
             cls._worker_heartbeat_key(worker_index),
             AsteriskCrmChannelConfig.HEARTBEAT_TTL_SEC,
             str(_now_ts()),
@@ -2457,7 +2464,7 @@ return 0
         await cls._ensure_stream_workers()
 
         try:
-            raw_ids = await redis_client.smembers(cls._active_ci_ids_key())
+            raw_ids = await redis_ops.smembers(cls._active_ci_ids_key())
         except Exception as error:
             logger.warning("Failed to read active Asterisk integrations set: %s", error)
             return {"total": 0, "restored": 0, "failed": 0}
@@ -2794,7 +2801,7 @@ return 0
                         block_ms = AsteriskCrmChannelConfig.STREAM_READ_BLOCK_MS
                         if pending_entries:
                             block_ms = min(block_ms, 500)
-                        records = await redis_client.xreadgroup(
+                        records = await redis_ops.xreadgroup(
                             groupname=AsteriskCrmChannelConfig.STREAM_GROUP,
                             consumername=consumer,
                             streams={stream_key: ">"},
@@ -2854,7 +2861,7 @@ return 0
         consumer: str,
     ) -> List[Tuple[str, Dict[str, str]]]:
         try:
-            claimed_raw = await redis_client.xautoclaim(
+            claimed_raw = await redis_ops.xautoclaim(
                 stream_key,
                 AsteriskCrmChannelConfig.STREAM_GROUP,
                 consumer,
@@ -2979,7 +2986,7 @@ return 0
     ) -> None:
         connected_integration_id = str(fields.get("connected_integration_id") or "").strip()
         if not connected_integration_id:
-            await redis_client.xack(
+            await redis_ops.xack(
                 stream_key,
                 AsteriskCrmChannelConfig.STREAM_GROUP,
                 message_id,
@@ -3003,7 +3010,7 @@ return 0
                 raise RuntimeError("stream event payload is not a dict")
 
             await cls._process_queued_event(connected_integration_id, event_payload)
-            await redis_client.xack(
+            await redis_ops.xack(
                 stream_key,
                 AsteriskCrmChannelConfig.STREAM_GROUP,
                 message_id,
@@ -3019,14 +3026,14 @@ return 0
                 defer_payload,
                 stream_ttl_sec=state_ttl_sec,
             )
-            await redis_client.xack(
+            await redis_ops.xack(
                 stream_key,
                 AsteriskCrmChannelConfig.STREAM_GROUP,
                 message_id,
             )
             return
         except ConnectedIntegrationInactiveError as error:
-            await redis_client.xack(
+            await redis_ops.xack(
                 stream_key,
                 AsteriskCrmChannelConfig.STREAM_GROUP,
                 message_id,
@@ -3051,7 +3058,7 @@ return 0
                 stream_ttl_sec=state_ttl_sec,
             )
             await cls._clear_enqueue_dedupe_for_fields(connected_integration_id, fields)
-            await redis_client.xack(
+            await redis_ops.xack(
                 stream_key,
                 AsteriskCrmChannelConfig.STREAM_GROUP,
                 message_id,
@@ -3077,7 +3084,7 @@ return 0
                     stream_ttl_sec=state_ttl_sec,
                 )
                 await cls._clear_enqueue_dedupe_for_fields(connected_integration_id, fields)
-                await redis_client.xack(
+                await redis_ops.xack(
                     stream_key,
                     AsteriskCrmChannelConfig.STREAM_GROUP,
                     message_id,
@@ -3098,7 +3105,7 @@ return 0
                 retry_payload,
                 stream_ttl_sec=state_ttl_sec,
             )
-            await redis_client.xack(
+            await redis_ops.xack(
                 stream_key,
                 AsteriskCrmChannelConfig.STREAM_GROUP,
                 message_id,
@@ -4282,7 +4289,10 @@ return 0
                 ClientAddRequest(
                     phone=normalized_phone,
                     name=normalized_phone,
-                    external_id=_external_id(runtime.asterisk_hash, normalized_phone),
+                    external_id=_external_id(
+                        runtime.connected_integration_id,
+                        normalized_phone,
+                    ),
                 )
             )
             add_result = cls._row_to_dict(add_response.result)
@@ -4306,11 +4316,14 @@ return 0
         normalized_call_id = cls._normalize_call_id(external_call_id)
         if not normalized_call_id:
             return None
+        external_dialog_id = cls._ticket_external_dialog_id(runtime, normalized_call_id)
+        if not external_dialog_id:
+            return None
         filters = [
             Filter(
                 field="external_dialog_id",
                 operator=FilterOperator.Equal,
-                value=normalized_call_id,
+                value=external_dialog_id,
             ),
         ]
         async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
@@ -4342,6 +4355,9 @@ return 0
         normalized_call_id = cls._normalize_call_id(event.external_call_id)
         if not normalized_call_id:
             raise NonRetryableCallEventError("external_call_id is required for Ticket flow")
+        external_dialog_id = cls._ticket_external_dialog_id(runtime, normalized_call_id)
+        if not external_dialog_id:
+            raise NonRetryableCallEventError("external_call_id is required for Ticket flow")
         reused = await cls._find_ticket_by_external_call(
             runtime,
             normalized_call_id,
@@ -4359,7 +4375,7 @@ return 0
                 if event.direction == "outbound"
                 else TicketDirectionEnum.Inbound
             ),
-            external_dialog_id=normalized_call_id,
+            external_dialog_id=external_dialog_id,
             responsible_user_id=runtime.default_responsible_user_id,
             subject=_safe_subject(
                 runtime.subject_template,

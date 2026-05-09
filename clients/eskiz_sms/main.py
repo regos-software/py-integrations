@@ -15,7 +15,7 @@ from schemas.integration.base import (
 from clients.base import ClientBase
 from core.logger import setup_logger
 from config.settings import settings
-from core.redis import redis_client
+from core.redis import redis_ops
 
 logger = setup_logger("eskiz_sms")
 
@@ -60,9 +60,9 @@ class EskizSmsIntegration(IntegrationSmsBase, ClientBase):
     async def _get_settings(self, cache_key: str) -> dict:
         """Получение настроек из Redis или API"""
         # 1. Пробуем Redis
-        if settings.redis_enabled and redis_client:
+        if settings.redis_enabled and redis_ops:
             try:
-                cached_data = await redis_client.get(cache_key)
+                cached_data = await redis_ops.get(cache_key)
                 if cached_data:
                     logger.debug(f"Настройки получены из Redis: {cache_key}")
                     if isinstance(cached_data, (bytes, bytearray)):
@@ -89,9 +89,9 @@ class EskizSmsIntegration(IntegrationSmsBase, ClientBase):
             settings_map = {item.key.lower(): item.value for item in settings_response}
 
             # 3. Сохраняем в Redis
-            if settings.redis_enabled and redis_client:
+            if settings.redis_enabled and redis_ops:
                 try:
-                    await redis_client.setex(
+                    await redis_ops.setex(
                         cache_key, self.SETTINGS_TTL, json.dumps(settings_map)
                     )
                 except Exception as error:
@@ -138,8 +138,8 @@ class EskizSmsIntegration(IntegrationSmsBase, ClientBase):
     async def get_token(self, email: str, password: str) -> str:
         token_cache_key = self._token_cache_key(self.connected_integration_id)
 
-        if settings.redis_enabled and redis_client:
-            cached_token = await redis_client.get(token_cache_key)
+        if settings.redis_enabled and redis_ops:
+            cached_token = await redis_ops.get(token_cache_key)
             if cached_token:
                 logger.debug("Токен найден в Redis")
                 return cached_token
@@ -155,8 +155,8 @@ class EskizSmsIntegration(IntegrationSmsBase, ClientBase):
             token = response.get("data", {}).get("token")
             if not token:
                 raise ValueError("Не удалось получить токен авторизации")
-            if settings.redis_enabled and redis_client:
-                await redis_client.setex(token_cache_key, self.TOKEN_TTL, token)
+            if settings.redis_enabled and redis_ops:
+                await redis_ops.setex(token_cache_key, self.TOKEN_TTL, token)
             return token
         except Exception as e:
             logger.error(f"Ошибка получения токена: {e}")
@@ -164,7 +164,7 @@ class EskizSmsIntegration(IntegrationSmsBase, ClientBase):
 
     async def refresh_token(self) -> Optional[str]:
         token_cache_key = self._token_cache_key(self.connected_integration_id)
-        token = await redis_client.get(token_cache_key)
+        token = await redis_ops.get(token_cache_key)
 
         if not token:
             logger.warning("Нет токена для обновления")
@@ -178,8 +178,8 @@ class EskizSmsIntegration(IntegrationSmsBase, ClientBase):
                 json=False,
             )
             new_token = new_token.get("data", {}).get("token")
-            if new_token and settings.redis_enabled and redis_client:
-                await redis_client.setex(token_cache_key, self.TOKEN_TTL, new_token)
+            if new_token and settings.redis_enabled and redis_ops:
+                await redis_ops.setex(token_cache_key, self.TOKEN_TTL, new_token)
                 logger.info("Токен успешно обновлён")
             return new_token
         except Exception as e:

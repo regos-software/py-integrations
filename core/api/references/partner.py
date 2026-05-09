@@ -1,20 +1,27 @@
 from __future__ import annotations
 
 from core.logger import setup_logger
-from schemas.api.references.partner import PartnerGetRequest, PartnerGetResponse
+from schemas.api.references.partner import (
+    PartnerAddRequest,
+    PartnerAddResponse,
+    PartnerGetRequest,
+    PartnerGetResponse,
+)
 
 logger = setup_logger("references.Partner")
 
 
 class PartnerService:
-    """Сервис работы со справочником контрагентов."""
+    """Service for Partner endpoints."""
 
     PATH_GET = "Partner/Get"
+    PATH_ADD = "Partner/Add"
 
     def __init__(self, api):
         self.api = api
 
     async def get(self, req: PartnerGetRequest) -> PartnerGetResponse:
-        """Возвращает список контрагентов согласно фильтрам запроса."""
-
         return await self.api.call(self.PATH_GET, req, PartnerGetResponse)
+
+    async def add(self, req: PartnerAddRequest) -> PartnerAddResponse:
+        return await self.api.call(self.PATH_ADD, req, PartnerAddResponse)

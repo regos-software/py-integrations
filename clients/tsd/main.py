@@ -18,7 +18,7 @@ from schemas.api.integrations.connected_integration_setting import (
 from clients.base import ClientBase
 from core.logger import setup_logger
 from config.settings import settings
-from core.redis import redis_client
+from core.redis import redis_ops
 
 
 logger = setup_logger("tsd")
@@ -66,9 +66,9 @@ class TsdIntegration(ClientBase):
 
     async def _fetch_settings(self, cache_key: str) -> dict:
         # 1) Redis
-        if settings.redis_enabled and redis_client:
+        if settings.redis_enabled and redis_ops:
             try:
-                cached = await redis_client.get(cache_key)
+                cached = await redis_ops.get(cache_key)
                 if cached:
                     if isinstance(cached, (bytes, bytearray)):
                         cached = cached.decode("utf-8")
@@ -92,9 +92,9 @@ class TsdIntegration(ClientBase):
         settings_map = {item.key.lower(): item.value for item in settings_response}
 
         # 3) Cache
-        if settings.redis_enabled and redis_client:
+        if settings.redis_enabled and redis_ops:
             try:
-                await redis_client.setex(
+                await redis_ops.setex(
                     cache_key, self.SETTINGS_TTL, json.dumps(settings_map)
                 )
             except Exception as err:

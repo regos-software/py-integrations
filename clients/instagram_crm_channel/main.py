@@ -16,11 +16,18 @@ import httpx
 from fastapi.responses import HTMLResponse, Response
 
 from clients.base import ClientBase
+from clients.instagram_crm_channel.storage import (
+    ensure_schema as ensure_instagram_db_schema,
+    instagram_mariadb_enabled,
+    mark_business_map_inactive,
+    resolve_ci_by_business_id as resolve_ci_by_business_id_db,
+    upsert_business_map,
+)
 from config.settings import settings as app_settings
 from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
 from core.redis import (
-    redis_client,
+    redis_ops,
     redis_error_contains,
     redis_expire_if_due,
     redis_sadd_with_ttl,
@@ -60,8 +67,9 @@ logger = setup_logger("instagram_crm_channel")
 
 _INSTANCE_ID = uuid.uuid4().hex[:12]
 _MANAGER_LOCK = asyncio.Lock()
-_WORKER_TASKS: Dict[str, asyncio.Task] = {}
+_WORKER_TASKS: Dict[int, asyncio.Task] = {}
 _REDIS_TTL_TOUCH_TS: Dict[str, int] = {}
+_STREAM_CLAIM_TS: Dict[str, int] = {}
 
 
 def _now_ts() -> int:
@@ -86,11 +94,13 @@ class InstagramCrmChannelConfig:
     HTTP_TIMEOUT_SEC = 30
     STREAM_GROUP = "instagram_crm_channel_workers"
     STREAM_TTL_SEC = 24 * 60 * 60
-    STREAM_MAXLEN = 10000
-    STREAM_BATCH_SIZE = 10
+    STREAM_MAXLEN = max(int(app_settings.instagram_crm_channel_stream_maxlen or 0), 10000)
+    STREAM_BATCH_SIZE = max(int(app_settings.instagram_crm_channel_stream_batch_size or 0), 1)
+    STREAM_WORKERS = max(int(app_settings.instagram_crm_channel_stream_workers or 0), 1)
     STREAM_READ_BLOCK_MS = 5000
     STREAM_MIN_IDLE_MS = 60_000
-    STREAM_MAX_RETRIES = 3
+    STREAM_CLAIM_INTERVAL_SEC = 30
+    STREAM_MAX_RETRIES = max(int(app_settings.instagram_crm_channel_stream_retry_limit or 0), 1)
     ACTIVE_CI_IDS_TTL_SEC = 7 * 24 * 60 * 60
     WORKER_HEARTBEAT_TTL_SEC = 60
 
@@ -197,7 +207,7 @@ def _headers_ci(headers: Dict[str, Any], key: str) -> Optional[str]:
 
 
 def _redis_enabled() -> bool:
-    return bool(app_settings.redis_enabled and redis_client is not None)
+    return bool(app_settings.redis_enabled and redis_ops)
 
 
 class InstagramCrmChannelIntegration(ClientBase):
@@ -233,12 +243,14 @@ class InstagramCrmChannelIntegration(ClientBase):
         return cls._redis_key("ci_active", connected_integration_id)
 
     @classmethod
-    def _stream_key(cls, connected_integration_id: str) -> str:
-        return cls._redis_key("stream", connected_integration_id)
+    def _stream_key(cls, connected_integration_id: Optional[str] = None) -> str:
+        _ = connected_integration_id
+        return cls._redis_key("stream")
 
     @classmethod
-    def _dlq_stream_key(cls, connected_integration_id: str) -> str:
-        return cls._redis_key("stream", "dlq", connected_integration_id)
+    def _dlq_stream_key(cls, connected_integration_id: Optional[str] = None) -> str:
+        _ = connected_integration_id
+        return cls._redis_key("stream", "dlq")
 
     @classmethod
     def _active_ci_ids_key(cls) -> str:
@@ -301,21 +313,21 @@ class InstagramCrmChannelIntegration(ClientBase):
     async def _redis_get(key: str) -> Optional[str]:
         if not _redis_enabled():
             return None
-        return await redis_client.get(key)
+        return await redis_ops.get(key)
 
     @staticmethod
     async def _redis_set(key: str, value: str, ttl_sec: int, min_ttl_sec: int = 60) -> None:
         if not _redis_enabled():
             return
         ttl = max(_to_int(ttl_sec, min_ttl_sec) or min_ttl_sec, min_ttl_sec)
-        await redis_client.set(key, value, ex=ttl)
+        await redis_ops.set(key, value, ex=ttl)
 
     @staticmethod
     async def _redis_set_nx(key: str, value: str, ttl_sec: int, min_ttl_sec: int = 60) -> bool:
         if not _redis_enabled():
             return False
         ttl = max(_to_int(ttl_sec, min_ttl_sec) or min_ttl_sec, min_ttl_sec)
-        return bool(await redis_client.set(key, value, ex=ttl, nx=True))
+        return bool(await redis_ops.set(key, value, ex=ttl, nx=True))
 
     @staticmethod
     async def _redis_delete(*keys: str) -> None:
@@ -323,7 +335,7 @@ class InstagramCrmChannelIntegration(ClientBase):
             return
         rows = [str(key).strip() for key in keys if str(key or "").strip()]
         if rows:
-            await redis_client.delete(*rows)
+            await redis_ops.delete(*rows)
 
     @classmethod
     def _resolve_stream_ttl(cls) -> int:
@@ -406,13 +418,13 @@ class InstagramCrmChannelIntegration(ClientBase):
             return
         ci = str(connected_integration_id or "").strip()
         if ci:
-            await redis_client.srem(cls._active_ci_ids_key(), ci)
+            await redis_ops.srem(cls._active_ci_ids_key(), ci)
 
     @classmethod
     async def _set_worker_heartbeat(cls, connected_integration_id: str) -> None:
         if not _redis_enabled():
             return
-        await redis_client.setex(
+        await redis_ops.setex(
             cls._worker_heartbeat_key(connected_integration_id),
             InstagramCrmChannelConfig.WORKER_HEARTBEAT_TTL_SEC,
             str(_now_ts()),
@@ -731,6 +743,20 @@ class InstagramCrmChannelIntegration(ClientBase):
                 runtime.connected_integration_id,
                 InstagramCrmChannelConfig.MAP_TTL_SEC,
             )
+            try:
+                await upsert_business_map(
+                    connected_integration_id=runtime.connected_integration_id,
+                    business_id=runtime.instagram_business_account_id,
+                    username=runtime.username,
+                    is_active=True,
+                )
+            except Exception as error:
+                logger.warning(
+                    "Failed to sync Instagram business mapping to MariaDB: ci=%s business_id=%s error=%s",
+                    runtime.connected_integration_id,
+                    runtime.instagram_business_account_id,
+                    error,
+                )
 
     @classmethod
     async def _subscribe_required_webhooks(
@@ -790,14 +816,43 @@ class InstagramCrmChannelIntegration(ClientBase):
 
     @staticmethod
     def _client_external_id(runtime: RuntimeConfig, external_user_id: str) -> str:
-        return f"ig:{runtime.instagram_business_account_id}:{external_user_id}"
+        return (
+            f"ci:{runtime.connected_integration_id}:"
+            f"ig:{runtime.instagram_business_account_id}:{external_user_id}"
+        )
+
+    @staticmethod
+    def _ticket_external_dialog_id(runtime: RuntimeConfig, external_user_id: str) -> str:
+        return (
+            f"ci:{runtime.connected_integration_id}:"
+            f"ig:{runtime.instagram_business_account_id}:{external_user_id}"
+        )
+
+    @classmethod
+    def _parse_ticket_external_dialog_id(
+        cls,
+        runtime: RuntimeConfig,
+        value: Optional[str],
+    ) -> Optional[str]:
+        text = str(value or "").strip()
+        prefix = (
+            f"ci:{runtime.connected_integration_id}:"
+            f"ig:{runtime.instagram_business_account_id}:"
+        )
+        if not text.startswith(prefix):
+            return None
+        external_user_id = text[len(prefix):].strip()
+        return external_user_id or None
 
     @classmethod
     def _extract_external_user_from_client_external_id(
         cls, runtime: RuntimeConfig, external_id: Optional[str]
     ) -> Optional[str]:
         value = str(external_id or "").strip()
-        prefix = f"ig:{runtime.instagram_business_account_id}:"
+        prefix = (
+            f"ci:{runtime.connected_integration_id}:"
+            f"ig:{runtime.instagram_business_account_id}:"
+        )
         if not value.startswith(prefix):
             return None
         tail = value[len(prefix):].strip()
@@ -978,7 +1033,7 @@ class InstagramCrmChannelIntegration(ClientBase):
             Filter(
                 field="external_dialog_id",
                 operator=FilterOperator.Equal,
-                value=external_user_id,
+                value=cls._ticket_external_dialog_id(runtime, external_user_id),
             )
         ]
         async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
@@ -1110,22 +1165,24 @@ class InstagramCrmChannelIntegration(ClientBase):
 
         if ticket:
             ticket_channel_id = _to_int(ticket.channel_id, None)
-            external_user_id_from_ticket = str(ticket.external_dialog_id or "").strip()
-            if (
-                ticket_channel_id
-                and int(ticket_channel_id) == int(runtime.channel_id)
-                and external_user_id_from_ticket
-            ):
-                resolved_client_id = _to_int(ticket.client_id, None) or _to_int(client_id, None)
-                if resolved_client_id and ticket.id:
-                    await cls._save_mapping(
-                        runtime,
-                        external_user_id_from_ticket,
-                        int(resolved_client_id),
-                        int(ticket.id),
-                        chat_id,
-                    )
-                return external_user_id_from_ticket
+            if not ticket_channel_id or int(ticket_channel_id) != int(runtime.channel_id):
+                return None
+            external_user_id_from_ticket = cls._parse_ticket_external_dialog_id(
+                runtime,
+                ticket.external_dialog_id,
+            )
+            if not external_user_id_from_ticket:
+                return None
+            resolved_client_id = _to_int(ticket.client_id, None) or _to_int(client_id, None)
+            if resolved_client_id and ticket.id:
+                await cls._save_mapping(
+                    runtime,
+                    external_user_id_from_ticket,
+                    int(resolved_client_id),
+                    int(ticket.id),
+                    chat_id,
+                )
+            return external_user_id_from_ticket
 
         if not client_id and ticket and ticket.client_id:
             client_id = _to_int(ticket.client_id, None)
@@ -1180,7 +1237,7 @@ class InstagramCrmChannelIntegration(ClientBase):
                     client_id=int(client.id),
                     channel_id=int(runtime.channel_id),
                     direction=TicketDirectionEnum.Inbound,
-                    external_dialog_id=external_user_id,
+                    external_dialog_id=cls._ticket_external_dialog_id(runtime, external_user_id),
                     responsible_user_id=runtime.default_responsible_user_id,
                     subject=cls._render_ticket_subject(runtime, external_user_id),
                 )
@@ -1637,7 +1694,22 @@ class InstagramCrmChannelIntegration(ClientBase):
             return resolved
 
         expected = str(business_id or "").strip()
-        if not expected or not _redis_enabled():
+        if not expected:
+            return None
+        try:
+            resolved = str(await resolve_ci_by_business_id_db(expected) or "").strip()
+        except Exception as error:
+            logger.warning("Failed to resolve Instagram business mapping from MariaDB: business_id=%s error=%s", expected, error)
+            resolved = ""
+        if resolved:
+            await cls._redis_set(
+                cls._redis_key("map", "business_ci", expected),
+                resolved,
+                InstagramCrmChannelConfig.MAP_TTL_SEC,
+            )
+            return resolved
+
+        if not _redis_enabled():
             return None
         for ci in await cls._active_ci_ids():
             try:
@@ -1658,7 +1730,7 @@ class InstagramCrmChannelIntegration(ClientBase):
         if not _redis_enabled():
             return []
         try:
-            raw_ids = await redis_client.smembers(cls._active_ci_ids_key())
+            raw_ids = await redis_ops.smembers(cls._active_ci_ids_key())
         except Exception as error:
             logger.warning("Failed to read active Instagram integrations set: %s", error)
             return []
@@ -1682,10 +1754,10 @@ class InstagramCrmChannelIntegration(ClientBase):
         ci = str(connected_integration_id or "").strip()
         if not ci:
             raise ValueError("connected_integration_id is required")
-        await cls._ensure_stream_worker(ci)
+        await cls._ensure_stream_workers()
         await cls._mark_ci_active(ci)
         await cls._enqueue(
-            cls._stream_key(ci),
+            cls._stream_key(),
             {
                 "connected_integration_id": ci,
                 "kind": kind,
@@ -1698,35 +1770,29 @@ class InstagramCrmChannelIntegration(ClientBase):
         )
 
     @classmethod
-    async def _ensure_stream_worker(cls, connected_integration_id: str) -> None:
-        ci = str(connected_integration_id or "").strip()
-        if not ci or not _redis_enabled():
+    async def _ensure_stream_workers(cls) -> None:
+        if not _redis_enabled():
             return
+        await cls._ensure_consumer_group(cls._stream_key())
         async with _MANAGER_LOCK:
-            task = _WORKER_TASKS.get(ci)
-            if task and not task.done():
-                return
-            _WORKER_TASKS[ci] = asyncio.create_task(
-                cls._stream_worker_loop(ci),
-                name=f"instagram_crm_channel_stream_{ci}",
-            )
+            for worker_index in range(InstagramCrmChannelConfig.STREAM_WORKERS):
+                task = _WORKER_TASKS.get(worker_index)
+                if task and not task.done():
+                    continue
+                _WORKER_TASKS[worker_index] = asyncio.create_task(
+                    cls._stream_worker_loop(worker_index),
+                    name=f"instagram_crm_channel_stream_{worker_index}",
+                )
+
+    @classmethod
+    async def _ensure_stream_worker(cls, connected_integration_id: str) -> None:
+        _ = connected_integration_id
+        await cls._ensure_stream_workers()
 
     @classmethod
     async def _stop_stream_worker(cls, connected_integration_id: str) -> None:
-        ci = str(connected_integration_id or "").strip()
-        if not ci:
-            return
-        async with _MANAGER_LOCK:
-            task = _WORKER_TASKS.pop(ci, None)
-        if not task:
-            return
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            logger.exception("Error while stopping Instagram stream worker: ci=%s", ci)
+        _ = connected_integration_id
+        return
 
     @classmethod
     async def shutdown_all(cls) -> None:
@@ -1752,6 +1818,7 @@ class InstagramCrmChannelIntegration(ClientBase):
             logger.info("Instagram auto-restore: no active integrations found")
             return {"total": 0, "restored": 0, "failed": 0}
         await cls._touch_active_ci_ids_ttl(force=True)
+        await cls._ensure_stream_workers()
 
         restored = 0
         failed = 0
@@ -1768,8 +1835,6 @@ class InstagramCrmChannelIntegration(ClientBase):
                     require_business_id=False,
                 )
                 await cls._sync_reverse_indexes(runtime)
-                await cls._ensure_consumer_group(cls._stream_key(ci))
-                await cls._ensure_stream_worker(ci)
                 await cls._mark_ci_active(ci)
                 restored += 1
             except Exception as error:
@@ -1790,7 +1855,7 @@ class InstagramCrmChannelIntegration(ClientBase):
 
     @classmethod
     async def _ack_stream_entry(cls, stream_key: str, entry_id: str) -> None:
-        await redis_client.xack(
+        await redis_ops.xack(
             stream_key,
             InstagramCrmChannelConfig.STREAM_GROUP,
             entry_id,
@@ -1803,7 +1868,7 @@ class InstagramCrmChannelIntegration(ClientBase):
         consumer: str,
     ) -> List[Tuple[str, Dict[str, Any]]]:
         try:
-            claimed_raw = await redis_client.xautoclaim(
+            claimed_raw = await redis_ops.xautoclaim(
                 stream_key,
                 InstagramCrmChannelConfig.STREAM_GROUP,
                 consumer,
@@ -1827,34 +1892,32 @@ class InstagramCrmChannelIntegration(ClientBase):
         ]
 
     @classmethod
-    async def _stream_worker_loop(cls, connected_integration_id: str) -> None:
-        ci = str(connected_integration_id or "").strip()
-        stream_key = cls._stream_key(ci)
-        consumer = f"{_INSTANCE_ID}:{ci[:8]}"
+    async def _stream_worker_loop(cls, worker_index: int) -> None:
+        stream_key = cls._stream_key()
+        consumer = f"{_INSTANCE_ID}:{int(worker_index)}"
         worker = cls()
-        worker.connected_integration_id = ci
-        logger.info("Instagram stream worker started: ci=%s", ci)
+        logger.info("Instagram stream worker started: worker_index=%s stream=%s", worker_index, stream_key)
         try:
             await cls._ensure_consumer_group(stream_key)
             while True:
                 try:
-                    if not await cls._is_connected_integration_active(ci):
-                        await cls._mark_ci_inactive(ci)
-                        logger.info("Instagram stream worker stopped for inactive integration: ci=%s", ci)
-                        break
-                    await cls._set_worker_heartbeat(ci)
+                    await cls._touch_active_ci_ids_ttl()
                     await cls._touch_stream_ttl(stream_key)
 
-                    for entry_id, fields in await cls._process_claimed_entries(stream_key, consumer):
-                        await cls._process_stream_entry(
-                            worker=worker,
-                            stream_key=stream_key,
-                            entry_id=entry_id,
-                            fields=fields,
-                        )
+                    now_ts = _now_ts()
+                    last_claim_ts = int(_STREAM_CLAIM_TS.get(stream_key) or 0)
+                    if now_ts - last_claim_ts >= InstagramCrmChannelConfig.STREAM_CLAIM_INTERVAL_SEC:
+                        _STREAM_CLAIM_TS[stream_key] = now_ts
+                        for entry_id, fields in await cls._process_claimed_entries(stream_key, consumer):
+                            await cls._process_stream_entry(
+                                worker=worker,
+                                stream_key=stream_key,
+                                entry_id=entry_id,
+                                fields=fields,
+                            )
 
                     try:
-                        records = await redis_client.xreadgroup(
+                        records = await redis_ops.xreadgroup(
                             groupname=InstagramCrmChannelConfig.STREAM_GROUP,
                             consumername=consumer,
                             streams={stream_key: ">"},
@@ -1878,7 +1941,7 @@ class InstagramCrmChannelIntegration(ClientBase):
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
-                    logger.exception("Instagram stream worker error: ci=%s error=%s", ci, error)
+                    logger.exception("Instagram stream worker error: worker_index=%s error=%s", worker_index, error)
                     await asyncio.sleep(2)
         finally:
             try:
@@ -1886,9 +1949,9 @@ class InstagramCrmChannelIntegration(ClientBase):
             except Exception:
                 logger.exception("Error while closing Instagram worker HTTP client")
             async with _MANAGER_LOCK:
-                current = _WORKER_TASKS.get(ci)
+                current = _WORKER_TASKS.get(worker_index)
                 if current is asyncio.current_task():
-                    _WORKER_TASKS.pop(ci, None)
+                    _WORKER_TASKS.pop(worker_index, None)
 
     @classmethod
     def _decode_stream_payload(cls, raw: Any) -> Dict[str, Any]:
@@ -1909,12 +1972,18 @@ class InstagramCrmChannelIntegration(ClientBase):
         entry_id: str,
         fields: Dict[str, Any],
     ) -> None:
-        ci = str(fields.get("connected_integration_id") or worker.connected_integration_id or "").strip()
+        ci = str(fields.get("connected_integration_id") or "").strip()
         kind = str(fields.get("kind") or "").strip()
         payload = cls._decode_stream_payload(fields.get("payload"))
         event_id = str(fields.get("event_id") or "").strip() or None
         if not ci or kind not in {"instagram_in", "regos_in"} or not payload:
             logger.warning("Instagram stream entry has invalid payload: entry_id=%s fields=%s", entry_id, fields)
+            await cls._ack_stream_entry(stream_key, entry_id)
+            return
+        worker.connected_integration_id = ci
+        if not await cls._is_connected_integration_active(ci):
+            await cls._mark_ci_inactive(ci)
+            logger.info("Instagram stream entry skipped for inactive integration: ci=%s entry_id=%s", ci, entry_id)
             await cls._ack_stream_entry(stream_key, entry_id)
             return
 
@@ -1946,7 +2015,7 @@ class InstagramCrmChannelIntegration(ClientBase):
                 dlq_payload["source_entry_id"] = entry_id
                 dlq_payload["failed_at"] = str(_now_ts())
                 dlq_payload["error"] = str(error)
-                await cls._enqueue(cls._dlq_stream_key(ci), dlq_payload)
+                await cls._enqueue(cls._dlq_stream_key(), dlq_payload)
                 await cls._ack_stream_entry(stream_key, entry_id)
                 logger.error(
                     "Instagram stream job moved to DLQ: ci=%s kind=%s entry_id=%s error=%s",
@@ -1975,19 +2044,51 @@ class InstagramCrmChannelIntegration(ClientBase):
                 error,
             )
 
-    @staticmethod
-    def _html_page(title: str, text: str) -> str:
-        safe_title = html.escape(str(title))
+    @classmethod
+    def _ui_message_page(cls, text: str, *, status: str = "info") -> str:
+        title = "Подключение Instagram"
         safe_text = html.escape(str(text))
-        return (
-            "<!doctype html><html><head><meta charset='utf-8'><title>"
-            + safe_title
-            + "</title><style>body{font-family:Arial,sans-serif;margin:40px;line-height:1.5;}</style></head><body><h1>"
-            + safe_title
-            + "</h1><p>"
-            + safe_text
-            + "</p></body></html>"
-        )
+        safe_status = "ok" if status == "ok" else "warn"
+        return f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{html.escape(title)}</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; margin: 0; color: #172033; background: #f5f7fb; }}
+    main {{ max-width: 680px; margin: 48px auto; padding: 0 20px; }}
+    section {{ background: #fff; border: 1px solid #dce3ee; border-radius: 8px; padding: 24px; }}
+    h1 {{ font-size: 24px; margin: 0 0 12px; }}
+    p {{ margin: 0; color: #536176; line-height: 1.5; }}
+    .badge {{ display: inline-block; margin-bottom: 16px; padding: 8px 10px; border-radius: 6px; font-weight: 600; }}
+    .ok {{ background: #e7f7ee; color: #0d6b3f; }}
+    .warn {{ background: #fff4d8; color: #7a5200; }}
+  </style>
+</head>
+<body>
+  <main>
+    <section>
+      <span class="badge {safe_status}">Instagram</span>
+      <h1>{html.escape(title)}</h1>
+      <p>{safe_text}</p>
+    </section>
+  </main>
+</body>
+</html>"""
+
+    @classmethod
+    def _ui_settings_error_message(cls, error: Exception) -> str:
+        text = str(error or "")
+        if "instagram_pipeline_id" in text:
+            return "Выберите воронку CRM для обращений из Instagram."
+        if "instagram_channel_id" in text:
+            return "Выберите CRM-канал для обращений из Instagram."
+        if "Service Instagram app config" in text or "Service Instagram webhook verify token" in text:
+            return "Подключение Instagram пока недоступно. Обратитесь к администратору."
+        if "Instagram authorization required" in text or "instagram_business_account_id" in text:
+            return "Подключите аккаунт Instagram, чтобы начать получать и отправлять сообщения."
+        return "Не удалось открыть подключение Instagram. Проверьте настройки интеграции и попробуйте снова."
 
     @staticmethod
     def _ui_page(
@@ -1995,27 +2096,25 @@ class InstagramCrmChannelIntegration(ClientBase):
         title: str,
         authorized: bool,
         authorization_url: str,
-        authorization_status: str,
-        connected_integration_id: str,
-        instagram_business_account_id: str,
         username: Optional[str],
-        verify_token: str,
     ) -> str:
         safe_title = html.escape(title)
-        safe_status = html.escape(authorization_status or "")
-        safe_ci = html.escape(connected_integration_id or "")
-        safe_business_id = html.escape(instagram_business_account_id or "")
-        safe_username = html.escape(username or "")
-        safe_verify_token = html.escape(verify_token or "")
+        account_name = str(username or "").strip()
+        account_label = f"@{account_name.lstrip('@')}" if account_name else "Аккаунт Instagram"
+        safe_account = html.escape(account_label)
         safe_url = html.escape(authorization_url or "", quote=True)
-        status_text = "Instagram connected" if authorized else "Instagram authorization required"
+        status_text = (
+            "Аккаунт Instagram подключен. Сообщения клиентов будут поступать в CRM, а ответы операторов отправляться в Instagram."
+            if authorized
+            else "Подключите аккаунт Instagram, чтобы получать сообщения клиентов в CRM и отвечать им из карточки обращения."
+        )
         safe_status_text = html.escape(status_text)
         action_html = (
-            "<span class='badge ok'>Connected</span>"
+            "<span class='badge ok'>Подключено</span>"
             if authorized
-            else f"<a class='button' href='{safe_url}'>Connect Instagram</a>"
+            else f"<a class='button' href='{safe_url}'>Подключить Instagram</a>"
             if authorization_url
-            else "<span class='badge warn'>Authorization URL is not ready</span>"
+            else "<span class='badge warn'>Подключение временно недоступно</span>"
         )
         return f"""<!doctype html>
 <html>
@@ -2029,14 +2128,11 @@ class InstagramCrmChannelIntegration(ClientBase):
     section {{ background: #fff; border: 1px solid #dce3ee; border-radius: 8px; padding: 24px; }}
     h1 {{ font-size: 24px; margin: 0 0 8px; }}
     p {{ margin: 0 0 20px; color: #536176; }}
-    dl {{ display: grid; grid-template-columns: 220px 1fr; gap: 10px 16px; margin: 0 0 22px; }}
-    dt {{ color: #66758c; }}
-    dd {{ margin: 0; overflow-wrap: anywhere; }}
+    .account {{ margin: 0 0 22px; color: #172033; font-weight: 600; overflow-wrap: anywhere; }}
     .button {{ display: inline-block; padding: 10px 14px; border-radius: 6px; background: #1769e0; color: #fff; text-decoration: none; font-weight: 600; }}
     .badge {{ display: inline-block; padding: 8px 10px; border-radius: 6px; font-weight: 600; }}
     .ok {{ background: #e7f7ee; color: #0d6b3f; }}
     .warn {{ background: #fff4d8; color: #7a5200; }}
-    @media (max-width: 640px) {{ dl {{ grid-template-columns: 1fr; }} }}
   </style>
 </head>
 <body>
@@ -2044,13 +2140,7 @@ class InstagramCrmChannelIntegration(ClientBase):
     <section>
       <h1>{safe_title}</h1>
       <p>{safe_status_text}</p>
-      <dl>
-        <dt>Connected integration</dt><dd>{safe_ci}</dd>
-        <dt>Authorization status</dt><dd>{safe_status}</dd>
-        <dt>Instagram Business Account</dt><dd>{safe_business_id or "-"}</dd>
-        <dt>Instagram username</dt><dd>{safe_username or "-"}</dd>
-        <dt>Verify token</dt><dd>{safe_verify_token}</dd>
-      </dl>
+      <p class="account">{safe_account if authorized else "Аккаунт не подключен"}</p>
       {action_html}
     </section>
   </main>
@@ -2068,6 +2158,8 @@ class InstagramCrmChannelIntegration(ClientBase):
             return self._error_response(1004, f"ConnectedIntegration '{ci}' is inactive").dict()
 
         try:
+            if instagram_mariadb_enabled():
+                await ensure_instagram_db_schema()
             runtime = await self._load_runtime(
                 ci,
                 require_access_token=False,
@@ -2090,8 +2182,7 @@ class InstagramCrmChannelIntegration(ClientBase):
                 )
             await self._mark_ci_active(ci)
             try:
-                await self._ensure_consumer_group(self._stream_key(ci))
-                await self._ensure_stream_worker(ci)
+                await self._ensure_stream_workers()
             except Exception:
                 await self._mark_ci_inactive(ci)
                 raise
@@ -2120,12 +2211,31 @@ class InstagramCrmChannelIntegration(ClientBase):
             keys = []
             if runtime.instagram_business_account_id:
                 keys.append(self._redis_key("map", "business_ci", runtime.instagram_business_account_id))
+            try:
+                await mark_business_map_inactive(
+                    connected_integration_id=str(self.connected_integration_id),
+                    business_id=runtime.instagram_business_account_id or None,
+                )
+            except Exception as error:
+                logger.warning(
+                    "Failed to mark Instagram business mapping inactive: ci=%s error=%s",
+                    self.connected_integration_id,
+                    error,
+                )
             if keys:
                 await self._redis_delete(*keys)
         except Exception:
-            pass
+            try:
+                await mark_business_map_inactive(
+                    connected_integration_id=str(self.connected_integration_id),
+                )
+            except Exception as error:
+                logger.warning(
+                    "Failed to mark Instagram business mappings inactive by ci: ci=%s error=%s",
+                    self.connected_integration_id,
+                    error,
+                )
         await self._mark_ci_inactive(str(self.connected_integration_id))
-        await self._stop_stream_worker(str(self.connected_integration_id))
         await self._redis_delete(
             self._settings_cache_key(str(self.connected_integration_id)),
             self._ci_active_cache_key(str(self.connected_integration_id)),
@@ -2147,10 +2257,13 @@ class InstagramCrmChannelIntegration(ClientBase):
 
     async def handle_ui(self, envelope: Dict[str, Any]) -> Any:
         if str(envelope.get("method") or "").upper() != "GET":
-            return Response(status_code=405, content="Method not allowed")
+            return HTMLResponse(
+                self._ui_message_page("Эта страница доступна только для просмотра."),
+                status_code=405,
+            )
         if not _redis_enabled():
             return HTMLResponse(
-                self._html_page("Instagram CRM Channel", "Redis is required for this integration"),
+                self._ui_message_page("Подключение Instagram временно недоступно. Попробуйте позже."),
                 status_code=503,
             )
 
@@ -2162,10 +2275,16 @@ class InstagramCrmChannelIntegration(ClientBase):
         if not ci and state_ci:
             ci = state_ci
         if not ci:
-            return HTMLResponse(self._html_page("Instagram CRM Channel", "connected_integration_id is required"), status_code=400)
+            return HTMLResponse(
+                self._ui_message_page("Откройте страницу подключения из карточки интеграции."),
+                status_code=400,
+            )
 
         if not await self._is_connected_integration_active(ci):
-            return HTMLResponse(self._html_page("Instagram CRM Channel", f"ConnectedIntegration '{ci}' is inactive"), status_code=403)
+            return HTMLResponse(
+                self._ui_message_page("Интеграция отключена. Включите ее и попробуйте снова."),
+                status_code=403,
+            )
 
         try:
             runtime = await self._load_runtime(
@@ -2176,21 +2295,30 @@ class InstagramCrmChannelIntegration(ClientBase):
             await self._sync_reverse_indexes(runtime)
             settings_map = await self._fetch_settings_map(ci)
         except Exception as error:
-            return HTMLResponse(self._html_page("Instagram CRM Channel", str(error)), status_code=400)
+            return HTMLResponse(self._ui_message_page(self._ui_settings_error_message(error)), status_code=400)
 
         oauth_error = _query_get(query, "error")
         if oauth_error:
-            return HTMLResponse(self._html_page("Instagram OAuth Error", _query_get(query, "error_description") or oauth_error), status_code=400)
+            return HTMLResponse(
+                self._ui_message_page("Instagram не подтвердил подключение. Попробуйте подключить аккаунт еще раз."),
+                status_code=400,
+            )
 
         oauth_code = _query_get(query, "code")
         if oauth_code:
             if not state_ci or not state_nonce or state_ci != ci:
-                return HTMLResponse(self._html_page("Instagram OAuth Error", "Invalid OAuth state"), status_code=400)
+                return HTMLResponse(
+                    self._ui_message_page("Сессия подключения истекла. Вернитесь к интеграции и попробуйте снова."),
+                    status_code=400,
+                )
 
             if _redis_enabled():
                 cached_ci = await self._consume_oauth_state(state_nonce)
                 if cached_ci != ci:
-                    return HTMLResponse(self._html_page("Instagram OAuth Error", "OAuth state expired or invalid"), status_code=400)
+                    return HTMLResponse(
+                        self._ui_message_page("Сессия подключения истекла. Вернитесь к интеграции и попробуйте снова."),
+                        status_code=400,
+                    )
 
             try:
                 short_token, oauth_user_id = await self._instagram_exchange_code(oauth_code)
@@ -2205,37 +2333,30 @@ class InstagramCrmChannelIntegration(ClientBase):
                 })
                 runtime = await self._load_runtime(ci, require_access_token=True)
                 await self._sync_reverse_indexes(runtime)
-                settings_map = await self._fetch_settings_map(ci)
                 return HTMLResponse(
                     self._ui_page(
-                        title="Instagram CRM Channel",
+                        title="Подключение Instagram",
                         authorized=True,
                         authorization_url="",
-                        authorization_status=settings_map.get(InstagramCrmChannelConfig.SETTING_AUTHORIZATION_STATUS) or "authorized",
-                        connected_integration_id=ci,
-                        instagram_business_account_id=runtime.instagram_business_account_id,
                         username=runtime.username,
-                        verify_token=runtime.webhook_verify_token,
                     ),
                     status_code=200,
                 )
             except Exception as error:
                 logger.exception("Instagram OAuth callback failed: ci=%s", ci)
-                return HTMLResponse(self._html_page("Instagram OAuth Error", str(error)), status_code=500)
+                return HTMLResponse(
+                    self._ui_message_page("Не удалось завершить подключение Instagram. Попробуйте еще раз."),
+                    status_code=500,
+                )
 
         authorization_url = await self._get_or_refresh_authorization_url(ci, runtime, settings_map)
         authorized = self._is_runtime_authorized(runtime)
-        authorization_status = "authorized" if authorized else "authorization_required"
         return HTMLResponse(
             self._ui_page(
-                title="Instagram CRM Channel",
+                title="Подключение Instagram",
                 authorized=authorized,
                 authorization_url=authorization_url,
-                authorization_status=authorization_status,
-                connected_integration_id=ci,
-                instagram_business_account_id=runtime.instagram_business_account_id,
                 username=runtime.username,
-                verify_token=runtime.webhook_verify_token,
             ),
             status_code=200,
         )

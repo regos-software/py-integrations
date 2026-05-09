@@ -16,6 +16,10 @@ from schemas.api.references.item import (
     ItemGetQuantityResponse,
     ItemGetRequest,
     ItemGetShortResponse,
+    ItemImportRequest,
+    ItemImportResponse,
+    ItemMatchingRequest,
+    ItemMatchingResponse,
     ItemSearchRequest,
 )
 
@@ -29,6 +33,8 @@ class ItemService:
     PATH_GET_QUANTITY = "Item/GetQuantity"
     PATH_GET_CURRENT_QUANTITY = "Item/GetCurrentQuantity"
     PATH_GET_SHORT = "Item/GetShort"
+    PATH_IMPORT = "Item/Import"
+    PATH_MATCH = "Item/Match"
 
     def __init__(self, api):
         self.api = api
@@ -64,3 +70,9 @@ class ItemService:
 
     async def get_short(self, req: ItemGetRequest) -> ItemGetShortResponse:
         return await self.api.call(self.PATH_GET_SHORT, req, ItemGetShortResponse)
+
+    async def import_items(self, req: ItemImportRequest) -> ItemImportResponse:
+        return await self.api.call(self.PATH_IMPORT, req, ItemImportResponse)
+
+    async def match(self, req: ItemMatchingRequest) -> ItemMatchingResponse:
+        return await self.api.call(self.PATH_MATCH, req, ItemMatchingResponse)
