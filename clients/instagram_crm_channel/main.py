@@ -89,6 +89,7 @@ class InstagramCrmChannelConfig:
     DEDUPE_TTL_SEC = 24 * 60 * 60
     LOCK_TTL_SEC = 30
     OAUTH_STATE_TTL_SEC = 10 * 60
+    WEBHOOK_DEBUG_TTL_SEC = 30
     ACTIVE_CACHE_TTL_SEC = 30
     HTTP_TIMEOUT_SEC = 30
     STREAM_GROUP = "instagram_crm_channel_workers"
@@ -260,6 +261,10 @@ class InstagramCrmChannelIntegration(ClientBase):
     def _worker_heartbeat_key(cls, connected_integration_id: str) -> str:
         return cls._redis_key("worker", "heartbeat", connected_integration_id)
 
+    @classmethod
+    def _webhook_debug_key(cls) -> str:
+        return cls._redis_key("webhook_debug", str(_now_ts()), uuid.uuid4().hex)
+
     @staticmethod
     def _active_ci_ids_ttl() -> int:
         return redis_ttl_seconds(InstagramCrmChannelConfig.ACTIVE_CI_IDS_TTL_SEC)
@@ -307,6 +312,49 @@ class InstagramCrmChannelIntegration(ClientBase):
         rows = [str(key).strip() for key in keys if str(key or "").strip()]
         if rows:
             await redis_ops.delete(*rows)
+
+    @classmethod
+    async def _store_webhook_debug_snapshot(
+        cls,
+        *,
+        envelope: Dict[str, Any],
+        body: Any,
+        raw_body: Any,
+        resolved_ci: Optional[str],
+    ) -> None:
+        if not _redis_enabled():
+            return
+        if isinstance(raw_body, bytes):
+            raw_text = raw_body.decode("utf-8", errors="replace")
+        elif raw_body is None:
+            raw_text = ""
+        else:
+            raw_text = str(raw_body)
+        if isinstance(body, bytes):
+            body_value: Any = body.decode("utf-8", errors="replace")
+        elif isinstance(body, bytearray):
+            body_value = bytes(body).decode("utf-8", errors="replace")
+        else:
+            body_value = body
+
+        payload = {
+            "ts": _now_ts(),
+            "method": str(envelope.get("method") or ""),
+            "path": str(envelope.get("path") or ""),
+            "external_path": str(envelope.get("external_path") or ""),
+            "connected_integration_id": str(resolved_ci or ""),
+            "business_ids": cls._business_ids_from_webhook_body(body),
+            "query": envelope.get("query") if isinstance(envelope.get("query"), dict) else {},
+            "headers": envelope.get("headers") if isinstance(envelope.get("headers"), dict) else {},
+            "body": body_value,
+            "raw_body": raw_text,
+        }
+        await cls._redis_set(
+            cls._webhook_debug_key(),
+            _json_dumps(payload),
+            InstagramCrmChannelConfig.WEBHOOK_DEBUG_TTL_SEC,
+            min_ttl_sec=1,
+        )
 
     @classmethod
     def _resolve_stream_ttl(cls) -> int:
@@ -1338,6 +1386,11 @@ class InstagramCrmChannelIntegration(ClientBase):
             return []
 
         events: List[Dict[str, Any]] = []
+        direct_value = body.get("value")
+        if str(body.get("field") or "").strip() == "messages" and isinstance(direct_value, dict):
+            if cls._event_targets_business(direct_value, runtime.instagram_business_account_id):
+                events.append(direct_value)
+
         for entry in body.get("entry") or []:
             if not isinstance(entry, dict):
                 continue
@@ -1347,7 +1400,58 @@ class InstagramCrmChannelIntegration(ClientBase):
             for event in entry.get("messaging") or []:
                 if isinstance(event, dict):
                     events.append(event)
+            for change in entry.get("changes") or []:
+                if not isinstance(change, dict):
+                    continue
+                if str(change.get("field") or "").strip() != "messages":
+                    continue
+                value = change.get("value")
+                if isinstance(value, dict) and cls._event_targets_business(value, runtime.instagram_business_account_id):
+                    events.append(value)
         return events
+
+    @staticmethod
+    def _event_targets_business(event: Dict[str, Any], business_id: str) -> bool:
+        expected = str(business_id or "").strip()
+        recipient = event.get("recipient") if isinstance(event, dict) else None
+        actual = str((recipient or {}).get("id") or "").strip() if isinstance(recipient, dict) else ""
+        return not actual or not expected or actual == expected
+
+    @classmethod
+    def _business_ids_from_webhook_body(cls, body: Any) -> List[str]:
+        if not isinstance(body, dict):
+            return []
+
+        ids: List[str] = []
+
+        def add(value: Any) -> None:
+            text = str(value or "").strip()
+            if text and text not in ids:
+                ids.append(text)
+
+        def add_event_recipient(event: Any) -> None:
+            if not isinstance(event, dict):
+                return
+            recipient = event.get("recipient")
+            if isinstance(recipient, dict):
+                add(recipient.get("id"))
+
+        direct_value = body.get("value")
+        if str(body.get("field") or "").strip() == "messages" and isinstance(direct_value, dict):
+            add_event_recipient(direct_value)
+
+        for entry in body.get("entry") or []:
+            if not isinstance(entry, dict):
+                continue
+            add(entry.get("id"))
+            for event in entry.get("messaging") or []:
+                add_event_recipient(event)
+            for change in entry.get("changes") or []:
+                if not isinstance(change, dict):
+                    continue
+                value = change.get("value")
+                add_event_recipient(value)
+        return ids
 
     @classmethod
     async def _process_inbound_event(cls, runtime: RuntimeConfig, event: Dict[str, Any]) -> str:
@@ -2317,7 +2421,7 @@ class InstagramCrmChannelIntegration(ClientBase):
             )
 
         try:
-            settings_map = await self._fetch_settings_map(ci)
+            settings_map = await self._fetch_settings_map(ci, force_refresh=True)
             runtime = self._runtime_from_settings_map(
                 ci,
                 settings_map,
@@ -2433,17 +2537,18 @@ class InstagramCrmChannelIntegration(ClientBase):
                 status_code=503,
                 content="Redis is required for this integration",
             )
+        await self._store_webhook_debug_snapshot(
+            envelope=envelope,
+            body=body,
+            raw_body=raw_body,
+            resolved_ci=ci,
+        )
         if not isinstance(body, dict):
             return self._error_response(400, "Invalid webhook payload").dict()
 
         if not ci:
             candidates: List[str] = []
-            for entry in body.get("entry") or []:
-                if not isinstance(entry, dict):
-                    continue
-                business_id = str(entry.get("id") or "").strip()
-                if not business_id:
-                    continue
+            for business_id in self._business_ids_from_webhook_body(body):
                 mapped = await self._resolve_ci_by_business_id(business_id)
                 if mapped and mapped not in candidates:
                     candidates.append(mapped)
