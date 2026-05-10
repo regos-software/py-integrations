@@ -27,6 +27,7 @@ from core.redis import (
     redis_error_contains,
     redis_expire_if_due,
     redis_stream_add_with_ttl,
+    redis_stream_ack_delete,
     redis_stream_group_create_with_ttl,
     redis_ttl_seconds,
 )
@@ -159,7 +160,7 @@ class TelegramBotOrdersConfig:
     STREAM_MIN_IDLE_MS = 60_000
     STREAM_CLAIM_INTERVAL_SEC = 30
     STREAM_MAX_RETRIES = 3
-    DEDUPE_TTL_SEC = 24 * 60 * 60
+    DEDUPE_TTL_SEC = 60 * 60
     SEND_CONCURRENCY = max(int(app_settings.telegram_orders_send_concurrency or 0), 1)
 
 
@@ -541,7 +542,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
 
     @classmethod
     async def _ack_stream_entry(cls, stream_key: str, entry_id: str) -> None:
-        await redis_ops.xack(stream_key, TelegramBotOrdersConfig.STREAM_GROUP, entry_id)
+        await redis_stream_ack_delete(stream_key, TelegramBotOrdersConfig.STREAM_GROUP, entry_id)
 
     @classmethod
     async def _process_claimed_entries(

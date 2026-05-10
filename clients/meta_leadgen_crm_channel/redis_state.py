@@ -9,6 +9,7 @@ from core.redis import (
     redis_expire_if_due,
     redis_sadd_with_ttl,
     redis_stream_add_with_ttl,
+    redis_stream_ack_delete,
     redis_stream_group_create_with_ttl,
     redis_ttl_seconds,
 )
@@ -247,11 +248,7 @@ class MetaLeadgenRedisState:
 
     @classmethod
     async def ack_stream_entry(cls, stream_key: str, entry_id: str) -> None:
-        await redis_ops.xack(
-            stream_key,
-            MetaLeadgenCrmChannelConfig.STREAM_GROUP,
-            entry_id,
-        )
+        await redis_stream_ack_delete(stream_key, MetaLeadgenCrmChannelConfig.STREAM_GROUP, entry_id)
 
     @classmethod
     async def process_claimed_entries(

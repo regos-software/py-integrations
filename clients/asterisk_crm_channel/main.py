@@ -27,6 +27,7 @@ from core.redis import (
     redis_expire_if_due,
     redis_sadd_with_ttl,
     redis_stream_add_with_ttl,
+    redis_stream_ack_delete,
     redis_stream_group_create_with_ttl,
     redis_ttl_seconds,
 )
@@ -68,7 +69,7 @@ class AsteriskCrmChannelConfig:
     SETTINGS_LOCK_WAIT_SEC = 2.0
     RUNTIME_LOCAL_TTL = min(30, max(5, SETTINGS_TTL // 4))
     CI_ACTIVE_MEMORY_TTL_SEC = 5
-    DEFAULT_DEDUPE_TTL_SEC = 6 * 60 * 60
+    DEFAULT_DEDUPE_TTL_SEC = 60 * 60
     DEFAULT_STATE_TTL_SEC = 6 * 60 * 60
     STREAM_TTL_SEC = 24 * 60 * 60
     ACTIVE_CI_IDS_TTL_SEC = 30 * 24 * 60 * 60
@@ -2986,11 +2987,7 @@ return 0
     ) -> None:
         connected_integration_id = str(fields.get("connected_integration_id") or "").strip()
         if not connected_integration_id:
-            await redis_ops.xack(
-                stream_key,
-                AsteriskCrmChannelConfig.STREAM_GROUP,
-                message_id,
-            )
+            await redis_stream_ack_delete(stream_key, AsteriskCrmChannelConfig.STREAM_GROUP, message_id)
             logger.warning(
                 "Asterisk stream entry skipped without connected_integration_id: message_id=%s",
                 message_id,
@@ -3010,11 +3007,7 @@ return 0
                 raise RuntimeError("stream event payload is not a dict")
 
             await cls._process_queued_event(connected_integration_id, event_payload)
-            await redis_ops.xack(
-                stream_key,
-                AsteriskCrmChannelConfig.STREAM_GROUP,
-                message_id,
-            )
+            await redis_stream_ack_delete(stream_key, AsteriskCrmChannelConfig.STREAM_GROUP, message_id)
         except DeferredCallEvent as deferred:
             defer_payload = dict(fields)
             defer_payload["defer_until_ts"] = str(_now_ts() + deferred.delay_sec)
@@ -3026,18 +3019,10 @@ return 0
                 defer_payload,
                 stream_ttl_sec=state_ttl_sec,
             )
-            await redis_ops.xack(
-                stream_key,
-                AsteriskCrmChannelConfig.STREAM_GROUP,
-                message_id,
-            )
+            await redis_stream_ack_delete(stream_key, AsteriskCrmChannelConfig.STREAM_GROUP, message_id)
             return
         except ConnectedIntegrationInactiveError as error:
-            await redis_ops.xack(
-                stream_key,
-                AsteriskCrmChannelConfig.STREAM_GROUP,
-                message_id,
-            )
+            await redis_stream_ack_delete(stream_key, AsteriskCrmChannelConfig.STREAM_GROUP, message_id)
             await cls._mark_ci_inactive(connected_integration_id)
             logger.info(
                 "Asterisk event skipped for inactive integration: ci=%s message_id=%s reason=%s",
@@ -3058,11 +3043,7 @@ return 0
                 stream_ttl_sec=state_ttl_sec,
             )
             await cls._clear_enqueue_dedupe_for_fields(connected_integration_id, fields)
-            await redis_ops.xack(
-                stream_key,
-                AsteriskCrmChannelConfig.STREAM_GROUP,
-                message_id,
-            )
+            await redis_stream_ack_delete(stream_key, AsteriskCrmChannelConfig.STREAM_GROUP, message_id)
             logger.error(
                 "Asterisk event moved to DLQ (non-retryable): ci=%s message_id=%s error=%s",
                 connected_integration_id,
@@ -3084,11 +3065,7 @@ return 0
                     stream_ttl_sec=state_ttl_sec,
                 )
                 await cls._clear_enqueue_dedupe_for_fields(connected_integration_id, fields)
-                await redis_ops.xack(
-                    stream_key,
-                    AsteriskCrmChannelConfig.STREAM_GROUP,
-                    message_id,
-                )
+                await redis_stream_ack_delete(stream_key, AsteriskCrmChannelConfig.STREAM_GROUP, message_id)
                 logger.error(
                     "Asterisk event moved to DLQ: ci=%s message_id=%s error=%s",
                     connected_integration_id,
@@ -3105,11 +3082,7 @@ return 0
                 retry_payload,
                 stream_ttl_sec=state_ttl_sec,
             )
-            await redis_ops.xack(
-                stream_key,
-                AsteriskCrmChannelConfig.STREAM_GROUP,
-                message_id,
-            )
+            await redis_stream_ack_delete(stream_key, AsteriskCrmChannelConfig.STREAM_GROUP, message_id)
             logger.warning(
                 "Asterisk event requeued: ci=%s attempt=%s message_id=%s error=%s",
                 connected_integration_id,
