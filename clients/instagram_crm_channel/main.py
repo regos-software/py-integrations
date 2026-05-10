@@ -31,6 +31,7 @@ from core.redis import (
     redis_expire_if_due,
     redis_sadd_with_ttl,
     redis_stream_add_with_ttl,
+    redis_stream_ack_delete,
     redis_stream_group_create_with_ttl,
     redis_ttl_seconds,
 )
@@ -88,7 +89,7 @@ class InstagramCrmChannelConfig:
 
     SETTINGS_TTL_SEC = max(int(app_settings.redis_cache_ttl or 60), 60)
     MAP_TTL_SEC = 30 * 24 * 60 * 60
-    DEDUPE_TTL_SEC = 24 * 60 * 60
+    DEDUPE_TTL_SEC = 60 * 60
     LOCK_TTL_SEC = 30
     OAUTH_STATE_TTL_SEC = 10 * 60
     ACTIVE_CACHE_TTL_SEC = 30
@@ -2385,11 +2386,7 @@ class InstagramCrmChannelIntegration(ClientBase):
 
     @classmethod
     async def _ack_stream_entry(cls, stream_key: str, entry_id: str) -> None:
-        await redis_ops.xack(
-            stream_key,
-            InstagramCrmChannelConfig.STREAM_GROUP,
-            entry_id,
-        )
+        await redis_stream_ack_delete(stream_key, InstagramCrmChannelConfig.STREAM_GROUP, entry_id)
 
     @classmethod
     async def _process_claimed_entries(

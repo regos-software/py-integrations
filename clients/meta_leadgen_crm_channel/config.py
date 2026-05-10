@@ -22,7 +22,7 @@ class MetaLeadgenCrmChannelConfig:
 
     SETTINGS_TTL_SEC = max(int(app_settings.redis_cache_ttl or 60), 60)
     MAP_TTL_SEC = 30 * 24 * 60 * 60
-    DEDUPE_TTL_SEC = 7 * 24 * 60 * 60
+    DEDUPE_TTL_SEC = 60 * 60
     LOCK_TTL_SEC = 60
     OAUTH_STATE_TTL_SEC = 10 * 60
     FIELD_CACHE_TTL_SEC = 10 * 60

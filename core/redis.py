@@ -103,6 +103,9 @@ class RedisOps:
     async def xack(self, *args: Any, **kwargs: Any):
         return await _require_redis_client().xack(*args, **kwargs)
 
+    async def xdel(self, *args: Any, **kwargs: Any):
+        return await _require_redis_client().xdel(*args, **kwargs)
+
     async def xautoclaim(self, *args: Any, **kwargs: Any):
         return await _require_redis_client().xautoclaim(*args, **kwargs)
 
@@ -331,3 +334,13 @@ async def redis_stream_group_create_with_ttl(
     ):
         raise group_result
     touch_ts_by_key[stream_key] = now_ts
+
+
+async def redis_stream_ack_delete(stream_key: str, group_name: str, entry_id: str) -> None:
+    """Finalize a Redis stream queue item without keeping processed payloads."""
+    if not stream_key or not group_name or not entry_id:
+        return
+    async with _require_redis_client().pipeline(transaction=True) as pipe:
+        await pipe.xack(stream_key, group_name, entry_id)
+        await pipe.xdel(stream_key, entry_id)
+        await pipe.execute()

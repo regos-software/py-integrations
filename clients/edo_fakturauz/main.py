@@ -22,6 +22,7 @@ from core.redis import (
     redis_make_key,
     redis_ops,
     redis_stream_add_with_ttl,
+    redis_stream_ack_delete,
     redis_stream_group_create_with_ttl,
 )
 from schemas.api.base import IDRequest
@@ -954,7 +955,7 @@ class EdoFakturaUzIntegration(ClientBase):
 
     @classmethod
     async def _ack_stream_entry(cls, entry_id: str) -> None:
-        await redis_ops.xack(cls._stream_key(), cls.STREAM_GROUP, entry_id)
+        await redis_stream_ack_delete(cls._stream_key(), cls.STREAM_GROUP, entry_id)
 
     @classmethod
     async def _process_claimed_entries(

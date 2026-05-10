@@ -37,6 +37,7 @@ from core.redis import (
     redis_expire_if_due,
     redis_sadd_with_ttl,
     redis_stream_add_with_ttl,
+    redis_stream_ack_delete,
     redis_stream_group_create_with_ttl,
     redis_ttl_seconds,
 )
@@ -103,7 +104,7 @@ class TelegramBotCrmChannelConfig:
     WEBHOOK_REFRESH_TTL = max(int(app_settings.telegram_webhook_refresh_ttl or 0), 60)
     WEBHOOK_LOCAL_TTL = min(300, WEBHOOK_REFRESH_TTL)
     WEBHOOK_LOCK_TTL = 30
-    DEFAULT_DEDUPE_TTL_SEC = 6 * 60 * 60
+    DEFAULT_DEDUPE_TTL_SEC = 60 * 60
     DEFAULT_STATE_TTL_SEC = 6 * 60 * 60
     STREAM_TTL_SEC = 24 * 60 * 60
     ACTIVE_CI_IDS_TTL_SEC = 30 * 24 * 60 * 60
@@ -5025,9 +5026,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
     ) -> None:
         connected_integration_id = str(fields.get("connected_integration_id") or "").strip()
         if not connected_integration_id:
-            await redis_ops.xack(
-                stream_key, TelegramBotCrmChannelConfig.STREAM_GROUP, message_id
-            )
+            await redis_stream_ack_delete(stream_key, TelegramBotCrmChannelConfig.STREAM_GROUP, message_id)
             logger.warning(
                 "Telegram CRM stream entry skipped without connected_integration_id: kind=%s message_id=%s",
                 kind,
@@ -5056,9 +5055,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 await cls._process_send_messages_event(connected_integration_id, fields)
             else:
                 raise ValueError(f"Unsupported stream kind: {kind}")
-            await redis_ops.xack(
-                stream_key, TelegramBotCrmChannelConfig.STREAM_GROUP, message_id
-            )
+            await redis_stream_ack_delete(stream_key, TelegramBotCrmChannelConfig.STREAM_GROUP, message_id)
             logger.debug(
                 "stream ack: ci=%s kind=%s message_id=%s",
                 connected_integration_id,
@@ -5066,9 +5063,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 message_id,
             )
         except ConnectedIntegrationInactiveError as error:
-            await redis_ops.xack(
-                stream_key, TelegramBotCrmChannelConfig.STREAM_GROUP, message_id
-            )
+            await redis_stream_ack_delete(stream_key, TelegramBotCrmChannelConfig.STREAM_GROUP, message_id)
             await redis_ops.srem(cls._active_ci_ids_key(), connected_integration_id)
             async with _RUNTIME_LOCAL_LOCK:
                 _RUNTIME_LOCAL_CACHE.pop(connected_integration_id, None)
@@ -5095,9 +5090,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                         fields=fields,
                         error_text=str(error),
                     )
-                await redis_ops.xack(
-                    stream_key, TelegramBotCrmChannelConfig.STREAM_GROUP, message_id
-                )
+                await redis_stream_ack_delete(stream_key, TelegramBotCrmChannelConfig.STREAM_GROUP, message_id)
                 logger.error(
                     "Moved message to DLQ: ci=%s kind=%s message_id=%s error=%s",
                     connected_integration_id,
@@ -5111,9 +5104,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             retry_payload["attempt"] = str(attempts)
             retry_payload["last_error"] = str(error)
             await cls._enqueue(stream_key, retry_payload)
-            await redis_ops.xack(
-                stream_key, TelegramBotCrmChannelConfig.STREAM_GROUP, message_id
-            )
+            await redis_stream_ack_delete(stream_key, TelegramBotCrmChannelConfig.STREAM_GROUP, message_id)
             logger.warning(
                 "Requeued stream event: ci=%s kind=%s attempt=%s message_id=%s error=%s",
                 connected_integration_id,
