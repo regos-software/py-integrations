@@ -34,7 +34,7 @@ from core.redis import (
     redis_stream_group_create_with_ttl,
     redis_ttl_seconds,
 )
-from schemas.api.chat.chat import ChatGetRequest
+from schemas.api.chat.chat import ChatEntityTypeEnum, ChatGetRequest
 from schemas.api.chat.chat_message import (
     ChatMessage,
     ChatMessageAddRequest,
@@ -1730,12 +1730,23 @@ class InstagramCrmChannelIntegration(ClientBase):
         return value.startswith("igin:") or value.startswith("igout:")
 
     @staticmethod
+    def _external_message_digest(runtime: RuntimeConfig, external_user_id: str, message_id: str) -> str:
+        raw = (
+            f"{runtime.instagram_business_account_id}:"
+            f"{external_user_id}:"
+            f"{message_id}"
+        )
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    @staticmethod
     def _inbound_external_message_id(runtime: RuntimeConfig, external_user_id: str, message_id: str) -> str:
-        return f"igin:{runtime.instagram_business_account_id}:{external_user_id}:{message_id}"[:150]
+        digest = InstagramCrmChannelIntegration._external_message_digest(runtime, external_user_id, message_id)
+        return f"igin:{runtime.instagram_business_account_id}:{external_user_id}:{digest}"[:150]
 
     @staticmethod
     def _outbound_external_message_id(runtime: RuntimeConfig, external_user_id: str, message_id: str) -> str:
-        return f"igout:{runtime.instagram_business_account_id}:{external_user_id}:{message_id}"[:150]
+        digest = InstagramCrmChannelIntegration._external_message_digest(runtime, external_user_id, message_id)
+        return f"igout:{runtime.instagram_business_account_id}:{external_user_id}:{digest}"[:150]
 
     @staticmethod
     def _extract_message_text(event: Dict[str, Any]) -> Optional[str]:
@@ -1761,7 +1772,7 @@ class InstagramCrmChannelIntegration(ClientBase):
             response = await api.chat.chat_message.add(
                 ChatMessageAddRequest(
                     chat_id=ticket_ctx.chat_id,
-                    author_entity_type="Client",
+                    author_entity_type=ChatEntityTypeEnum.Client,
                     author_entity_id=ticket_ctx.client_id,
                     message_type=ChatMessageTypeEnum.Regular,
                     text=text,
@@ -1771,6 +1782,9 @@ class InstagramCrmChannelIntegration(ClientBase):
         if not response.ok:
             payload = _row_to_dict(response.result)
             raise RuntimeError(f"ChatMessage/Add rejected: error={payload.get('error')} description={payload.get('description')}")
+        payload = _row_to_dict(response.result)
+        if not str(payload.get("new_uuid") or "").strip():
+            raise RuntimeError(f"ChatMessage/Add did not return new_uuid: result={payload}")
 
     @classmethod
     def _extract_messaging_events(cls, body: Any, runtime: RuntimeConfig) -> List[Dict[str, Any]]:
