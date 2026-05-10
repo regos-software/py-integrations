@@ -106,7 +106,6 @@ class InstagramCrmChannelConfig:
 
     OAUTH_SCOPES = (
         "instagram_business_basic",
-        "instagram_manage_comments",
         "instagram_business_manage_messages",
     )
 
