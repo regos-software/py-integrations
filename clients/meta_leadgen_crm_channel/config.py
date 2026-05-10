@@ -15,9 +15,16 @@ class MetaLeadgenCrmChannelConfig:
     OAUTH_TOKEN_URL = f"https://graph.facebook.com/{GRAPH_API_VERSION}/oauth/access_token"
 
     OAUTH_SCOPES = (
+        "public_profile",
+        "email",
         "pages_show_list",
         "pages_read_engagement",
+        "pages_manage_metadata",
+        "pages_manage_ads",
         "leads_retrieval",
+        "ads_read",
+        "ads_management",
+        "business_management",
     )
 
     SETTINGS_TTL_SEC = max(int(app_settings.redis_cache_ttl or 60), 60)

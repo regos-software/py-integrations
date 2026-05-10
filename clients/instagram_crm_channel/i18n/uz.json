@@ -38,7 +38,6 @@
   "notice_confirm_disconnect": "Akkauntni faqat ushbu integratsiyada xabarlarni qabul qilish va yuborishni to'xtatmoqchi bo'lsangiz uzing.",
   "notice_conflict": "Bitta Instagram akkaunti faqat bitta ulangan integratsiyada faol bo'lishi mumkin. Uni u yerdan uzing yoki boshqa akkaunt tanlang.",
   "notice_error": "Sozlamalar to'liq saqlanmagan yoki ulanish servisi mavjud emas.",
-  "notice_pipeline_required": "Instagram murojaatlari uchun CRM voronkasini tanlang.",
   "notice_channel_required": "Instagram murojaatlari uchun CRM kanalini tanlang.",
   "notice_service_unavailable": "Instagram ulanishi hozircha mavjud emas. Administratorga murojaat qiling.",
   "notice_authorization_required": "Xabarlarni olish va yuborishni boshlash uchun Instagram akkauntini ulang.",
@@ -51,7 +50,7 @@
   "action_cancel": "Bekor qilish",
   "action_done": "Tayyor",
   "action_no_action": "Amal mavjud emas",
-  "step_save_settings": "Avval integratsiya sozlamalarida voronka va CRM kanalini tanlang.",
+  "step_save_settings": "Avval integratsiya sozlamalarida CRM kanalini tanlang.",
   "step_connect_account": "Ulash tugmasini bosing va professional Instagram akkauntiga kirishni tasdiqlang.",
   "step_send_test_message": "Ulangandan keyin boshqa akkauntdan Direct ga test xabar yuboring.",
   "step_connected_messages": "Yangi xabarlar faol murojaatga qo'shiladi yoki yangi murojaat yaratadi.",
@@ -63,7 +62,7 @@
   "step_conflict_other": "Bu Instagram ulangan integratsiyani oching.",
   "step_conflict_disconnect": "Akkauntni shu yerga ko'chirish uchun u integratsiyada uzing.",
   "step_conflict_choose": "Yoki ulanishni takrorlab, boshqa Instagram akkauntini tanlang.",
-  "step_error_settings": "Voronka va CRM kanali tanlanganini tekshiring.",
+  "step_error_settings": "CRM kanali tanlanganini tekshiring.",
   "step_error_retry": "Sahifani yangilang va amalni qayta bajaring.",
   "step_error_admin": "Xato takrorlansa, administratorga murojaat qiling."
 }

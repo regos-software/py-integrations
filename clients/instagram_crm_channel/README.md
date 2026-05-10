@@ -42,7 +42,6 @@
 
 | Ключ | Обяз. | Тип данных | Скрывать в UI | Наименование (RU / UZ / EN) | Описание (RU / UZ / EN) | Placeholder (RU / UZ / EN) |
 |---|---|---|---|---|---|---|
-| `instagram_pipeline_id` | Да | Integer | Нет | `Воронка CRM` / `CRM voronkasi` / `CRM pipeline` | `Воронка, в которой создаются обращения из Instagram` / `Instagram murojaatlari yaratiladigan voronka` / `Pipeline where Instagram cases are created` | `1` / `1` / `1` |
 | `instagram_channel_id` | Да | Integer | Нет | `ID CRM-канала` / `CRM kanal ID` / `CRM channel ID` | `Канал CRM, куда будут попадать диалоги из Instagram` / `Instagram muloqotlari tushadigan CRM kanal` / `CRM channel where Instagram conversations are routed` | `1` / `1` / `1` |
 | `instagram_default_responsible_user_id` | Нет | Integer | Нет | `Ответственный по умолчанию` / `Standart mas'ul` / `Default responsible user` | `Сотрудник, назначаемый ответственным при создании обращения` / `Murojaat yaratilganda biriktiriladigan mas'ul xodim` / `User assigned as responsible when a case is created` | `15` / `15` / `15` |
 | `instagram_ticket_subject_template` | Нет | String | Нет | `Шаблон темы обращения` / `Murojaat mavzusi shabloni` / `Case subject template` | `Шаблон названия нового обращения` / `Yangi murojaat nomi uchun shablon` / `Template for new case subject` | `Instagram {client_name}` / `Instagram {client_name}` / `Instagram {client_name}` |

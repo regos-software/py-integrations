@@ -38,7 +38,6 @@
   "notice_confirm_disconnect": "Disconnect only if you want to stop receiving and sending messages for this integration.",
   "notice_conflict": "One Instagram account can be active in only one connected integration. Disconnect it there or choose another account.",
   "notice_error": "Settings are incomplete or the connection service is unavailable.",
-  "notice_pipeline_required": "Select a CRM pipeline for Instagram cases.",
   "notice_channel_required": "Select a CRM channel for Instagram cases.",
   "notice_service_unavailable": "Instagram connection is not available yet. Contact an administrator.",
   "notice_authorization_required": "Connect an Instagram account to start receiving and sending messages.",
@@ -51,7 +50,7 @@
   "action_cancel": "Cancel",
   "action_done": "Done",
   "action_no_action": "Action unavailable",
-  "step_save_settings": "First select the pipeline and CRM channel in the integration settings.",
+  "step_save_settings": "First select the CRM channel in the integration settings.",
   "step_connect_account": "Press the connect button and approve access to the professional Instagram account.",
   "step_send_test_message": "After connecting, send a test Direct message from another account.",
   "step_connected_messages": "New customer messages will enter an active case or create a new one.",
@@ -63,7 +62,7 @@
   "step_conflict_other": "Open the integration where this Instagram account is already connected.",
   "step_conflict_disconnect": "Disconnect the account there if you want to move it here.",
   "step_conflict_choose": "Or repeat connection and choose another Instagram account.",
-  "step_error_settings": "Check that the pipeline and CRM channel are selected.",
+  "step_error_settings": "Check that the CRM channel is selected.",
   "step_error_retry": "Refresh the page and try the action again.",
   "step_error_admin": "If the error repeats, contact an administrator."
 }

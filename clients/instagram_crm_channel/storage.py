@@ -119,6 +119,61 @@ async def upsert_business_map(
     return True
 
 
+async def reassign_business_map(
+    *,
+    connected_integration_id: str,
+    business_id: str,
+    username: Optional[str] = None,
+) -> Optional[str]:
+    ci = str(connected_integration_id or "").strip()
+    business = str(business_id or "").strip()
+    if not ci or not business:
+        return None
+
+    previous_ci: Optional[str] = None
+    try:
+        await ensure_schema()
+        async with mariadb_ops.transaction() as connection:
+            async with connection.cursor() as cursor:
+                await cursor.execute(
+                    f"""
+                    SELECT `connected_integration_id`, `is_active`
+                    FROM {_BUSINESS_MAP_TABLE}
+                    WHERE `business_id` = %s
+                    FOR UPDATE
+                    """,
+                    (business,),
+                )
+                row = await cursor.fetchone()
+                if row:
+                    existing_ci = str(row[0] or "").strip()
+                    existing_active = str(row[1] or "").strip().lower() not in {"", "0", "false", "none"}
+                    if existing_active and existing_ci and existing_ci != ci:
+                        previous_ci = existing_ci
+
+                await cursor.execute(
+                    f"""
+                    INSERT INTO {_BUSINESS_MAP_TABLE}
+                        (`business_id`, `connected_integration_id`, `username`, `is_active`)
+                    VALUES (%s, %s, %s, 1)
+                    ON DUPLICATE KEY UPDATE
+                        `connected_integration_id` = VALUES(`connected_integration_id`),
+                        `username` = VALUES(`username`),
+                        `is_active` = 1,
+                        `updated_at` = CURRENT_TIMESTAMP
+                    """,
+                    (business, ci, str(username or "").strip() or None),
+                )
+    except Exception:
+        logger.exception(
+            "Failed to reassign Instagram business mapping: ci=%s business_id=%s",
+            ci,
+            business,
+        )
+        raise
+    return previous_ci
+
+
 async def get_business_map(business_id: str) -> Optional[Dict[str, Any]]:
     business = str(business_id or "").strip()
     if not business:
