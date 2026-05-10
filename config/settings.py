@@ -104,6 +104,7 @@ class Settings(BaseSettings):
     instagram_app_secret: str = ""
     instagram_redirect_uri: str = ""
     instagram_webhook_verify_token: str = ""
+    instagram_graph_version: str = "v25.0"
     meta_leadgen_app_id: str = ""
     meta_leadgen_app_secret: str = ""
     meta_leadgen_redirect_uri: str = ""

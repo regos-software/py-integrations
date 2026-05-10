@@ -3,12 +3,11 @@
 import asyncio
 import base64
 import hashlib
-import html
 import hmac
 import json
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote, urlencode
 
@@ -17,10 +16,18 @@ from fastapi.responses import HTMLResponse, Response
 
 from clients.base import ClientBase
 from clients.instagram_crm_channel.storage import (
+    BusinessMapConflictError,
     ensure_schema as ensure_instagram_db_schema,
+    get_business_map,
     mark_business_map_inactive,
     resolve_ci_by_business_id as resolve_ci_by_business_id_db,
     upsert_business_map,
+)
+from clients.instagram_crm_channel.ui import (
+    InstagramUiContext,
+    normalize_locale,
+    render_instagram_ui,
+    resolve_locale,
 )
 from config.settings import settings as app_settings
 from core.api.regos_api import RegosAPI
@@ -44,6 +51,7 @@ from schemas.api.chat.chat_message import (
     ChatMessageTypeEnum,
 )
 from schemas.api.common.filters import Filter, FilterOperator
+from schemas.api.crm.channel import Channel, ChannelGetRequest
 from schemas.api.crm.client import Client, ClientAddRequest, ClientEditRequest, ClientGetRequest
 from schemas.api.crm.ticket import (
     Ticket,
@@ -51,6 +59,7 @@ from schemas.api.crm.ticket import (
     TicketDirectionEnum,
     TicketEditRequest,
     TicketGetRequest,
+    TicketSetRatingRequest,
     TicketSetStatusRequest,
     TicketStatusEnum,
 )
@@ -82,10 +91,12 @@ class InstagramCrmChannelConfig:
     INTEGRATION_KEY = "instagram_crm_channel"
     REDIS_PREFIX = "igc:"
 
-    GRAPH_BASE_URL = "https://graph.instagram.com/v20.0"
+    GRAPH_API_VERSION = str(app_settings.instagram_graph_version or "v25.0").strip().lstrip("/") or "v25.0"
+    GRAPH_BASE_URL = f"https://graph.instagram.com/{GRAPH_API_VERSION}"
     OAUTH_DIALOG_URL = "https://www.instagram.com/oauth/authorize"
     OAUTH_TOKEN_URL = "https://api.instagram.com/oauth/access_token"
     LONG_LIVED_TOKEN_URL = "https://graph.instagram.com/access_token"
+    REFRESH_TOKEN_URL = "https://graph.instagram.com/refresh_access_token"
 
     SETTINGS_TTL_SEC = max(int(app_settings.redis_cache_ttl or 60), 60)
     MAP_TTL_SEC = 30 * 24 * 60 * 60
@@ -94,6 +105,11 @@ class InstagramCrmChannelConfig:
     OAUTH_STATE_TTL_SEC = 10 * 60
     ACTIVE_CACHE_TTL_SEC = 30
     HTTP_TIMEOUT_SEC = 30
+    TOKEN_REFRESH_THRESHOLD_SEC = 7 * 24 * 60 * 60
+    TOKEN_REFRESH_LOCK_TTL_SEC = 30
+    RATING_POSITIVE_THRESHOLD = 4
+    RATING_STATE_TTL_SEC = 30 * 24 * 60 * 60
+    REGOS_ACTION_FIELD = "__regos_action"
     STREAM_GROUP = "instagram_crm_channel_workers"
     STREAM_TTL_SEC = 24 * 60 * 60
     STREAM_MAXLEN = max(int(app_settings.instagram_crm_channel_stream_maxlen or 0), 10000)
@@ -118,9 +134,13 @@ class InstagramCrmChannelConfig:
         TicketStatusEnum.WaitingStaff,
     )
 
-    SUPPORTED_INBOUND_WEBHOOKS = {"ChatMessageAdded"}
+    SUPPORTED_INBOUND_WEBHOOKS = {"ChatMessageAdded", "TicketClosed", "ChannelEdited"}
 
     SETTING_AUTHORIZATION_STATUS = "instagram_authorization_status"
+
+
+class InstagramAuthorizationRefreshError(RuntimeError):
+    pass
 
 
 @dataclass
@@ -136,6 +156,15 @@ class RuntimeConfig:
     access_token_expires_at: Optional[int]
     username: Optional[str]
     find_active_ticket_by_external_id: bool
+
+
+@dataclass
+class ChannelMessageSettings:
+    end_message: Optional[str]
+    rating_enabled: bool
+    rating_message: Optional[str]
+    rating_positive_message: Optional[str]
+    rating_negative_message: Optional[str]
 
 
 @dataclass
@@ -287,6 +316,32 @@ class InstagramCrmChannelIntegration(ClientBase):
     @classmethod
     def _webhook_debug_key(cls) -> str:
         return cls._redis_key("webhook_debug", str(_now_ts()), uuid.uuid4().hex)
+
+    @classmethod
+    def _channel_cache_key(cls, connected_integration_id: str, channel_id: int) -> str:
+        return cls._redis_key("channel", connected_integration_id, int(channel_id))
+
+    @classmethod
+    def _rating_lock_key(cls, connected_integration_id: str, ticket_id: int) -> str:
+        return cls._redis_key("lock", "rating", connected_integration_id, int(ticket_id))
+
+    @classmethod
+    def _rating_end_sent_key(cls, connected_integration_id: str, ticket_id: int) -> str:
+        return cls._redis_key("rating", "end_sent", connected_integration_id, int(ticket_id))
+
+    @classmethod
+    def _rating_prompt_sent_key(cls, connected_integration_id: str, ticket_id: int) -> str:
+        return cls._redis_key("rating", "prompt_sent", connected_integration_id, int(ticket_id))
+
+    @classmethod
+    def _rating_pending_key(cls, runtime: RuntimeConfig, external_user_id: str) -> str:
+        return cls._redis_key(
+            "rating",
+            "pending",
+            runtime.connected_integration_id,
+            runtime.instagram_business_account_id,
+            external_user_id,
+        )
 
     @staticmethod
     def _active_ci_ids_ttl() -> int:
@@ -687,10 +742,17 @@ class InstagramCrmChannelIntegration(ClientBase):
         return verify_token
 
     @classmethod
-    async def _build_oauth_url(cls, connected_integration_id: str) -> str:
+    async def _build_oauth_url(cls, connected_integration_id: str, locale: str = "") -> str:
         app_id, _, redirect_uri = cls._instagram_app_config()
         nonce = uuid.uuid4().hex
         await cls._store_oauth_state(connected_integration_id, nonce)
+        state = {
+            "ci": connected_integration_id,
+            "nonce": nonce,
+        }
+        normalized_locale = str(locale or "").strip()
+        if normalized_locale:
+            state["lang"] = normalized_locale
         return f"{InstagramCrmChannelConfig.OAUTH_DIALOG_URL}?{urlencode({
             'enable_fb_login': '0',
             'force_authentication': '1',
@@ -698,7 +760,7 @@ class InstagramCrmChannelIntegration(ClientBase):
             'redirect_uri': redirect_uri,
             'response_type': 'code',
             'scope': ','.join(InstagramCrmChannelConfig.OAUTH_SCOPES),
-            'state': cls._encode_oauth_state(connected_integration_id, nonce),
+            'state': cls._encode_oauth_state(state),
         })}"
 
     @staticmethod
@@ -724,10 +786,11 @@ class InstagramCrmChannelIntegration(ClientBase):
         cls,
         connected_integration_id: str,
         runtime: RuntimeConfig,
+        locale: str = "",
     ) -> str:
         if cls._is_runtime_authorized(runtime):
             return ""
-        return await cls._build_oauth_url(connected_integration_id)
+        return await cls._build_oauth_url(connected_integration_id, locale)
 
     @classmethod
     async def _write_business_mapping(
@@ -737,7 +800,7 @@ class InstagramCrmChannelIntegration(ClientBase):
         business_id: str,
         username: Optional[str],
         require_persistent_map: bool,
-        ) -> None:
+    ) -> None:
         ci = str(connected_integration_id or "").strip()
         business = str(business_id or "").strip()
         if not ci:
@@ -749,12 +812,6 @@ class InstagramCrmChannelIntegration(ClientBase):
                 raise RuntimeError("instagram_business_account_id is required for persistent mapping")
             return
 
-        await cls._redis_set(
-            cls._redis_key("map", "business_ci", business),
-            ci,
-            InstagramCrmChannelConfig.MAP_TTL_SEC,
-        )
-
         try:
             stored = await upsert_business_map(
                 connected_integration_id=ci,
@@ -762,12 +819,41 @@ class InstagramCrmChannelIntegration(ClientBase):
                 username=username,
                 is_active=True,
             )
+        except BusinessMapConflictError:
+            raise
         except Exception:
             if require_persistent_map:
                 raise
             return
         if require_persistent_map and not stored:
             raise RuntimeError("Instagram business mapping was not stored")
+        if stored:
+            await cls._redis_set(
+                cls._redis_key("map", "business_ci", business),
+                ci,
+                InstagramCrmChannelConfig.MAP_TTL_SEC,
+            )
+
+    @classmethod
+    async def _assert_business_account_available(
+        cls,
+        *,
+        connected_integration_id: str,
+        business_id: str,
+    ) -> None:
+        ci = str(connected_integration_id or "").strip()
+        business = str(business_id or "").strip()
+        if not ci or not business:
+            return
+        row = await get_business_map(business)
+        if not row or not row.get("is_active"):
+            return
+        existing_ci = str(row.get("connected_integration_id") or "").strip()
+        if existing_ci and existing_ci != ci:
+            raise BusinessMapConflictError(
+                business_id=business,
+                connected_integration_id=existing_ci,
+            )
 
     @classmethod
     async def _sync_reverse_indexes(
@@ -825,23 +911,27 @@ class InstagramCrmChannelIntegration(ClientBase):
         return {"status": "failed", "error": str(response.result)}
 
     @staticmethod
-    def _encode_oauth_state(connected_integration_id: str, nonce: str) -> str:
-        payload = _json_dumps({"ci": connected_integration_id, "nonce": nonce}).encode("utf-8")
-        return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+    def _encode_oauth_state(payload: Dict[str, str]) -> str:
+        payload_bytes = _json_dumps(payload).encode("utf-8")
+        return base64.urlsafe_b64encode(payload_bytes).decode("ascii").rstrip("=")
 
     @staticmethod
-    def _decode_oauth_state(state: str) -> Tuple[Optional[str], Optional[str]]:
+    def _decode_oauth_state(state: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         token = str(state or "").strip()
         if not token:
-            return None, None
+            return None, None, None
         token += "=" * ((4 - (len(token) % 4)) % 4)
         try:
             payload = _json_loads(base64.urlsafe_b64decode(token.encode("ascii")).decode("utf-8"))
         except Exception:
-            return None, None
+            return None, None, None
         if not isinstance(payload, dict):
-            return None, None
-        return str(payload.get("ci") or "").strip() or None, str(payload.get("nonce") or "").strip() or None
+            return None, None, None
+        return (
+            str(payload.get("ci") or "").strip() or None,
+            str(payload.get("nonce") or "").strip() or None,
+            str(payload.get("lang") or "").strip() or None,
+        )
 
     @classmethod
     async def _store_oauth_state(cls, connected_integration_id: str, nonce: str) -> None:
@@ -858,6 +948,122 @@ class InstagramCrmChannelIntegration(ClientBase):
         value = await cls._redis_get(key)
         await cls._redis_delete(key)
         return str(value or "").strip() or None
+
+    @classmethod
+    async def _store_ui_action_token(cls, connected_integration_id: str, action: str) -> str:
+        token = uuid.uuid4().hex
+        await cls._redis_set(
+            cls._redis_key("ui_action", action, connected_integration_id, token),
+            "1",
+            InstagramCrmChannelConfig.OAUTH_STATE_TTL_SEC,
+            min_ttl_sec=30,
+        )
+        return token
+
+    @classmethod
+    async def _consume_ui_action_token(cls, connected_integration_id: str, action: str, token: str) -> bool:
+        normalized_token = str(token or "").strip()
+        if not normalized_token:
+            return False
+        key = cls._redis_key("ui_action", action, connected_integration_id, normalized_token)
+        value = await cls._redis_get(key)
+        await cls._redis_delete(key)
+        return value == "1"
+
+    @staticmethod
+    def _empty_channel_message_settings() -> ChannelMessageSettings:
+        return ChannelMessageSettings(
+            end_message=None,
+            rating_enabled=False,
+            rating_message=None,
+            rating_positive_message=None,
+            rating_negative_message=None,
+        )
+
+    @staticmethod
+    def _channel_attr(channel: Any, key: str) -> Any:
+        if isinstance(channel, dict):
+            return channel.get(key)
+        return getattr(channel, key, None)
+
+    @classmethod
+    def _parse_channel_message_settings_cache(
+        cls,
+        raw: Optional[str],
+    ) -> Optional[ChannelMessageSettings]:
+        if not raw:
+            return None
+        try:
+            payload = _json_loads(raw)
+        except Exception:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return ChannelMessageSettings(
+            end_message=str(payload.get("end_message") or "").strip() or None,
+            rating_enabled=_to_bool(payload.get("rating_enabled"), False),
+            rating_message=str(payload.get("rating_message") or "").strip() or None,
+            rating_positive_message=str(payload.get("rating_positive_message") or "").strip() or None,
+            rating_negative_message=str(payload.get("rating_negative_message") or "").strip() or None,
+        )
+
+    @classmethod
+    async def _get_channel_message_settings(
+        cls,
+        connected_integration_id: str,
+        channel_id: Any,
+    ) -> ChannelMessageSettings:
+        resolved_channel_id = _to_int(channel_id, None)
+        if not resolved_channel_id or resolved_channel_id <= 0:
+            return cls._empty_channel_message_settings()
+
+        cache_key = cls._channel_cache_key(
+            connected_integration_id,
+            int(resolved_channel_id),
+        )
+        cached = cls._parse_channel_message_settings_cache(await cls._redis_get(cache_key))
+        if cached is not None:
+            return cached
+
+        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+            response = await api.crm.channel.get(
+                ChannelGetRequest(ids=[int(resolved_channel_id)], limit=1, offset=0)
+            )
+        if not response.ok:
+            logger.warning(
+                "Channel/Get rejected while loading Instagram channel messages: ci=%s channel_id=%s payload=%s",
+                connected_integration_id,
+                resolved_channel_id,
+                response.result,
+            )
+            return cls._empty_channel_message_settings()
+
+        rows = response.result if isinstance(response.result, list) else []
+        channel: Optional[Channel] = rows[0] if rows else None
+        if not channel:
+            return cls._empty_channel_message_settings()
+
+        settings = ChannelMessageSettings(
+            end_message=str(cls._channel_attr(channel, "end_message") or "").strip() or None,
+            rating_enabled=_to_bool(cls._channel_attr(channel, "rating_enabled"), False),
+            rating_message=str(cls._channel_attr(channel, "rating_message") or "").strip() or None,
+            rating_positive_message=str(cls._channel_attr(channel, "rating_positive_message") or "").strip() or None,
+            rating_negative_message=str(cls._channel_attr(channel, "rating_negative_message") or "").strip() or None,
+        )
+        await cls._redis_set(
+            cache_key,
+            _json_dumps(
+                {
+                    "end_message": settings.end_message or "",
+                    "rating_enabled": settings.rating_enabled,
+                    "rating_message": settings.rating_message or "",
+                    "rating_positive_message": settings.rating_positive_message or "",
+                    "rating_negative_message": settings.rating_negative_message or "",
+                }
+            ),
+            InstagramCrmChannelConfig.SETTINGS_TTL_SEC,
+        )
+        return settings
 
     @staticmethod
     def _client_external_id(runtime: RuntimeConfig, external_user_id: str) -> str:
@@ -1728,7 +1934,12 @@ class InstagramCrmChannelIntegration(ClientBase):
     @staticmethod
     def _is_internal_external_message(external_message_id: Optional[str]) -> bool:
         value = str(external_message_id or "").strip().lower()
-        return value.startswith("igin:") or value.startswith("igout:")
+        return (
+            value.startswith("igin:")
+            or value.startswith("igout:")
+            or value.startswith("igsys:")
+            or value.startswith("igalert:")
+        )
 
     @staticmethod
     def _external_message_digest(runtime: RuntimeConfig, external_user_id: str, message_id: str) -> str:
@@ -1748,6 +1959,121 @@ class InstagramCrmChannelIntegration(ClientBase):
     def _outbound_external_message_id(runtime: RuntimeConfig, external_user_id: str, message_id: str) -> str:
         digest = InstagramCrmChannelIntegration._external_message_digest(runtime, external_user_id, message_id)
         return f"igout:{runtime.instagram_business_account_id}:{external_user_id}:{digest}"[:150]
+
+    @staticmethod
+    def _delivery_alert_external_message_id(runtime: RuntimeConfig, message_id: str) -> str:
+        raw = f"{runtime.instagram_business_account_id}:send_failed:{message_id}"
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        return f"igalert:send:{digest}"[:150]
+
+    @staticmethod
+    def _system_external_message_id(
+        runtime: RuntimeConfig,
+        prefix: str,
+        *parts: Any,
+    ) -> str:
+        raw = ":".join(
+            [
+                runtime.connected_integration_id,
+                runtime.instagram_business_account_id,
+                str(prefix or ""),
+                *[str(part or "") for part in parts],
+            ]
+        )
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        return f"igsys:{str(prefix or 'event').strip() or 'event'}:{digest}"[:150]
+
+    @staticmethod
+    def _format_delivery_alert_text(message_id: str, error: BaseException) -> str:
+        technical_reason = InstagramCrmChannelIntegration._short_error_text(error)
+        reason = (
+            "Не удалось обновить доступ Instagram. "
+            "Откройте настройки интеграции и подключите аккаунт Instagram заново."
+        )
+        if technical_reason:
+            reason = f"{reason}\nТехническая причина: {technical_reason}"
+        return (
+            "[Instagram] Не удалось отправить сообщение в Direct.\n"
+            f"Сообщение CRM: {str(message_id or '-').strip() or '-'}\n"
+            f"Причина: {reason}"
+        )
+
+    @classmethod
+    async def _send_delivery_issue_system_message_best_effort(
+        cls,
+        runtime: RuntimeConfig,
+        *,
+        chat_id: str,
+        message_id: str,
+        error: BaseException,
+    ) -> None:
+        resolved_chat_id = str(chat_id or "").strip()
+        if not resolved_chat_id:
+            return
+        alert_external_id = cls._delivery_alert_external_message_id(runtime, message_id)
+        try:
+            async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
+                response = await api.chat.chat_message.add(
+                    ChatMessageAddRequest(
+                        chat_id=resolved_chat_id,
+                        message_type=ChatMessageTypeEnum.System,
+                        text=cls._format_delivery_alert_text(message_id, error),
+                        external_message_id=alert_external_id,
+                    )
+                )
+            if response.ok:
+                return
+            logger.warning(
+                "Instagram delivery alert system message rejected: ci=%s chat_id=%s payload=%s",
+                runtime.connected_integration_id,
+                resolved_chat_id,
+                response.result,
+            )
+        except Exception as notify_error:
+            logger.warning(
+                "Failed to post Instagram delivery alert: ci=%s chat_id=%s error=%s",
+                runtime.connected_integration_id,
+                resolved_chat_id,
+                notify_error,
+            )
+
+    @classmethod
+    async def _post_system_message_best_effort(
+        cls,
+        runtime: RuntimeConfig,
+        *,
+        chat_id: str,
+        external_message_id: str,
+        text: str,
+    ) -> None:
+        resolved_chat_id = str(chat_id or "").strip()
+        resolved_text = str(text or "").strip()
+        if not resolved_chat_id or not resolved_text:
+            return
+        try:
+            async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
+                response = await api.chat.chat_message.add(
+                    ChatMessageAddRequest(
+                        chat_id=resolved_chat_id,
+                        message_type=ChatMessageTypeEnum.System,
+                        text=resolved_text,
+                        external_message_id=external_message_id,
+                    )
+                )
+            if not response.ok:
+                logger.warning(
+                    "Instagram system message rejected: ci=%s chat_id=%s payload=%s",
+                    runtime.connected_integration_id,
+                    resolved_chat_id,
+                    response.result,
+                )
+        except Exception as error:
+            logger.warning(
+                "Failed to post Instagram system message: ci=%s chat_id=%s error=%s",
+                runtime.connected_integration_id,
+                resolved_chat_id,
+                error,
+            )
 
     @staticmethod
     def _extract_message_text(event: Dict[str, Any]) -> Optional[str]:
@@ -1786,6 +2112,199 @@ class InstagramCrmChannelIntegration(ClientBase):
         payload = _row_to_dict(response.result)
         if not str(payload.get("new_uuid") or "").strip():
             raise RuntimeError(f"ChatMessage/Add did not return new_uuid: result={payload}")
+
+    @staticmethod
+    def _parse_rating_value(text: str) -> Optional[int]:
+        value = str(text or "").strip()
+        if not value.isdigit():
+            return None
+        rating = _to_int(value, None)
+        if rating is None or rating < 1 or rating > 5:
+            return None
+        return int(rating)
+
+    @classmethod
+    async def _store_pending_rating(
+        cls,
+        runtime: RuntimeConfig,
+        *,
+        external_user_id: str,
+        ticket_id: int,
+        chat_id: str,
+        channel_id: int,
+    ) -> None:
+        await cls._redis_set(
+            cls._rating_pending_key(runtime, external_user_id),
+            _json_dumps(
+                {
+                    "external_user_id": external_user_id,
+                    "ticket_id": int(ticket_id),
+                    "chat_id": str(chat_id),
+                    "channel_id": int(channel_id),
+                }
+            ),
+            InstagramCrmChannelConfig.RATING_STATE_TTL_SEC,
+        )
+
+    async def _send_channel_text_to_instagram(
+        self,
+        runtime: RuntimeConfig,
+        *,
+        external_user_id: str,
+        chat_id: str,
+        text: str,
+        system_prefix: str,
+        system_parts: Tuple[Any, ...],
+    ) -> Tuple[RuntimeConfig, bool]:
+        resolved_text = str(text or "").strip()
+        if not resolved_text:
+            return runtime, False
+        try:
+            runtime, _ = await self._instagram_send_text_message_with_refresh(
+                runtime,
+                external_user_id,
+                resolved_text,
+            )
+        except InstagramAuthorizationRefreshError as error:
+            await self._send_delivery_issue_system_message_best_effort(
+                runtime,
+                chat_id=chat_id,
+                message_id=":".join([system_prefix, *[str(part or "") for part in system_parts]]),
+                error=error,
+            )
+            return runtime, False
+        except Exception as error:
+            logger.warning(
+                "Failed to send Instagram channel message: ci=%s chat_id=%s external_user_id=%s error=%s",
+                runtime.connected_integration_id,
+                chat_id,
+                external_user_id,
+                error,
+            )
+            return runtime, False
+
+        await self._post_system_message_best_effort(
+            runtime,
+            chat_id=chat_id,
+            external_message_id=self._system_external_message_id(
+                runtime,
+                system_prefix,
+                *system_parts,
+            ),
+            text=resolved_text,
+        )
+        return runtime, True
+
+    async def _process_pending_rating_if_applicable(
+        self,
+        runtime: RuntimeConfig,
+        *,
+        external_user_id: str,
+        text: str,
+        message_id: str,
+    ) -> Optional[str]:
+        pending_key = self._rating_pending_key(runtime, external_user_id)
+        raw = await self._redis_get(pending_key)
+        if not raw:
+            return None
+        rating = self._parse_rating_value(text)
+        if rating is None:
+            await self._redis_delete(pending_key)
+            return None
+        try:
+            pending = _json_loads(raw)
+        except Exception:
+            pending = {}
+        if not isinstance(pending, dict):
+            await self._redis_delete(pending_key)
+            return None
+
+        ticket_id = _to_int(pending.get("ticket_id"), None)
+        chat_id = str(pending.get("chat_id") or "").strip()
+        channel_id = _to_int(pending.get("channel_id"), None)
+        pending_external_user_id = str(pending.get("external_user_id") or "").strip()
+        if (
+            not ticket_id
+            or not chat_id
+            or not channel_id
+            or pending_external_user_id != external_user_id
+        ):
+            await self._redis_delete(pending_key)
+            return None
+
+        lock_key = self._rating_lock_key(runtime.connected_integration_id, int(ticket_id))
+        lock_token = uuid.uuid4().hex
+        lock_acquired = await self._redis_set_nx(
+            lock_key,
+            lock_token,
+            InstagramCrmChannelConfig.LOCK_TTL_SEC,
+            min_ttl_sec=5,
+        )
+        if _redis_enabled() and not lock_acquired:
+            return "ignored_rating_locked"
+
+        try:
+            ticket = await self._get_ticket_by_id(runtime, int(ticket_id))
+            if not ticket or not ticket.id:
+                await self._redis_delete(pending_key)
+                return "ignored_rating_ticket_not_found"
+            if str(ticket.chat_id or "").strip() != chat_id:
+                await self._redis_delete(pending_key)
+                return None
+            if _to_int(ticket.channel_id, None) != int(channel_id):
+                await self._redis_delete(pending_key)
+                return None
+            if self._parse_ticket_external_dialog_id(runtime, ticket.external_dialog_id) != external_user_id:
+                await self._redis_delete(pending_key)
+                return None
+
+            existing_rating = _to_int(ticket.rating, None)
+            if existing_rating and 1 <= int(existing_rating) <= 5:
+                await self._redis_delete(pending_key)
+                return "accepted_rating_already_saved"
+
+            async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
+                response = await api.crm.ticket.set_rating(
+                    TicketSetRatingRequest(id=int(ticket.id), rating=int(rating))
+                )
+            if not response.ok:
+                payload = _row_to_dict(response.result)
+                description = str(payload.get("description") or "").strip().lower()
+                already_rated = any(
+                    token in description
+                    for token in ("already", "repeat", "rated", "exists")
+                )
+                if already_rated:
+                    await self._redis_delete(pending_key)
+                    return "accepted_rating_already_saved"
+                raise RuntimeError(
+                    "Ticket/SetRating rejected: "
+                    f"error={payload.get('error')} description={payload.get('description')}"
+                )
+
+            await self._redis_delete(pending_key)
+            channel_settings = await self._get_channel_message_settings(
+                runtime.connected_integration_id,
+                int(channel_id),
+            )
+            followup_text = (
+                channel_settings.rating_positive_message
+                if int(rating) >= InstagramCrmChannelConfig.RATING_POSITIVE_THRESHOLD
+                else channel_settings.rating_negative_message
+            )
+            if followup_text:
+                await self._send_channel_text_to_instagram(
+                    runtime,
+                    external_user_id=external_user_id,
+                    chat_id=chat_id,
+                    text=followup_text,
+                    system_prefix="channel_rating_result",
+                    system_parts=(ticket_id, rating, message_id),
+                )
+            return "accepted_rating"
+        finally:
+            if lock_acquired and await self._redis_get(lock_key) == lock_token:
+                await self._redis_delete(lock_key)
 
     @classmethod
     def _extract_messaging_events(cls, body: Any, runtime: RuntimeConfig) -> List[Dict[str, Any]]:
@@ -1863,8 +2382,7 @@ class InstagramCrmChannelIntegration(ClientBase):
                 add_event_recipient(value)
         return ids
 
-    @classmethod
-    async def _process_inbound_event(cls, runtime: RuntimeConfig, event: Dict[str, Any]) -> str:
+    async def _process_inbound_event(self, runtime: RuntimeConfig, event: Dict[str, Any]) -> str:
         message = event.get("message") if isinstance(event, dict) else None
         if not isinstance(message, dict):
             message_edit = event.get("message_edit") if isinstance(event, dict) else None
@@ -1874,7 +2392,7 @@ class InstagramCrmChannelIntegration(ClientBase):
                 else ""
             )
             if message_edit_id:
-                fetched_event = await cls._fetch_message_event(runtime, message_edit_id)
+                fetched_event = await self._fetch_message_event(runtime, message_edit_id)
                 if fetched_event:
                     merged_event = dict(event)
                     for key, value in fetched_event.items():
@@ -1898,10 +2416,10 @@ class InstagramCrmChannelIntegration(ClientBase):
         if not message_id:
             message_id = hashlib.md5(_json_dumps(event).encode("utf-8")).hexdigest()
 
-        dedupe_key = cls._redis_key("dedupe", "inbound", runtime.connected_integration_id, message_id)
+        dedupe_key = self._redis_key("dedupe", "inbound", runtime.connected_integration_id, message_id)
         dedupe_acquired = False
         if _redis_enabled():
-            dedupe_acquired = await cls._redis_set_nx(
+            dedupe_acquired = await self._redis_set_nx(
                 dedupe_key,
                 "1",
                 InstagramCrmChannelConfig.DEDUPE_TTL_SEC,
@@ -1909,24 +2427,33 @@ class InstagramCrmChannelIntegration(ClientBase):
             if not dedupe_acquired:
                 return "ignored_duplicate"
 
-        text = cls._extract_message_text(event)
+        text = self._extract_message_text(event)
         if not text:
             return "ignored_empty"
 
         try:
-            sender_profile = await cls._resolve_sender_profile(
+            rating_decision = await self._process_pending_rating_if_applicable(
+                runtime,
+                external_user_id=external_user_id,
+                text=text,
+                message_id=message_id,
+            )
+            if rating_decision:
+                return rating_decision
+
+            sender_profile = await self._resolve_sender_profile(
                 runtime,
                 event,
                 external_user_id,
                 message_id,
             )
-            ticket_ctx = await cls._resolve_or_create_ticket(
+            ticket_ctx = await self._resolve_or_create_ticket(
                 runtime,
                 external_user_id,
                 sender_profile,
             )
-            await cls._post_chat_message(runtime, ticket_ctx, external_user_id, text, message_id)
-            await cls._set_ticket_status_best_effort(
+            await self._post_chat_message(runtime, ticket_ctx, external_user_id, text, message_id)
+            await self._set_ticket_status_best_effort(
                 runtime,
                 ticket_ctx.ticket_id,
                 TicketStatusEnum.WaitingStaff,
@@ -1935,16 +2462,15 @@ class InstagramCrmChannelIntegration(ClientBase):
             return "accepted"
         except Exception:
             if dedupe_acquired:
-                await cls._redis_delete(dedupe_key)
+                await self._redis_delete(dedupe_key)
             raise
 
-    @classmethod
     async def _process_instagram_webhook_body(
-        cls,
+        self,
         runtime: RuntimeConfig,
         body: Dict[str, Any],
     ) -> Dict[str, Any]:
-        events = cls._extract_messaging_events(body, runtime)
+        events = self._extract_messaging_events(body, runtime)
         if not events:
             return {"status": "ignored", "reason": "no_supported_events"}
 
@@ -1954,8 +2480,8 @@ class InstagramCrmChannelIntegration(ClientBase):
         errors: List[str] = []
         for event in events:
             try:
-                decision = await cls._process_inbound_event(runtime, event)
-                if decision == "accepted":
+                decision = await self._process_inbound_event(runtime, event)
+                if decision in {"accepted", "accepted_rating", "accepted_rating_already_saved"}:
                     accepted += 1
                 else:
                     ignored += 1
@@ -2015,6 +2541,167 @@ class InstagramCrmChannelIntegration(ClientBase):
         expires_at = _now_ts() + int(expires_in) if expires_in and expires_in > 0 else None
         return token, expires_at
 
+    @staticmethod
+    def _short_error_text(error: Any) -> str:
+        text = str(error or "").strip()
+        text = " ".join(text.split())
+        if len(text) > 500:
+            return text[:500] + "..."
+        return text
+
+    @classmethod
+    def _instagram_http_error_text(cls, error: BaseException) -> str:
+        if not isinstance(error, httpx.HTTPStatusError) or error.response is None:
+            return cls._short_error_text(error)
+        response = error.response
+        try:
+            payload = response.json() if response.content else {}
+        except Exception:
+            payload = {}
+        if isinstance(payload, dict):
+            graph_error = payload.get("error")
+            if isinstance(graph_error, dict):
+                message = str(graph_error.get("message") or "").strip()
+                code = str(graph_error.get("code") or "").strip()
+                subcode = str(graph_error.get("error_subcode") or "").strip()
+                pieces = [f"status={response.status_code}"]
+                if code:
+                    pieces.append(f"code={code}")
+                if subcode:
+                    pieces.append(f"subcode={subcode}")
+                if message:
+                    pieces.append(message)
+                return cls._short_error_text(" ".join(pieces))
+        return cls._short_error_text(f"status={response.status_code} {response.text}")
+
+    @staticmethod
+    def _is_instagram_auth_error(error: BaseException) -> bool:
+        if isinstance(error, InstagramAuthorizationRefreshError):
+            return True
+        text = str(error or "").lower()
+        if isinstance(error, httpx.HTTPStatusError) and error.response is not None:
+            try:
+                payload = error.response.json() if error.response.content else {}
+            except Exception:
+                payload = {}
+            graph_error = payload.get("error") if isinstance(payload, dict) else None
+            if isinstance(graph_error, dict):
+                code = _to_int(graph_error.get("code"), None)
+                if code in {10, 102, 190, 200}:
+                    return True
+                text = f"{text} {graph_error.get('message') or ''}".lower()
+        return any(
+            token in text
+            for token in (
+                "access token",
+                "invalid token",
+                "expired token",
+                "oauth",
+                "permission",
+                "authorization",
+            )
+        )
+
+    @classmethod
+    def _runtime_token_should_refresh(cls, runtime: RuntimeConfig, *, force: bool) -> bool:
+        if force:
+            return True
+        if not runtime.access_token_expires_at:
+            return False
+        return int(runtime.access_token_expires_at) <= _now_ts() + InstagramCrmChannelConfig.TOKEN_REFRESH_THRESHOLD_SEC
+
+    @classmethod
+    def _runtime_token_must_refresh(cls, runtime: RuntimeConfig, *, force: bool) -> bool:
+        if force:
+            return True
+        if not runtime.access_token_expires_at:
+            return False
+        return int(runtime.access_token_expires_at) <= _now_ts()
+
+    async def _refresh_instagram_access_token(self, runtime: RuntimeConfig) -> RuntimeConfig:
+        if not runtime.access_token:
+            raise InstagramAuthorizationRefreshError("Instagram access token is missing")
+        try:
+            response = await self.http_client.get(
+                InstagramCrmChannelConfig.REFRESH_TOKEN_URL,
+                params={
+                    "grant_type": "ig_refresh_token",
+                    "access_token": runtime.access_token,
+                },
+            )
+            response.raise_for_status()
+            payload = response.json() if response.content else {}
+        except Exception as error:
+            detail = self._instagram_http_error_text(error)
+            raise InstagramAuthorizationRefreshError(
+                f"Instagram token refresh failed: {detail}"
+            ) from error
+
+        if not isinstance(payload, dict):
+            raise InstagramAuthorizationRefreshError("Instagram token refresh returned invalid payload")
+        token = str(payload.get("access_token") or "").strip()
+        if not token:
+            raise InstagramAuthorizationRefreshError("Instagram token refresh did not return access_token")
+        expires_in = _to_int(payload.get("expires_in"), None)
+        expires_at = _now_ts() + int(expires_in) if expires_in and expires_in > 0 else runtime.access_token_expires_at
+
+        await self._edit_settings(
+            runtime.connected_integration_id,
+            {
+                "instagram_access_token": token,
+                "instagram_access_token_expires_at": str(expires_at or ""),
+                **self._authorization_settings_patch(authorized=True),
+            },
+        )
+        return replace(runtime, access_token=token, access_token_expires_at=expires_at)
+
+    async def _ensure_instagram_access_token_fresh(
+        self,
+        runtime: RuntimeConfig,
+        *,
+        force: bool = False,
+    ) -> RuntimeConfig:
+        if not runtime.instagram_business_account_id or not runtime.access_token:
+            raise InstagramAuthorizationRefreshError("Instagram authorization is missing")
+        if not self._runtime_token_should_refresh(runtime, force=force):
+            return runtime
+
+        must_refresh = self._runtime_token_must_refresh(runtime, force=force)
+        lock_key = self._redis_key("lock", "token_refresh", runtime.connected_integration_id)
+        lock_token = uuid.uuid4().hex
+        lock_acquired = False
+        try:
+            if _redis_enabled():
+                lock_acquired = await self._redis_set_nx(
+                    lock_key,
+                    lock_token,
+                    InstagramCrmChannelConfig.TOKEN_REFRESH_LOCK_TTL_SEC,
+                    10,
+                )
+                if not lock_acquired:
+                    await asyncio.sleep(0.5)
+                    reloaded = await self._load_runtime(
+                        runtime.connected_integration_id,
+                        require_access_token=True,
+                    )
+                    if not self._runtime_token_should_refresh(reloaded, force=force):
+                        return reloaded
+                    if not must_refresh:
+                        return runtime
+
+            return await self._refresh_instagram_access_token(runtime)
+        except InstagramAuthorizationRefreshError:
+            if must_refresh:
+                raise
+            logger.warning(
+                "Silent Instagram token refresh failed, using current token: ci=%s",
+                runtime.connected_integration_id,
+            )
+            return runtime
+        finally:
+            if lock_acquired and await self._redis_get(lock_key) == lock_token:
+                await self._redis_delete(lock_key)
+
     async def _instagram_resolve_account(
         self,
         runtime: RuntimeConfig,
@@ -2065,6 +2752,28 @@ class InstagramCrmChannelIntegration(ClientBase):
             if isinstance(rows, list) and rows and isinstance(rows[0], dict):
                 return str(rows[0].get("id") or "").strip() or None
         return None
+
+    async def _instagram_send_text_message_with_refresh(
+        self,
+        runtime: RuntimeConfig,
+        external_user_id: str,
+        text: str,
+    ) -> Tuple[RuntimeConfig, Optional[str]]:
+        runtime = await self._ensure_instagram_access_token_fresh(runtime)
+        try:
+            return runtime, await self._instagram_send_text_message(runtime, external_user_id, text)
+        except httpx.HTTPStatusError as error:
+            if not self._is_instagram_auth_error(error):
+                raise
+            refreshed_runtime = await self._ensure_instagram_access_token_fresh(runtime, force=True)
+            try:
+                return refreshed_runtime, await self._instagram_send_text_message(refreshed_runtime, external_user_id, text)
+            except httpx.HTTPStatusError as retry_error:
+                if self._is_instagram_auth_error(retry_error):
+                    raise InstagramAuthorizationRefreshError(
+                        f"Instagram authorization failed after token refresh: {self._instagram_http_error_text(retry_error)}"
+                    ) from retry_error
+                raise
 
     @staticmethod
     def _verify_instagram_signature(
@@ -2140,6 +2849,156 @@ class InstagramCrmChannelIntegration(ClientBase):
         if not response.ok:
             logger.warning("ChatMessage/MarkSent rejected: ci=%s message_id=%s payload=%s", connected_integration_id, message_id, response.result)
 
+    async def _process_regos_ticket_closed(
+        self,
+        runtime: RuntimeConfig,
+        payload: Dict[str, Any],
+        event_id: Optional[str],
+    ) -> Dict[str, Any]:
+        _ = event_id
+        ticket_id = _to_int(
+            payload.get("id")
+            or payload.get("ticket_id")
+            or payload.get("ticketId"),
+            None,
+        )
+        if not ticket_id:
+            return {"status": "ignored", "reason": "missing_ticket_id"}
+
+        ticket = await self._get_ticket_by_id(runtime, int(ticket_id))
+        if not ticket or not ticket.id:
+            return {"status": "ignored", "reason": "ticket_not_found"}
+
+        ticket_channel_id = _to_int(ticket.channel_id, None)
+        if ticket_channel_id != int(runtime.channel_id):
+            return {"status": "ignored", "reason": "foreign_channel"}
+
+        chat_id = str(ticket.chat_id or "").strip()
+        if not chat_id:
+            return {"status": "ignored", "reason": "ticket_has_no_chat"}
+
+        external_user_id = self._parse_ticket_external_dialog_id(
+            runtime,
+            ticket.external_dialog_id,
+        )
+        if not external_user_id:
+            external_user_id = await self._resolve_external_user_by_chat(runtime, chat_id)
+        if not external_user_id:
+            return {"status": "ignored", "reason": "chat_mapping_not_found"}
+
+        client_id = _to_int(ticket.client_id, None)
+        if client_id:
+            await self._save_mapping(
+                runtime,
+                external_user_id,
+                int(client_id),
+                int(ticket.id),
+                chat_id,
+            )
+
+        lock_key = self._rating_lock_key(runtime.connected_integration_id, int(ticket.id))
+        lock_token = uuid.uuid4().hex
+        lock_acquired = await self._redis_set_nx(
+            lock_key,
+            lock_token,
+            InstagramCrmChannelConfig.LOCK_TTL_SEC,
+            min_ttl_sec=5,
+        )
+        if _redis_enabled() and not lock_acquired:
+            return {"status": "ignored", "reason": "rating_locked"}
+
+        sent = 0
+        try:
+            channel_settings = await self._get_channel_message_settings(
+                runtime.connected_integration_id,
+                ticket_channel_id,
+            )
+            end_message = str(channel_settings.end_message or "").strip()
+            if end_message:
+                end_key = self._rating_end_sent_key(
+                    runtime.connected_integration_id,
+                    int(ticket.id),
+                )
+                end_allowed = await self._redis_set_nx(
+                    end_key,
+                    "1",
+                    InstagramCrmChannelConfig.RATING_STATE_TTL_SEC,
+                )
+                if end_allowed:
+                    runtime, delivered = await self._send_channel_text_to_instagram(
+                        runtime,
+                        external_user_id=external_user_id,
+                        chat_id=chat_id,
+                        text=end_message,
+                        system_prefix="channel_end_sent",
+                        system_parts=(ticket.id, chat_id),
+                    )
+                    if delivered:
+                        sent += 1
+                    else:
+                        await self._redis_delete(end_key)
+
+            rating_message = str(channel_settings.rating_message or "").strip()
+            if channel_settings.rating_enabled and rating_message:
+                prompt_key = self._rating_prompt_sent_key(
+                    runtime.connected_integration_id,
+                    int(ticket.id),
+                )
+                prompt_allowed = await self._redis_set_nx(
+                    prompt_key,
+                    "1",
+                    InstagramCrmChannelConfig.RATING_STATE_TTL_SEC,
+                )
+                if prompt_allowed:
+                    runtime, delivered = await self._send_channel_text_to_instagram(
+                        runtime,
+                        external_user_id=external_user_id,
+                        chat_id=chat_id,
+                        text=rating_message,
+                        system_prefix="channel_rating_prompt_sent",
+                        system_parts=(ticket.id, chat_id),
+                    )
+                    if delivered:
+                        await self._store_pending_rating(
+                            runtime,
+                            external_user_id=external_user_id,
+                            ticket_id=int(ticket.id),
+                            chat_id=chat_id,
+                            channel_id=int(ticket_channel_id),
+                        )
+                        sent += 1
+                    else:
+                        await self._redis_delete(prompt_key)
+
+            return {
+                "status": "accepted" if sent else "ignored",
+                "sent": sent,
+                "ticket_id": int(ticket.id),
+            }
+        finally:
+            if lock_acquired and await self._redis_get(lock_key) == lock_token:
+                await self._redis_delete(lock_key)
+
+    async def _process_regos_channel_edited(
+        self,
+        runtime: RuntimeConfig,
+        payload: Dict[str, Any],
+        event_id: Optional[str],
+    ) -> Dict[str, Any]:
+        _ = event_id
+        channel_id = _to_int(
+            payload.get("id")
+            or payload.get("channel_id")
+            or payload.get("channelId"),
+            None,
+        )
+        if not channel_id:
+            return {"status": "ignored", "reason": "missing_channel_id"}
+        await self._redis_delete(
+            self._channel_cache_key(runtime.connected_integration_id, int(channel_id))
+        )
+        return {"status": "accepted", "channel_id": int(channel_id)}
+
     async def _process_regos_chat_message_added(self, runtime: RuntimeConfig, payload: Dict[str, Any], event_id: Optional[str]) -> Dict[str, Any]:
         chat_id = str(payload.get("chat_id") or "").strip()
         message_id = str(payload.get("id") or "").strip()
@@ -2175,7 +3034,25 @@ class InstagramCrmChannelIntegration(ClientBase):
             if not text:
                 return {"status": "ignored", "reason": "empty_message"}
 
-            remote_message_id = await self._instagram_send_text_message(runtime, external_user_id, text)
+            try:
+                runtime, remote_message_id = await self._instagram_send_text_message_with_refresh(
+                    runtime,
+                    external_user_id,
+                    text,
+                )
+            except InstagramAuthorizationRefreshError as error:
+                await self._send_delivery_issue_system_message_best_effort(
+                    runtime,
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    error=error,
+                )
+                return {
+                    "status": "failed_notified",
+                    "reason": "instagram_authorization_required",
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                }
             external_message_id = self._outbound_external_message_id(runtime, external_user_id, remote_message_id or message_id)
             await self._mark_chat_message_sent(runtime.connected_integration_id, message_id, external_message_id)
             ticket_id = await self._resolve_ticket_id_by_chat(runtime, chat_id)
@@ -2215,41 +3092,28 @@ class InstagramCrmChannelIntegration(ClientBase):
 
     @classmethod
     async def _resolve_ci_by_business_id(cls, business_id: str) -> Optional[str]:
-        value = await cls._redis_get(cls._redis_key("map", "business_ci", business_id))
-        resolved = str(value or "").strip()
-        if resolved:
-            return resolved
-
         expected = str(business_id or "").strip()
         if not expected:
             return None
+        redis_key = cls._redis_key("map", "business_ci", expected)
+        cached = str(await cls._redis_get(redis_key) or "").strip()
         try:
             resolved = str(await resolve_ci_by_business_id_db(expected) or "").strip()
         except Exception as error:
             logger.warning("Failed to resolve Instagram business mapping from MariaDB: business_id=%s error=%s", expected, error)
-            resolved = ""
-        if resolved:
-            await cls._redis_set(
-                cls._redis_key("map", "business_ci", expected),
-                resolved,
-                InstagramCrmChannelConfig.MAP_TTL_SEC,
-            )
-            return resolved
-
-        if not _redis_enabled():
             return None
-        for ci in await cls._active_ci_ids():
-            try:
-                runtime = await cls._load_runtime(
-                    ci,
-                    require_access_token=False,
-                    require_business_id=False,
+        if resolved:
+            if cached != resolved:
+                await cls._redis_set(
+                    redis_key,
+                    resolved,
+                    InstagramCrmChannelConfig.MAP_TTL_SEC,
                 )
-                await cls._sync_reverse_indexes(runtime, persist_business_map=True)
-            except Exception:
-                continue
-            if runtime.instagram_business_account_id == expected:
-                return ci
+            return resolved
+        if cached:
+            await cls._redis_delete(redis_key)
+
+        logger.warning("Instagram business mapping is missing: business_id=%s", expected)
         return None
 
     @classmethod
@@ -2519,11 +3383,37 @@ class InstagramCrmChannelIntegration(ClientBase):
             if kind == "instagram_in":
                 runtime = await cls._load_runtime(ci, require_access_token=False)
                 await cls._sync_reverse_indexes(runtime)
-                result = await cls._process_instagram_webhook_body(runtime, payload)
+                result = await worker._process_instagram_webhook_body(runtime, payload)
             else:
-                runtime = await cls._load_runtime(ci, require_access_token=True)
+                regos_action = str(
+                    payload.get(InstagramCrmChannelConfig.REGOS_ACTION_FIELD) or ""
+                ).strip()
+                handler_payload = dict(payload)
+                handler_payload.pop(InstagramCrmChannelConfig.REGOS_ACTION_FIELD, None)
+                runtime = await cls._load_runtime(
+                    ci,
+                    require_access_token=regos_action in {"", "ChatMessageAdded"},
+                    require_business_id=regos_action in {"", "ChatMessageAdded"},
+                )
                 await cls._sync_reverse_indexes(runtime)
-                result = await worker._process_regos_chat_message_added(runtime, payload, event_id)
+                if regos_action == "TicketClosed":
+                    result = await worker._process_regos_ticket_closed(
+                        runtime,
+                        handler_payload,
+                        event_id,
+                    )
+                elif regos_action == "ChannelEdited":
+                    result = await worker._process_regos_channel_edited(
+                        runtime,
+                        handler_payload,
+                        event_id,
+                    )
+                else:
+                    result = await worker._process_regos_chat_message_added(
+                        runtime,
+                        handler_payload,
+                        event_id,
+                    )
 
             logger.info(
                 "Instagram stream job processed: ci=%s kind=%s entry_id=%s status=%s",
@@ -2572,121 +3462,46 @@ class InstagramCrmChannelIntegration(ClientBase):
             )
 
     @classmethod
-    def _ui_message_page(cls, text: str, *, status: str = "info") -> str:
-        title = "Подключение Instagram"
-        safe_text = html.escape(str(text))
-        safe_status = "ok" if status == "ok" else "warn"
-        return f"""<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{html.escape(title)}</title>
-  <style>
-    body {{ font-family: Arial, sans-serif; margin: 0; color: #172033; background: #f5f7fb; }}
-    main {{ max-width: 680px; margin: 48px auto; padding: 0 20px; }}
-    section {{ background: #fff; border: 1px solid #dce3ee; border-radius: 8px; padding: 24px; }}
-    h1 {{ font-size: 24px; margin: 0 0 12px; }}
-    p {{ margin: 0; color: #536176; line-height: 1.5; }}
-    .badge {{ display: inline-block; margin-bottom: 16px; padding: 8px 10px; border-radius: 6px; font-weight: 600; }}
-    .ok {{ background: #e7f7ee; color: #0d6b3f; }}
-    .warn {{ background: #fff4d8; color: #7a5200; }}
-  </style>
-</head>
-<body>
-  <main>
-    <section>
-      <span class="badge {safe_status}">Instagram</span>
-      <h1>{html.escape(title)}</h1>
-      <p>{safe_text}</p>
-    </section>
-  </main>
-</body>
-</html>"""
-
-    @classmethod
-    def _ui_settings_error_message(cls, error: Exception) -> str:
+    def _ui_settings_error_key(cls, error: Exception) -> str:
         text = str(error or "")
         if "instagram_pipeline_id" in text:
-            return "Выберите воронку CRM для обращений из Instagram."
+            return "notice_pipeline_required"
         if "instagram_channel_id" in text:
-            return "Выберите CRM-канал для обращений из Instagram."
+            return "notice_channel_required"
         if "Service Instagram app config" in text or "Service Instagram webhook verify token" in text:
-            return "Подключение Instagram пока недоступно. Обратитесь к администратору."
+            return "notice_service_unavailable"
         if "Instagram authorization required" in text or "instagram_business_account_id" in text:
-            return "Подключите аккаунт Instagram, чтобы начать получать и отправлять сообщения."
-        return "Не удалось открыть подключение Instagram. Проверьте настройки интеграции и попробуйте снова."
+            return "notice_authorization_required"
+        return "notice_error"
 
     @staticmethod
-    def _ui_page(
+    def _ui_response(
         *,
-        title: str,
-        authorized: bool,
-        authorization_url: str,
-        username: Optional[str],
         connected_integration_id: str,
-    ) -> str:
-        safe_title = html.escape(title)
-        account_name = str(username or "").strip()
-        account_label = f"@{account_name.lstrip('@')}" if account_name else "Аккаунт Instagram"
-        safe_account = html.escape(account_label)
-        safe_url = html.escape(authorization_url or "", quote=True)
-        safe_ci = html.escape(connected_integration_id or "", quote=True)
-        status_text = (
-            "Аккаунт Instagram подключен. Сообщения клиентов будут поступать в CRM, а ответы операторов отправляться в Instagram."
-            if authorized
-            else "Подключите аккаунт Instagram, чтобы получать сообщения клиентов в CRM и отвечать им из карточки обращения."
+        locale: str,
+        mode: str,
+        authorization_url: str = "",
+        username: Optional[str] = None,
+        message_key: str = "",
+        message: str = "",
+        disconnect_token: str = "",
+        status_code: int = 200,
+    ) -> HTMLResponse:
+        return HTMLResponse(
+            render_instagram_ui(
+                InstagramUiContext(
+                    connected_integration_id=connected_integration_id,
+                    locale=locale,
+                    mode=mode,
+                    authorization_url=authorization_url,
+                    username=username,
+                    message_key=message_key,
+                    message=message,
+                    disconnect_token=disconnect_token,
+                )
+            ),
+            status_code=status_code,
         )
-        safe_status_text = html.escape(status_text)
-        action_html = (
-            f"""
-            <div class="actions">
-              <span class="badge ok">Подключено</span>
-              <form method="get">
-                <input type="hidden" name="ci" value="{safe_ci}">
-                <input type="hidden" name="action" value="disconnect">
-                <button class="button danger" type="submit" onclick="return confirm('Отключить Instagram?')">Отключить</button>
-              </form>
-            </div>
-            """
-            if authorized
-            else f"<a class='button' href='{safe_url}'>Подключить Instagram</a>"
-            if authorization_url
-            else "<span class='badge warn'>Подключение временно недоступно</span>"
-        )
-        return f"""<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{safe_title}</title>
-  <style>
-    body {{ font-family: Arial, sans-serif; margin: 0; color: #172033; background: #f5f7fb; }}
-    main {{ max-width: 760px; margin: 40px auto; padding: 0 20px; }}
-    section {{ background: #fff; border: 1px solid #dce3ee; border-radius: 8px; padding: 24px; }}
-    h1 {{ font-size: 24px; margin: 0 0 8px; }}
-    p {{ margin: 0 0 20px; color: #536176; }}
-    .account {{ margin: 0 0 22px; color: #172033; font-weight: 600; overflow-wrap: anywhere; }}
-    .actions {{ display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }}
-    form {{ margin: 0; }}
-    .button {{ display: inline-block; padding: 10px 14px; border: 0; border-radius: 6px; background: #1769e0; color: #fff; text-decoration: none; font: inherit; font-weight: 600; cursor: pointer; }}
-    .danger {{ background: #c93535; }}
-    .badge {{ display: inline-block; padding: 8px 10px; border-radius: 6px; font-weight: 600; }}
-    .ok {{ background: #e7f7ee; color: #0d6b3f; }}
-    .warn {{ background: #fff4d8; color: #7a5200; }}
-  </style>
-</head>
-<body>
-  <main>
-    <section>
-      <h1>{safe_title}</h1>
-      <p>{safe_status_text}</p>
-      <p class="account">{safe_account if authorized else "Аккаунт не подключен"}</p>
-      {action_html}
-    </section>
-  </main>
-</body>
-</html>"""
 
     async def connect(self, **_: Any) -> Any:
         if not self.connected_integration_id:
@@ -2710,7 +3525,7 @@ class InstagramCrmChannelIntegration(ClientBase):
                 persist_business_map=True,
                 require_persistent_map=self._is_runtime_authorized(runtime),
             )
-            subscribe_result = await self._subscribe_required_webhooks(ci)
+            await self._subscribe_required_webhooks(ci)
             authorized = self._is_runtime_authorized(runtime)
             if authorized:
                 authorization_url = ""
@@ -2729,10 +3544,8 @@ class InstagramCrmChannelIntegration(ClientBase):
         return {
             "status": "connected",
             "authorized": authorized,
-            "instagram_business_account_id": runtime.instagram_business_account_id,
-            "verify_token": runtime.webhook_verify_token,
-            "webhooks_subscription": subscribe_result,
-            "queue_enabled": True,
+            "authorization_required": not authorized,
+            "account": runtime.username or "",
             "authorization_url": authorization_url,
         }
 
@@ -2806,14 +3619,19 @@ class InstagramCrmChannelIntegration(ClientBase):
         return {"status": "settings updated"}
 
     async def handle_ui(self, envelope: Dict[str, Any]) -> Any:
+        locale = resolve_locale(envelope)
         if str(envelope.get("method") or "").upper() != "GET":
-            return HTMLResponse(
-                self._ui_message_page("Эта страница доступна только для просмотра."),
+            return self._ui_response(
+                connected_integration_id=self._resolve_ci_from_envelope(envelope) or "",
+                locale=locale,
+                mode="unavailable",
                 status_code=405,
             )
         if not _redis_enabled():
-            return HTMLResponse(
-                self._ui_message_page("Подключение Instagram временно недоступно. Попробуйте позже."),
+            return self._ui_response(
+                connected_integration_id=self._resolve_ci_from_envelope(envelope) or "",
+                locale=locale,
+                mode="unavailable",
                 status_code=503,
             )
 
@@ -2821,28 +3639,81 @@ class InstagramCrmChannelIntegration(ClientBase):
         ci = self._resolve_ci_from_envelope(envelope)
 
         state = _query_get(query, "state")
-        state_ci, state_nonce = self._decode_oauth_state(state or "") if state else (None, None)
+        state_ci, state_nonce, state_lang = self._decode_oauth_state(state or "") if state else (None, None, None)
+        has_query_lang = any(_query_get(query, key) for key in ("lang", "locale", "language", "hl"))
+        if state_lang and not has_query_lang:
+            locale = normalize_locale(state_lang)
         if not ci and state_ci:
             ci = state_ci
         if not ci:
-            return HTMLResponse(
-                self._ui_message_page("Откройте страницу подключения из карточки интеграции."),
+            return self._ui_response(
+                connected_integration_id="",
+                locale=locale,
+                mode="missing_context",
                 status_code=400,
             )
 
         if not await self._is_connected_integration_active(ci):
-            return HTMLResponse(
-                self._ui_message_page("Интеграция отключена. Включите ее и попробуйте снова."),
+            return self._ui_response(
+                connected_integration_id=ci,
+                locale=locale,
+                mode="inactive",
                 status_code=403,
             )
 
         action = _query_get(query, "action")
+        if action == "confirm_disconnect":
+            token = await self._store_ui_action_token(ci, "disconnect")
+            try:
+                runtime = await self._load_runtime(
+                    ci,
+                    require_access_token=False,
+                    require_business_id=False,
+                )
+                username = runtime.username
+            except Exception:
+                username = None
+            return self._ui_response(
+                connected_integration_id=ci,
+                locale=locale,
+                mode="confirm_disconnect",
+                username=username,
+                disconnect_token=token,
+                status_code=200,
+            )
+
         if action == "disconnect":
+            token = _query_get(query, "token") or ""
+            if not await self._consume_ui_action_token(ci, "disconnect", token):
+                try:
+                    runtime = await self._load_runtime(
+                        ci,
+                        require_access_token=False,
+                        require_business_id=False,
+                    )
+                    authorization_url = await self._authorization_url(ci, runtime, locale)
+                    username = runtime.username
+                except Exception:
+                    authorization_url = ""
+                    username = None
+                return self._ui_response(
+                    connected_integration_id=ci,
+                    locale=locale,
+                    mode="error",
+                    authorization_url=authorization_url,
+                    username=username,
+                    message_key="notice_invalid_disconnect",
+                    status_code=400,
+                )
+
             self.connected_integration_id = ci
             result = await self.disconnect()
             if isinstance(result, dict) and "result" in result:
-                return HTMLResponse(
-                    self._ui_message_page("Не удалось отключить аккаунт Instagram. Попробуйте еще раз."),
+                return self._ui_response(
+                    connected_integration_id=ci,
+                    locale=locale,
+                    mode="error",
+                    message_key="notice_disconnect_failed",
                     status_code=500,
                 )
             try:
@@ -2851,17 +3722,15 @@ class InstagramCrmChannelIntegration(ClientBase):
                     require_access_token=False,
                     require_business_id=False,
                 )
-                authorization_url = await self._authorization_url(ci, runtime)
+                authorization_url = await self._authorization_url(ci, runtime, locale)
             except Exception:
                 authorization_url = ""
-            return HTMLResponse(
-                self._ui_page(
-                    title="Подключение Instagram",
-                    authorized=False,
-                    authorization_url=authorization_url,
-                    username=None,
-                    connected_integration_id=ci,
-                ),
+            return self._ui_response(
+                connected_integration_id=ci,
+                locale=locale,
+                mode="disconnected_success",
+                authorization_url=authorization_url,
+                username=None,
                 status_code=200,
             )
 
@@ -2873,36 +3742,76 @@ class InstagramCrmChannelIntegration(ClientBase):
                 require_access_token=False,
                 require_business_id=False,
             )
-            await self._sync_reverse_indexes(runtime)
+            authorized_runtime = self._is_runtime_authorized(runtime)
+            await self._sync_reverse_indexes(
+                runtime,
+                persist_business_map=authorized_runtime,
+                require_persistent_map=authorized_runtime,
+            )
+        except BusinessMapConflictError:
+            authorization_url = await self._build_oauth_url(ci, locale)
+            return self._ui_response(
+                connected_integration_id=ci,
+                locale=locale,
+                mode="conflict",
+                authorization_url=authorization_url,
+                username=runtime.username,
+                status_code=409,
+            )
         except Exception as error:
-            return HTMLResponse(self._ui_message_page(self._ui_settings_error_message(error)), status_code=400)
+            return self._ui_response(
+                connected_integration_id=ci,
+                locale=locale,
+                mode="error",
+                message_key=self._ui_settings_error_key(error),
+                status_code=400,
+            )
 
         oauth_error = _query_get(query, "error")
         if oauth_error:
-            return HTMLResponse(
-                self._ui_message_page("Instagram не подтвердил подключение. Попробуйте подключить аккаунт еще раз."),
+            authorization_url = await self._build_oauth_url(ci, locale)
+            return self._ui_response(
+                connected_integration_id=ci,
+                locale=locale,
+                mode="oauth_error",
+                authorization_url=authorization_url,
+                username=runtime.username,
                 status_code=400,
             )
 
         oauth_code = _query_get(query, "code")
         if oauth_code:
             if not state_ci or not state_nonce or state_ci != ci:
-                return HTMLResponse(
-                    self._ui_message_page("Сессия подключения истекла. Вернитесь к интеграции и попробуйте снова."),
+                authorization_url = await self._build_oauth_url(ci, locale)
+                return self._ui_response(
+                    connected_integration_id=ci,
+                    locale=locale,
+                    mode="session_expired",
+                    authorization_url=authorization_url,
+                    username=runtime.username,
                     status_code=400,
                 )
 
             if _redis_enabled():
                 cached_ci = await self._consume_oauth_state(state_nonce)
                 if cached_ci != ci:
-                    return HTMLResponse(
-                        self._ui_message_page("Сессия подключения истекла. Вернитесь к интеграции и попробуйте снова."),
+                    authorization_url = await self._build_oauth_url(ci, locale)
+                    return self._ui_response(
+                        connected_integration_id=ci,
+                        locale=locale,
+                        mode="session_expired",
+                        authorization_url=authorization_url,
+                        username=runtime.username,
                         status_code=400,
                     )
             try:
                 short_token, oauth_user_id = await self._instagram_exchange_code(oauth_code)
                 long_token, expires_at = await self._instagram_exchange_long_lived(short_token)
                 business_id, username = await self._instagram_resolve_account(runtime, long_token, oauth_user_id)
+                await self._assert_business_account_available(
+                    connected_integration_id=ci,
+                    business_id=business_id,
+                )
                 await self._write_business_mapping(
                     connected_integration_id=ci,
                     business_id=business_id,
@@ -2923,33 +3832,48 @@ class InstagramCrmChannelIntegration(ClientBase):
                 )
                 await self._mark_ci_active(ci)
                 await self._ensure_stream_workers()
-                return HTMLResponse(
-                    self._ui_page(
-                        title="Подключение Instagram",
-                        authorized=True,
-                        authorization_url="",
-                        username=runtime.username,
-                        connected_integration_id=ci,
-                    ),
+                return self._ui_response(
+                    connected_integration_id=ci,
+                    locale=locale,
+                    mode="connected_success",
+                    username=runtime.username,
                     status_code=200,
+                )
+            except BusinessMapConflictError:
+                logger.warning("Instagram OAuth account conflict: ci=%s", ci)
+                authorization_url = await self._build_oauth_url(ci, locale)
+                return self._ui_response(
+                    connected_integration_id=ci,
+                    locale=locale,
+                    mode="conflict",
+                    authorization_url=authorization_url,
+                    username=None,
+                    status_code=409,
                 )
             except Exception as error:
                 logger.exception("Instagram OAuth callback failed: ci=%s", ci)
-                return HTMLResponse(
-                    self._ui_message_page("Не удалось завершить подключение Instagram. Попробуйте еще раз."),
+                authorization_url = ""
+                try:
+                    authorization_url = await self._build_oauth_url(ci, locale)
+                except Exception:
+                    pass
+                return self._ui_response(
+                    connected_integration_id=ci,
+                    locale=locale,
+                    mode="error",
+                    authorization_url=authorization_url,
+                    username=runtime.username,
                     status_code=500,
                 )
 
-        authorization_url = await self._authorization_url(ci, runtime)
+        authorization_url = await self._authorization_url(ci, runtime, locale)
         authorized = self._is_runtime_authorized(runtime)
-        return HTMLResponse(
-            self._ui_page(
-                title="Подключение Instagram",
-                authorized=authorized,
-                authorization_url=authorization_url,
-                username=runtime.username,
-                connected_integration_id=ci,
-            ),
+        return self._ui_response(
+            connected_integration_id=ci,
+            locale=locale,
+            mode="connected" if authorized else "disconnected",
+            authorization_url=authorization_url,
+            username=runtime.username,
             status_code=200,
         )
 
@@ -3045,10 +3969,12 @@ class InstagramCrmChannelIntegration(ClientBase):
             return {"status": "ignored", "reason": f"unsupported_action:{normalized_action}"}
 
         try:
+            queue_payload = dict(payload)
+            queue_payload[InstagramCrmChannelConfig.REGOS_ACTION_FIELD] = normalized_action
             await self._enqueue_event(
                 ci,
                 kind="regos_in",
-                payload=payload,
+                payload=queue_payload,
                 event_id=event_id,
             )
             return {"status": "accepted", "queued": 1, "action": normalized_action}
