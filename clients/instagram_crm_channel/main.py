@@ -50,6 +50,7 @@ from schemas.api.crm.ticket import (
     TicketDirectionEnum,
     TicketEditRequest,
     TicketGetRequest,
+    TicketSetStatusRequest,
     TicketStatusEnum,
 )
 from schemas.api.integrations.connected_integration import (
@@ -109,7 +110,11 @@ class InstagramCrmChannelConfig:
         "instagram_business_manage_messages",
     )
 
-    ACTIVE_TICKET_STATUSES = (TicketStatusEnum.Open,)
+    ACTIVE_TICKET_STATUSES = (
+        TicketStatusEnum.Open,
+        TicketStatusEnum.WaitingClient,
+        TicketStatusEnum.WaitingStaff,
+    )
 
     SUPPORTED_INBOUND_WEBHOOKS = {"ChatMessageAdded"}
 
@@ -1197,7 +1202,7 @@ class InstagramCrmChannelIntegration(ClientBase):
         return rows[0]
 
     @classmethod
-    async def _find_open_ticket_for_client(
+    async def _find_active_ticket_for_client(
         cls,
         runtime: RuntimeConfig,
         client_id: int,
@@ -1273,7 +1278,7 @@ class InstagramCrmChannelIntegration(ClientBase):
         if (not client or not client.id) and runtime.find_active_ticket_by_external_id:
             client = await cls._find_client_by_external_id(runtime, external_user_id)
         if client and client.id:
-            ticket = await cls._find_open_ticket_for_client(
+            ticket = await cls._find_active_ticket_for_client(
                 runtime,
                 int(client.id),
                 external_user_id,
@@ -1373,7 +1378,7 @@ class InstagramCrmChannelIntegration(ClientBase):
         if external_user_id:
             resolved_ticket_id = ticket_id
             if not resolved_ticket_id:
-                maybe_ticket = await cls._find_open_ticket_for_client(
+                maybe_ticket = await cls._find_active_ticket_for_client(
                     runtime,
                     int(client_id),
                     external_user_id,
@@ -1388,6 +1393,29 @@ class InstagramCrmChannelIntegration(ClientBase):
                     chat_id,
                 )
         return external_user_id
+
+    @classmethod
+    async def _resolve_ticket_id_by_chat(cls, runtime: RuntimeConfig, chat_id: str) -> Optional[int]:
+        raw = await cls._redis_get(cls._redis_key("map", "by_chat", runtime.connected_integration_id, chat_id))
+        if raw:
+            try:
+                data = _json_loads(raw)
+            except Exception:
+                data = {}
+            ticket_id = _to_int(data.get("ticket_id"), None) if isinstance(data, dict) else None
+            if ticket_id:
+                return int(ticket_id)
+
+        await cls._resolve_external_user_by_chat(runtime, chat_id)
+        raw = await cls._redis_get(cls._redis_key("map", "by_chat", runtime.connected_integration_id, chat_id))
+        if not raw:
+            return None
+        try:
+            data = _json_loads(raw)
+        except Exception:
+            data = {}
+        ticket_id = _to_int(data.get("ticket_id"), None) if isinstance(data, dict) else None
+        return int(ticket_id) if ticket_id else None
 
     @classmethod
     def _render_ticket_subject(
@@ -1461,6 +1489,40 @@ class InstagramCrmChannelIntegration(ClientBase):
                 runtime.connected_integration_id,
                 ticket.id,
                 response.result,
+            )
+
+    @classmethod
+    async def _set_ticket_status_best_effort(
+        cls,
+        runtime: RuntimeConfig,
+        ticket_id: Optional[int],
+        status: TicketStatusEnum,
+        context: str,
+    ) -> None:
+        if not ticket_id:
+            return
+        try:
+            async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
+                response = await api.crm.ticket.set_status(
+                    TicketSetStatusRequest(id=int(ticket_id), status=status)
+                )
+            if not response.ok:
+                logger.warning(
+                    "Ticket/SetStatus rejected: ci=%s ticket_id=%s status=%s context=%s payload=%s",
+                    runtime.connected_integration_id,
+                    ticket_id,
+                    status.value,
+                    context,
+                    response.result,
+                )
+        except Exception as error:
+            logger.warning(
+                "Ticket/SetStatus failed: ci=%s ticket_id=%s status=%s context=%s error=%s",
+                runtime.connected_integration_id,
+                ticket_id,
+                status.value,
+                context,
+                error,
             )
 
     @classmethod
@@ -1727,6 +1789,12 @@ class InstagramCrmChannelIntegration(ClientBase):
                 sender_profile,
             )
             await cls._post_chat_message(runtime, ticket_ctx, external_user_id, text, message_id)
+            await cls._set_ticket_status_best_effort(
+                runtime,
+                ticket_ctx.ticket_id,
+                TicketStatusEnum.WaitingStaff,
+                "instagram_inbound_message_added",
+            )
             return "accepted"
         except Exception:
             if dedupe_acquired:
@@ -1973,6 +2041,13 @@ class InstagramCrmChannelIntegration(ClientBase):
             remote_message_id = await self._instagram_send_text_message(runtime, external_user_id, text)
             external_message_id = self._outbound_external_message_id(runtime, external_user_id, remote_message_id or message_id)
             await self._mark_chat_message_sent(runtime.connected_integration_id, message_id, external_message_id)
+            ticket_id = await self._resolve_ticket_id_by_chat(runtime, chat_id)
+            await self._set_ticket_status_best_effort(
+                runtime,
+                ticket_id,
+                TicketStatusEnum.WaitingClient,
+                "crm_outbound_message_added",
+            )
             return {"status": "accepted", "chat_id": chat_id, "message_id": message_id}
         except Exception:
             if _redis_enabled():
