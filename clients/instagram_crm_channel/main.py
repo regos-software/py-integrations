@@ -18,7 +18,6 @@ from fastapi.responses import HTMLResponse, Response
 from clients.base import ClientBase
 from clients.instagram_crm_channel.storage import (
     ensure_schema as ensure_instagram_db_schema,
-    instagram_mariadb_enabled,
     mark_business_map_inactive,
     resolve_ci_by_business_id as resolve_ci_by_business_id_db,
     upsert_business_map,
@@ -660,27 +659,73 @@ class InstagramCrmChannelIntegration(ClientBase):
         return await cls._build_oauth_url(connected_integration_id)
 
     @classmethod
-    async def _sync_reverse_indexes(cls, runtime: RuntimeConfig) -> None:
-        if runtime.instagram_business_account_id:
-            await cls._redis_set(
-                cls._redis_key("map", "business_ci", runtime.instagram_business_account_id),
-                runtime.connected_integration_id,
-                InstagramCrmChannelConfig.MAP_TTL_SEC,
+    async def _write_business_mapping(
+        cls,
+        *,
+        connected_integration_id: str,
+        business_id: str,
+        username: Optional[str],
+        require_persistent_map: bool,
+        ) -> None:
+        ci = str(connected_integration_id or "").strip()
+        business = str(business_id or "").strip()
+        if not ci:
+            if require_persistent_map:
+                raise RuntimeError("connected_integration_id is required for persistent mapping")
+            return
+        if not business:
+            if require_persistent_map:
+                raise RuntimeError("instagram_business_account_id is required for persistent mapping")
+            return
+
+        await cls._redis_set(
+            cls._redis_key("map", "business_ci", business),
+            ci,
+            InstagramCrmChannelConfig.MAP_TTL_SEC,
+        )
+
+        try:
+            stored = await upsert_business_map(
+                connected_integration_id=ci,
+                business_id=business,
+                username=username,
+                is_active=True,
             )
-            try:
-                await upsert_business_map(
-                    connected_integration_id=runtime.connected_integration_id,
-                    business_id=runtime.instagram_business_account_id,
-                    username=runtime.username,
-                    is_active=True,
-                )
-            except Exception as error:
-                logger.warning(
-                    "Failed to sync Instagram business mapping to MariaDB: ci=%s business_id=%s error=%s",
-                    runtime.connected_integration_id,
-                    runtime.instagram_business_account_id,
-                    error,
-                )
+        except Exception:
+            if require_persistent_map:
+                raise
+            return
+        if require_persistent_map and not stored:
+            raise RuntimeError("Instagram business mapping was not stored")
+
+    @classmethod
+    async def _sync_reverse_indexes(
+        cls,
+        runtime: RuntimeConfig,
+        *,
+        persist_business_map: bool = False,
+        require_persistent_map: bool = False,
+    ) -> None:
+        business_id = str(runtime.instagram_business_account_id or "").strip()
+        if not business_id:
+            if require_persistent_map:
+                raise RuntimeError("instagram_business_account_id is required for persistent mapping")
+            return
+
+        if persist_business_map or require_persistent_map:
+            await cls._write_business_mapping(
+                connected_integration_id=runtime.connected_integration_id,
+                business_id=business_id,
+                username=runtime.username,
+                require_persistent_map=require_persistent_map,
+            )
+            return
+
+        await cls._redis_set(
+            cls._redis_key("map", "business_ci", business_id),
+            runtime.connected_integration_id,
+            InstagramCrmChannelConfig.MAP_TTL_SEC,
+        )
 
     @classmethod
     async def _subscribe_required_webhooks(
@@ -1647,7 +1692,7 @@ class InstagramCrmChannelIntegration(ClientBase):
                     require_access_token=False,
                     require_business_id=False,
                 )
-                await cls._sync_reverse_indexes(runtime)
+                await cls._sync_reverse_indexes(runtime, persist_business_map=True)
             except Exception:
                 continue
             if runtime.instagram_business_account_id == expected:
@@ -1763,7 +1808,11 @@ class InstagramCrmChannelIntegration(ClientBase):
                     require_access_token=False,
                     require_business_id=False,
                 )
-                await cls._sync_reverse_indexes(runtime)
+                await cls._sync_reverse_indexes(
+                    runtime,
+                    persist_business_map=True,
+                    require_persistent_map=cls._is_runtime_authorized(runtime),
+                )
                 await cls._mark_ci_active(ci)
                 restored += 1
             except Exception as error:
@@ -2101,14 +2150,17 @@ class InstagramCrmChannelIntegration(ClientBase):
             return self._error_response(1004, f"ConnectedIntegration '{ci}' is inactive").dict()
 
         try:
-            if instagram_mariadb_enabled():
-                await ensure_instagram_db_schema()
+            await ensure_instagram_db_schema()
             runtime = await self._load_runtime(
                 ci,
                 require_access_token=False,
                 require_business_id=False,
             )
-            await self._sync_reverse_indexes(runtime)
+            await self._sync_reverse_indexes(
+                runtime,
+                persist_business_map=True,
+                require_persistent_map=self._is_runtime_authorized(runtime),
+            )
             subscribe_result = await self._subscribe_required_webhooks(ci)
             authorized = self._is_runtime_authorized(runtime)
             if authorized:
@@ -2122,6 +2174,7 @@ class InstagramCrmChannelIntegration(ClientBase):
                 await self._mark_ci_inactive(ci)
                 raise
         except Exception as error:
+            logger.exception("Instagram connect failed: ci=%s", ci)
             return self._error_response(1001, str(error)).dict()
 
         return {
@@ -2301,6 +2354,12 @@ class InstagramCrmChannelIntegration(ClientBase):
                 short_token, oauth_user_id = await self._instagram_exchange_code(oauth_code)
                 long_token, expires_at = await self._instagram_exchange_long_lived(short_token)
                 business_id, username = await self._instagram_resolve_account(runtime, long_token, oauth_user_id)
+                await self._write_business_mapping(
+                    connected_integration_id=ci,
+                    business_id=business_id,
+                    username=username,
+                    require_persistent_map=True,
+                )
                 updated_settings_map = await self._edit_settings(ci, {
                     "instagram_business_account_id": business_id,
                     "instagram_access_token": long_token,
@@ -2313,7 +2372,6 @@ class InstagramCrmChannelIntegration(ClientBase):
                     updated_settings_map,
                     require_access_token=True,
                 )
-                await self._sync_reverse_indexes(runtime)
                 await self._mark_ci_active(ci)
                 await self._ensure_stream_workers()
                 return HTMLResponse(

@@ -20,10 +20,14 @@ def instagram_mariadb_enabled() -> bool:
     return mariadb_is_enabled()
 
 
+def _require_instagram_mariadb() -> None:
+    if not instagram_mariadb_enabled():
+        raise RuntimeError("MariaDB is required for instagram_crm_channel")
+
+
 async def ensure_schema(*, force: bool = False) -> bool:
     global _SCHEMA_READY
-    if not instagram_mariadb_enabled():
-        return False
+    _require_instagram_mariadb()
     if _SCHEMA_READY and not force:
         return True
 
@@ -51,29 +55,37 @@ async def upsert_business_map(
 ) -> bool:
     ci = str(connected_integration_id or "").strip()
     business = str(business_id or "").strip()
-    if not ci or not business or not instagram_mariadb_enabled():
+    if not ci or not business:
         return False
 
-    await ensure_schema()
-    await mariadb_ops.execute(
-        f"""
-        INSERT INTO {_BUSINESS_MAP_TABLE}
-            (`business_id`, `connected_integration_id`, `username`, `is_active`)
-        VALUES (%s, %s, %s, %s)
-        ON DUPLICATE KEY UPDATE
-            `connected_integration_id` = VALUES(`connected_integration_id`),
-            `username` = VALUES(`username`),
-            `is_active` = VALUES(`is_active`),
-            `updated_at` = CURRENT_TIMESTAMP
-        """,
-        (business, ci, str(username or "").strip() or None, 1 if is_active else 0),
-    )
+    try:
+        await ensure_schema()
+        await mariadb_ops.execute(
+            f"""
+            INSERT INTO {_BUSINESS_MAP_TABLE}
+                (`business_id`, `connected_integration_id`, `username`, `is_active`)
+            VALUES (%s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                `connected_integration_id` = VALUES(`connected_integration_id`),
+                `username` = VALUES(`username`),
+                `is_active` = VALUES(`is_active`),
+                `updated_at` = CURRENT_TIMESTAMP
+            """,
+            (business, ci, str(username or "").strip() or None, 1 if is_active else 0),
+        )
+    except Exception:
+        logger.exception(
+            "Failed to write Instagram business mapping: ci=%s business_id=%s",
+            ci,
+            business,
+        )
+        raise
     return True
 
 
 async def resolve_ci_by_business_id(business_id: str) -> Optional[str]:
     business = str(business_id or "").strip()
-    if not business or not instagram_mariadb_enabled():
+    if not business:
         return None
 
     await ensure_schema()
@@ -98,26 +110,34 @@ async def mark_business_map_inactive(
 ) -> bool:
     ci = str(connected_integration_id or "").strip()
     business = str(business_id or "").strip()
-    if not ci or not instagram_mariadb_enabled():
+    if not ci:
         return False
 
-    await ensure_schema()
-    if business:
-        await mariadb_ops.execute(
-            f"""
-            UPDATE {_BUSINESS_MAP_TABLE}
-            SET `is_active` = 0, `updated_at` = CURRENT_TIMESTAMP
-            WHERE `connected_integration_id` = %s AND `business_id` = %s
-            """,
-            (ci, business),
+    try:
+        await ensure_schema()
+        if business:
+            await mariadb_ops.execute(
+                f"""
+                UPDATE {_BUSINESS_MAP_TABLE}
+                SET `is_active` = 0, `updated_at` = CURRENT_TIMESTAMP
+                WHERE `connected_integration_id` = %s AND `business_id` = %s
+                """,
+                (ci, business),
+            )
+        else:
+            await mariadb_ops.execute(
+                f"""
+                UPDATE {_BUSINESS_MAP_TABLE}
+                SET `is_active` = 0, `updated_at` = CURRENT_TIMESTAMP
+                WHERE `connected_integration_id` = %s
+                """,
+                (ci,),
+            )
+    except Exception:
+        logger.exception(
+            "Failed to mark Instagram business mapping inactive: ci=%s business_id=%s",
+            ci,
+            business or "",
         )
-    else:
-        await mariadb_ops.execute(
-            f"""
-            UPDATE {_BUSINESS_MAP_TABLE}
-            SET `is_active` = 0, `updated_at` = CURRENT_TIMESTAMP
-            WHERE `connected_integration_id` = %s
-            """,
-            (ci,),
-        )
+        raise
     return True
