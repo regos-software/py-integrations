@@ -106,8 +106,8 @@ class InstagramCrmChannelConfig:
 
     OAUTH_SCOPES = (
         "instagram_business_basic",
+        "instagram_manage_comments",
         "instagram_business_manage_messages",
-        "instagram_business_manage_comments",
     )
 
     ACTIVE_TICKET_STATUSES = (TicketStatusEnum.Open,)
