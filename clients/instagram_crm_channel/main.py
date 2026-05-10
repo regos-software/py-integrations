@@ -102,6 +102,7 @@ class InstagramCrmChannelConfig:
     STREAM_MIN_IDLE_MS = 60_000
     STREAM_CLAIM_INTERVAL_SEC = 30
     STREAM_MAX_RETRIES = max(int(app_settings.instagram_crm_channel_stream_retry_limit or 0), 1)
+    WEBHOOK_DEBUG_TTL_SEC = 30
     ACTIVE_CI_IDS_TTL_SEC = 7 * 24 * 60 * 60
     WORKER_HEARTBEAT_TTL_SEC = 60
 
@@ -282,6 +283,10 @@ class InstagramCrmChannelIntegration(ClientBase):
     def _worker_heartbeat_key(cls, connected_integration_id: str) -> str:
         return cls._redis_key("worker", "heartbeat", connected_integration_id)
 
+    @classmethod
+    def _webhook_debug_key(cls) -> str:
+        return cls._redis_key("webhook_debug", str(_now_ts()), uuid.uuid4().hex)
+
     @staticmethod
     def _active_ci_ids_ttl() -> int:
         return redis_ttl_seconds(InstagramCrmChannelConfig.ACTIVE_CI_IDS_TTL_SEC)
@@ -329,6 +334,49 @@ class InstagramCrmChannelIntegration(ClientBase):
         rows = [str(key).strip() for key in keys if str(key or "").strip()]
         if rows:
             await redis_ops.delete(*rows)
+
+    @classmethod
+    async def _store_webhook_debug_snapshot(
+        cls,
+        *,
+        envelope: Dict[str, Any],
+        body: Any,
+        raw_body: Any,
+        resolved_ci: Optional[str],
+    ) -> None:
+        if not _redis_enabled():
+            return
+        if isinstance(raw_body, bytes):
+            raw_text = raw_body.decode("utf-8", errors="replace")
+        elif raw_body is None:
+            raw_text = ""
+        else:
+            raw_text = str(raw_body)
+        if isinstance(body, bytes):
+            body_value: Any = body.decode("utf-8", errors="replace")
+        elif isinstance(body, bytearray):
+            body_value = bytes(body).decode("utf-8", errors="replace")
+        else:
+            body_value = body
+
+        payload = {
+            "ts": _now_ts(),
+            "method": str(envelope.get("method") or ""),
+            "path": str(envelope.get("path") or ""),
+            "external_path": str(envelope.get("external_path") or ""),
+            "connected_integration_id": str(resolved_ci or ""),
+            "business_ids": cls._business_ids_from_webhook_body(body),
+            "query": envelope.get("query") if isinstance(envelope.get("query"), dict) else {},
+            "headers": envelope.get("headers") if isinstance(envelope.get("headers"), dict) else {},
+            "body": body_value,
+            "raw_body": raw_text,
+        }
+        await cls._redis_set(
+            cls._webhook_debug_key(),
+            _json_dumps(payload),
+            InstagramCrmChannelConfig.WEBHOOK_DEBUG_TTL_SEC,
+            min_ttl_sec=1,
+        )
 
     @classmethod
     def _resolve_stream_ttl(cls) -> int:
@@ -2923,6 +2971,12 @@ class InstagramCrmChannelIntegration(ClientBase):
                 status_code=503,
                 content="Redis is required for this integration",
             )
+        await self._store_webhook_debug_snapshot(
+            envelope=envelope,
+            body=body,
+            raw_body=raw_body,
+            resolved_ci=ci,
+        )
         if not isinstance(body, dict):
             return self._error_response(400, "Invalid webhook payload").dict()
 
