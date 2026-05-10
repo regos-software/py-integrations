@@ -236,10 +236,6 @@ class InstagramCrmChannelIntegration(ClientBase):
         return cls._redis_key("settings", connected_integration_id)
 
     @classmethod
-    def _authorization_url_cache_key(cls, connected_integration_id: str) -> str:
-        return cls._redis_key("oauth_url", connected_integration_id)
-
-    @classmethod
     def _ci_active_cache_key(cls, connected_integration_id: str) -> str:
         return cls._redis_key("ci_active", connected_integration_id)
 
@@ -635,21 +631,6 @@ class InstagramCrmChannelIntegration(ClientBase):
             'state': cls._encode_oauth_state(connected_integration_id, nonce),
         })}"
 
-    @classmethod
-    async def _cached_oauth_url(cls, connected_integration_id: str) -> str:
-        cache_key = cls._authorization_url_cache_key(connected_integration_id)
-        cached = await cls._redis_get(cache_key)
-        if cached:
-            return cached
-        authorization_url = await cls._build_oauth_url(connected_integration_id)
-        await cls._redis_set(
-            cache_key,
-            authorization_url,
-            max(InstagramCrmChannelConfig.OAUTH_STATE_TTL_SEC - 60, 30),
-            min_ttl_sec=30,
-        )
-        return authorization_url
-
     @staticmethod
     def _is_runtime_authorized(runtime: RuntimeConfig) -> bool:
         return bool(runtime.instagram_business_account_id and runtime.access_token)
@@ -676,7 +657,7 @@ class InstagramCrmChannelIntegration(ClientBase):
     ) -> str:
         if cls._is_runtime_authorized(runtime):
             return ""
-        return await cls._cached_oauth_url(connected_integration_id)
+        return await cls._build_oauth_url(connected_integration_id)
 
     @classmethod
     async def _sync_reverse_indexes(cls, runtime: RuntimeConfig) -> None:
@@ -2133,7 +2114,7 @@ class InstagramCrmChannelIntegration(ClientBase):
             if authorized:
                 authorization_url = ""
             else:
-                authorization_url = await self._cached_oauth_url(ci)
+                authorization_url = await self._build_oauth_url(ci)
             await self._mark_ci_active(ci)
             try:
                 await self._ensure_stream_workers()
@@ -2204,7 +2185,6 @@ class InstagramCrmChannelIntegration(ClientBase):
         await self._redis_delete(
             self._settings_cache_key(ci),
             self._ci_active_cache_key(ci),
-            self._authorization_url_cache_key(ci),
             self._webhooks_subscription_cache_key(ci),
         )
         return {"status": "disconnected"}
@@ -2317,8 +2297,6 @@ class InstagramCrmChannelIntegration(ClientBase):
                         self._ui_message_page("Сессия подключения истекла. Вернитесь к интеграции и попробуйте снова."),
                         status_code=400,
                     )
-                await self._redis_delete(self._authorization_url_cache_key(ci))
-
             try:
                 short_token, oauth_user_id = await self._instagram_exchange_code(oauth_code)
                 long_token, expires_at = await self._instagram_exchange_long_lived(short_token)
@@ -2330,7 +2308,6 @@ class InstagramCrmChannelIntegration(ClientBase):
                     "instagram_username": username or "",
                     **self._authorization_settings_patch(authorized=True),
                 }, settings_map=settings_map)
-                await self._redis_delete(self._authorization_url_cache_key(ci))
                 runtime = self._runtime_from_settings_map(
                     ci,
                     updated_settings_map,
