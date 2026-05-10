@@ -18,8 +18,8 @@ from clients.base import ClientBase
 from clients.instagram_crm_channel.storage import (
     BusinessMapConflictError,
     ensure_schema as ensure_instagram_db_schema,
-    get_business_map,
     mark_business_map_inactive,
+    reassign_business_map,
     resolve_ci_by_business_id as resolve_ci_by_business_id_db,
     upsert_business_map,
 )
@@ -147,7 +147,6 @@ class InstagramAuthorizationRefreshError(RuntimeError):
 class RuntimeConfig:
     connected_integration_id: str
     instagram_business_account_id: str
-    pipeline_id: int
     channel_id: int
     default_responsible_user_id: Optional[int]
     ticket_subject_template: str
@@ -511,10 +510,12 @@ class InstagramCrmChannelIntegration(ClientBase):
 
     @classmethod
     async def _mark_ci_inactive(cls, connected_integration_id: str) -> None:
-        if not _redis_enabled():
-            return
         ci = str(connected_integration_id or "").strip()
-        if ci:
+        if not ci:
+            return
+        async with cls._ACTIVE_CACHE_LOCK:
+            cls._ACTIVE_CACHE.pop(ci, None)
+        if _redis_enabled():
             await redis_ops.srem(cls._active_ci_ids_key(), ci)
 
     @classmethod
@@ -692,12 +693,9 @@ class InstagramCrmChannelIntegration(ClientBase):
     ) -> RuntimeConfig:
         settings_map = cls._normalize_settings_map(settings_map)
         business_id = str(settings_map.get("instagram_business_account_id") or "").strip()
-        pipeline_id = _to_int(settings_map.get("instagram_pipeline_id"), None)
         channel_id = _to_int(settings_map.get("instagram_channel_id"), None)
         if require_business_id and not business_id:
             raise ValueError("instagram_business_account_id is required")
-        if not pipeline_id or pipeline_id <= 0:
-            raise ValueError("instagram_pipeline_id must be > 0")
         if not channel_id or channel_id <= 0:
             raise ValueError("instagram_channel_id must be > 0")
 
@@ -714,7 +712,6 @@ class InstagramCrmChannelIntegration(ClientBase):
         return RuntimeConfig(
             connected_integration_id=connected_integration_id,
             instagram_business_account_id=business_id,
-            pipeline_id=int(pipeline_id),
             channel_id=int(channel_id),
             default_responsible_user_id=_to_int(settings_map.get("instagram_default_responsible_user_id"), None),
             ticket_subject_template=str(settings_map.get("instagram_ticket_subject_template") or "").strip() or "Instagram {client_name}",
@@ -835,25 +832,93 @@ class InstagramCrmChannelIntegration(ClientBase):
             )
 
     @classmethod
-    async def _assert_business_account_available(
+    async def _clear_instagram_account_binding(
+        cls,
+        connected_integration_id: str,
+        *,
+        expected_business_id: Optional[str] = None,
+    ) -> None:
+        ci = str(connected_integration_id or "").strip()
+        expected = str(expected_business_id or "").strip()
+        if not ci:
+            return
+
+        should_clear_settings = True
+        if expected:
+            try:
+                settings_map = await cls._fetch_settings_map(ci, force_refresh=True)
+                current_business = str(
+                    settings_map.get("instagram_business_account_id") or ""
+                ).strip()
+                should_clear_settings = not current_business or current_business == expected
+            except Exception as error:
+                logger.warning(
+                    "Failed to read previous Instagram integration settings before unlink: ci=%s business_id=%s error=%s",
+                    ci,
+                    expected,
+                    error,
+                )
+                should_clear_settings = True
+
+        if not should_clear_settings:
+            return
+
+        try:
+            await cls._edit_settings(
+                ci,
+                {
+                    "instagram_business_account_id": "",
+                    "instagram_access_token": "",
+                    "instagram_access_token_expires_at": "",
+                    "instagram_username": "",
+                    **cls._authorization_settings_patch(authorized=False),
+                },
+            )
+        except Exception as error:
+            logger.warning(
+                "Failed to clear previous Instagram integration settings: ci=%s business_id=%s error=%s",
+                ci,
+                expected,
+                error,
+            )
+
+        await cls._mark_ci_inactive(ci)
+        await cls._redis_delete(
+            cls._settings_cache_key(ci),
+            cls._ci_active_cache_key(ci),
+            cls._webhooks_subscription_cache_key(ci),
+        )
+
+    @classmethod
+    async def _move_business_mapping_to_integration(
         cls,
         *,
         connected_integration_id: str,
         business_id: str,
+        username: Optional[str],
     ) -> None:
         ci = str(connected_integration_id or "").strip()
         business = str(business_id or "").strip()
-        if not ci or not business:
-            return
-        row = await get_business_map(business)
-        if not row or not row.get("is_active"):
-            return
-        existing_ci = str(row.get("connected_integration_id") or "").strip()
-        if existing_ci and existing_ci != ci:
-            raise BusinessMapConflictError(
-                business_id=business,
-                connected_integration_id=existing_ci,
+        if not ci:
+            raise RuntimeError("connected_integration_id is required for persistent mapping")
+        if not business:
+            raise RuntimeError("instagram_business_account_id is required for persistent mapping")
+
+        previous_ci = await reassign_business_map(
+            connected_integration_id=ci,
+            business_id=business,
+            username=username,
+        )
+        if previous_ci and previous_ci != ci:
+            await cls._clear_instagram_account_binding(
+                previous_ci,
+                expected_business_id=business,
             )
+        await cls._redis_set(
+            cls._redis_key("map", "business_ci", business),
+            ci,
+            InstagramCrmChannelConfig.MAP_TTL_SEC,
+        )
 
     @classmethod
     async def _sync_reverse_indexes(
@@ -3464,8 +3529,6 @@ class InstagramCrmChannelIntegration(ClientBase):
     @classmethod
     def _ui_settings_error_key(cls, error: Exception) -> str:
         text = str(error or "")
-        if "instagram_pipeline_id" in text:
-            return "notice_pipeline_required"
         if "instagram_channel_id" in text:
             return "notice_channel_required"
         if "Service Instagram app config" in text or "Service Instagram webhook verify token" in text:
@@ -3537,6 +3600,26 @@ class InstagramCrmChannelIntegration(ClientBase):
             except Exception:
                 await self._mark_ci_inactive(ci)
                 raise
+        except BusinessMapConflictError as error:
+            logger.warning(
+                "Instagram connect found account moved to another integration: ci=%s business_id=%s owner_ci=%s",
+                ci,
+                error.business_id,
+                error.connected_integration_id,
+            )
+            await self._clear_instagram_account_binding(
+                ci,
+                expected_business_id=error.business_id,
+            )
+            runtime = await self._load_runtime(
+                ci,
+                require_access_token=False,
+                require_business_id=False,
+            )
+            await self._subscribe_required_webhooks(ci)
+            authorized = False
+            authorization_url = await self._build_oauth_url(ci)
+            await self._mark_ci_active(ci)
         except Exception as error:
             logger.exception("Instagram connect failed: ci=%s", ci)
             return self._error_response(1001, str(error)).dict()
@@ -3748,15 +3831,19 @@ class InstagramCrmChannelIntegration(ClientBase):
                 persist_business_map=authorized_runtime,
                 require_persistent_map=authorized_runtime,
             )
-        except BusinessMapConflictError:
+        except BusinessMapConflictError as error:
+            await self._clear_instagram_account_binding(
+                ci,
+                expected_business_id=error.business_id,
+            )
             authorization_url = await self._build_oauth_url(ci, locale)
             return self._ui_response(
                 connected_integration_id=ci,
                 locale=locale,
-                mode="conflict",
+                mode="disconnected",
                 authorization_url=authorization_url,
-                username=runtime.username,
-                status_code=409,
+                username=None,
+                status_code=200,
             )
         except Exception as error:
             return self._ui_response(
@@ -3808,15 +3895,10 @@ class InstagramCrmChannelIntegration(ClientBase):
                 short_token, oauth_user_id = await self._instagram_exchange_code(oauth_code)
                 long_token, expires_at = await self._instagram_exchange_long_lived(short_token)
                 business_id, username = await self._instagram_resolve_account(runtime, long_token, oauth_user_id)
-                await self._assert_business_account_available(
-                    connected_integration_id=ci,
-                    business_id=business_id,
-                )
-                await self._write_business_mapping(
+                await self._move_business_mapping_to_integration(
                     connected_integration_id=ci,
                     business_id=business_id,
                     username=username,
-                    require_persistent_map=True,
                 )
                 updated_settings_map = await self._edit_settings(ci, {
                     "instagram_business_account_id": business_id,
@@ -3838,17 +3920,6 @@ class InstagramCrmChannelIntegration(ClientBase):
                     mode="connected_success",
                     username=runtime.username,
                     status_code=200,
-                )
-            except BusinessMapConflictError:
-                logger.warning("Instagram OAuth account conflict: ci=%s", ci)
-                authorization_url = await self._build_oauth_url(ci, locale)
-                return self._ui_response(
-                    connected_integration_id=ci,
-                    locale=locale,
-                    mode="conflict",
-                    authorization_url=authorization_url,
-                    username=None,
-                    status_code=409,
                 )
             except Exception as error:
                 logger.exception("Instagram OAuth callback failed: ci=%s", ci)

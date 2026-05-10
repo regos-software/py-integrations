@@ -5,6 +5,7 @@ import html
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 from fastapi.responses import HTMLResponse, Response
@@ -300,12 +301,29 @@ class MetaLeadgenCrmChannelIntegration(ClientBase):
         )
 
     @staticmethod
-    def _authorization_url_is_fresh(settings_map: Dict[str, str]) -> bool:
+    def _authorization_url_has_current_scopes(authorization_url: str) -> bool:
+        try:
+            parsed = urlparse(str(authorization_url or ""))
+            query = parse_qs(parsed.query)
+        except Exception:
+            return False
+        scopes = query.get("scope") or []
+        scope_value = str(scopes[0] if scopes else "").strip()
+        return scope_value == ",".join(MetaLeadgenCrmChannelConfig.OAUTH_SCOPES)
+
+    @classmethod
+    def _authorization_url_is_fresh(
+        cls,
+        settings_map: Dict[str, str],
+        authorization_url: str,
+    ) -> bool:
         generated_at = to_int(
             settings_map.get(MetaLeadgenCrmChannelConfig.SETTING_AUTHORIZATION_URL_GENERATED_AT),
             None,
         )
         if not generated_at:
+            return False
+        if not cls._authorization_url_has_current_scopes(authorization_url):
             return False
         return now_ts() < int(generated_at) + MetaLeadgenCrmChannelConfig.OAUTH_STATE_TTL_SEC - 60
 
@@ -328,7 +346,7 @@ class MetaLeadgenCrmChannelIntegration(ClientBase):
         existing_url = normalize_text(
             settings_map.get(MetaLeadgenCrmChannelConfig.SETTING_AUTHORIZATION_URL)
         )
-        if existing_url and cls._authorization_url_is_fresh(settings_map):
+        if existing_url and cls._authorization_url_is_fresh(settings_map, existing_url):
             return existing_url
 
         generated_at = now_ts()
