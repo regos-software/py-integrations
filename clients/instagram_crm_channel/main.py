@@ -10,7 +10,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import httpx
 from fastapi.responses import HTMLResponse, Response
@@ -48,6 +48,7 @@ from schemas.api.crm.ticket import (
     Ticket,
     TicketAddRequest,
     TicketDirectionEnum,
+    TicketEditRequest,
     TicketGetRequest,
     TicketStatusEnum,
 )
@@ -89,7 +90,6 @@ class InstagramCrmChannelConfig:
     DEDUPE_TTL_SEC = 24 * 60 * 60
     LOCK_TTL_SEC = 30
     OAUTH_STATE_TTL_SEC = 10 * 60
-    WEBHOOK_DEBUG_TTL_SEC = 30
     ACTIVE_CACHE_TTL_SEC = 30
     HTTP_TIMEOUT_SEC = 30
     STREAM_GROUP = "instagram_crm_channel_workers"
@@ -184,6 +184,23 @@ def _row_to_dict(row: Any) -> Dict[str, Any]:
     return {}
 
 
+def _enum_text(value: Any) -> str:
+    raw = getattr(value, "value", value)
+    return str(raw or "").strip().lower()
+
+
+def _extract_add_new_id(result: Any) -> Optional[int]:
+    direct = _to_int(result, None)
+    if direct and direct > 0:
+        return int(direct)
+    payload = _row_to_dict(result)
+    for key in ("new_id", "id", "ticket_id", "client_id"):
+        value = _to_int(payload.get(key), None)
+        if value and value > 0:
+            return int(value)
+    return None
+
+
 def _query_get(query: Dict[str, Any], key: str) -> Optional[str]:
     value = query.get(key)
     if isinstance(value, list):
@@ -260,10 +277,6 @@ class InstagramCrmChannelIntegration(ClientBase):
     def _worker_heartbeat_key(cls, connected_integration_id: str) -> str:
         return cls._redis_key("worker", "heartbeat", connected_integration_id)
 
-    @classmethod
-    def _webhook_debug_key(cls) -> str:
-        return cls._redis_key("webhook_debug", str(_now_ts()), uuid.uuid4().hex)
-
     @staticmethod
     def _active_ci_ids_ttl() -> int:
         return redis_ttl_seconds(InstagramCrmChannelConfig.ACTIVE_CI_IDS_TTL_SEC)
@@ -311,49 +324,6 @@ class InstagramCrmChannelIntegration(ClientBase):
         rows = [str(key).strip() for key in keys if str(key or "").strip()]
         if rows:
             await redis_ops.delete(*rows)
-
-    @classmethod
-    async def _store_webhook_debug_snapshot(
-        cls,
-        *,
-        envelope: Dict[str, Any],
-        body: Any,
-        raw_body: Any,
-        resolved_ci: Optional[str],
-    ) -> None:
-        if not _redis_enabled():
-            return
-        if isinstance(raw_body, bytes):
-            raw_text = raw_body.decode("utf-8", errors="replace")
-        elif raw_body is None:
-            raw_text = ""
-        else:
-            raw_text = str(raw_body)
-        if isinstance(body, bytes):
-            body_value: Any = body.decode("utf-8", errors="replace")
-        elif isinstance(body, bytearray):
-            body_value = bytes(body).decode("utf-8", errors="replace")
-        else:
-            body_value = body
-
-        payload = {
-            "ts": _now_ts(),
-            "method": str(envelope.get("method") or ""),
-            "path": str(envelope.get("path") or ""),
-            "external_path": str(envelope.get("external_path") or ""),
-            "connected_integration_id": str(resolved_ci or ""),
-            "business_ids": cls._business_ids_from_webhook_body(body),
-            "query": envelope.get("query") if isinstance(envelope.get("query"), dict) else {},
-            "headers": envelope.get("headers") if isinstance(envelope.get("headers"), dict) else {},
-            "body": body_value,
-            "raw_body": raw_text,
-        }
-        await cls._redis_set(
-            cls._webhook_debug_key(),
-            _json_dumps(payload),
-            InstagramCrmChannelConfig.WEBHOOK_DEBUG_TTL_SEC,
-            min_ttl_sec=1,
-        )
 
     @classmethod
     def _resolve_stream_ttl(cls) -> int:
@@ -638,7 +608,7 @@ class InstagramCrmChannelIntegration(ClientBase):
             pipeline_id=int(pipeline_id),
             channel_id=int(channel_id),
             default_responsible_user_id=_to_int(settings_map.get("instagram_default_responsible_user_id"), None),
-            ticket_subject_template=str(settings_map.get("instagram_ticket_subject_template") or "").strip() or "Instagram {client_id}",
+            ticket_subject_template=str(settings_map.get("instagram_ticket_subject_template") or "").strip() or "Instagram {client_name}",
             webhook_verify_token=webhook_verify_token,
             access_token=access_token,
             access_token_expires_at=access_token_expires_at,
@@ -880,6 +850,170 @@ class InstagramCrmChannelIntegration(ClientBase):
         return tail or None
 
     @classmethod
+    def _sender_profile_cache_key(cls, runtime: RuntimeConfig, external_user_id: str) -> str:
+        return cls._redis_key("profile", runtime.connected_integration_id, external_user_id)
+
+    @staticmethod
+    def _sender_display_name(profile: Optional[Dict[str, Any]], external_user_id: str) -> str:
+        data = profile if isinstance(profile, dict) else {}
+        username = str(data.get("username") or "").strip().lstrip("@")
+        name = str(data.get("name") or "").strip()
+        if username:
+            return username[:120]
+        if name:
+            return name[:120]
+        return f"Instagram {external_user_id}"[:120]
+
+    @classmethod
+    async def _load_sender_profile_cache(
+        cls,
+        runtime: RuntimeConfig,
+        external_user_id: str,
+    ) -> Dict[str, Any]:
+        raw = await cls._redis_get(cls._sender_profile_cache_key(runtime, external_user_id))
+        if not raw:
+            return {}
+        try:
+            payload = _json_loads(raw)
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    @classmethod
+    async def _store_sender_profile_cache(
+        cls,
+        runtime: RuntimeConfig,
+        external_user_id: str,
+        profile: Dict[str, Any],
+    ) -> None:
+        if not profile:
+            return
+        await cls._redis_set(
+            cls._sender_profile_cache_key(runtime, external_user_id),
+            _json_dumps(profile),
+            InstagramCrmChannelConfig.MAP_TTL_SEC,
+        )
+
+    @classmethod
+    async def _fetch_message_sender_profile(
+        cls,
+        runtime: RuntimeConfig,
+        message_id: str,
+        external_user_id: str,
+    ) -> Dict[str, Any]:
+        if not runtime.access_token or not message_id:
+            return {}
+        try:
+            async with httpx.AsyncClient(timeout=InstagramCrmChannelConfig.HTTP_TIMEOUT_SEC) as client:
+                response = await client.get(
+                    f"{InstagramCrmChannelConfig.GRAPH_BASE_URL}/{quote(message_id, safe='')}",
+                    params={
+                        "access_token": runtime.access_token,
+                        "fields": "id,created_time,from,to,message",
+                    },
+                )
+            response.raise_for_status()
+            payload = response.json() if response.content else {}
+        except Exception as error:
+            logger.warning(
+                "Failed to fetch Instagram message details: ci=%s message_id=%s error=%s",
+                runtime.connected_integration_id,
+                message_id,
+                error,
+            )
+            return {}
+
+        sender = payload.get("from") if isinstance(payload, dict) else None
+        if not isinstance(sender, dict):
+            return {}
+        sender_id = str(sender.get("id") or "").strip()
+        if sender_id and sender_id != str(external_user_id or "").strip():
+            return {}
+        profile = {
+            "id": sender_id or str(external_user_id or "").strip(),
+            "username": str(sender.get("username") or "").strip(),
+            "name": str(sender.get("name") or "").strip(),
+        }
+        return {key: value for key, value in profile.items() if value}
+
+    @classmethod
+    async def _fetch_sender_profile(
+        cls,
+        runtime: RuntimeConfig,
+        external_user_id: str,
+    ) -> Dict[str, Any]:
+        if not runtime.access_token or not external_user_id:
+            return {}
+        try:
+            async with httpx.AsyncClient(timeout=InstagramCrmChannelConfig.HTTP_TIMEOUT_SEC) as client:
+                response = await client.get(
+                    f"{InstagramCrmChannelConfig.GRAPH_BASE_URL}/{quote(external_user_id, safe='')}",
+                    params={
+                        "access_token": runtime.access_token,
+                        "fields": "id,username,name,profile_pic",
+                    },
+                )
+            response.raise_for_status()
+            payload = response.json() if response.content else {}
+        except Exception as error:
+            logger.warning(
+                "Failed to fetch Instagram sender profile: ci=%s external_user_id=%s error=%s",
+                runtime.connected_integration_id,
+                external_user_id,
+                error,
+            )
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        sender_id = str(payload.get("id") or "").strip()
+        if sender_id and sender_id != str(external_user_id or "").strip():
+            return {}
+        profile = {
+            "id": sender_id or str(external_user_id or "").strip(),
+            "username": str(payload.get("username") or "").strip(),
+            "name": str(payload.get("name") or "").strip(),
+            "photo_url": str(payload.get("profile_pic") or "").strip(),
+        }
+        return {key: value for key, value in profile.items() if value}
+
+    @classmethod
+    async def _resolve_sender_profile(
+        cls,
+        runtime: RuntimeConfig,
+        event: Dict[str, Any],
+        external_user_id: str,
+        message_id: str,
+    ) -> Dict[str, Any]:
+        sender = event.get("sender") if isinstance(event, dict) else None
+        profile: Dict[str, Any] = {}
+        if isinstance(sender, dict):
+            for key in ("id", "username", "name"):
+                value = str(sender.get(key) or "").strip()
+                if value:
+                    profile[key] = value
+
+        cached = await cls._load_sender_profile_cache(runtime, external_user_id)
+        for key, value in cached.items():
+            if value and not profile.get(key):
+                profile[key] = value
+
+        if not profile.get("username") or not profile.get("photo_url"):
+            fetched = await cls._fetch_sender_profile(runtime, external_user_id)
+            for key, value in fetched.items():
+                if value:
+                    profile[key] = value
+
+        if not profile.get("username") and message_id:
+            fetched = await cls._fetch_message_sender_profile(runtime, message_id, external_user_id)
+            for key, value in fetched.items():
+                if value:
+                    profile[key] = value
+
+        if profile:
+            await cls._store_sender_profile_cache(runtime, external_user_id, profile)
+        return profile
+
+    @classmethod
     async def _get_client_by_id(
         cls, runtime: RuntimeConfig, client_id: int
     ) -> Optional[Client]:
@@ -933,17 +1067,30 @@ class InstagramCrmChannelIntegration(ClientBase):
         runtime: RuntimeConfig,
         client: Client,
         external_user_id: str,
+        sender_profile: Optional[Dict[str, Any]] = None,
     ) -> Client:
         if not client or not client.id:
             return client
 
         instagram_id = str(external_user_id or "").strip() or None
         external_id = cls._client_external_id(runtime, external_user_id)
+        display_name = cls._sender_display_name(sender_profile, external_user_id)
+        photo_url = str((sender_profile or {}).get("photo_url") or "").strip()
         patch: Dict[str, Any] = {}
         if instagram_id and not str(client.instagram_id or "").strip():
             patch["instagram_id"] = instagram_id
         if external_id and not str(client.external_id or "").strip():
             patch["external_id"] = external_id
+        current_name = str(client.name or "").strip()
+        technical_names = {
+            "",
+            str(external_user_id or "").strip(),
+            f"Instagram {external_user_id}",
+        }
+        if display_name and current_name in technical_names:
+            patch["name"] = display_name
+        if photo_url and not str(client.photo_url or "").strip():
+            patch["photo_url"] = photo_url
         if not patch:
             return client
 
@@ -965,7 +1112,10 @@ class InstagramCrmChannelIntegration(ClientBase):
 
     @classmethod
     async def _resolve_or_create_client(
-        cls, runtime: RuntimeConfig, external_user_id: str
+        cls,
+        runtime: RuntimeConfig,
+        external_user_id: str,
+        sender_profile: Optional[Dict[str, Any]] = None,
     ) -> Client:
         existing = await cls._find_client_by_instagram_id(runtime, external_user_id)
         if existing and existing.id:
@@ -973,6 +1123,7 @@ class InstagramCrmChannelIntegration(ClientBase):
                 runtime,
                 existing,
                 external_user_id,
+                sender_profile,
             )
 
         existing = await cls._find_client_by_external_id(runtime, external_user_id)
@@ -981,14 +1132,17 @@ class InstagramCrmChannelIntegration(ClientBase):
                 runtime,
                 existing,
                 external_user_id,
+                sender_profile,
             )
 
+        display_name = cls._sender_display_name(sender_profile, external_user_id)
         async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
             add_response = await api.crm.client.add(
                 ClientAddRequest(
                     external_id=cls._client_external_id(runtime, external_user_id),
                     instagram_id=external_user_id,
-                    name=external_user_id,
+                    name=display_name,
+                    photo_url=str((sender_profile or {}).get("photo_url") or "").strip() or None,
                 )
             )
         if not add_response.ok:
@@ -1000,6 +1154,7 @@ class InstagramCrmChannelIntegration(ClientBase):
                     runtime,
                     existing,
                     external_user_id,
+                    sender_profile,
                 )
             existing = await cls._find_client_by_external_id(runtime, external_user_id)
             if existing and existing.id:
@@ -1007,19 +1162,16 @@ class InstagramCrmChannelIntegration(ClientBase):
                     runtime,
                     existing,
                     external_user_id,
+                    sender_profile,
                 )
             raise RuntimeError(
                 "Client/Add rejected: "
                 f"error={payload.get('error')} description={payload.get('description')}"
             )
 
-        new_id = (
-            _to_int((add_response.result or {}).get("new_id"), None)
-            if isinstance(add_response.result, dict)
-            else None
-        )
+        new_id = _extract_add_new_id(add_response.result)
         if not new_id:
-            raise RuntimeError("Client/Add did not return new_id")
+            raise RuntimeError(f"Client/Add did not return new_id: result={_row_to_dict(add_response.result)}")
 
         created = await cls._get_client_by_id(runtime, int(new_id))
         if not created or not created.id:
@@ -1028,6 +1180,7 @@ class InstagramCrmChannelIntegration(ClientBase):
             runtime,
             created,
             external_user_id,
+            sender_profile,
         )
 
     @classmethod
@@ -1237,19 +1390,87 @@ class InstagramCrmChannelIntegration(ClientBase):
         return external_user_id
 
     @classmethod
-    def _render_ticket_subject(cls, runtime: RuntimeConfig, external_user_id: str) -> str:
-        template = str(runtime.ticket_subject_template or "").strip() or "Instagram {client_id}"
+    def _render_ticket_subject(
+        cls,
+        runtime: RuntimeConfig,
+        external_user_id: str,
+        sender_profile: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        client_name = cls._sender_display_name(sender_profile, external_user_id)
+        template = str(runtime.ticket_subject_template or "").strip()
+        if template in {"Instagram {client_id}", "Instagram {external_user_id}"}:
+            template = ""
+        template = template or "Instagram {client_name}"
         try:
-            subject = template.format(client_id=external_user_id, external_user_id=external_user_id)
+            subject = template.format(
+                client_id=external_user_id,
+                external_user_id=external_user_id,
+                client_name=client_name,
+                username=str((sender_profile or {}).get("username") or "").strip(),
+            )
         except Exception:
             subject = template
         return str(subject or "").strip() or f"Instagram {external_user_id}"
 
     @classmethod
+    async def _sync_client_profile_by_id(
+        cls,
+        runtime: RuntimeConfig,
+        client_id: int,
+        external_user_id: str,
+        sender_profile: Optional[Dict[str, Any]],
+    ) -> None:
+        if not sender_profile:
+            return
+        client = await cls._get_client_by_id(runtime, int(client_id))
+        if client:
+            await cls._sync_instagram_client_identifiers(
+                runtime,
+                client,
+                external_user_id,
+                sender_profile,
+            )
+
+    @classmethod
+    async def _sync_ticket_subject_if_technical(
+        cls,
+        runtime: RuntimeConfig,
+        ticket_id: int,
+        external_user_id: str,
+        sender_profile: Optional[Dict[str, Any]],
+    ) -> None:
+        if not sender_profile:
+            return
+        ticket = await cls._get_ticket_by_id(runtime, int(ticket_id))
+        if not ticket or not ticket.id:
+            return
+        current = str(ticket.subject or "").strip()
+        old_default = f"Instagram {external_user_id}"
+        if current and current != old_default and current != str(external_user_id or "").strip():
+            return
+        subject = cls._render_ticket_subject(runtime, external_user_id, sender_profile)
+        if not subject or subject == current:
+            return
+        async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
+            response = await api.crm.ticket.edit(
+                TicketEditRequest(id=int(ticket.id), subject=subject)
+            )
+        if not response.ok:
+            logger.warning(
+                "Ticket/Edit rejected while syncing Instagram subject: ci=%s ticket_id=%s payload=%s",
+                runtime.connected_integration_id,
+                ticket.id,
+                response.result,
+            )
+
+    @classmethod
     async def _create_ticket_context(
-        cls, runtime: RuntimeConfig, external_user_id: str
+        cls,
+        runtime: RuntimeConfig,
+        external_user_id: str,
+        sender_profile: Optional[Dict[str, Any]] = None,
     ) -> TicketContext:
-        client = await cls._resolve_or_create_client(runtime, external_user_id)
+        client = await cls._resolve_or_create_client(runtime, external_user_id, sender_profile)
         if not client.id:
             raise RuntimeError("Client id is empty after resolve/create")
         async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
@@ -1260,7 +1481,7 @@ class InstagramCrmChannelIntegration(ClientBase):
                     direction=TicketDirectionEnum.Inbound,
                     external_dialog_id=cls._ticket_external_dialog_id(runtime, external_user_id),
                     responsible_user_id=runtime.default_responsible_user_id,
-                    subject=cls._render_ticket_subject(runtime, external_user_id),
+                    subject=cls._render_ticket_subject(runtime, external_user_id, sender_profile),
                 )
             )
         if not response.ok:
@@ -1270,13 +1491,9 @@ class InstagramCrmChannelIntegration(ClientBase):
                 f"error={payload.get('error')} description={payload.get('description')}"
             )
 
-        ticket_id = (
-            _to_int((response.result or {}).get("new_id"), None)
-            if isinstance(response.result, dict)
-            else None
-        )
+        ticket_id = _extract_add_new_id(response.result)
         if not ticket_id:
-            raise RuntimeError("Ticket/Add did not return new_id")
+            raise RuntimeError(f"Ticket/Add did not return new_id: result={_row_to_dict(response.result)}")
 
         ticket = await cls._get_ticket_by_id(runtime, int(ticket_id))
         if not ticket or not ticket.chat_id:
@@ -1288,9 +1505,16 @@ class InstagramCrmChannelIntegration(ClientBase):
         )
 
     @classmethod
-    async def _resolve_or_create_ticket(cls, runtime: RuntimeConfig, external_user_id: str) -> TicketContext:
+    async def _resolve_or_create_ticket(
+        cls,
+        runtime: RuntimeConfig,
+        external_user_id: str,
+        sender_profile: Optional[Dict[str, Any]] = None,
+    ) -> TicketContext:
         cached = await cls._resolve_mapping_by_user(runtime, external_user_id)
         if cached:
+            await cls._sync_client_profile_by_id(runtime, cached.client_id, external_user_id, sender_profile)
+            await cls._sync_ticket_subject_if_technical(runtime, cached.ticket_id, external_user_id, sender_profile)
             return cached
 
         lock_key = cls._redis_key("lock", "ticket_create", runtime.connected_integration_id, external_user_id)
@@ -1309,12 +1533,16 @@ class InstagramCrmChannelIntegration(ClientBase):
                     await asyncio.sleep(0.1)
                     cached = await cls._resolve_mapping_by_user(runtime, external_user_id)
                     if cached:
+                        await cls._sync_client_profile_by_id(runtime, cached.client_id, external_user_id, sender_profile)
+                        await cls._sync_ticket_subject_if_technical(runtime, cached.ticket_id, external_user_id, sender_profile)
                         return cached
         try:
             cached = await cls._resolve_mapping_by_user(runtime, external_user_id)
             if cached:
+                await cls._sync_client_profile_by_id(runtime, cached.client_id, external_user_id, sender_profile)
+                await cls._sync_ticket_subject_if_technical(runtime, cached.ticket_id, external_user_id, sender_profile)
                 return cached
-            context = await cls._create_ticket_context(runtime, external_user_id)
+            context = await cls._create_ticket_context(runtime, external_user_id, sender_profile)
             await cls._save_mapping(
                 runtime,
                 external_user_id,
@@ -1487,7 +1715,17 @@ class InstagramCrmChannelIntegration(ClientBase):
             return "ignored_empty"
 
         try:
-            ticket_ctx = await cls._resolve_or_create_ticket(runtime, external_user_id)
+            sender_profile = await cls._resolve_sender_profile(
+                runtime,
+                event,
+                external_user_id,
+                message_id,
+            )
+            ticket_ctx = await cls._resolve_or_create_ticket(
+                runtime,
+                external_user_id,
+                sender_profile,
+            )
             await cls._post_chat_message(runtime, ticket_ctx, external_user_id, text, message_id)
             return "accepted"
         except Exception:
@@ -1722,7 +1960,7 @@ class InstagramCrmChannelIntegration(ClientBase):
             if chat_message.message_type != ChatMessageTypeEnum.Regular:
                 return {"status": "ignored", "reason": f"unsupported_message_type:{chat_message.message_type}"}
 
-            author_type = str(chat_message.author_entity_type or "").strip().lower()
+            author_type = _enum_text(chat_message.author_entity_type)
             if author_type not in {"user", "1"}:
                 return {"status": "ignored", "reason": f"unsupported_author:{chat_message.author_entity_type}"}
 
@@ -2536,12 +2774,6 @@ class InstagramCrmChannelIntegration(ClientBase):
                 status_code=503,
                 content="Redis is required for this integration",
             )
-        await self._store_webhook_debug_snapshot(
-            envelope=envelope,
-            body=body,
-            raw_body=raw_body,
-            resolved_ci=ci,
-        )
         if not isinstance(body, dict):
             return self._error_response(400, "Invalid webhook payload").dict()
 
