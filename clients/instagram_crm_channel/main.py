@@ -941,6 +941,64 @@ class InstagramCrmChannelIntegration(ClientBase):
         }
         return {key: value for key, value in profile.items() if value}
 
+    @staticmethod
+    def _message_recipient_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+        recipient = payload.get("to") if isinstance(payload, dict) else None
+        if not isinstance(recipient, dict):
+            return {}
+        if str(recipient.get("id") or "").strip():
+            return recipient
+        data = recipient.get("data")
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            return data[0]
+        return {}
+
+    @classmethod
+    async def _fetch_message_event(
+        cls,
+        runtime: RuntimeConfig,
+        message_id: str,
+    ) -> Dict[str, Any]:
+        if not runtime.access_token or not message_id:
+            return {}
+        try:
+            async with httpx.AsyncClient(timeout=InstagramCrmChannelConfig.HTTP_TIMEOUT_SEC) as client:
+                response = await client.get(
+                    f"{InstagramCrmChannelConfig.GRAPH_BASE_URL}/{quote(message_id, safe='')}",
+                    params={
+                        "access_token": runtime.access_token,
+                        "fields": "id,created_time,from,to,message",
+                    },
+                )
+            response.raise_for_status()
+            payload = response.json() if response.content else {}
+        except Exception as error:
+            logger.warning(
+                "Failed to fetch Instagram message event: ci=%s message_id=%s error=%s",
+                runtime.connected_integration_id,
+                message_id,
+                error,
+            )
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+
+        sender = payload.get("from") if isinstance(payload.get("from"), dict) else {}
+        recipient = cls._message_recipient_from_payload(payload)
+        fetched_message_id = str(payload.get("id") or message_id).strip()
+        text = str(payload.get("message") or "").strip()
+        if not fetched_message_id or not isinstance(sender, dict):
+            return {}
+
+        event: Dict[str, Any] = {
+            "sender": {key: value for key, value in sender.items() if value},
+            "recipient": {key: value for key, value in recipient.items() if value},
+            "message": {"mid": fetched_message_id},
+        }
+        if text:
+            event["message"]["text"] = text
+        return event
+
     @classmethod
     async def _fetch_sender_profile(
         cls,
@@ -1745,6 +1803,22 @@ class InstagramCrmChannelIntegration(ClientBase):
     @classmethod
     async def _process_inbound_event(cls, runtime: RuntimeConfig, event: Dict[str, Any]) -> str:
         message = event.get("message") if isinstance(event, dict) else None
+        if not isinstance(message, dict):
+            message_edit = event.get("message_edit") if isinstance(event, dict) else None
+            message_edit_id = (
+                str(message_edit.get("mid") or message_edit.get("id") or "").strip()
+                if isinstance(message_edit, dict)
+                else ""
+            )
+            if message_edit_id:
+                fetched_event = await cls._fetch_message_event(runtime, message_edit_id)
+                if fetched_event:
+                    merged_event = dict(event)
+                    for key, value in fetched_event.items():
+                        if value:
+                            merged_event[key] = value
+                    event = merged_event
+                    message = event.get("message")
         if not isinstance(message, dict):
             return "ignored_no_message"
         if _to_bool(message.get("is_echo"), False):
