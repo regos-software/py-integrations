@@ -91,8 +91,14 @@ class Settings(BaseSettings):
     edo_fakturauz_stream_batch_size: int = 20
     edo_fakturauz_stream_maxlen: int = 100000
     edo_fakturauz_stream_retry_limit: int = 3
-    edo_fakturauz_stream_ttl: int = 604800
+    edo_fakturauz_stream_ttl: int = 86400
     edo_fakturauz_token_cache_ttl: int = 240
+    edo_didox_stream_workers: int = 2
+    edo_didox_stream_batch_size: int = 20
+    edo_didox_stream_maxlen: int = 100000
+    edo_didox_stream_retry_limit: int = 3
+    edo_didox_stream_ttl: int = 86400
+    edo_didox_token_cache_ttl: int = 21000
     marketplace_external_timeout: int = 60
     marketplace_unload_page_size: int = 250
     marketplace_cache_ttl: int = 300

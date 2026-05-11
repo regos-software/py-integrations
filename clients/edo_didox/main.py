@@ -61,7 +61,7 @@ from schemas.api.references.item import (
 from schemas.api.references.partner import LegalStatus, PartnerAddRequest, PartnerGetRequest
 
 
-logger = setup_logger("edo_fakturauz")
+logger = setup_logger("edo_didox")
 
 _INSTANCE_ID = uuid.uuid4().hex[:12]
 _STREAM_WORKER_TASKS: Dict[str, asyncio.Task] = {}
@@ -157,8 +157,7 @@ def _money(value: Any) -> Decimal:
 
 
 def _decimal_json(value: Any) -> str:
-    amount = _money(value)
-    return format(amount, "f")
+    return format(_money(value), "f")
 
 
 def _parse_date_to_unix(value: Any, default: Optional[int] = None) -> int:
@@ -172,7 +171,13 @@ def _parse_date_to_unix(value: Any, default: Optional[int] = None) -> int:
         return default if default is not None else _now_ts()
     if text.isdigit():
         return _parse_date_to_unix(int(text), default)
-    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%Y-%m-%dT%H:%M:%S", "%d.%m.%Y %H:%M:%S"):
+    for fmt in (
+        "%Y-%m-%d",
+        "%d.%m.%Y",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%d.%m.%Y %H:%M:%S",
+    ):
         try:
             dt = datetime.strptime(text[: len(fmt)], fmt)
             return int(dt.replace(tzinfo=timezone.utc).timestamp())
@@ -187,19 +192,19 @@ def _parse_date_to_unix(value: Any, default: Optional[int] = None) -> int:
         return default if default is not None else _now_ts()
 
 
-def _format_date(value: Any, fmt: str = "%d.%m.%Y") -> str:
+def _format_date(value: Any, fmt: str = "%Y-%m-%d") -> str:
     unix_ts = _parse_date_to_unix(value, _now_ts())
     return datetime.fromtimestamp(unix_ts, tz=timezone.utc).strftime(fmt)
 
 
 def _display_date(value: Any) -> str:
-    if isinstance(value, (int, float)):
-        return _format_date(value)
     text = _text(value)
-    return text or _format_date(value)
+    if text:
+        return text
+    return _format_date(value, "%d.%m.%Y")
 
 
-def _iso_from_ms(value: Any) -> Optional[str]:
+def _iso_from_date(value: Any) -> Optional[str]:
     if value is None or value == "":
         return None
     ts = _parse_date_to_unix(value, 0)
@@ -214,39 +219,11 @@ def _list_payload(value: Any) -> List[Any]:
     if isinstance(value, tuple):
         return list(value)
     if isinstance(value, dict):
-        for key in ("result", "Result", "data", "Data", "items", "Items", "documents", "Documents"):
+        for key in ("data", "Data", "result", "Result", "items", "Items", "documents", "Documents"):
             nested = _ci_lookup(value, key)
             if isinstance(nested, list):
                 return nested
     return []
-
-
-def _result_new_id(response: Any, context: str) -> int:
-    if not getattr(response, "ok", False):
-        raise EdoFakturaUzError(111600, f"{context} failed")
-    result = getattr(response, "result", None)
-    new_id = _ci_lookup(result, "new_id", "newId", "id")
-    parsed = _to_int(new_id, 0)
-    if parsed <= 0:
-        raise EdoFakturaUzError(111601, f"{context} did not return new_id")
-    return parsed
-
-
-def _ensure_api_ok(response: Any, context: str) -> None:
-    if not getattr(response, "ok", False):
-        payload = getattr(response, "result", None)
-        raise EdoFakturaUzError(111602, f"{context} failed: {payload}")
-
-
-def _firm_field(firm: Optional[Firm], name: str) -> str:
-    if firm is None:
-        return ""
-    if name in {"full_name", "fullname"}:
-        return _text(
-            getattr(firm, "full_name", None)
-            or getattr(firm, "fullname", None)
-        )
-    return _text(getattr(firm, name, ""))
 
 
 def _model_enum_value(value: Any) -> str:
@@ -255,7 +232,47 @@ def _model_enum_value(value: Any) -> str:
     return _text(value)
 
 
-class EdoFakturaUzError(Exception):
+def _firm_field(firm: Optional[Firm], name: str) -> str:
+    if firm is None:
+        return ""
+    if name in {"full_name", "fullname"}:
+        return _text(getattr(firm, "full_name", None) or getattr(firm, "fullname", None))
+    return _text(getattr(firm, name, ""))
+
+
+def _result_new_id(response: Any, context: str) -> int:
+    if not getattr(response, "ok", False):
+        raise EdoDidoxError(112600, f"{context} failed")
+    result = getattr(response, "result", None)
+    new_id = _ci_lookup(result, "new_id", "newId", "id")
+    parsed = _to_int(new_id, 0)
+    if parsed <= 0:
+        raise EdoDidoxError(112601, f"{context} did not return new_id")
+    return parsed
+
+
+def _ensure_api_ok(response: Any, context: str) -> None:
+    if not getattr(response, "ok", False):
+        payload = getattr(response, "result", None)
+        raise EdoDidoxError(112602, f"{context} failed: {payload}")
+
+
+def _first_nested(data: Any, *keys: str) -> Any:
+    if not isinstance(data, dict):
+        return None
+    for key in keys:
+        value = _ci_lookup(data, key)
+        if value not in (None, ""):
+            return value
+    for value in data.values():
+        if isinstance(value, dict):
+            found = _first_nested(value, *keys)
+            if found not in (None, ""):
+                return found
+    return None
+
+
+class EdoDidoxError(Exception):
     def __init__(self, code: int, description: str, status_code: int = 500):
         super().__init__(description)
         self.code = int(code)
@@ -263,19 +280,17 @@ class EdoFakturaUzError(Exception):
         self.status_code = int(status_code)
 
 
-class EdoFakturaUzNonRetryableError(EdoFakturaUzError):
+class EdoDidoxNonRetryableError(EdoDidoxError):
     pass
 
 
-class FakturaUzClient:
-    TOKEN_ENDPOINT = "https://account.faktura.uz"
-    API_ENDPOINT = "https://api.faktura.uz/Api"
+class DidoxClient:
+    API_ENDPOINT = "https://api-partners.didox.uz"
     REQUIRED_SETTINGS = {
-        "FAKTURA_UZ_CLIENT_ID",
-        "FAKTURA_UZ_LOGIN",
-        "FAKTURA_UZ_PASSWORD",
-        "FAKTURA_UZ_PRIVATE_KEY",
+        "DIDOX_PARTNER_TOKEN",
+        "DIDOX_PASSWORD",
     }
+    DEFAULT_DOCUMENT_TYPES = "002,005,008,023"
 
     def __init__(
         self,
@@ -285,23 +300,25 @@ class FakturaUzClient:
         firm: Firm,
         settings_map: Dict[str, str],
         access_token: str,
-        token_type: str = "Bearer",
+        base_url: str,
+        locale: str,
     ) -> None:
         self.connected_integration_id = connected_integration_id
         self.firm_id = int(firm_id)
         self.firm = firm
         self.settings_map = settings_map
         self.access_token = access_token
-        self.token_type = token_type or "Bearer"
+        self.base_url = base_url.rstrip("/")
+        self.locale = locale
 
     @classmethod
-    async def create(cls, connected_integration_id: str, firm_id: int) -> "FakturaUzClient":
+    async def create(cls, connected_integration_id: str, firm_id: int) -> "DidoxClient":
         ci = _text(connected_integration_id)
         if not ci:
-            raise EdoFakturaUzError(111001, "connected_integration_id is required", 400)
+            raise EdoDidoxError(112001, "connected_integration_id is required", 400)
         parsed_firm_id = _to_int(firm_id, 0)
         if parsed_firm_id <= 0:
-            raise EdoFakturaUzError(111002, "firm_id is required", 400)
+            raise EdoDidoxError(112002, "firm_id is required", 400)
 
         async with RegosAPI(connected_integration_id=ci) as api:
             firm_response = await api.references.firm.get(
@@ -309,21 +326,23 @@ class FakturaUzClient:
             )
             firms = firm_response.result or []
             if not firms:
-                raise EdoFakturaUzError(
-                    111003,
-                    f"Firm {parsed_firm_id} was not found",
-                    400,
-                )
+                raise EdoDidoxError(112003, f"Firm {parsed_firm_id} was not found", 400)
             settings_map = await cls._load_settings(api, ci, parsed_firm_id)
 
-        access_token, token_type = await cls._get_access_token(ci, parsed_firm_id, settings_map)
+        firm = firms[0]
+        base_url = _text(settings_map.get("DIDOX_BASE_URL"), cls.API_ENDPOINT)
+        locale = _text(settings_map.get("DIDOX_LOCALE"), "ru").lower()
+        if locale not in {"ru", "uz"}:
+            locale = "ru"
+        access_token = await cls._get_access_token(ci, parsed_firm_id, firm, settings_map, base_url, locale)
         return cls(
             connected_integration_id=ci,
             firm_id=parsed_firm_id,
-            firm=firms[0],
+            firm=firm,
             settings_map=settings_map,
             access_token=access_token,
-            token_type=token_type,
+            base_url=base_url,
+            locale=locale,
         )
 
     @classmethod
@@ -346,94 +365,127 @@ class FakturaUzClient:
                 settings_map[key] = _text(getattr(item, "value", ""))
         missing = sorted(key for key in cls.REQUIRED_SETTINGS if not settings_map.get(key))
         if missing:
-            raise EdoFakturaUzError(
-                111004,
-                f"Missing Faktura.uz settings: {', '.join(missing)}",
-                400,
-            )
+            raise EdoDidoxError(112004, f"Missing Didox settings: {', '.join(missing)}", 400)
         return settings_map
 
     @classmethod
     def _token_cache_key(cls, connected_integration_id: str, firm_id: int) -> str:
-        return redis_make_key("edo", "fakturauz", "token", connected_integration_id, firm_id)
+        return redis_make_key("edo", "didox", "token", connected_integration_id, firm_id)
 
     @classmethod
     async def _get_access_token(
         cls,
         connected_integration_id: str,
         firm_id: int,
+        firm: Firm,
         settings_map: Dict[str, str],
-    ) -> Tuple[str, str]:
+        base_url: str,
+        locale: str,
+    ) -> str:
         cache_key = cls._token_cache_key(connected_integration_id, firm_id)
         if redis_is_enabled():
             try:
                 cached = await redis_ops.get(cache_key)
                 if cached:
                     token_payload = _json_loads(cached)
-                    token = _text(_ci_lookup(token_payload, "access_token", "accessToken"))
-                    token_type = _text(_ci_lookup(token_payload, "token_type", "tokenType"), "Bearer")
+                    token = _text(_ci_lookup(token_payload, "token"))
                     if token:
-                        return token, token_type
+                        return token
             except Exception as error:
-                logger.debug("Faktura token cache read failed: %s", error)
+                logger.debug("Didox token cache read failed: %s", error)
 
-        payload = {
-            "grant_type": "password",
-            "username": settings_map["FAKTURA_UZ_LOGIN"],
-            "password": settings_map["FAKTURA_UZ_PASSWORD"],
-            "client_id": settings_map["FAKTURA_UZ_CLIENT_ID"],
-            "client_secret": settings_map["FAKTURA_UZ_PRIVATE_KEY"],
+        company_tax_id = _digits(settings_map.get("DIDOX_COMPANY_TAX_ID") or firm.inn)
+        login_tax_id = _digits(settings_map.get("DIDOX_LOGIN_TAX_ID") or company_tax_id)
+        if not company_tax_id:
+            raise EdoDidoxError(112005, f"Firm {firm_id} does not contain INN", 400)
+        if not login_tax_id:
+            raise EdoDidoxError(112006, "DIDOX_LOGIN_TAX_ID or firm INN is required", 400)
+
+        partner_token = settings_map["DIDOX_PARTNER_TOKEN"]
+        headers = {
+            "Accept": "application/json",
+            "Partner-Authorization": partner_token,
         }
-        url = f"{cls.TOKEN_ENDPOINT.rstrip('/')}/token"
+        url = f"{base_url.rstrip('/')}/v1/auth/{login_tax_id}/password/{locale}"
         try:
             async with httpx.AsyncClient(timeout=30) as http_client:
-                response = await http_client.post(url, data=payload)
+                response = await http_client.post(
+                    url,
+                    headers=headers,
+                    json={"password": settings_map["DIDOX_PASSWORD"]},
+                )
                 text = response.text
                 response.raise_for_status()
                 data = response.json()
         except httpx.HTTPStatusError as error:
             body = _text(getattr(error.response, "text", ""))[:500]
-            raise EdoFakturaUzError(
-                111005,
-                f"Faktura.uz token request failed: status={error.response.status_code} body={body}",
+            raise EdoDidoxError(
+                112007,
+                f"Didox token request failed: status={error.response.status_code} body={body}",
             ) from error
         except Exception as error:
-            raise EdoFakturaUzError(
-                111005,
-                f"Faktura.uz token request failed: {error}",
-            ) from error
+            raise EdoDidoxError(112007, f"Didox token request failed: {error}") from error
 
-        token = _text(_ci_lookup(data, "access_token", "accessToken"))
-        token_type = _text(_ci_lookup(data, "token_type", "tokenType"), "Bearer")
-        expires_in = _to_int(_ci_lookup(data, "expires_in", "expiresIn"), 300)
+        token = _text(_ci_lookup(data, "token"))
         if not token:
-            raise EdoFakturaUzError(
-                111006,
-                f"Faktura.uz token response does not contain access_token: {text[:300]}",
-            )
+            raise EdoDidoxError(112008, f"Didox token response does not contain token: {text[:300]}")
+
+        if login_tax_id != company_tax_id:
+            token = await cls._login_company(base_url, partner_token, token, company_tax_id, locale)
+
         if redis_is_enabled():
-            ttl_limit = max(int(settings.edo_fakturauz_token_cache_ttl or 0), 1)
-            ttl = min(max(expires_in - 60, 1), ttl_limit)
+            ttl = max(int(settings.edo_didox_token_cache_ttl or 0), 60)
             try:
-                await redis_ops.setex(
-                    cache_key,
-                    ttl,
-                    _json_dumps({"access_token": token, "token_type": token_type}),
-                )
+                await redis_ops.setex(cache_key, ttl, _json_dumps({"token": token}))
             except Exception as error:
-                logger.debug("Faktura token cache write failed: %s", error)
-        return token, token_type
+                logger.debug("Didox token cache write failed: %s", error)
+        return token
+
+    @classmethod
+    async def _login_company(
+        cls,
+        base_url: str,
+        partner_token: str,
+        user_token: str,
+        company_tax_id: str,
+        locale: str,
+    ) -> str:
+        url = f"{base_url.rstrip('/')}/v1/auth/company/{company_tax_id}/login/{locale}"
+        headers = {
+            "Accept": "application/json",
+            "Partner-Authorization": partner_token,
+            "user-key": user_token,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=30) as http_client:
+                response = await http_client.post(url, headers=headers)
+                text = response.text
+                response.raise_for_status()
+                data = response.json()
+        except httpx.HTTPStatusError as error:
+            body = _text(getattr(error.response, "text", ""))[:500]
+            raise EdoDidoxError(
+                112009,
+                f"Didox company login failed: status={error.response.status_code} body={body}",
+            ) from error
+        except Exception as error:
+            raise EdoDidoxError(112009, f"Didox company login failed: {error}") from error
+        token = _text(_ci_lookup(data, "token"))
+        if not token:
+            raise EdoDidoxError(112010, f"Didox company login response does not contain token: {text[:300]}")
+        return token
 
     def _headers(self) -> Dict[str, str]:
         return {
             "Accept": "application/json",
-            "Authorization": f"{self.token_type} {self.access_token}",
+            "Partner-Authorization": self.settings_map["DIDOX_PARTNER_TOKEN"],
+            "user-key": self.access_token,
         }
 
     def _company_inn(self) -> str:
-        inn = _digits(self.firm.inn)
+        inn = _digits(self.settings_map.get("DIDOX_COMPANY_TAX_ID") or self.firm.inn)
         if not inn:
-            raise EdoFakturaUzError(111013, f"Firm {self.firm_id} does not contain INN", 400)
+            raise EdoDidoxError(112011, f"Firm {self.firm_id} does not contain INN", 400)
         return inn
 
     async def _request(
@@ -444,7 +496,7 @@ class FakturaUzClient:
         params: Optional[Dict[str, Any]] = None,
         json_body: Optional[Dict[str, Any]] = None,
     ) -> Any:
-        url = f"{self.API_ENDPOINT.rstrip('/')}/{path.lstrip('/')}"
+        url = f"{self.base_url}/{path.lstrip('/')}"
         try:
             async with httpx.AsyncClient(timeout=90) as http_client:
                 response = await http_client.request(
@@ -461,18 +513,15 @@ class FakturaUzClient:
                 return response.json()
         except httpx.HTTPStatusError as error:
             body = _text(getattr(error.response, "text", ""))[:500]
-            raise EdoFakturaUzError(
-                111007,
+            raise EdoDidoxError(
+                112012,
                 (
-                    f"Faktura.uz request failed: {method} {path}: "
+                    f"Didox request failed: {method} {path}: "
                     f"status={error.response.status_code} body={body}"
                 ),
             ) from error
         except Exception as error:
-            raise EdoFakturaUzError(
-                111007,
-                f"Faktura.uz request failed: {method} {path}: {error}",
-            ) from error
+            raise EdoDidoxError(112012, f"Didox request failed: {method} {path}: {error}") from error
 
     async def get_documents(
         self,
@@ -482,68 +531,77 @@ class FakturaUzClient:
         limit: Optional[int] = None,
         offset: Optional[int] = None,
     ) -> Tuple[List[Dict[str, Any]], int]:
-        page_limit = max(_to_int(limit, 500), 1)
+        page_limit = min(max(_to_int(limit, 50), 1), 100)
         page_offset = max(_to_int(offset, 0), 0)
+        page = page_offset // page_limit + 1
         params: Dict[str, Any] = {
-            "companyInn": self._company_inn(),
-            "isInbox": "true",
-            "types": "2,5,28,29",
-            "statuses": "22,24",
+            "owner": 0,
+            "page": page,
             "limit": page_limit,
-            "skip": page_offset,
+            "doctype": _text(self.settings_map.get("DIDOX_DOCUMENT_TYPES"), self.DEFAULT_DOCUMENT_TYPES),
         }
         if start_date:
-            params["invoiceDateFrom"] = _parse_date_to_unix(start_date, 0) * 1000
+            params["docDateFromCreated"] = _format_date(start_date)
         if end_date:
-            params["invoiceDateTo"] = _parse_date_to_unix(end_date, 0) * 1000
+            params["docDateToCreated"] = _format_date(end_date)
 
-        payload = await self._request("GET", "Document/GetDocuments", params=params)
+        payload = await self._request("GET", "/v2/documents", params=params)
         raw_documents = _list_payload(payload)
-        total = _to_int(
-            _ci_lookup(payload, "total", "Total", "totalCount", "TotalCount", "recordsTotal", "count"),
-            len(raw_documents),
-        )
+        total = _to_int(_ci_lookup(payload, "total", "Total"), len(raw_documents))
         return [self._map_document_row(item) for item in raw_documents], total
 
     def _map_document_row(self, raw: Dict[str, Any]) -> Dict[str, Any]:
-        contractor = _ci_lookup(raw, "contractor", "Contractor", default={}) or {}
-        member = _ci_lookup(raw, "contractorMember", "ContractorMember", default={}) or {}
+        doc_date = _ci_lookup(raw, "doc_date", "docDate", "document_date")
+        external_id = _text(_ci_lookup(raw, "doc_id", "docId", "id"))
+        name = _text(_ci_lookup(raw, "name"), f"Didox {external_id}")
         return {
-            "id": _text(_ci_lookup(raw, "uniqueId", "UniqueId", "id")),
-            "roaming_id": _text(_ci_lookup(raw, "roamingUid", "RoamingUid", "roaming_id")),
-            "name": _text(_ci_lookup(raw, "title", "Title", "name")),
-            "create_date": _iso_from_ms(_ci_lookup(raw, "createdDateTime", "CreatedDateTime")),
-            "update_date": _iso_from_ms(_ci_lookup(raw, "updatedDateTime", "UpdatedDateTime")),
-            "amount": _money(_ci_lookup(raw, "totalPrice", "TotalPrice", "amount")),
-            "contract": _ci_lookup(raw, "contract", "Contract"),
-            "partner_inn": _digits(_ci_lookup(contractor, "inn", "Inn")),
-            "partner_name": _text(_ci_lookup(contractor, "name", "Name")),
+            "id": external_id,
+            "external_id": external_id,
+            "roaming_id": _text(_ci_lookup(raw, "roaming_id", "roamingId")),
+            "name": name,
+            "date": _parse_date_to_unix(doc_date),
+            "create_date": _iso_from_date(_ci_lookup(raw, "created", "created_date", "createdDate")),
+            "update_date": _iso_from_date(_ci_lookup(raw, "updated", "updated_date", "updatedDate")),
+            "amount": _money(
+                _ci_lookup(
+                    raw,
+                    "total_delivery_sum_with_vat",
+                    "totalDeliverySumWithVat",
+                    "total_sum",
+                    "totalSum",
+                    default=0,
+                )
+            ),
+            "contract": _text(_ci_lookup(raw, "contract_number", "contractNumber")),
+            "partner_inn": _digits(_ci_lookup(raw, "partnerTin", "partner_tin")),
+            "partner_name": _text(_ci_lookup(raw, "partnerCompany", "partner_company")),
             "firm": {
-                "inn": _digits(_ci_lookup(member, "inn", "Inn")),
-                "name": _text(_ci_lookup(member, "name", "Name")),
+                "inn": _digits(_ci_lookup(raw, "usersTaxId", "users_tax_id")),
+                "name": "",
             },
         }
 
-    async def get_document_content(self, document_id: str) -> Dict[str, Any]:
+    async def get_document_content(self, document_id: str, *, owner: int = 0) -> Dict[str, Any]:
         payload = await self._request(
-            "POST",
-            "Document/GetDocumentsContent",
-            params={"companyInn": self._company_inn()},
-            json_body={"DocumentUniqueIds": [_text(document_id)]},
+            "GET",
+            f"/v1/documents/{_text(document_id)}",
+            params={"owner": int(owner)},
         )
-        rows = _list_payload(payload)
-        raw_row = rows[0] if rows else payload
-        if not isinstance(raw_row, dict):
-            raise EdoFakturaUzError(111008, "Faktura.uz document content is empty")
-        content_raw = _ci_lookup(raw_row, "Content", "content")
-        content = _json_loads(content_raw)
+        data = _ci_lookup(payload, "data", "Data", default=payload)
+        if not isinstance(data, dict):
+            raise EdoDidoxError(112013, "Didox document content is empty")
+        content = _ci_lookup(data, "json", "Json")
         if not isinstance(content, dict):
-            raise EdoFakturaUzError(111009, "Faktura.uz document content is invalid")
+            pending = _ci_lookup(data, "pending_document", "pendingDocument", default={}) or {}
+            content = _ci_lookup(pending, "document_json", "documentJson")
+        if not isinstance(content, dict):
+            raise EdoDidoxError(112014, "Didox document content is invalid")
+        document_meta = _ci_lookup(data, "document", "Document", default={}) or {}
         external_id = _text(
-            _ci_lookup(raw_row, "UniqueId", "uniqueId", "id"),
+            _ci_lookup(document_meta, "doc_id", "docId", "id"),
             _text(document_id),
         )
-        roaming_id = _text(_ci_lookup(raw_row, "RoamingUid", "roamingUid", "roaming_id"))
+        roaming_id = _text(_ci_lookup(document_meta, "roaming_id", "roamingId"))
         return self._map_document_content(content, external_id=external_id, roaming_id=roaming_id)
 
     def _map_document_content(
@@ -553,114 +611,122 @@ class FakturaUzClient:
         external_id: str,
         roaming_id: str,
     ) -> Dict[str, Any]:
-        act_services = _ci_lookup(content, "actServices", "ActServices")
-        document_kind = "act" if act_services is not None else "invoice"
-        services = _ci_lookup(content, "invoiceServices", "InvoiceServices", default=[])
-        if (not isinstance(services, list) or not services) and isinstance(act_services, list):
-            services = act_services
-        if not isinstance(services, list):
-            services = []
+        product_list = _ci_lookup(content, "productlist", "ProductList", default={}) or {}
+        products = _ci_lookup(product_list, "products", "Products", default=[])
+        if not isinstance(products, list):
+            products = []
 
-        invoice_number = _text(_ci_lookup(content, "invoiceNumber", "InvoiceNumber"))
-        invoice_date = _ci_lookup(content, "invoiceDate", "InvoiceDate")
-        invoice_date_text = _display_date(invoice_date)
-        contract_number = _text(_ci_lookup(content, "invoiceContractNumber", "InvoiceContractNumber"))
-        contract_date = _ci_lookup(content, "invoiceContractDate", "InvoiceContractDate")
-        contract_date_text = _display_date(contract_date)
-        contract_parts = []
-        if contract_date:
-            contract_parts.append(f"№{contract_date_text}")
-        if contract_number:
-            contract_parts.append(f"от {contract_number}")
-        contract_name = " ".join(contract_parts).strip() or invoice_number or external_id
+        factura_doc = _ci_lookup(content, "facturadoc", "FacturaDoc", default={}) or {}
+        act_doc = _ci_lookup(content, "actdoc", "ActDoc", default={}) or {}
+        contract_doc = _ci_lookup(content, "contractdoc", "ContractDoc", default={}) or {}
+        is_act = bool(act_doc) and not bool(factura_doc)
+        document_number = _text(
+            _ci_lookup(factura_doc, "facturano", "FacturaNo")
+            or _ci_lookup(act_doc, "actno", "ActNo")
+            or _ci_lookup(content, "name")
+        )
+        document_date = (
+            _ci_lookup(factura_doc, "facturadate", "FacturaDate")
+            or _ci_lookup(act_doc, "actdate", "ActDate")
+        )
+        date_text = _display_date(document_date)
+        contract_number = _text(_ci_lookup(contract_doc, "contractno", "ContractNo"))
+        contract_date = _ci_lookup(contract_doc, "contractdate", "ContractDate")
+        contract_name = " ".join(
+            part for part in (_text(contract_number), _display_date(contract_date) if contract_date else "") if part
+        ) or document_number or external_id
 
-        if document_kind == "act":
-            name = f"Акт и счёт фактура (ПКМ №489) №{invoice_number} от {invoice_date_text}"
+        seller = _ci_lookup(content, "seller", "Seller", default={}) or {}
+        buyer = _ci_lookup(content, "buyer", "Buyer", default={}) or {}
+        seller_tin = _digits(_ci_lookup(content, "sellertin", "SellerTin"))
+        buyer_tin = _digits(_ci_lookup(content, "buyertin", "BuyerTin"))
+        company_inn = self._company_inn()
+        if seller_tin == company_inn and buyer_tin:
+            partner = buyer
+            partner_inn = buyer_tin
+            firm = seller
+            firm_inn = seller_tin
         else:
-            name = f"Счет-фактура {invoice_number} от {invoice_date_text}"
+            partner = seller
+            partner_inn = seller_tin
+            firm = buyer
+            firm_inn = buyer_tin
 
-        operations = [self._map_operation(row, index) for index, row in enumerate(services)]
+        title_prefix = "Акт выполненных работ" if is_act else "Счет-фактура"
+        name = f"{title_prefix} {document_number} от {date_text}".strip()
+        operations = [self._map_operation(row, index) for index, row in enumerate(products)]
         return {
             "id": external_id,
             "external_id": external_id,
             "roaming_id": roaming_id,
             "name": name,
-            "date": _parse_date_to_unix(invoice_date),
+            "date": _parse_date_to_unix(document_date),
             "contract": contract_name,
-            "amount": _money(
-                _ci_lookup(
-                    content,
-                    "invoiceServicesTotalPrice",
-                    "InvoiceServicesTotalPrice",
-                    "actServicesTotalPrice",
-                    "ActServicesTotalPrice",
-                    default=sum((_money(item.get("amount")) for item in operations), Decimal("0")),
-                )
-            ),
-            "partner_inn": _digits(_ci_lookup(content, "ownerInn", "OwnerInn")),
-            "partner_name": _text(_ci_lookup(content, "ownerName", "OwnerName")),
+            "amount": sum((_money(item.get("amount")) for item in operations), Decimal("0")),
+            "partner_inn": partner_inn,
+            "partner_name": _text(_ci_lookup(partner, "name", "Name")),
             "firm": {
-                "inn": _digits(_ci_lookup(content, "contractorInn", "ContractorInn")),
-                "name": _text(_ci_lookup(content, "contractorName", "ContractorName")),
+                "inn": firm_inn,
+                "name": _text(_ci_lookup(firm, "name", "Name")),
             },
             "operations": operations,
         }
 
     def _map_operation(self, raw: Dict[str, Any], index: int) -> Dict[str, Any]:
-        catalog = _ci_lookup(raw, "catalog", "Catalog", default={}) or {}
-        marks = _ci_lookup(raw, "marks", "Marks", default={}) or {}
-        quantity = _to_decimal(_ci_lookup(raw, "quantity", "Quantity"), Decimal("0"))
-        price = _to_decimal(_ci_lookup(raw, "pricePerItem", "PricePerItem", "price"), Decimal("0"))
-        vat_rate = _to_decimal(_ci_lookup(raw, "vatRate", "VatRate"), Decimal("0"))
-        amount = _money(_ci_lookup(raw, "totalPrice", "TotalPrice", default=quantity * price))
+        quantity = _to_decimal(_ci_lookup(raw, "count", "Count"), Decimal("0"))
+        price = _to_decimal(_ci_lookup(raw, "summa", "Summa"), Decimal("0"))
+        vat_rate = _to_decimal(_ci_lookup(raw, "vatrate", "VatRate"), Decimal("0"))
+        amount = _money(
+            _ci_lookup(
+                raw,
+                "deliverysumwithvat",
+                "DeliverySumWithVat",
+                "totalsum",
+                "TotalSum",
+                default=quantity * price,
+            )
+        )
         return {
             "index": str(index),
-            "name": _text(_ci_lookup(raw, "title", "Title", "name"), f"Item {index + 1}"),
-            "icps": _text(_ci_lookup(catalog, "code", "Code")),
+            "name": _text(_ci_lookup(raw, "name", "Name"), f"Item {index + 1}"),
+            "icps": _text(_ci_lookup(raw, "catalogcode", "CatalogCode")),
             "barcode": _text(_ci_lookup(raw, "barcode", "Barcode")),
-            "package_code": _to_optional_int(_ci_lookup(raw, "measurementCode", "MeasurementCode")),
-            "package_name": _text(_ci_lookup(raw, "measurement", "Measurement")),
+            "package_code": _to_optional_int(_ci_lookup(raw, "packagecode", "PackageCode")),
+            "package_name": _text(_ci_lookup(raw, "packagename", "PackageName")),
             "quantity": quantity,
             "price": price,
             "amount": amount,
             "vat_rate": vat_rate,
             "origin": _to_optional_int(_ci_lookup(raw, "origin", "Origin")),
-            "labels": _ci_lookup(marks, "kiz", "Kiz", default=[]),
-            "group_labels": _ci_lookup(marks, "nomUpak", "NomUpak", default=[]),
-            "transport_labels": _ci_lookup(marks, "identTransUpak", "IdentTransUpak", default=[]),
         }
 
-    async def send_document_invoice(
+    async def create_invoice_draft(
         self,
         document: DocInvoice,
         operations: List[InvoiceOperation],
     ) -> str:
-        payload = {"invoices": [self._build_invoice_payload(document, operations)]}
+        payload = self._build_invoice_payload(document, operations)
         response = await self._request(
             "POST",
-            "Document/ImportDocumentRegister",
-            params={"companyInn": self._company_inn()},
+            f"/v1/documents/002/create/{self.locale}",
             json_body=payload,
         )
-        error_count = _to_int(_ci_lookup(response, "ErrorCount", "errorCount"), 0)
-        if error_count > 0:
-            errors = _ci_lookup(response, "ErrorItems", "errorItems", default=[])
-            raise EdoFakturaUzNonRetryableError(
-                111010,
-                f"Faktura.uz rejected invoice: {errors}",
+        external_id = _text(
+            _first_nested(
+                response,
+                "doc_id",
+                "docId",
+                "document_id",
+                "documentId",
+                "pending_documents_id",
+                "pendingDocumentsId",
+                "id",
             )
-        success_items = _ci_lookup(response, "SuccessItems", "successItems", default=[])
-        if not isinstance(success_items, list) or not success_items:
-            raise EdoFakturaUzNonRetryableError(
-                111011,
-                f"Faktura.uz response does not contain success item: {response}",
-            )
-        first = success_items[0]
-        external_id = _text(_ci_lookup(first, "UniqueId", "uniqueId", "id"))
+        )
         if not external_id:
-            raise EdoFakturaUzNonRetryableError(
-                111012,
-                f"Faktura.uz response does not contain UniqueId: {response}",
+            raise EdoDidoxNonRetryableError(
+                112015,
+                f"Didox create draft response does not contain document id: {response}",
             )
         return external_id
 
@@ -676,179 +742,124 @@ class FakturaUzClient:
         contract_date = _format_date(getattr(contract, "date", None)) if contract else document_date
         contract_number = _text(getattr(contract, "code", None) or getattr(contract, "name", None), "1")
         invoice_number = _text(getattr(document, "code", None), str(getattr(document, "id", "")))
-        currency = getattr(document, "currency", None)
-        currency_code = _text(
-            getattr(currency, "code_num", None),
-            _text(getattr(currency, "code_chr", None), "860"),
-        )
-        currency_name = _text(getattr(currency, "code_chr", None), "UZS")
-        exchange_rate = _to_decimal(getattr(document, "exchange_rate", None), Decimal("1"))
 
-        invoice_type = _model_enum_value(getattr(document, "invoice_type", None)).lower()
-        is_corrective = invoice_type == DocInvoiceType.Corrective.value.lower()
-        item_rows: List[Dict[str, Any]] = []
-        subtotal = Decimal("0")
-        vat_total = Decimal("0")
-        subtotal_with_taxes_total = Decimal("0")
+        product_rows: List[Dict[str, Any]] = []
+        has_vat = False
         for index, operation in enumerate(operations, start=1):
-            row, row_subtotal, row_vat, row_total = self._build_invoice_item(
-                index,
-                operation,
-                is_corrective=is_corrective,
-            )
-            item_rows.append(row)
-            subtotal += row_subtotal
-            vat_total += row_vat
-            subtotal_with_taxes_total += row_total
-        document_amount = _money(getattr(document, "amount", None))
-        subtotal_with_taxes = document_amount if document_amount else _money(subtotal_with_taxes_total)
-        if is_corrective and subtotal_with_taxes > 0:
-            subtotal_with_taxes = -subtotal_with_taxes
-        doc_payload: Dict[str, Any] = {
-            "document_date": document_date,
-            "document_number": invoice_number,
-            "contract_date": contract_date,
-            "contract_number": contract_number,
-            "currency_code": currency_code,
-            "currency_rate": _decimal_json(exchange_rate),
-            "factura_type": "1" if is_corrective else "0",
-            "items": item_rows,
-            "column_summary_values": {
-                "column_subtotal": _decimal_json(subtotal),
-                "column_subtotal_uzs": _decimal_json(subtotal * exchange_rate),
-                "column_subtotal_with_taxes": _decimal_json(subtotal_with_taxes),
-                "column_subtotal_with_taxes_total": _decimal_json(subtotal_with_taxes),
-                "column_subtotal_with_taxes_total_uzs": _decimal_json(subtotal_with_taxes * exchange_rate),
-                "column_subtotal_with_taxes_uzs": _decimal_json(subtotal_with_taxes * exchange_rate),
-                "column_vat_value": _decimal_json(vat_total),
-                "column_vat_value_uzs": _decimal_json(vat_total * exchange_rate),
-            },
-            "column_summary_values_in_words": {
-                "column_subtotal_in_words": f"{_decimal_json(subtotal)} {currency_name}",
-                "column_subtotal_uzs_in_words": f"{_decimal_json(subtotal * exchange_rate)} {currency_name}",
-                "column_subtotal_with_taxes_in_words": f"{_decimal_json(subtotal_with_taxes)} {currency_name}",
-                "column_subtotal_with_taxes_uzs_in_words": f"{_decimal_json(subtotal_with_taxes * exchange_rate)} {currency_name}",
-            },
-        }
-        if is_corrective:
-            doc_payload["korrektirovoch_document_number"] = _text(
-                getattr(document, "corrected_code", None)
-            )
-            doc_payload["korrektirovoch_document_date"] = _format_date(
-                getattr(document, "corrected_date", None)
-            )
-
-        partner = getattr(document, "partner", None)
-        if _model_enum_value(getattr(partner, "legal_status", None)) == LegalStatus.Natural.value:
-            doc_payload["single_sided_type"] = "1"
+            row, row_has_vat = self._build_invoice_item(index, operation)
+            product_rows.append(row)
+            has_vat = has_vat or row_has_vat
 
         return {
-            "id": self._client_document_uid(document),
-            "head": {
-                "file_name": f"invoice-{getattr(document, 'id', '')}.json",
-                "receiver": {
-                    "receiver_info": partner_info,
-                    "approver_and_signers": {},
-                },
-                "sender": {
-                    "sender_info": firm_info,
-                    "approver_and_signers": {},
-                },
+            "Version": 1,
+            "FacturaType": 0,
+            "FacturaDoc": {
+                "FacturaNo": invoice_number,
+                "FacturaDate": document_date,
             },
-            "document": doc_payload,
+            "ContractDoc": {
+                "ContractNo": contract_number,
+                "ContractDate": contract_date,
+            },
+            "SellerTin": self._company_inn(),
+            "Seller": firm_info,
+            "BuyerTin": _digits(getattr(getattr(document, "partner", None), "inn", None)),
+            "Buyer": partner_info,
+            "ProductList": {
+                "Tin": self._company_inn(),
+                "HasExcise": False,
+                "HasVat": has_vat,
+                "Products": product_rows,
+            },
+            "ItemReleasedDoc": {
+                "ItemReleasedPinfl": "",
+                "ItemReleasedFio": "",
+            },
+            "FacturaEmpowermentDoc": {
+                "EmpowermentNo": "",
+                "EmpowermentDateOfIssue": "",
+                "AgentFio": "",
+                "AgentPinfl": "",
+            },
         }
-
-    def _client_document_uid(self, document: DocInvoice) -> str:
-        return f"regos-{self.connected_integration_id}-{_to_int(getattr(document, 'id', None), 0)}"
 
     def _company_info_from_firm(self, firm: Firm) -> Dict[str, Any]:
         return {
-            "company_name": _firm_field(firm, "fullname") or _firm_field(firm, "name"),
-            "INN": _digits(_firm_field(firm, "inn")),
-            "phone": _firm_field(firm, "phones"),
-            "company_vat_code": _firm_field(firm, "vat_index"),
-            "address": {
-                "region": "",
-                "street": _firm_field(firm, "address"),
-            },
-            "bank_details": {
-                "bank_code": _firm_field(firm, "mfo"),
-                "bank_name": _firm_field(firm, "bank_name"),
-                "account_number": _firm_field(firm, "rs"),
-            },
+            "Name": _firm_field(firm, "fullname") or _firm_field(firm, "name"),
+            "BranchCode": "",
+            "BranchName": "",
+            "VatRegCode": _firm_field(firm, "vat_index"),
+            "Account": _firm_field(firm, "rs"),
+            "BankId": _firm_field(firm, "mfo"),
+            "Address": _firm_field(firm, "address"),
+            "Director": _firm_field(firm, "boss_name"),
+            "Accountant": "",
+            "VatRegStatus": 20 if _firm_field(firm, "vat_index") else None,
         }
 
     def _company_info_from_partner(self, partner: Any) -> Dict[str, Any]:
         return {
-            "company_name": _text(getattr(partner, "fullname", None) or getattr(partner, "name", None)),
-            "INN": _digits(getattr(partner, "inn", None)),
-            "phone": _text(getattr(partner, "phones", None)),
-            "company_vat_code": _text(getattr(partner, "vat_index", None)),
-            "address": {
-                "region": "",
-                "street": _text(getattr(partner, "address", None)),
-            },
-            "bank_details": {
-                "bank_code": _text(getattr(partner, "mfo", None)),
-                "bank_name": _text(getattr(partner, "bank_name", None)),
-                "account_number": _text(getattr(partner, "rs", None)),
-            },
+            "Name": _text(getattr(partner, "fullname", None) or getattr(partner, "name", None)),
+            "BranchCode": "",
+            "BranchName": "",
+            "VatRegCode": _text(getattr(partner, "vat_index", None)),
+            "Account": _text(getattr(partner, "rs", None)),
+            "BankId": _text(getattr(partner, "mfo", None)),
+            "Address": _text(getattr(partner, "address", None)),
+            "Director": _text(getattr(partner, "boss_name", None)),
+            "Accountant": "",
+            "VatRegStatus": 20 if _text(getattr(partner, "vat_index", None)) else None,
         }
 
     def _build_invoice_item(
         self,
         index: int,
         operation: InvoiceOperation,
-        *,
-        is_corrective: bool,
-    ) -> Tuple[Dict[str, Any], Decimal, Decimal, Decimal]:
+    ) -> Tuple[Dict[str, Any], bool]:
         item = getattr(operation, "item", None)
         quantity = _to_decimal(getattr(operation, "quantity", None), Decimal("0"))
         price = _to_decimal(getattr(operation, "price", None), Decimal("0"))
-        if is_corrective:
-            price = -price
-        subtotal = _money(quantity * price)
+        delivery_sum = _money(quantity * price)
         vat_rate = _to_decimal(getattr(operation, "vat_value", None), Decimal("0"))
         vat_calc_type = _model_enum_value(getattr(operation, "vat_calculation_type", None))
-
-        vat_amount = Decimal("0")
-        subtotal_with_taxes = subtotal
+        vat_sum = Decimal("0")
+        delivery_sum_with_vat = delivery_sum
         if vat_rate > 0 and vat_calc_type.lower() != "no":
             if vat_calc_type.lower() == "exclude":
-                vat_amount = _money(subtotal * vat_rate / (Decimal("100") + vat_rate))
-                subtotal_with_taxes = subtotal
+                vat_sum = _money(delivery_sum * vat_rate / (Decimal("100") + vat_rate))
+                delivery_sum_with_vat = delivery_sum
             elif vat_calc_type.lower() == "include":
-                vat_amount = _money(subtotal * vat_rate / Decimal("100"))
-                subtotal_with_taxes = _money(subtotal + vat_amount)
+                vat_sum = _money(delivery_sum * vat_rate / Decimal("100"))
+                delivery_sum_with_vat = _money(delivery_sum + vat_sum)
 
         has_vat = vat_rate > 0 and vat_calc_type.lower() in {"exclude", "include"}
-        row = {
-            "item_number": str(index),
-            "description": _text(getattr(item, "name", None), f"Item {index}"),
-            "volume": _decimal_json(quantity),
-            "unit_price": _decimal_json(price),
-            "measurement_unit_code": _text(getattr(item, "package_code", None)),
-            "excise": {},
-            "catalog": {
-                "code": _text(getattr(item, "icps", None)),
-                "name": "",
+        return (
+            {
+                "OrdNo": index,
+                "Name": _text(getattr(item, "name", None), f"Item {index}"),
+                "CatalogCode": _text(getattr(item, "icps", None)),
+                "CatalogName": "",
+                "Barcode": _text(getattr(item, "barcode", None)),
+                "PackageCode": _to_optional_int(getattr(item, "package_code", None)),
+                "PackageName": _text(getattr(item, "package_name", None)),
+                "Count": _decimal_json(quantity),
+                "Summa": _decimal_json(price),
+                "DeliverySum": _decimal_json(delivery_sum),
+                "VatRate": _decimal_json(vat_rate) if has_vat else "0",
+                "VatSum": _decimal_json(vat_sum),
+                "DeliverySumWithVat": _decimal_json(delivery_sum_with_vat),
+                "WithoutVat": not has_vat,
+                "Origin": _to_optional_int(getattr(item, "origin", None)) or 3,
+                "Marks": None,
             },
-            "subtotal": _decimal_json(subtotal),
-            "vat": {
-                "vat_rate": _decimal_json(vat_rate),
-                "vat_value": _decimal_json(vat_amount),
-            }
-            if has_vat
-            else {},
-            "subtotal_with_taxes": _decimal_json(subtotal_with_taxes),
-        }
-        return row, subtotal, vat_amount, subtotal_with_taxes
+            has_vat,
+        )
 
 
-class EdoFakturaUzIntegration(ClientBase):
-    integration_key = "edo_fakturauz"
-    REDIS_PREFIX = "edo:fakturauz"
-    STREAM_GROUP = "edo_fakturauz_workers"
+class EdoDidoxIntegration(ClientBase):
+    integration_key = "edo_didox"
+    REDIS_PREFIX = "edo:didox"
+    STREAM_GROUP = "edo_didox_workers"
     STREAM_READ_BLOCK_MS = 5000
     STREAM_MIN_IDLE_MS = 60_000
     STREAM_CLAIM_INTERVAL_SEC = 30
@@ -860,7 +871,7 @@ class EdoFakturaUzIntegration(ClientBase):
     @classmethod
     def _require_redis(cls) -> None:
         if not cls._redis_enabled():
-            raise RuntimeError("Redis is required for edo_fakturauz")
+            raise RuntimeError("Redis is required for edo_didox")
 
     @classmethod
     def _stream_key(cls) -> str:
@@ -876,23 +887,23 @@ class EdoFakturaUzIntegration(ClientBase):
 
     @classmethod
     def _stream_ttl(cls) -> int:
-        return max(int(settings.edo_fakturauz_stream_ttl or 0), 60)
+        return max(int(settings.edo_didox_stream_ttl or 0), 60)
 
     @classmethod
     def _stream_workers(cls) -> int:
-        return max(int(settings.edo_fakturauz_stream_workers or 0), 1)
+        return max(int(settings.edo_didox_stream_workers or 0), 1)
 
     @classmethod
     def _stream_batch_size(cls) -> int:
-        return max(int(settings.edo_fakturauz_stream_batch_size or 0), 1)
+        return max(int(settings.edo_didox_stream_batch_size or 0), 1)
 
     @classmethod
     def _stream_maxlen(cls) -> int:
-        return max(int(settings.edo_fakturauz_stream_maxlen or 0), 1000)
+        return max(int(settings.edo_didox_stream_maxlen or 0), 1000)
 
     @classmethod
     def _stream_retry_limit(cls) -> int:
-        return max(int(settings.edo_fakturauz_stream_retry_limit or 0), 1)
+        return max(int(settings.edo_didox_stream_retry_limit or 0), 1)
 
     @staticmethod
     def _serialize_stream_fields(fields: Dict[str, Any]) -> Dict[str, str]:
@@ -922,10 +933,16 @@ class EdoFakturaUzIntegration(ClientBase):
         _STREAM_GROUP_READY = True
 
     @classmethod
-    async def _enqueue_stream(cls, fields: Dict[str, Any], *, dlq: bool = False) -> str:
+    async def _enqueue_stream(
+        cls,
+        fields: Dict[str, Any],
+        *,
+        dlq: bool = False,
+        message_id: Optional[str] = None,
+    ) -> str:
         cls._require_redis()
         stream_key = cls._dlq_stream_key() if dlq else cls._stream_key()
-        message_id = uuid.uuid4().hex
+        message_id = _text(message_id) or uuid.uuid4().hex
         payload = dict(fields)
         payload.setdefault("message_id", message_id)
         await redis_stream_add_with_ttl(
@@ -937,6 +954,59 @@ class EdoFakturaUzIntegration(ClientBase):
             now_ts=_now_ts(),
         )
         return message_id
+
+    @classmethod
+    def _dedupe_key(
+        cls,
+        *,
+        connected_integration_id: str,
+        firm_id: int,
+        action: str,
+        document_id: str,
+    ) -> str:
+        return redis_make_key(
+            cls.REDIS_PREFIX,
+            "dedupe",
+            connected_integration_id,
+            firm_id,
+            action,
+            document_id,
+        )
+
+    @classmethod
+    async def _enqueue_unique_task(cls, fields: Dict[str, Any]) -> str:
+        cls._require_redis()
+        ci = _text(fields.get("connected_integration_id"))
+        action = _text(fields.get("action"))
+        firm_id = _to_int(fields.get("firm_id"), 0)
+        document_id = _text(fields.get("data"))
+        dedupe_key = cls._dedupe_key(
+            connected_integration_id=ci,
+            firm_id=firm_id,
+            action=action,
+            document_id=document_id,
+        )
+        message_id = uuid.uuid4().hex
+        created = await redis_ops.set(dedupe_key, message_id, ex=cls._stream_ttl(), nx=True)
+        if not created:
+            existing = await redis_ops.get(dedupe_key)
+            return _text(existing, message_id)
+        payload = dict(fields)
+        payload["dedupe_key"] = dedupe_key
+        try:
+            return await cls._enqueue_stream(payload, message_id=message_id)
+        except Exception:
+            await redis_ops.delete(dedupe_key)
+            raise
+
+    @classmethod
+    async def _release_dedupe(cls, fields: Dict[str, Any]) -> None:
+        dedupe_key = _text(fields.get("dedupe_key"))
+        if dedupe_key:
+            try:
+                await redis_ops.delete(dedupe_key)
+            except Exception as error:
+                logger.debug("EDO Didox dedupe release failed: key=%s error=%s", dedupe_key, error)
 
     @classmethod
     def _stream_workers_ready(cls) -> bool:
@@ -961,7 +1031,7 @@ class EdoFakturaUzIntegration(ClientBase):
                     continue
                 _STREAM_WORKER_TASKS[task_key] = asyncio.create_task(
                     cls._stream_worker_loop(index),
-                    name=f"edo_fakturauz_stream_{index}",
+                    name=f"edo_didox_stream_{index}",
                 )
 
     @classmethod
@@ -976,7 +1046,7 @@ class EdoFakturaUzIntegration(ClientBase):
             except asyncio.CancelledError:
                 pass
             except Exception:
-                logger.exception("Error while stopping EDO Faktura.uz stream worker")
+                logger.exception("Error while stopping EDO Didox stream worker")
 
     @classmethod
     async def restore_active_connections(cls) -> Dict[str, int]:
@@ -1007,7 +1077,7 @@ class EdoFakturaUzIntegration(ClientBase):
             if redis_error_contains(error, "NOGROUP"):
                 await cls._ensure_consumer_group(force=True)
                 return []
-            logger.warning("EDO Faktura.uz xautoclaim failed: %s", error)
+            logger.warning("EDO Didox xautoclaim failed: %s", error)
             return []
 
         entries: List[Tuple[str, Dict[str, Any]]] = []
@@ -1022,7 +1092,7 @@ class EdoFakturaUzIntegration(ClientBase):
     async def _stream_worker_loop(cls, worker_index: int) -> None:
         task_key = cls._worker_task_key(worker_index)
         consumer = f"{_INSTANCE_ID}:{worker_index}"
-        logger.info("EDO Faktura.uz stream worker started: worker=%s", worker_index)
+        logger.info("EDO Didox stream worker started: worker=%s", worker_index)
         try:
             await cls._ensure_consumer_group()
             while True:
@@ -1057,7 +1127,7 @@ class EdoFakturaUzIntegration(ClientBase):
                 except asyncio.CancelledError:
                     raise
                 except Exception as error:
-                    logger.exception("EDO Faktura.uz stream worker error: %s", error)
+                    logger.exception("EDO Didox stream worker error: %s", error)
                     await asyncio.sleep(2)
         finally:
             async with _STREAM_WORKER_LOCK:
@@ -1079,7 +1149,7 @@ class EdoFakturaUzIntegration(ClientBase):
         attempt = cls._stream_entry_attempt(fields)
 
         if not ci or action not in {"import", "export"} or firm_id <= 0 or not document_id:
-            logger.warning("EDO Faktura.uz invalid stream entry: entry_id=%s fields=%s", entry_id, fields)
+            logger.warning("EDO Didox invalid stream entry: entry_id=%s fields=%s", entry_id, fields)
             await cls._ack_stream_entry(entry_id)
             return
 
@@ -1092,8 +1162,9 @@ class EdoFakturaUzIntegration(ClientBase):
                 firm_id=firm_id,
                 user_id=user_id,
             )
+            await cls._release_dedupe(fields)
             await cls._ack_stream_entry(entry_id)
-        except EdoFakturaUzNonRetryableError as error:
+        except EdoDidoxNonRetryableError as error:
             await cls._move_to_dlq(entry_id, fields, error, attempt + 1)
             await cls._ack_stream_entry(entry_id)
         except Exception as error:
@@ -1109,7 +1180,7 @@ class EdoFakturaUzIntegration(ClientBase):
             await cls._enqueue_stream(retry_fields)
             await cls._ack_stream_entry(entry_id)
             logger.warning(
-                "EDO Faktura.uz job requeued: ci=%s action=%s doc=%s attempt=%s error=%s",
+                "EDO Didox job requeued: ci=%s action=%s doc=%s attempt=%s error=%s",
                 ci,
                 action,
                 document_id,
@@ -1132,8 +1203,9 @@ class EdoFakturaUzIntegration(ClientBase):
         payload["failed_at"] = str(_now_ts())
         payload["error"] = str(error)
         await cls._enqueue_stream(payload, dlq=True)
+        await cls._release_dedupe(fields)
         logger.error(
-            "EDO Faktura.uz job moved to DLQ: entry_id=%s attempt=%s error=%s",
+            "EDO Didox job moved to DLQ: entry_id=%s attempt=%s error=%s",
             entry_id,
             attempt,
             error,
@@ -1145,7 +1217,7 @@ class EdoFakturaUzIntegration(ClientBase):
     async def _ensure_active_integration(self) -> None:
         ci = self._ci()
         if not ci:
-            raise EdoFakturaUzError(111020, "connected_integration_id is required", 400)
+            raise EdoDidoxError(112020, "connected_integration_id is required", 400)
         async with RegosAPI(connected_integration_id=ci) as api:
             response = await api.integrations.connected_integration.get(
                 ConnectedIntegrationGetRequest(
@@ -1159,15 +1231,11 @@ class EdoFakturaUzIntegration(ClientBase):
             if _text(getattr(row, "connected_integration_id", "")) != ci:
                 continue
             if _text(getattr(row, "key", "")) != self.integration_key:
-                raise EdoFakturaUzError(
-                    111021,
-                    f"Connected integration {ci} is not {self.integration_key}",
-                    400,
-                )
+                raise EdoDidoxError(112021, f"Connected integration {ci} is not {self.integration_key}", 400)
             if getattr(row, "is_active", None) is False:
-                raise EdoFakturaUzError(111022, f"Connected integration {ci} is inactive", 403)
+                raise EdoDidoxError(112022, f"Connected integration {ci} is inactive", 403)
             return
-        raise EdoFakturaUzError(111023, f"Connected integration {ci} was not found", 404)
+        raise EdoDidoxError(112023, f"Connected integration {ci} was not found", 404)
 
     async def connect(self, **kwargs) -> Dict[str, Any]:
         await self._ensure_active_integration()
@@ -1190,7 +1258,7 @@ class EdoFakturaUzIntegration(ClientBase):
     async def check(self, firm_id: Optional[int] = None, **kwargs) -> Dict[str, Any]:
         await self._ensure_active_integration()
         if firm_id:
-            await FakturaUzClient.create(self._ci(), int(firm_id))
+            await DidoxClient.create(self._ci(), int(firm_id))
         return {"status": "ok", "connected_integration_id": self._ci()}
 
     async def handle_webhook(self, data: Optional[Dict] = None, **kwargs) -> Dict[str, Any]:
@@ -1210,8 +1278,8 @@ class EdoFakturaUzIntegration(ClientBase):
     ) -> JSONResponse:
         try:
             await self._ensure_active_integration()
-            provider = await FakturaUzClient.create(self._ci(), int(firm_id))
-            page_limit = max(_to_int(limit, 500), 1)
+            provider = await DidoxClient.create(self._ci(), int(firm_id))
+            page_limit = min(max(_to_int(limit, 50), 1), 100)
             page_offset = max(_to_int(offset, 0), 0)
             rows, total = await provider.get_documents(
                 start_date=start_date,
@@ -1232,7 +1300,7 @@ class EdoFakturaUzIntegration(ClientBase):
                     "total": known_total,
                 }
             )
-        except EdoFakturaUzError as error:
+        except EdoDidoxError as error:
             return _json_response(
                 {
                     "ok": False,
@@ -1253,8 +1321,8 @@ class EdoFakturaUzIntegration(ClientBase):
     ) -> List[Dict[str, Any]]:
         doc_id = _text(document_id or id)
         if not doc_id:
-            raise EdoFakturaUzError(111030, "document id is required", 400)
-        provider = await FakturaUzClient.create(self._ci(), int(firm_id or 0))
+            raise EdoDidoxError(112030, "document id is required", 400)
+        provider = await DidoxClient.create(self._ci(), int(firm_id or 0))
         content = await provider.get_document_content(doc_id)
         return content.get("operations") or []
 
@@ -1271,12 +1339,12 @@ class EdoFakturaUzIntegration(ClientBase):
     ) -> str:
         doc_id = _text(document_id or id)
         if not doc_id:
-            raise EdoFakturaUzError(111031, "document id is required", 400)
+            raise EdoDidoxError(112031, "document id is required", 400)
         if _to_int(firm_id, 0) <= 0:
-            raise EdoFakturaUzError(111032, "firm_id is required", 400)
+            raise EdoDidoxError(112032, "firm_id is required", 400)
         await self._ensure_active_integration()
         await self._ensure_stream_workers()
-        return await self._enqueue_stream(
+        return await self._enqueue_unique_task(
             {
                 "connected_integration_id": self._ci(),
                 "action": "import",
@@ -1297,15 +1365,15 @@ class EdoFakturaUzIntegration(ClientBase):
     ) -> Optional[Dict[str, Any]]:
         raw_ids = ids if ids is not None else messages
         if not isinstance(raw_ids, list) or not raw_ids:
-            raise EdoFakturaUzError(111033, "ids are required", 400)
+            raise EdoDidoxError(112033, "ids are required", 400)
         if _to_int(firm_id, 0) <= 0:
-            raise EdoFakturaUzError(111034, "firm_id is required", 400)
+            raise EdoDidoxError(112034, "firm_id is required", 400)
         await self._ensure_active_integration()
         await self._ensure_stream_workers()
         task_ids: List[str] = []
         for doc_id in raw_ids:
             task_ids.append(
-                await self._enqueue_stream(
+                await self._enqueue_unique_task(
                     {
                         "connected_integration_id": self._ci(),
                         "action": "export",
@@ -1329,8 +1397,8 @@ class EdoFakturaUzIntegration(ClientBase):
     ) -> None:
         ci = self._ci()
         if action == "import":
-            provider = await FakturaUzClient.create(ci, firm_id)
-            content = await provider.get_document_content(document_id)
+            provider = await DidoxClient.create(ci, firm_id)
+            content = await provider.get_document_content(document_id, owner=0)
             async with RegosAPI(connected_integration_id=ci) as api:
                 await self._import_document_to_regos(
                     api,
@@ -1341,13 +1409,13 @@ class EdoFakturaUzIntegration(ClientBase):
                 )
             return
         if action == "export":
-            await self._export_document_to_faktura(
+            await self._export_document_to_didox(
                 document_id=_to_int(document_id, 0),
                 firm_id=firm_id,
                 connected_integration_id=ci,
             )
             return
-        raise EdoFakturaUzError(111035, f"Unsupported EDO action: {action}", 400)
+        raise EdoDidoxError(112035, f"Unsupported EDO action: {action}", 400)
 
     async def _import_document_to_regos(
         self,
@@ -1416,7 +1484,7 @@ class EdoFakturaUzIntegration(ClientBase):
                     DocInvoiceStatus.ErrorReceived,
                     str(error),
                 )
-                raise EdoFakturaUzNonRetryableError(111036, str(error)) from error
+                raise EdoDidoxNonRetryableError(112036, str(error)) from error
             raise
 
     async def _find_imported_invoice_id(
@@ -1530,19 +1598,19 @@ class EdoFakturaUzIntegration(ClientBase):
         operations: List[Dict[str, Any]],
     ) -> None:
         if not operations:
-            raise EdoFakturaUzError(111037, "Document operations are empty", 400)
+            raise EdoDidoxError(112037, "Document operations are empty", 400)
         groups = self._build_item_import_groups(operations)
         for matching_type, import_request in groups:
             response = await api.references.item.import_items(import_request)
             _ensure_api_ok(response, f"Item/Import {matching_type.value}")
             failed_rows = [row for row in response.result or [] if getattr(row, "success", None) is False]
             if failed_rows:
-                raise EdoFakturaUzError(111038, f"Item import failed: {failed_rows}", 400)
+                raise EdoDidoxError(112038, f"Item import failed: {failed_rows}", 400)
 
         matches = await self._match_items(api, operations)
         missing = [row["index"] for row in operations if _text(row.get("index")) not in matches]
         if missing:
-            raise EdoFakturaUzError(111039, f"Items were not matched: {', '.join(missing)}", 400)
+            raise EdoDidoxError(112039, f"Items were not matched: {', '.join(missing)}", 400)
 
         rows = [
             InvoiceOperationAdd(
@@ -1590,7 +1658,7 @@ class EdoFakturaUzIntegration(ClientBase):
             elif barcode:
                 grouped[ItemMatchingType.Barcode].append(data)
             else:
-                raise EdoFakturaUzError(111040, f"Operation {index} does not contain ICPS or barcode", 400)
+                raise EdoDidoxError(112040, f"Operation {index} does not contain ICPS or barcode", 400)
 
         result: List[Tuple[ItemMatchingType, ItemImportRequest]] = []
         for matching_type, rows in grouped.items():
@@ -1646,9 +1714,9 @@ class EdoFakturaUzIntegration(ClientBase):
             return ItemMatchingType.ICPS, icps
         if barcode:
             return ItemMatchingType.Barcode, barcode
-        raise EdoFakturaUzError(111041, "Operation does not contain ICPS or barcode", 400)
+        raise EdoDidoxError(112041, "Operation does not contain ICPS or barcode", 400)
 
-    async def _export_document_to_faktura(
+    async def _export_document_to_didox(
         self,
         *,
         document_id: int,
@@ -1656,19 +1724,18 @@ class EdoFakturaUzIntegration(ClientBase):
         connected_integration_id: str,
     ) -> None:
         if document_id <= 0:
-            raise EdoFakturaUzError(111042, "document_id is required", 400)
+            raise EdoDidoxError(112042, "document_id is required", 400)
         async with RegosAPI(connected_integration_id=connected_integration_id) as api:
             document = await api.docs.doc_invoice.get_by_id(document_id)
             if not document:
-                raise EdoFakturaUzNonRetryableError(
-                    111043,
-                    f"DocInvoice {document_id} was not found",
-                    404,
-                )
+                raise EdoDidoxNonRetryableError(112043, f"DocInvoice {document_id} was not found", 404)
             try:
                 if _text(getattr(document, "external_code", None)) and (
                     _model_enum_value(getattr(document, "status", None)).lower()
-                    == DocInvoiceStatus.Sent.value.lower()
+                    in {
+                        DocInvoiceStatus.InSentProgress.value.lower(),
+                        DocInvoiceStatus.Sent.value.lower(),
+                    }
                 ):
                     return
                 await self._validate_export_document(document)
@@ -1684,16 +1751,13 @@ class EdoFakturaUzIntegration(ClientBase):
                 _ensure_api_ok(operations_response, "InvoiceOperation/Get")
                 operations = operations_response.result or []
                 if not operations:
-                    raise EdoFakturaUzNonRetryableError(
-                        111048,
+                    raise EdoDidoxNonRetryableError(
+                        112048,
                         f"DocInvoice {document_id} does not contain operations",
                         400,
                     )
-                provider = await FakturaUzClient.create(connected_integration_id, firm_id)
-                external_id = await provider.send_document_invoice(
-                    document,
-                    operations,
-                )
+                provider = await DidoxClient.create(connected_integration_id, firm_id)
+                external_id = await provider.create_invoice_draft(document, operations)
                 await api.docs.doc_invoice.set_external_data(
                     DocInvoiceSetExternalDataRequest(
                         document_id=document_id,
@@ -1701,13 +1765,7 @@ class EdoFakturaUzIntegration(ClientBase):
                         external_id=external_id,
                     )
                 )
-                await api.docs.doc_invoice.set_status(
-                    DocInvoiceSetStatusRequest(
-                        document_id=document_id,
-                        status=DocInvoiceStatus.Sent,
-                    )
-                )
-            except EdoFakturaUzNonRetryableError as error:
+            except EdoDidoxNonRetryableError as error:
                 await self._set_invoice_error(
                     api,
                     document_id,
@@ -1722,27 +1780,19 @@ class EdoFakturaUzIntegration(ClientBase):
                     DocInvoiceStatus.ErrorSent,
                     str(error),
                 )
-                raise EdoFakturaUzNonRetryableError(111044, str(error)) from error
+                raise EdoDidoxNonRetryableError(112044, str(error)) from error
 
     async def _validate_export_document(self, document: DocInvoice) -> None:
         if getattr(document, "performed", None) is False:
-            raise EdoFakturaUzNonRetryableError(
-                111045,
-                f"DocInvoice {document.id} is not performed",
-                400,
-            )
+            raise EdoDidoxNonRetryableError(112045, f"DocInvoice {document.id} is not performed", 400)
         if not getattr(document, "partner", None):
-            raise EdoFakturaUzNonRetryableError(
-                111046,
+            raise EdoDidoxNonRetryableError(
+                112046,
                 f"DocInvoice {document.id} does not contain partner",
                 400,
             )
         if not getattr(document, "firm", None):
-            raise EdoFakturaUzNonRetryableError(
-                111047,
-                f"DocInvoice {document.id} does not contain firm",
-                400,
-            )
+            raise EdoDidoxNonRetryableError(112047, f"DocInvoice {document.id} does not contain firm", 400)
 
     async def _set_invoice_error(
         self,
@@ -1761,10 +1811,10 @@ class EdoFakturaUzIntegration(ClientBase):
             )
         except Exception as error:
             logger.warning(
-                "Failed to set EDO invoice error status: document_id=%s error=%s",
+                "Failed to set EDO Didox invoice error status: document_id=%s error=%s",
                 document_id,
                 error,
             )
 
 
-__all__ = ["EdoFakturaUzIntegration", "FakturaUzClient"]
+__all__ = ["EdoDidoxIntegration", "DidoxClient"]

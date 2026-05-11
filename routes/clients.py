@@ -36,6 +36,7 @@ from clients.marketplace_yandex_eats.main import YandexEatsIntegration
 from clients.marketplace_uzum_tezkor.main import UzumTezkorIntegration
 from clients.marketplace_toserver.main import MarketplaceToServerIntegration
 from clients.edo_fakturauz.main import EdoFakturaUzIntegration
+from clients.edo_didox.main import EdoDidoxIntegration
 
 router = APIRouter()
 logger = setup_logger("clients_route")
@@ -61,6 +62,7 @@ INTEGRATION_CLASSES = {
     "marketplace_uzum_tezkor": UzumTezkorIntegration,
     "marketplace_toserver": MarketplaceToServerIntegration,
     "edo_fakturauz": EdoFakturaUzIntegration,
+    "edo_didox": EdoDidoxIntegration,
 }
 
 # Служебные заголовки, которые не нужно прокидывать обработчикам
