@@ -109,7 +109,7 @@ class Settings(BaseSettings):
     meta_leadgen_app_secret: str = ""
     meta_leadgen_redirect_uri: str = ""
     meta_leadgen_webhook_verify_token: str = ""
-    meta_leadgen_graph_version: str = "v20.0"
+    meta_leadgen_graph_version: str = "v25.0"
 
     oauth_endpoint: str = "https://auth.regos.uz/" # oath/token
     oauth_client_id: str = ""
