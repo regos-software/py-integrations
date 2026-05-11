@@ -101,7 +101,6 @@ class DocInvoice(BaseSchema):
     attached_user: Optional[User] = PydField(default=None, description="Attached user.")
     base_document_id: Optional[int] = PydField(default=None, description="Base document id.")
     document_type: Optional[int] = PydField(default=None, description="Base document type.")
-    positive: Optional[bool] = PydField(default=None, description="Positive flag.")
     description: Optional[str] = PydField(default=None, description="Description.")
     uuid: Optional[str] = PydField(default=None, description="UUID.")
     external_code: Optional[str] = PydField(default=None, description="External code.")
@@ -110,7 +109,6 @@ class DocInvoice(BaseSchema):
     blocked: Optional[bool] = PydField(default=None, description="Blocked flag.")
     current_user_blocked: Optional[bool] = PydField(default=None, description="Current user blocked flag.")
     performed: Optional[bool] = PydField(default=None, description="Performed flag.")
-    sent: Optional[bool] = PydField(default=None, description="Sent flag.")
     deleted_mark: Optional[bool] = PydField(default=None, description="Deleted mark.")
     last_update: Optional[int] = PydField(default=None, ge=0, description="Last update.")
 
@@ -142,6 +140,7 @@ class DocInvoiceGetRequest(BaseSchema):
     blocked: Optional[bool] = PydField(default=None, description="Blocked flag.")
     deleted_mark: Optional[bool] = PydField(default=None, description="Deleted mark.")
     vat_calculation_type: Optional[VatCalculationType] = PydField(default=None, description="VAT type.")
+    external_code: Optional[str] = PydField(default=None, description="External code.")
     sort_orders: Optional[SortOrders] = PydField(default=None, description="Sort orders.")
     search: Optional[str] = PydField(default=None, description="Search string.")
     limit: Optional[int] = PydField(default=None, ge=1, le=10000, description="Limit.")
@@ -152,9 +151,9 @@ class DocInvoiceGetRequest(BaseSchema):
     def _normalize_invoice_type(cls, value):
         return _normalize_invoice_type(value)
 
-    @field_validator("search", mode="before")
+    @field_validator("external_code", "search", mode="before")
     @classmethod
-    def _strip_search(cls, value: Optional[str]) -> Optional[str]:
+    def _strip_strings(cls, value: Optional[str]) -> Optional[str]:
         return value.strip() if isinstance(value, str) else value
 
     @model_validator(mode="after")
@@ -181,7 +180,6 @@ class DocInvoiceAddRequest(BaseSchema):
     currency_id: int = PydField(..., ge=1, description="Currency id.")
     exchange_rate: Optional[Decimal] = PydField(default=None, description="Exchange rate.")
     description: Optional[str] = PydField(default=None, description="Description.")
-    positive: Optional[bool] = PydField(default=None, description="Positive flag.")
     invoice_type: Optional[DocInvoiceType] = PydField(default=None, description="Invoice type.")
     vat_calculation_type: Optional[VatCalculationType] = PydField(default=None, description="VAT type.")
     attached_user_id: Optional[int] = PydField(default=None, ge=1, description="Attached user id.")

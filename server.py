@@ -14,6 +14,7 @@ from clients.telegram_bot_quantity.main import TelegramBotMinQuantityIntegration
 from clients.telegram_bot_notification.main import TelegramBotNotificationIntegration
 from clients.telegram_bot_orders.main import TelegramBotOrdersIntegration
 from clients.edo_fakturauz.main import EdoFakturaUzIntegration
+from clients.edo_didox.main import EdoDidoxIntegration
 
 
 _RESTORE_INTEGRATIONS = (
@@ -27,6 +28,7 @@ _RESTORE_INTEGRATIONS = (
     ("Instagram", InstagramCrmChannelIntegration),
     ("Meta Leadgen", MetaLeadgenCrmChannelIntegration),
     ("EDO Faktura.uz", EdoFakturaUzIntegration),
+    ("EDO Didox", EdoDidoxIntegration),
 )
 
 _SHUTDOWN_INTEGRATIONS = (
@@ -40,6 +42,7 @@ _SHUTDOWN_INTEGRATIONS = (
     ("Instagram", InstagramCrmChannelIntegration),
     ("Meta Leadgen", MetaLeadgenCrmChannelIntegration),
     ("EDO Faktura.uz", EdoFakturaUzIntegration),
+    ("EDO Didox", EdoDidoxIntegration),
 )
 
 

@@ -72,6 +72,7 @@ class MetaLeadgenCrmChannelIntegration(ClientBase):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
+        self.connected_integration_id: Optional[str] = None
         self.http_client = httpx.AsyncClient(
             timeout=MetaLeadgenCrmChannelConfig.HTTP_TIMEOUT_SEC
         )
@@ -575,24 +576,25 @@ class MetaLeadgenCrmChannelIntegration(ClientBase):
         )
 
     def _resolve_ci_from_envelope(self, envelope: Dict[str, Any]) -> Optional[str]:
-        if self.connected_integration_id:
-            return normalize_text(self.connected_integration_id, max_len=128)
+        instance_ci = str(getattr(self, "connected_integration_id", "") or "").strip()
+        if instance_ci:
+            return instance_ci
 
         headers = envelope.get("headers") or {}
         query = envelope.get("query") or {}
-        ci = headers_ci(headers, "Connected-Integration-Id") or headers_ci(
-            headers,
-            "connected-integration-id",
-        )
+        ci = headers_ci(headers, "Connected-Integration-Id")
         if ci:
             return ci
         for key in ("connected_integration_id", "ci"):
             ci = _query_get(query, key)
             if ci:
                 return ci
+
         body = envelope.get("body")
         if isinstance(body, dict):
-            return normalize_text(body.get("connected_integration_id"), max_len=128)
+            ci = normalize_text(body.get("connected_integration_id"), max_len=128)
+            if ci:
+                return ci
         return None
 
     @classmethod
