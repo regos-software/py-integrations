@@ -26,6 +26,7 @@ from clients.telegram_bot_notification.main import TelegramBotNotificationIntegr
 from clients.telegram_bot_quantity.main import TelegramBotMinQuantityIntegration
 from clients.telegram_bot_orders.main import TelegramBotOrdersIntegration
 from clients.telegram_bot_crm_channel.main import TelegramBotCrmChannelIntegration
+from clients.telegram_business_crm_channel.main import TelegramBusinessCrmChannelIntegration
 from clients.asterisk_crm_channel.main import AsteriskCrmChannelIntegration
 from clients.instagram_crm_channel.main import InstagramCrmChannelIntegration
 from clients.meta_leadgen_crm_channel.main import MetaLeadgenCrmChannelIntegration
@@ -52,6 +53,7 @@ INTEGRATION_CLASSES = {
     "telegram_bot_quantity": TelegramBotMinQuantityIntegration,
     "telegram_bot_orders": TelegramBotOrdersIntegration,
     "telegram_bot_crm_channel": TelegramBotCrmChannelIntegration,
+    "telegram_business_crm_channel": TelegramBusinessCrmChannelIntegration,
     "asterisk_crm_channel": AsteriskCrmChannelIntegration,
     "instagram_crm_channel": InstagramCrmChannelIntegration,
     "meta_leadgen_crm_channel": MetaLeadgenCrmChannelIntegration,

@@ -68,6 +68,12 @@ class Settings(BaseSettings):
     telegram_crm_channel_stream_batch_size: int = 50
     telegram_crm_channel_stream_maxlen: int = 100000
     telegram_crm_channel_send_concurrency: int = 20
+    telegram_business_webhook_refresh_ttl: int = 86400
+    telegram_business_update_mode: str = "webhook"
+    telegram_business_crm_channel_stream_workers: int = 2
+    telegram_business_crm_channel_stream_batch_size: int = 50
+    telegram_business_crm_channel_stream_maxlen: int = 100000
+    telegram_business_crm_channel_send_concurrency: int = 20
     asterisk_crm_channel_stream_workers: int = 2
     asterisk_crm_channel_stream_batch_size: int = 50
     asterisk_crm_channel_stream_maxlen: int = 100000
