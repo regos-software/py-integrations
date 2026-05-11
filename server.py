@@ -10,6 +10,7 @@ from clients.gpt_crm_chat_assistant.main import GptCrmChatAssistantIntegration
 from clients.instagram_crm_channel.main import InstagramCrmChannelIntegration
 from clients.meta_leadgen_crm_channel.main import MetaLeadgenCrmChannelIntegration
 from clients.telegram_bot_crm_channel.main import TelegramBotCrmChannelIntegration
+from clients.telegram_business_crm_channel.main import TelegramBusinessCrmChannelIntegration
 from clients.telegram_bot_quantity.main import TelegramBotMinQuantityIntegration
 from clients.telegram_bot_notification.main import TelegramBotNotificationIntegration
 from clients.telegram_bot_orders.main import TelegramBotOrdersIntegration
@@ -21,6 +22,7 @@ _RESTORE_INTEGRATIONS = (
     ("Asterisk", AsteriskCrmChannelIntegration),
     ("External chat", ExternalChatCrmChannelIntegration),
     ("Telegram", TelegramBotCrmChannelIntegration),
+    ("Telegram Business", TelegramBusinessCrmChannelIntegration),
     ("Telegram notification", TelegramBotNotificationIntegration),
     ("Telegram min quantity", TelegramBotMinQuantityIntegration),
     ("Telegram orders", TelegramBotOrdersIntegration),
@@ -33,6 +35,7 @@ _RESTORE_INTEGRATIONS = (
 
 _SHUTDOWN_INTEGRATIONS = (
     ("Telegram", TelegramBotCrmChannelIntegration),
+    ("Telegram Business", TelegramBusinessCrmChannelIntegration),
     ("Telegram notification", TelegramBotNotificationIntegration),
     ("Telegram min quantity", TelegramBotMinQuantityIntegration),
     ("Telegram orders", TelegramBotOrdersIntegration),
