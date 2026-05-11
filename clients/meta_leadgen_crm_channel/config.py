@@ -8,7 +8,7 @@ class MetaLeadgenCrmChannelConfig:
     REDIS_PREFIX = "mlg:"
 
     GRAPH_API_VERSION = str(
-        getattr(app_settings, "meta_leadgen_graph_version", "") or "v20.0"
+        getattr(app_settings, "meta_leadgen_graph_version", "") or "v25.0"
     ).strip()
     GRAPH_BASE_URL = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
     OAUTH_DIALOG_URL = f"https://www.facebook.com/{GRAPH_API_VERSION}/dialog/oauth"
@@ -28,7 +28,7 @@ class MetaLeadgenCrmChannelConfig:
     )
 
     SETTINGS_TTL_SEC = max(int(app_settings.redis_cache_ttl or 60), 60)
-    MAP_TTL_SEC = 30 * 24 * 60 * 60
+    MAP_TTL_SEC = 10 * 60
     DEDUPE_TTL_SEC = 60 * 60
     LOCK_TTL_SEC = 60
     OAUTH_STATE_TTL_SEC = 10 * 60

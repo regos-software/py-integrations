@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import html
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
@@ -37,6 +36,21 @@ from .models import (
     to_int,
 )
 from .redis_state import MetaLeadgenRedisState, redis_enabled
+from .storage import (
+    PageMapConflictError,
+    active_connected_integration_ids,
+    ensure_schema as ensure_meta_leadgen_db_schema,
+    mark_page_map_inactive,
+    reassign_page_map,
+    resolve_ci_by_page_id as resolve_ci_by_page_id_db,
+    upsert_page_map,
+)
+from .ui import (
+    MetaLeadgenUiContext,
+    normalize_locale,
+    render_meta_leadgen_ui,
+    resolve_locale,
+)
 
 logger = setup_logger("meta_leadgen_crm_channel")
 
@@ -192,6 +206,33 @@ class MetaLeadgenCrmChannelIntegration(ClientBase):
         return active
 
     @classmethod
+    async def _mark_ci_active(cls, connected_integration_id: str) -> None:
+        ci = normalize_text(connected_integration_id, max_len=128)
+        if not ci:
+            return
+        async with cls._ACTIVE_CACHE_LOCK:
+            cls._ACTIVE_CACHE[ci] = (
+                True,
+                time.monotonic() + MetaLeadgenCrmChannelConfig.ACTIVE_CACHE_TTL_SEC,
+            )
+        await MetaLeadgenRedisState.set(
+            MetaLeadgenRedisState.ci_active_cache_key(ci),
+            "1",
+            MetaLeadgenCrmChannelConfig.ACTIVE_CACHE_TTL_SEC,
+        )
+        await MetaLeadgenRedisState.mark_ci_active(ci)
+
+    @classmethod
+    async def _mark_ci_inactive(cls, connected_integration_id: str) -> None:
+        ci = normalize_text(connected_integration_id, max_len=128)
+        if not ci:
+            return
+        async with cls._ACTIVE_CACHE_LOCK:
+            cls._ACTIVE_CACHE.pop(ci, None)
+        await MetaLeadgenRedisState.delete(MetaLeadgenRedisState.ci_active_cache_key(ci))
+        await MetaLeadgenRedisState.mark_ci_inactive(ci)
+
+    @classmethod
     async def _load_runtime(
         cls,
         connected_integration_id: str,
@@ -311,11 +352,26 @@ class MetaLeadgenCrmChannelIntegration(ClientBase):
         scope_value = str(scopes[0] if scopes else "").strip()
         return scope_value == ",".join(MetaLeadgenCrmChannelConfig.OAUTH_SCOPES)
 
+    @staticmethod
+    def _authorization_url_has_locale(authorization_url: str, locale: str) -> bool:
+        expected = normalize_locale(locale)
+        if not expected:
+            return True
+        try:
+            parsed = urlparse(str(authorization_url or ""))
+            query = parse_qs(parsed.query)
+        except Exception:
+            return False
+        states = query.get("state") or []
+        _, _, state_locale = MetaLeadgenApi.decode_oauth_state(str(states[0] if states else ""))
+        return normalize_locale(state_locale) == expected
+
     @classmethod
     def _authorization_url_is_fresh(
         cls,
         settings_map: Dict[str, str],
         authorization_url: str,
+        locale: str = "",
     ) -> bool:
         generated_at = to_int(
             settings_map.get(MetaLeadgenCrmChannelConfig.SETTING_AUTHORIZATION_URL_GENERATED_AT),
@@ -325,6 +381,8 @@ class MetaLeadgenCrmChannelIntegration(ClientBase):
             return False
         if not cls._authorization_url_has_current_scopes(authorization_url):
             return False
+        if locale and not cls._authorization_url_has_locale(authorization_url, locale):
+            return False
         return now_ts() < int(generated_at) + MetaLeadgenCrmChannelConfig.OAUTH_STATE_TTL_SEC - 60
 
     @classmethod
@@ -333,6 +391,7 @@ class MetaLeadgenCrmChannelIntegration(ClientBase):
         connected_integration_id: str,
         runtime: RuntimeConfig,
         settings_map: Dict[str, str],
+        locale: str = "",
     ) -> str:
         if cls._is_runtime_authorized(runtime):
             if (
@@ -346,11 +405,11 @@ class MetaLeadgenCrmChannelIntegration(ClientBase):
         existing_url = normalize_text(
             settings_map.get(MetaLeadgenCrmChannelConfig.SETTING_AUTHORIZATION_URL)
         )
-        if existing_url and cls._authorization_url_is_fresh(settings_map, existing_url):
+        if existing_url and cls._authorization_url_is_fresh(settings_map, existing_url, locale):
             return existing_url
 
         generated_at = now_ts()
-        authorization_url = await MetaLeadgenApi.build_oauth_url(connected_integration_id)
+        authorization_url = await MetaLeadgenApi.build_oauth_url(connected_integration_id, locale)
         await cls._save_authorization_state(
             connected_integration_id,
             authorized=False,
@@ -360,10 +419,159 @@ class MetaLeadgenCrmChannelIntegration(ClientBase):
         return authorization_url
 
     @classmethod
-    async def _sync_reverse_indexes(cls, runtime: RuntimeConfig) -> None:
+    async def _write_page_mapping(
+        cls,
+        *,
+        connected_integration_id: str,
+        page_id: str,
+        page_name: Optional[str],
+        require_persistent_map: bool,
+    ) -> None:
+        ci = normalize_text(connected_integration_id, max_len=128)
+        page = normalize_text(page_id, max_len=128)
+        if not ci:
+            if require_persistent_map:
+                raise RuntimeError("connected_integration_id is required for persistent mapping")
+            return
+        if not page:
+            if require_persistent_map:
+                raise RuntimeError("meta_page_id is required for persistent mapping")
+            return
+
+        try:
+            stored = await upsert_page_map(
+                connected_integration_id=ci,
+                page_id=page,
+                page_name=page_name,
+                is_active=True,
+            )
+        except PageMapConflictError:
+            raise
+        except Exception:
+            if require_persistent_map:
+                raise
+            return
+        if require_persistent_map and not stored:
+            raise RuntimeError("Meta page mapping was not stored")
+        if stored:
+            await MetaLeadgenRedisState.sync_page_index(ci, page)
+
+    @classmethod
+    async def _clear_meta_page_binding(
+        cls,
+        connected_integration_id: str,
+        *,
+        expected_page_id: Optional[str] = None,
+    ) -> None:
+        ci = normalize_text(connected_integration_id, max_len=128)
+        expected = normalize_text(expected_page_id, max_len=128)
+        if not ci:
+            return
+
+        should_clear_settings = True
+        if expected:
+            try:
+                settings_map = await cls._fetch_settings_map(ci, force_refresh=True)
+                current_page = normalize_text(
+                    settings_map.get(MetaLeadgenCrmChannelConfig.SETTING_PAGE_ID),
+                    max_len=128,
+                )
+                should_clear_settings = not current_page or current_page == expected
+            except Exception as error:
+                logger.warning(
+                    "Failed to read previous Meta Leadgen settings before unlink: ci=%s page_id=%s error=%s",
+                    ci,
+                    expected,
+                    error,
+                )
+                should_clear_settings = True
+
+        if not should_clear_settings:
+            return
+
+        try:
+            await cls._edit_settings(
+                ci,
+                {
+                    MetaLeadgenCrmChannelConfig.SETTING_PAGE_ID: "",
+                    MetaLeadgenCrmChannelConfig.SETTING_PAGE_NAME: "",
+                    MetaLeadgenCrmChannelConfig.SETTING_PAGE_ACCESS_TOKEN: "",
+                    MetaLeadgenCrmChannelConfig.SETTING_ACCESS_TOKEN_EXPIRES_AT: "",
+                    **cls._authorization_settings_patch(authorized=False),
+                },
+            )
+        except Exception as error:
+            logger.warning(
+                "Failed to clear previous Meta Leadgen integration settings: ci=%s page_id=%s error=%s",
+                ci,
+                expected,
+                error,
+            )
+
+        await cls._mark_ci_inactive(ci)
+        await cls._stop_stream_worker(ci)
+        keys = [
+            MetaLeadgenRedisState.settings_cache_key(ci),
+            MetaLeadgenRedisState.ci_active_cache_key(ci),
+            MetaLeadgenRedisState.field_ready_key(ci),
+        ]
+        if expected:
+            keys.append(MetaLeadgenRedisState.page_ci_key(expected))
+        await MetaLeadgenRedisState.delete(*keys)
+
+    @classmethod
+    async def _move_page_mapping_to_integration(
+        cls,
+        *,
+        connected_integration_id: str,
+        page_id: str,
+        page_name: Optional[str],
+    ) -> None:
+        ci = normalize_text(connected_integration_id, max_len=128)
+        page = normalize_text(page_id, max_len=128)
+        if not ci:
+            raise RuntimeError("connected_integration_id is required for persistent mapping")
+        if not page:
+            raise RuntimeError("meta_page_id is required for persistent mapping")
+
+        previous_ci = await reassign_page_map(
+            connected_integration_id=ci,
+            page_id=page,
+            page_name=page_name,
+        )
+        if previous_ci and previous_ci != ci:
+            await cls._clear_meta_page_binding(
+                previous_ci,
+                expected_page_id=page,
+            )
+        await MetaLeadgenRedisState.sync_page_index(ci, page)
+
+    @classmethod
+    async def _sync_reverse_indexes(
+        cls,
+        runtime: RuntimeConfig,
+        *,
+        persist_page_map: bool = False,
+        require_persistent_map: bool = False,
+    ) -> None:
+        page_id = normalize_text(runtime.page_id, max_len=128)
+        if not page_id:
+            if require_persistent_map:
+                raise RuntimeError("meta_page_id is required for persistent mapping")
+            return
+
+        if persist_page_map or require_persistent_map:
+            await cls._write_page_mapping(
+                connected_integration_id=runtime.connected_integration_id,
+                page_id=page_id,
+                page_name=runtime.page_name,
+                require_persistent_map=require_persistent_map,
+            )
+            return
+
         await MetaLeadgenRedisState.sync_page_index(
             runtime.connected_integration_id,
-            runtime.page_id,
+            page_id,
         )
 
     def _resolve_ci_from_envelope(self, envelope: Dict[str, Any]) -> Optional[str]:
@@ -389,22 +597,22 @@ class MetaLeadgenCrmChannelIntegration(ClientBase):
 
     @classmethod
     async def _resolve_ci_by_page_id(cls, page_id: str) -> Optional[str]:
-        resolved = await MetaLeadgenRedisState.resolve_ci_by_page_id(page_id)
+        page = normalize_text(page_id, max_len=128)
+        if not page:
+            return None
+
+        resolved = await MetaLeadgenRedisState.resolve_ci_by_page_id(page)
         if resolved:
             return resolved
 
-        expected = normalize_text(page_id, max_len=128)
-        if not expected or not redis_enabled():
-            return None
-        for ci in await MetaLeadgenRedisState.active_ci_ids():
-            runtime = await cls._load_runtime(
-                ci,
-                require_access_token=False,
-                require_page_id=False,
-            )
-            await cls._sync_reverse_indexes(runtime)
-            if runtime.page_id == expected:
-                return ci
+        try:
+            resolved = await resolve_ci_by_page_id_db(page)
+        except Exception:
+            logger.exception("Failed to resolve Meta Leadgen page mapping: page_id=%s", page)
+            raise
+        if resolved:
+            await MetaLeadgenRedisState.sync_page_index(resolved, page)
+            return resolved
         return None
 
     @staticmethod
@@ -458,7 +666,7 @@ class MetaLeadgenCrmChannelIntegration(ClientBase):
         if not ci:
             raise ValueError("connected_integration_id is required")
         await cls._ensure_stream_worker(ci)
-        await MetaLeadgenRedisState.mark_ci_active(ci)
+        await cls._mark_ci_active(ci)
         await MetaLeadgenRedisState.enqueue(
             MetaLeadgenRedisState.stream_key(ci),
             {
@@ -522,18 +730,22 @@ class MetaLeadgenCrmChannelIntegration(ClientBase):
         if not redis_enabled():
             return {"total": 0, "restored": 0, "failed": 0}
 
-        ci_ids = await MetaLeadgenRedisState.active_ci_ids()
+        try:
+            ci_ids = await active_connected_integration_ids()
+        except Exception as error:
+            logger.exception("Meta Leadgen auto-restore failed to read MariaDB mappings: %s", error)
+            return {"total": 0, "restored": 0, "failed": 1}
+
         if not ci_ids:
             logger.info("Meta Leadgen auto-restore: no active integrations found")
             return {"total": 0, "restored": 0, "failed": 0}
-        await MetaLeadgenRedisState.touch_active_ci_ids_ttl(force=True)
 
         restored = 0
         failed = 0
         for ci in ci_ids:
             try:
                 if not await cls._is_connected_integration_active(ci, force_refresh=True):
-                    await MetaLeadgenRedisState.mark_ci_inactive(ci)
+                    await cls._mark_ci_inactive(ci)
                     failed += 1
                     continue
                 runtime = await cls._load_runtime(
@@ -541,12 +753,12 @@ class MetaLeadgenCrmChannelIntegration(ClientBase):
                     require_access_token=False,
                     require_page_id=False,
                 )
-                await cls._sync_reverse_indexes(runtime)
+                await cls._sync_reverse_indexes(runtime, persist_page_map=True)
                 await MetaLeadgenRedisState.ensure_consumer_group(
                     MetaLeadgenRedisState.stream_key(ci)
                 )
                 await cls._ensure_stream_worker(ci)
-                await MetaLeadgenRedisState.mark_ci_active(ci)
+                await cls._mark_ci_active(ci)
                 restored += 1
             except Exception as error:
                 failed += 1
@@ -566,7 +778,7 @@ class MetaLeadgenCrmChannelIntegration(ClientBase):
             while True:
                 try:
                     if not await cls._is_connected_integration_active(ci):
-                        await MetaLeadgenRedisState.mark_ci_inactive(ci)
+                        await cls._mark_ci_inactive(ci)
                         logger.info("Meta Leadgen stream worker stopped for inactive integration: ci=%s", ci)
                         break
                     await MetaLeadgenRedisState.set_worker_heartbeat(ci)
@@ -716,83 +928,68 @@ class MetaLeadgenCrmChannelIntegration(ClientBase):
                 error,
             )
 
-    @staticmethod
-    def _html_page(title: str, text: str) -> str:
-        safe_title = html.escape(str(title))
-        safe_text = html.escape(str(text))
-        return (
-            "<!doctype html><html><head><meta charset='utf-8'><title>"
-            + safe_title
-            + "</title><style>body{font-family:Arial,sans-serif;margin:40px;line-height:1.5;}</style></head><body><h1>"
-            + safe_title
-            + "</h1><p>"
-            + safe_text
-            + "</p></body></html>"
-        )
+    @classmethod
+    def _ui_settings_error_key(cls, error: Exception) -> str:
+        text = str(error or "")
+        if "Service Meta Leadgen app config" in text or "Service Meta Leadgen webhook verify token" in text:
+            return "notice_service_unavailable"
+        if "Meta authorization required" in text:
+            return "notice_authorization_required"
+        if "meta_page_id" in text:
+            return "notice_settings_required"
+        if "field mapping" in text.lower() or "pipeline" in text.lower() or "stage" in text.lower():
+            return "notice_settings_required"
+        return "notice_error"
 
     @staticmethod
-    def _ui_page(
+    def _ui_response(
         *,
         connected_integration_id: str,
-        authorized: bool,
-        authorization_url: str,
-        authorization_status: str,
-        page_id: Optional[str],
-        page_name: Optional[str],
-        verify_token: str,
-    ) -> str:
-        safe_ci = html.escape(connected_integration_id or "")
-        safe_status = html.escape(authorization_status or "")
-        safe_page_id = html.escape(page_id or "")
-        safe_page_name = html.escape(page_name or "")
-        safe_verify_token = html.escape(verify_token or "")
-        safe_url = html.escape(authorization_url or "", quote=True)
-        action_html = (
-            "<span class='badge ok'>Connected</span>"
-            if authorized
-            else f"<a class='button' href='{safe_url}'>Connect Meta</a>"
-            if authorization_url
-            else "<span class='badge warn'>Authorization URL is not ready</span>"
+        locale: str,
+        mode: str,
+        authorization_url: str = "",
+        page_name: Optional[str] = None,
+        message_key: str = "",
+        message: str = "",
+        disconnect_token: str = "",
+        status_code: int = 200,
+    ) -> HTMLResponse:
+        return HTMLResponse(
+            render_meta_leadgen_ui(
+                MetaLeadgenUiContext(
+                    connected_integration_id=connected_integration_id,
+                    locale=locale,
+                    mode=mode,
+                    authorization_url=authorization_url,
+                    page_name=page_name,
+                    message_key=message_key,
+                    message=message,
+                    disconnect_token=disconnect_token,
+                )
+            ),
+            status_code=status_code,
         )
-        return f"""<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Meta Leadgen CRM Channel</title>
-  <style>
-    body {{ font-family: Arial, sans-serif; margin: 0; color: #172033; background: #f5f7fb; }}
-    main {{ max-width: 760px; margin: 40px auto; padding: 0 20px; }}
-    section {{ background: #fff; border: 1px solid #dce3ee; border-radius: 8px; padding: 24px; }}
-    h1 {{ font-size: 24px; margin: 0 0 8px; }}
-    p {{ margin: 0 0 20px; color: #536176; }}
-    dl {{ display: grid; grid-template-columns: 220px 1fr; gap: 10px 16px; margin: 0 0 22px; }}
-    dt {{ color: #66758c; }}
-    dd {{ margin: 0; overflow-wrap: anywhere; }}
-    .button {{ display: inline-block; padding: 10px 14px; border-radius: 6px; background: #1769e0; color: #fff; text-decoration: none; font-weight: 600; }}
-    .badge {{ display: inline-block; padding: 8px 10px; border-radius: 6px; font-weight: 600; }}
-    .ok {{ background: #e7f7ee; color: #0d6b3f; }}
-    .warn {{ background: #fff4d8; color: #7a5200; }}
-    @media (max-width: 640px) {{ dl {{ grid-template-columns: 1fr; }} }}
-  </style>
-</head>
-<body>
-  <main>
-    <section>
-      <h1>Meta Leadgen CRM Channel</h1>
-      <p>{"Meta page connected" if authorized else "Meta authorization required"}</p>
-      <dl>
-        <dt>Connected integration</dt><dd>{safe_ci}</dd>
-        <dt>Authorization status</dt><dd>{safe_status}</dd>
-        <dt>Page ID</dt><dd>{safe_page_id or "-"}</dd>
-        <dt>Page name</dt><dd>{safe_page_name or "-"}</dd>
-        <dt>Verify token</dt><dd>{safe_verify_token}</dd>
-      </dl>
-      {action_html}
-    </section>
-  </main>
-</body>
-</html>"""
+
+    @classmethod
+    async def _store_ui_action_token(cls, connected_integration_id: str, action: str) -> str:
+        token = uuid.uuid4().hex
+        await MetaLeadgenRedisState.set(
+            MetaLeadgenRedisState.key("ui_action", action, connected_integration_id, token),
+            "1",
+            MetaLeadgenCrmChannelConfig.OAUTH_STATE_TTL_SEC,
+            min_ttl_sec=30,
+        )
+        return token
+
+    @classmethod
+    async def _consume_ui_action_token(cls, connected_integration_id: str, action: str, token: str) -> bool:
+        normalized_token = str(token or "").strip()
+        if not normalized_token:
+            return False
+        key = MetaLeadgenRedisState.key("ui_action", action, connected_integration_id, normalized_token)
+        value = await MetaLeadgenRedisState.get(key)
+        await MetaLeadgenRedisState.delete(key)
+        return value == "1"
 
     async def connect(self, **_: Any) -> Any:
         if not self.connected_integration_id:
@@ -805,17 +1002,22 @@ class MetaLeadgenCrmChannelIntegration(ClientBase):
             return self._error_response(1004, f"ConnectedIntegration '{ci}' is inactive").dict()
 
         try:
+            await ensure_meta_leadgen_db_schema()
             runtime = await self._load_runtime(
                 ci,
                 require_access_token=False,
                 require_page_id=False,
             )
-            await self._sync_reverse_indexes(runtime)
             field_result = await MetaLeadgenCrmSync.ensure_required_fields(ci, force=True)
             mapping_result = await MetaLeadgenCrmSync.validate_mapping_fields(runtime, force=True)
             authorized = self._is_runtime_authorized(runtime)
             subscribe_result: Dict[str, Any] = {"status": "skipped"}
             if authorized:
+                await self._sync_reverse_indexes(
+                    runtime,
+                    persist_page_map=True,
+                    require_persistent_map=True,
+                )
                 subscribe_result = await self.meta_api.subscribe_page(
                     str(runtime.page_id),
                     str(runtime.page_access_token),
@@ -831,11 +1033,33 @@ class MetaLeadgenCrmChannelIntegration(ClientBase):
                     authorization_url=authorization_url,
                     generated_at=generated_at,
                 )
-            await MetaLeadgenRedisState.mark_ci_active(ci)
+            await self._mark_ci_active(ci)
             await MetaLeadgenRedisState.ensure_consumer_group(
                 MetaLeadgenRedisState.stream_key(ci)
             )
             await self._ensure_stream_worker(ci)
+        except PageMapConflictError as error:
+            logger.warning(
+                "Meta Leadgen connect found page moved to another integration: ci=%s page_id=%s owner_ci=%s",
+                ci,
+                error.page_id,
+                error.connected_integration_id,
+            )
+            await self._clear_meta_page_binding(
+                ci,
+                expected_page_id=error.page_id,
+            )
+            runtime = await self._load_runtime(
+                ci,
+                require_access_token=False,
+                require_page_id=False,
+            )
+            field_result = {"status": "skipped"}
+            mapping_result = {"status": "skipped"}
+            subscribe_result = {"status": "skipped"}
+            authorized = False
+            authorization_url = await MetaLeadgenApi.build_oauth_url(ci)
+            await self._mark_ci_active(ci)
         except Exception as error:
             return self._error_response(1001, str(error)).dict()
 
@@ -855,25 +1079,51 @@ class MetaLeadgenCrmChannelIntegration(ClientBase):
         if not self.connected_integration_id:
             return self._error_response(1000, "connected_integration_id is required").dict()
         ci = str(self.connected_integration_id)
+        keys = [
+            MetaLeadgenRedisState.settings_cache_key(ci),
+            MetaLeadgenRedisState.ci_active_cache_key(ci),
+            MetaLeadgenRedisState.field_ready_key(ci),
+        ]
+        runtime: Optional[RuntimeConfig] = None
         try:
             runtime = await self._load_runtime(
                 ci,
                 require_access_token=False,
                 require_page_id=False,
             )
-            if runtime.page_id:
-                await MetaLeadgenRedisState.delete(
-                    MetaLeadgenRedisState.page_ci_key(runtime.page_id)
-                )
         except Exception:
-            pass
-        await MetaLeadgenRedisState.mark_ci_inactive(ci)
-        await self._stop_stream_worker(ci)
-        await MetaLeadgenRedisState.delete(
-            MetaLeadgenRedisState.settings_cache_key(ci),
-            MetaLeadgenRedisState.ci_active_cache_key(ci),
-            MetaLeadgenRedisState.field_ready_key(ci),
+            runtime = None
+
+        try:
+            if runtime and runtime.page_id:
+                keys.append(MetaLeadgenRedisState.page_ci_key(runtime.page_id))
+                await mark_page_map_inactive(
+                    connected_integration_id=ci,
+                    page_id=runtime.page_id or None,
+                )
+            else:
+                await mark_page_map_inactive(connected_integration_id=ci)
+        except Exception as error:
+            logger.exception(
+                "Failed to mark Meta Leadgen page mapping inactive during disconnect: ci=%s error=%s",
+                ci,
+                error,
+            )
+            return self._error_response(1001, str(error)).dict()
+
+        await self._edit_settings(
+            ci,
+            {
+                MetaLeadgenCrmChannelConfig.SETTING_PAGE_ID: "",
+                MetaLeadgenCrmChannelConfig.SETTING_PAGE_NAME: "",
+                MetaLeadgenCrmChannelConfig.SETTING_PAGE_ACCESS_TOKEN: "",
+                MetaLeadgenCrmChannelConfig.SETTING_ACCESS_TOKEN_EXPIRES_AT: "",
+                **self._authorization_settings_patch(authorized=False),
+            },
         )
+        await self._mark_ci_inactive(ci)
+        await self._stop_stream_worker(ci)
+        await MetaLeadgenRedisState.delete(*keys)
         return {"status": "disconnected"}
 
     async def reconnect(self, **_: Any) -> Any:
@@ -892,11 +1142,19 @@ class MetaLeadgenCrmChannelIntegration(ClientBase):
         return {"status": "settings updated"}
 
     async def handle_ui(self, envelope: Dict[str, Any]) -> Any:
+        locale = resolve_locale(envelope)
         if str(envelope.get("method") or "").upper() != "GET":
-            return Response(status_code=405, content="Method not allowed")
+            return self._ui_response(
+                connected_integration_id=self._resolve_ci_from_envelope(envelope) or "",
+                locale=locale,
+                mode="unavailable",
+                status_code=405,
+            )
         if not redis_enabled():
-            return HTMLResponse(
-                self._html_page("Meta Leadgen CRM Channel", "Redis is required for this integration"),
+            return self._ui_response(
+                connected_integration_id=self._resolve_ci_from_envelope(envelope) or "",
+                locale=locale,
+                mode="unavailable",
                 status_code=503,
             )
 
@@ -904,52 +1162,207 @@ class MetaLeadgenCrmChannelIntegration(ClientBase):
         ci = self._resolve_ci_from_envelope(envelope)
 
         state = _query_get(query, "state")
-        state_ci, state_nonce = MetaLeadgenApi.decode_oauth_state(state or "") if state else (None, None)
+        state_ci, state_nonce, state_lang = MetaLeadgenApi.decode_oauth_state(state or "") if state else (None, None, None)
+        has_query_lang = any(_query_get(query, key) for key in ("lang", "locale", "language", "hl"))
+        if state_lang and not has_query_lang:
+            locale = normalize_locale(state_lang)
         if not ci and state_ci:
             ci = state_ci
         if not ci:
-            return HTMLResponse(
-                self._html_page("Meta Leadgen CRM Channel", "connected_integration_id is required"),
+            return self._ui_response(
+                connected_integration_id="",
+                locale=locale,
+                mode="missing_context",
                 status_code=400,
             )
 
         if not await self._is_connected_integration_active(ci):
-            return HTMLResponse(
-                self._html_page("Meta Leadgen CRM Channel", f"ConnectedIntegration '{ci}' is inactive"),
+            return self._ui_response(
+                connected_integration_id=ci,
+                locale=locale,
+                mode="inactive",
                 status_code=403,
             )
 
+        action = _query_get(query, "action")
+        if action == "confirm_disconnect":
+            token = await self._store_ui_action_token(ci, "disconnect")
+            try:
+                runtime = await self._load_runtime(
+                    ci,
+                    require_access_token=False,
+                    require_page_id=False,
+                )
+                page_name = runtime.page_name
+            except Exception:
+                page_name = None
+            return self._ui_response(
+                connected_integration_id=ci,
+                locale=locale,
+                mode="confirm_disconnect",
+                page_name=page_name,
+                disconnect_token=token,
+                status_code=200,
+            )
+
+        if action == "disconnect":
+            token = _query_get(query, "token") or ""
+            if not await self._consume_ui_action_token(ci, "disconnect", token):
+                try:
+                    runtime = await self._load_runtime(
+                        ci,
+                        require_access_token=False,
+                        require_page_id=False,
+                    )
+                    settings_map = await self._fetch_settings_map(ci)
+                    authorization_url = await self._get_or_refresh_authorization_url(
+                        ci,
+                        runtime,
+                        settings_map,
+                        locale,
+                    )
+                    page_name = runtime.page_name
+                except Exception:
+                    authorization_url = ""
+                    page_name = None
+                return self._ui_response(
+                    connected_integration_id=ci,
+                    locale=locale,
+                    mode="error",
+                    authorization_url=authorization_url,
+                    page_name=page_name,
+                    message_key="notice_invalid_disconnect",
+                    status_code=400,
+                )
+
+            self.connected_integration_id = ci
+            result = await self.disconnect()
+            if isinstance(result, dict) and "result" in result:
+                return self._ui_response(
+                    connected_integration_id=ci,
+                    locale=locale,
+                    mode="error",
+                    message_key="notice_disconnect_failed",
+                    status_code=500,
+                )
+            try:
+                runtime = await self._load_runtime(
+                    ci,
+                    require_access_token=False,
+                    require_page_id=False,
+                )
+                settings_map = await self._fetch_settings_map(ci)
+                authorization_url = await self._get_or_refresh_authorization_url(
+                    ci,
+                    runtime,
+                    settings_map,
+                    locale,
+                )
+            except Exception:
+                authorization_url = ""
+            return self._ui_response(
+                connected_integration_id=ci,
+                locale=locale,
+                mode="disconnected_success",
+                authorization_url=authorization_url,
+                page_name=None,
+                status_code=200,
+            )
+
         try:
+            await ensure_meta_leadgen_db_schema()
+            settings_map = await self._fetch_settings_map(ci, force_refresh=True)
             runtime = await self._load_runtime(
                 ci,
                 require_access_token=False,
                 require_page_id=False,
             )
-            await self._sync_reverse_indexes(runtime)
-            settings_map = await self._fetch_settings_map(ci)
+            authorized_runtime = self._is_runtime_authorized(runtime)
+            await self._sync_reverse_indexes(
+                runtime,
+                persist_page_map=authorized_runtime,
+                require_persistent_map=authorized_runtime,
+            )
+        except PageMapConflictError as error:
+            await self._clear_meta_page_binding(
+                ci,
+                expected_page_id=error.page_id,
+            )
+            runtime = await self._load_runtime(
+                ci,
+                require_access_token=False,
+                require_page_id=False,
+            )
+            settings_map = await self._fetch_settings_map(ci, force_refresh=True)
+            authorization_url = await self._get_or_refresh_authorization_url(
+                ci,
+                runtime,
+                settings_map,
+                locale,
+            )
+            return self._ui_response(
+                connected_integration_id=ci,
+                locale=locale,
+                mode="disconnected",
+                authorization_url=authorization_url,
+                page_name=None,
+                status_code=200,
+            )
         except Exception as error:
-            return HTMLResponse(self._html_page("Meta Leadgen CRM Channel", str(error)), status_code=400)
+            return self._ui_response(
+                connected_integration_id=ci,
+                locale=locale,
+                mode="error",
+                message_key=self._ui_settings_error_key(error),
+                status_code=400,
+            )
 
         oauth_error = _query_get(query, "error")
         if oauth_error:
-            return HTMLResponse(
-                self._html_page("Meta OAuth Error", _query_get(query, "error_description") or oauth_error),
+            authorization_url = await MetaLeadgenApi.build_oauth_url(ci, locale)
+            return self._ui_response(
+                connected_integration_id=ci,
+                locale=locale,
+                mode="oauth_error",
+                authorization_url=authorization_url,
+                page_name=runtime.page_name,
                 status_code=400,
             )
 
         oauth_code = _query_get(query, "code")
         if oauth_code:
             if not state_ci or not state_nonce or state_ci != ci:
-                return HTMLResponse(self._html_page("Meta OAuth Error", "Invalid OAuth state"), status_code=400)
+                authorization_url = await MetaLeadgenApi.build_oauth_url(ci, locale)
+                return self._ui_response(
+                    connected_integration_id=ci,
+                    locale=locale,
+                    mode="session_expired",
+                    authorization_url=authorization_url,
+                    page_name=runtime.page_name,
+                    status_code=400,
+                )
             cached_ci = await MetaLeadgenApi.consume_oauth_state(state_nonce)
             if cached_ci != ci:
-                return HTMLResponse(self._html_page("Meta OAuth Error", "OAuth state expired or invalid"), status_code=400)
+                authorization_url = await MetaLeadgenApi.build_oauth_url(ci, locale)
+                return self._ui_response(
+                    connected_integration_id=ci,
+                    locale=locale,
+                    mode="session_expired",
+                    authorization_url=authorization_url,
+                    page_name=runtime.page_name,
+                    status_code=400,
+                )
 
             try:
                 short_token, short_expires_at = await self.meta_api.exchange_code(oauth_code)
                 long_token, long_expires_at = await self.meta_api.exchange_long_lived(short_token)
                 page_id, page_name, page_token = await self.meta_api.resolve_page(runtime, long_token)
                 await self.meta_api.subscribe_page(page_id, page_token)
+                await self._move_page_mapping_to_integration(
+                    connected_integration_id=ci,
+                    page_id=page_id,
+                    page_name=page_name,
+                )
                 await self._edit_settings(
                     ci,
                     {
@@ -961,44 +1374,45 @@ class MetaLeadgenCrmChannelIntegration(ClientBase):
                     },
                 )
                 runtime = await self._load_runtime(ci, require_access_token=True, require_page_id=True)
-                await self._sync_reverse_indexes(runtime)
                 await MetaLeadgenCrmSync.ensure_required_fields(ci, force=True)
                 await MetaLeadgenCrmSync.validate_mapping_fields(runtime, force=True)
-                await MetaLeadgenRedisState.mark_ci_active(ci)
+                await self._mark_ci_active(ci)
                 await MetaLeadgenRedisState.ensure_consumer_group(
                     MetaLeadgenRedisState.stream_key(ci)
                 )
                 await self._ensure_stream_worker(ci)
-                settings_map = await self._fetch_settings_map(ci)
-                return HTMLResponse(
-                    self._ui_page(
-                        connected_integration_id=ci,
-                        authorized=True,
-                        authorization_url="",
-                        authorization_status=settings_map.get(MetaLeadgenCrmChannelConfig.SETTING_AUTHORIZATION_STATUS) or "authorized",
-                        page_id=runtime.page_id,
-                        page_name=runtime.page_name,
-                        verify_token=runtime.webhook_verify_token,
-                    ),
+                return self._ui_response(
+                    connected_integration_id=ci,
+                    locale=locale,
+                    mode="connected_success",
+                    page_name=runtime.page_name,
                     status_code=200,
                 )
             except Exception as error:
                 logger.exception("Meta OAuth callback failed: ci=%s", ci)
-                return HTMLResponse(self._html_page("Meta OAuth Error", str(error)), status_code=500)
+                authorization_url = ""
+                try:
+                    authorization_url = await MetaLeadgenApi.build_oauth_url(ci, locale)
+                except Exception:
+                    pass
+                return self._ui_response(
+                    connected_integration_id=ci,
+                    locale=locale,
+                    mode="error",
+                    authorization_url=authorization_url,
+                    page_name=runtime.page_name,
+                    message_key=self._ui_settings_error_key(error),
+                    status_code=500,
+                )
 
-        authorization_url = await self._get_or_refresh_authorization_url(ci, runtime, settings_map)
+        authorization_url = await self._get_or_refresh_authorization_url(ci, runtime, settings_map, locale)
         authorized = self._is_runtime_authorized(runtime)
-        authorization_status = "authorized" if authorized else "authorization_required"
-        return HTMLResponse(
-            self._ui_page(
-                connected_integration_id=ci,
-                authorized=authorized,
-                authorization_url=authorization_url,
-                authorization_status=authorization_status,
-                page_id=runtime.page_id,
-                page_name=runtime.page_name,
-                verify_token=runtime.webhook_verify_token,
-            ),
+        return self._ui_response(
+            connected_integration_id=ci,
+            locale=locale,
+            mode="connected" if authorized else "disconnected",
+            authorization_url=authorization_url,
+            page_name=runtime.page_name,
             status_code=200,
         )
 
@@ -1060,7 +1474,11 @@ class MetaLeadgenCrmChannelIntegration(ClientBase):
                     ignored += 1
                     reasons["page_id_mismatch"] = reasons.get("page_id_mismatch", 0) + 1
                     continue
-                await self._sync_reverse_indexes(runtime)
+                await self._sync_reverse_indexes(
+                    runtime,
+                    persist_page_map=True,
+                    require_persistent_map=True,
+                )
                 await self._enqueue_event(
                     ci,
                     payload=event.to_payload(),

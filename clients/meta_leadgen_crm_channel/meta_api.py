@@ -59,25 +59,30 @@ class MetaLeadgenApi:
         return verify_token
 
     @staticmethod
-    def encode_oauth_state(connected_integration_id: str, nonce: str) -> str:
-        payload = json_dumps({"ci": connected_integration_id, "nonce": nonce}).encode("utf-8")
+    def encode_oauth_state(connected_integration_id: str, nonce: str, locale: str = "") -> str:
+        state = {"ci": connected_integration_id, "nonce": nonce}
+        normalized_locale = str(locale or "").strip()
+        if normalized_locale:
+            state["lang"] = normalized_locale
+        payload = json_dumps(state).encode("utf-8")
         return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
 
     @staticmethod
-    def decode_oauth_state(state: str) -> Tuple[Optional[str], Optional[str]]:
+    def decode_oauth_state(state: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         token = str(state or "").strip()
         if not token:
-            return None, None
+            return None, None, None
         token += "=" * ((4 - (len(token) % 4)) % 4)
         try:
             payload = json_loads(base64.urlsafe_b64decode(token.encode("ascii")).decode("utf-8"))
         except Exception:
-            return None, None
+            return None, None, None
         if not isinstance(payload, dict):
-            return None, None
+            return None, None, None
         return (
             normalize_text(payload.get("ci"), max_len=128),
             normalize_text(payload.get("nonce"), max_len=128),
+            normalize_text(payload.get("lang"), max_len=16),
         )
 
     @staticmethod
@@ -97,7 +102,7 @@ class MetaLeadgenApi:
         return normalize_text(value, max_len=128)
 
     @classmethod
-    async def build_oauth_url(cls, connected_integration_id: str) -> str:
+    async def build_oauth_url(cls, connected_integration_id: str, locale: str = "") -> str:
         app_id, _, redirect_uri = cls.app_config()
         nonce = uuid.uuid4().hex
         await cls.store_oauth_state(connected_integration_id, nonce)
@@ -106,7 +111,7 @@ class MetaLeadgenApi:
             'redirect_uri': redirect_uri,
             'response_type': 'code',
             'scope': ','.join(MetaLeadgenCrmChannelConfig.OAUTH_SCOPES),
-            'state': cls.encode_oauth_state(connected_integration_id, nonce),
+            'state': cls.encode_oauth_state(connected_integration_id, nonce, locale),
         })}"
 
     @staticmethod
