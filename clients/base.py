@@ -1,25 +1,34 @@
-from typing import Any
+from typing import Any, Optional
 from schemas.integration.integration_base import IntegrationBase
 
 
 class ClientBase(IntegrationBase):
 
-    async def connect(self) -> Any:
+    async def connect(self, **kwargs: Any) -> Any:
         # Заглушка подключения
+        _ = kwargs
         return {"status": "connected"}
 
-    async def disconnect(self) -> Any:
+    async def disconnect(self, **kwargs: Any) -> Any:
         # Заглушка отключения
+        _ = kwargs
         return {"status": "disconnected"}
 
-    async def reconnect(self) -> Any:
+    async def reconnect(self, **kwargs: Any) -> Any:
         # Заглушка переподключения
+        await self.disconnect(**kwargs)
+        await self.connect(**kwargs)
         return {"status": "reconnected"}
 
     async def handle_webhook(self, data: dict) -> Any:
         # Заглушка обработки webhook
         return {"status": "webhook received", "data": data}
 
-    async def update_settings(self, settings: dict) -> Any:
+    async def update_settings(
+        self,
+        settings: Optional[dict] = None,
+        **kwargs: Any,
+    ) -> Any:
         # Заглушка обновления настроек
-        return {"status": "settings updated", "settings": settings}
+        _ = kwargs
+        return {"status": "settings updated", "settings": settings or {}}
