@@ -39,19 +39,19 @@
 
 ## Настройки интеграции
 
-| Ключ | Обяз. | Тип | Показывать в UI | Назначение |
-|---|---:|---|---|---|
-| `bot_1_token` | Да | String | Да | Токен бота, подключаемого к Telegram Business аккаунту. |
-| `bot_1_channel_id` | Да | Integer | Да | CRM-канал, куда будут попадать обращения из Telegram Business. |
-| `bot_1_lead_subject_template` | Нет | String | Да | Шаблон темы нового обращения. Доступны данные Telegram профиля клиента. |
-| `bot_1_default_responsible_user_id` | Нет | Integer | Да | Пользователь CRM, назначаемый ответственным при создании обращения. |
-| `telegram_secret_token` | Нет | String | Скрывать в UI | Секрет для проверки входящих Telegram webhook запросов. |
-| `send_private_messages` | Нет | Boolean | Да | Разрешает отправлять private-сообщения CRM в Telegram. По умолчанию `false`. |
-| `forward_system_messages` | Нет | Boolean | Да | Разрешает отправлять system-сообщения CRM в Telegram. По умолчанию `false`. |
-| `phone_request_text` | Нет | String | Да | Текст запроса номера телефона у клиента. |
-| `phone_share_button_text` | Нет | String | Да | Текст кнопки отправки контакта в Telegram. |
+| Ключ | Обяз. | Тип данных | Наименование (RU / UZ / EN) | Описание (RU / UZ / EN) | Placeholder (RU / UZ / EN) |
+|---|---|---|---|---|---|
+| `bot_1_token` | Да | String | `Токен Telegram Business бота` / `Telegram Business bot tokeni` / `Telegram Business bot token` | `Токен бота, подключенного к Telegram Business аккаунту` / `Telegram Business akkauntiga ulangan bot tokeni` / `Token of the bot connected to a Telegram Business account` | `123456:ABC...` / `123456:ABC...` / `123456:ABC...` |
+| `bot_1_channel_id` | Да | Integer | `ID CRM-канала` / `CRM kanal ID` / `CRM channel ID` | `Канал CRM, куда будут попадать диалоги из Telegram Business` / `Telegram Business muloqotlari tushadigan CRM kanal` / `CRM channel where Telegram Business conversations are routed` | `1` / `1` / `1` |
+| `bot_1_lead_subject_template` | Нет | String | `Шаблон темы обращения` / `Murojaat mavzusi shabloni` / `Case subject template` | `Шаблон названия нового обращения` / `Yangi murojaat nomi uchun shablon` / `Template for new case subject` | `{display_name}` / `{display_name}` / `{display_name}` |
+| `bot_1_default_responsible_user_id` | Нет | Integer | `Ответственный по умолчанию` / `Standart mas'ul` / `Default responsible user` | `Сотрудник, назначаемый ответственным при создании обращения` / `Murojaat yaratilganda biriktiriladigan mas'ul xodim` / `User assigned as responsible when a case is created` | `15` / `15` / `15` |
+| `telegram_secret_token` | Нет | String | `Секрет проверки Telegram` / `Telegram tekshiruv siri` / `Telegram verification secret` | `Секрет для проверки входящих webhook-запросов Telegram Business` / `Telegram Business webhook so'rovlarini tekshirish siri` / `Secret used to validate inbound Telegram Business webhook calls` | `secret-...` / `secret-...` / `secret-...` |
+| `send_private_messages` | Нет | Boolean | `Передавать private-сообщения` / `Private xabarlarni uzatish` / `Forward private messages` | `Разрешить отправку private-сообщений CRM в Telegram` / `CRM private xabarlarini Telegramga yuborishga ruxsat` / `Allow forwarding CRM private messages to Telegram` | `false` / `false` / `false` |
+| `forward_system_messages` | Нет | Boolean | `Передавать system-сообщения` / `System xabarlarni uzatish` / `Forward system messages` | `Разрешить отправку system-сообщений CRM в Telegram` / `CRM system xabarlarini Telegramga yuborishga ruxsat` / `Allow forwarding CRM system messages to Telegram` | `false` / `false` / `false` |
+| `phone_request_text` | Нет | String | `Текст запроса телефона` / `Telefon so'rovi matni` / `Phone request text` | `Текст, который бот отправляет при запросе номера телефона` / `Telefon raqamini so'raganda bot yuboradigan matn` / `Text sent when bot requests phone number` | `Поделитесь номером телефона` / `Telefon raqamingizni ulashing` / `Please share your phone number` |
+| `phone_share_button_text` | Нет | String | `Текст кнопки телефона` / `Telefon tugmasi matni` / `Phone button text` | `Подпись кнопки Telegram для отправки контакта` / `Kontakt yuborish uchun Telegram tugmasi matni` / `Telegram contact-share button label` | `Отправить номер / Raqamni ulashish` / `Raqamni ulashish` / `Share phone number` |
 
-## Глобальные env
+Глобальные настройки сервиса (не поля интеграции):
 
 - `TELEGRAM_BUSINESS_WEBHOOK_REFRESH_TTL`: срок кеша проверки webhook, по умолчанию `86400`.
 - `TELEGRAM_BUSINESS_UPDATE_MODE`: режим получения событий, по умолчанию `webhook`; допустимо `longpolling`.
