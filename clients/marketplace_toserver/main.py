@@ -28,7 +28,13 @@ from schemas.api.references.item import (
     ItemGetExtRequest,
 )
 from schemas.api.references.stock import StockGetRequest
-from schemas.scheduler import AdapterSchedulerRequest, AdapterSchedulerUuidRequest, ScheduleAddRequest
+from schemas.scheduler import (
+    AdapterSchedulerRequest,
+    AdapterSchedulerUuidRequest,
+    ScheduleAddRequest,
+    ScheduleTaskSetStatusRequest,
+    ScheduleTaskStatus,
+)
 
 
 logger = setup_logger("marketplace_toserver")
@@ -260,7 +266,64 @@ class MarketplaceToServerIntegration(ClientBase):
         return {"status": "deleted"}
 
     async def handle_external(self, envelope: Dict[str, Any]) -> Dict[str, Any]:
-        return {"status": "ok"}
+        method = str(envelope.get("method") or "").upper()
+        if method and method != "POST":
+            raise MarketplaceToServerError(111350, "POST method is required")
+
+        body = envelope.get("body")
+        if not isinstance(body, dict):
+            raise MarketplaceToServerError(111350, "JSON body is required")
+
+        task_uuid = _text(body.get("uuid") or body.get("Uuid") or body.get("UUID")).strip()
+        if not task_uuid:
+            raise MarketplaceToServerError(111350, "task uuid is required")
+
+        scheduler = RegosSchedulerClient()
+        try:
+            task = await scheduler.task_get_info(task_uuid)
+        except SchedulerError as error:
+            raise MarketplaceToServerError(error.code, error.description) from error
+
+        if task is None:
+            raise MarketplaceToServerError(111350, "scheduler task not found")
+
+        task_ci = _text(task.connected_integration_id).strip()
+        if not task_ci:
+            task_ci = _text(envelope.get("connected_integration_id")).strip()
+        if not task_ci:
+            raise MarketplaceToServerError(100, "connected_integration_id is required")
+
+        self.connected_integration_id = task_ci
+        await self._set_scheduler_task_status(scheduler, task_uuid, ScheduleTaskStatus.Processing)
+        try:
+            result = await self.do_work()
+        except Exception:
+            try:
+                await self._set_scheduler_task_status(scheduler, task_uuid, ScheduleTaskStatus.Error)
+            except Exception as status_error:
+                logger.warning("Failed to mark scheduler task as Error: uuid=%s error=%s", task_uuid, status_error)
+            raise
+
+        await self._set_scheduler_task_status(scheduler, task_uuid, ScheduleTaskStatus.Finished)
+        return {
+            "status": "ok",
+            "task_uuid": task_uuid,
+            "connected_integration_id": task_ci,
+            "result": result,
+        }
+
+    async def _set_scheduler_task_status(
+        self,
+        scheduler: RegosSchedulerClient,
+        task_uuid: str,
+        status: ScheduleTaskStatus,
+    ) -> Any:
+        try:
+            return await scheduler.task_set_status(
+                ScheduleTaskSetStatusRequest(uuid=task_uuid, status=status)
+            )
+        except SchedulerError as error:
+            raise MarketplaceToServerError(error.code, error.description) from error
 
     async def _ensure_scheduled(self) -> None:
         state = await self._load_integration_state(require_scheduled=True)
