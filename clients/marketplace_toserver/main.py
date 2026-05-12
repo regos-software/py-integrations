@@ -647,17 +647,18 @@ class MarketplaceToServerIntegration(ClientBase):
         if isinstance(cached, dict):
             if not bool(cached.get("active")):
                 raise MarketplaceToServerError(111350, "inactive")
-            if not require_scheduled:
+            if not require_scheduled or "scheduled" in cached:
                 return {
                     "active": True,
                     "key": str(cached.get("key") or self.integration_key),
+                    "scheduled": bool(cached.get("scheduled")),
                 }
 
         async with RegosAPI(ci) as api:
             response = await api.integrations.connected_integration.get(
                 ConnectedIntegrationGetRequest(
                     connected_integration_ids=[ci],
-                    include_schedule=require_scheduled,
+                    include_schedule=False,
                     include_name=False,
                 )
             )
@@ -669,10 +670,8 @@ class MarketplaceToServerIntegration(ClientBase):
         state = {
             "active": bool(getattr(row, "is_active", False)),
             "key": str(getattr(row, "key", "") or "").strip() or self.integration_key,
+            "scheduled": bool(getattr(row, "scheduled", False)),
         }
-        scheduled = getattr(row, "scheduled", None)
-        if require_scheduled or scheduled is not None:
-            state["scheduled"] = bool(scheduled)
         if not state["active"]:
             await redis_set_json(
                 self._active_cache_key(),
