@@ -112,6 +112,12 @@ class Settings(BaseSettings):
     marketplace_lock_wait_timeout: float = 5.0
     marketplace_order_dedupe_ttl: int = 86400
     marketplace_toserver_lock_ttl: int = 3600
+    marketplace_toserver_stream_workers: int = 1
+    marketplace_toserver_stream_batch_size: int = 10
+    marketplace_toserver_stream_maxlen: int = 10000
+    marketplace_toserver_stream_ttl: int = 86400
+    marketplace_toserver_disable_schedule_after_auth_errors: int = 3
+    marketplace_toserver_auth_error_ttl: int = 3600
     instagram_app_id: str = ""
     instagram_app_secret: str = ""
     instagram_redirect_uri: str = ""

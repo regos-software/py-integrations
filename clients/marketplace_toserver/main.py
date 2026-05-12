@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import uuid
 import time
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional, Tuple
@@ -12,12 +14,18 @@ from config.settings import settings
 from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
 from core.redis import (
+    redis_error_contains,
     redis_acquire_lock,
     redis_delete_keys,
     redis_get_json,
+    redis_incr_with_ttl,
     redis_make_key,
     redis_release_lock,
     redis_set_json,
+    redis_stream_ack_delete,
+    redis_stream_add_with_ttl,
+    redis_stream_group_create_with_ttl,
+    redis_ops,
 )
 from core.scheduler import RegosSchedulerClient, SchedulerError
 from schemas.api.integrations.connected_integration import ConnectedIntegrationGetRequest
@@ -38,6 +46,13 @@ from schemas.scheduler import (
 
 
 logger = setup_logger("marketplace_toserver")
+
+_INSTANCE_ID = uuid.uuid4().hex[:12]
+_STREAM_WORKER_TASKS: Dict[int, asyncio.Task] = {}
+_STREAM_WORKER_LOCK = asyncio.Lock()
+_STREAM_TTL_TOUCH_TS: Dict[str, int] = {}
+_STREAM_CLAIM_TS: Dict[str, int] = {}
+_STREAM_GROUP_READY: set[str] = set()
 
 
 class MarketplaceToServerError(Exception):
@@ -99,6 +114,10 @@ def _normalize_settings_map(raw: Dict[str, Any]) -> Dict[str, str]:
 class MarketplaceToServerIntegration(ClientBase):
     integration_key = "marketplace_toserver"
     redis_prefix = "mp:ts"
+    stream_group = "mtsw"
+    stream_read_block_ms = 5000
+    stream_min_idle_ms = 60_000
+    stream_claim_interval_sec = 30
 
     def __init__(self) -> None:
         self.connected_integration_id: Optional[str] = None
@@ -121,6 +140,86 @@ class MarketplaceToServerIntegration(ClientBase):
 
     def _run_lock_key(self) -> str:
         return self._redis_key("rl")
+
+    def _schedule_auth_error_key(self, schedule_uuid: str) -> str:
+        return self._redis_key("sae", schedule_uuid)
+
+    @classmethod
+    def _stream_key(cls) -> str:
+        return redis_make_key(cls.redis_prefix, "scheduler")
+
+    @classmethod
+    def _stream_workers_count(cls) -> int:
+        return max(int(settings.marketplace_toserver_stream_workers or 0), 1)
+
+    @classmethod
+    def _stream_batch_size(cls) -> int:
+        return max(int(settings.marketplace_toserver_stream_batch_size or 0), 1)
+
+    @classmethod
+    def _stream_ttl_sec(cls) -> int:
+        return max(int(settings.marketplace_toserver_stream_ttl or 0), 60)
+
+    @classmethod
+    async def _ensure_stream_group(cls, *, force: bool = False) -> None:
+        stream_key = cls._stream_key()
+        if not force and stream_key in _STREAM_GROUP_READY:
+            return
+        now_ts = int(time.time())
+        await redis_stream_group_create_with_ttl(
+            stream_key,
+            cls.stream_group,
+            ttl_sec=cls._stream_ttl_sec(),
+            touch_ts_by_key=_STREAM_TTL_TOUCH_TS,
+            now_ts=now_ts,
+        )
+        _STREAM_GROUP_READY.add(stream_key)
+
+    @classmethod
+    async def _enqueue_scheduler_task(cls, task_uuid: str) -> None:
+        await cls._ensure_stream_group()
+        now_ts = int(time.time())
+        await redis_stream_add_with_ttl(
+            cls._stream_key(),
+            {
+                "task_uuid": str(task_uuid),
+                "enqueued_at": str(now_ts),
+            },
+            maxlen=max(int(settings.marketplace_toserver_stream_maxlen or 0), 1000),
+            ttl_sec=cls._stream_ttl_sec(),
+            touch_ts_by_key=_STREAM_TTL_TOUCH_TS,
+            now_ts=now_ts,
+        )
+        await cls._ensure_stream_workers(ensure_group=False)
+
+    @classmethod
+    async def _ensure_stream_workers(cls, *, ensure_group: bool = True) -> None:
+        if ensure_group:
+            await cls._ensure_stream_group()
+        async with _STREAM_WORKER_LOCK:
+            for index in range(cls._stream_workers_count()):
+                task = _STREAM_WORKER_TASKS.get(index)
+                if task and not task.done():
+                    continue
+                _STREAM_WORKER_TASKS[index] = asyncio.create_task(cls._stream_worker_loop(index))
+
+    @classmethod
+    async def shutdown_all(cls) -> None:
+        async with _STREAM_WORKER_LOCK:
+            tasks = list(_STREAM_WORKER_TASKS.values())
+            _STREAM_WORKER_TASKS.clear()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        _STREAM_GROUP_READY.clear()
+        _STREAM_TTL_TOUCH_TS.clear()
+        _STREAM_CLAIM_TS.clear()
+
+    @classmethod
+    async def restore_active_connections(cls) -> Dict[str, int]:
+        await cls._ensure_stream_workers()
+        return {"workers": len(_STREAM_WORKER_TASKS)}
 
     async def check(self) -> Dict[str, Any]:
         await self._ensure_active()
@@ -278,32 +377,53 @@ class MarketplaceToServerIntegration(ClientBase):
         if not task_uuid:
             raise MarketplaceToServerError(111350, "task uuid is required")
 
-        scheduler = RegosSchedulerClient()
+        await self._enqueue_scheduler_task(task_uuid)
+        return {"status": "queued", "task_uuid": task_uuid}
+
+    async def _process_scheduler_task(
+        self,
+        scheduler: RegosSchedulerClient,
+        task_uuid: str,
+    ) -> Dict[str, Any]:
         try:
             task = await scheduler.task_get_info(task_uuid)
         except SchedulerError as error:
             raise MarketplaceToServerError(error.code, error.description) from error
-
         if task is None:
             raise MarketplaceToServerError(111350, "scheduler task not found")
 
         task_ci = _text(task.connected_integration_id).strip()
         if not task_ci:
-            task_ci = _text(envelope.get("connected_integration_id")).strip()
-        if not task_ci:
             raise MarketplaceToServerError(100, "connected_integration_id is required")
 
         self.connected_integration_id = task_ci
+        schedule_uuid = _text(task.schedule_uuid).strip()
         await self._set_scheduler_task_status(scheduler, task_uuid, ScheduleTaskStatus.Processing)
         try:
             result = await self.do_work()
-        except Exception:
+        except Exception as error:
             try:
                 await self._set_scheduler_task_status(scheduler, task_uuid, ScheduleTaskStatus.Error)
             except Exception as status_error:
                 logger.warning("Failed to mark scheduler task as Error: uuid=%s error=%s", task_uuid, status_error)
-            raise
+            disabled = await self._disable_broken_schedule_if_needed(
+                scheduler=scheduler,
+                task_uuid=task_uuid,
+                schedule_uuid=schedule_uuid,
+                error=error,
+            )
+            if disabled is not None:
+                return disabled
+            return {
+                "status": "error",
+                "task_uuid": task_uuid,
+                "schedule_uuid": schedule_uuid,
+                "connected_integration_id": task_ci,
+                "error": str(error),
+            }
 
+        if schedule_uuid:
+            await redis_delete_keys(self._schedule_auth_error_key(schedule_uuid))
         await self._set_scheduler_task_status(scheduler, task_uuid, ScheduleTaskStatus.Finished)
         return {
             "status": "ok",
@@ -324,6 +444,190 @@ class MarketplaceToServerIntegration(ClientBase):
             )
         except SchedulerError as error:
             raise MarketplaceToServerError(error.code, error.description) from error
+
+    @classmethod
+    async def _stream_worker_loop(cls, worker_index: int) -> None:
+        stream_key = cls._stream_key()
+        consumer = f"{_INSTANCE_ID}:mts:{worker_index}"
+        logger.info("Marketplace toserver stream worker started: index=%s", worker_index)
+        try:
+            while True:
+                try:
+                    await cls._ensure_stream_group()
+                    now_ts = int(time.time())
+                    last_claim_ts = int(_STREAM_CLAIM_TS.get(stream_key) or 0)
+                    if now_ts - last_claim_ts >= cls.stream_claim_interval_sec:
+                        _STREAM_CLAIM_TS[stream_key] = now_ts
+                        for entry_id, fields in await cls._process_claimed_entries(stream_key, consumer):
+                            await cls._process_stream_entry(stream_key, entry_id, fields)
+
+                    records = await redis_ops.xreadgroup(
+                        groupname=cls.stream_group,
+                        consumername=consumer,
+                        streams={stream_key: ">"},
+                        count=cls._stream_batch_size(),
+                        block=cls.stream_read_block_ms,
+                    )
+                    if not records:
+                        continue
+                    for _, entries in records:
+                        for entry_id, fields in entries:
+                            await cls._process_stream_entry(stream_key, str(entry_id), fields)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    if redis_error_contains(error, "NOGROUP"):
+                        _STREAM_GROUP_READY.discard(stream_key)
+                        await cls._ensure_stream_group(force=True)
+                        continue
+                    logger.exception(
+                        "Marketplace toserver stream worker error: index=%s error=%s",
+                        worker_index,
+                        error,
+                    )
+                    await asyncio.sleep(1)
+        finally:
+            logger.info("Marketplace toserver stream worker stopped: index=%s", worker_index)
+            async with _STREAM_WORKER_LOCK:
+                current = _STREAM_WORKER_TASKS.get(worker_index)
+                if current is asyncio.current_task():
+                    _STREAM_WORKER_TASKS.pop(worker_index, None)
+
+    @classmethod
+    async def _process_claimed_entries(
+        cls,
+        stream_key: str,
+        consumer: str,
+    ) -> List[Tuple[str, Dict[str, Any]]]:
+        try:
+            claimed_raw = await redis_ops.xautoclaim(
+                stream_key,
+                cls.stream_group,
+                consumer,
+                min_idle_time=cls.stream_min_idle_ms,
+                start_id="0-0",
+                count=cls._stream_batch_size(),
+            )
+        except Exception as error:
+            if redis_error_contains(error, "NOGROUP"):
+                _STREAM_GROUP_READY.discard(stream_key)
+                await cls._ensure_stream_group(force=True)
+                return []
+            logger.warning("Marketplace toserver stream xautoclaim failed: stream=%s error=%s", stream_key, error)
+            return []
+
+        entries: List[Tuple[str, Dict[str, Any]]] = []
+        if isinstance(claimed_raw, (list, tuple)) and len(claimed_raw) >= 2:
+            entries = claimed_raw[1] or []
+        return [
+            (str(entry_id), fields if isinstance(fields, dict) else {})
+            for entry_id, fields in entries
+        ]
+
+    @classmethod
+    async def _process_stream_entry(
+        cls,
+        stream_key: str,
+        entry_id: str,
+        fields: Dict[str, Any],
+    ) -> None:
+        task_uuid = _text(fields.get("task_uuid") or fields.get("uuid")).strip()
+        if not task_uuid:
+            await redis_stream_ack_delete(stream_key, cls.stream_group, entry_id)
+            return
+
+        scheduler = RegosSchedulerClient()
+        worker = cls()
+        try:
+            result = await worker._process_scheduler_task(scheduler, task_uuid)
+            logger.info("Marketplace toserver scheduler task processed: task_uuid=%s result=%s", task_uuid, result)
+        except Exception as error:
+            logger.warning("Marketplace toserver scheduler task failed: task_uuid=%s error=%s", task_uuid, error)
+        finally:
+            await redis_stream_ack_delete(stream_key, cls.stream_group, entry_id)
+
+    async def _disable_broken_schedule_if_needed(
+        self,
+        *,
+        scheduler: RegosSchedulerClient,
+        task_uuid: str,
+        schedule_uuid: str,
+        error: Exception,
+    ) -> Optional[Dict[str, Any]]:
+        if not schedule_uuid or not self._is_regos_auth_error(error):
+            return None
+
+        threshold = max(
+            int(settings.marketplace_toserver_disable_schedule_after_auth_errors or 1),
+            1,
+        )
+        counter_key = self._schedule_auth_error_key(schedule_uuid)
+        try:
+            failures = await redis_incr_with_ttl(
+                counter_key,
+                settings.marketplace_toserver_auth_error_ttl,
+            )
+        except Exception as counter_error:
+            logger.warning(
+                "Failed to increment scheduler auth error counter: ci=%s schedule_uuid=%s task_uuid=%s error=%s",
+                self._ci(),
+                schedule_uuid,
+                task_uuid,
+                counter_error,
+            )
+            return None
+
+        if failures < threshold:
+            logger.warning(
+                "Scheduler task failed with REGOS auth error: ci=%s schedule_uuid=%s task_uuid=%s failures=%s/%s error=%s",
+                self._ci(),
+                schedule_uuid,
+                task_uuid,
+                failures,
+                threshold,
+                error,
+            )
+            return None
+
+        try:
+            await scheduler.schedule_delete(schedule_uuid)
+        except SchedulerError as delete_error:
+            logger.warning(
+                "Failed to delete broken scheduler schedule: ci=%s schedule_uuid=%s task_uuid=%s error=%s",
+                self._ci(),
+                schedule_uuid,
+                task_uuid,
+                delete_error.description,
+            )
+            return None
+
+        await redis_delete_keys(counter_key)
+        logger.warning(
+            "Deleted broken scheduler schedule after REGOS auth errors: ci=%s schedule_uuid=%s task_uuid=%s failures=%s error=%s",
+            self._ci(),
+            schedule_uuid,
+            task_uuid,
+            failures,
+            error,
+        )
+        return {
+            "status": "disabled",
+            "reason": "regos_auth_error",
+            "task_uuid": task_uuid,
+            "schedule_uuid": schedule_uuid,
+            "connected_integration_id": self._ci(),
+            "failures": failures,
+        }
+
+    @staticmethod
+    def _is_regos_auth_error(error: Exception) -> bool:
+        if not isinstance(error, httpx.HTTPStatusError):
+            return False
+        response = error.response
+        if response is None or response.status_code not in {401, 403}:
+            return False
+        url = str(response.request.url) if response.request is not None else ""
+        return "/gateway/out/" in url
 
     async def _ensure_scheduled(self) -> None:
         state = await self._load_integration_state(require_scheduled=True)
