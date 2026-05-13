@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     mariadb_pool_min_size: int = 1
     mariadb_pool_max_size: int = 10
     mariadb_connect_timeout: int = 10
+    telegram_api_base_url: str = "https://api.telegram.org"
     telegram_webhook_refresh_ttl: int = 86400
     telegram_update_mode: str = "webhook"
     telegram_notification_stream_workers: int = 2

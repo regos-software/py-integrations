@@ -55,6 +55,7 @@ from core.redis import (
     redis_stream_group_create_with_ttl,
     redis_ttl_seconds,
 )
+from core.telegram_api import create_telegram_bot, telegram_api_base_url
 from config.settings import settings
 
 # Configure logging
@@ -106,7 +107,7 @@ class TelegramSettings(Enum):
 
 # Configuration for Telegram bot
 class TelegramBotConfig:
-    BASE_URL = "https://api.telegram.org"
+    BASE_URL = telegram_api_base_url()
     WEBHOOK_BASE_URL = (
         f"{(settings.proxy_integration_url or settings.integration_url).rstrip('/')}/external"
     )
@@ -1603,7 +1604,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                 _BOT_RUNTIME_CACHE.pop(ci, None)
                 await cached[1]._close_bot_session()
             try:
-                self.bot = Bot(
+                self.bot = create_telegram_bot(
                     token=bot_token,
                     default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN),
                 )

@@ -41,6 +41,7 @@ from core.redis import (
     redis_stream_group_create_with_ttl,
     redis_ttl_seconds,
 )
+from core.telegram_api import create_telegram_bot, telegram_file_url
 from schemas.api.chat.chat import ChatGetRequest
 from schemas.api.chat.chat_message import (
     ChatMessageAddFileRequest,
@@ -2278,7 +2279,7 @@ class TelegramBusinessCrmChannelIntegration(IntegrationTelegramBase, ClientBase)
             bot = _BOT_CLIENTS.get(token)
             if bot:
                 return bot
-            bot = Bot(token=token)
+            bot = create_telegram_bot(token=token)
             _BOT_CLIENTS[token] = bot
             return bot
 
@@ -4556,7 +4557,7 @@ class TelegramBusinessCrmChannelIntegration(IntegrationTelegramBase, ClientBase)
                 avatar_file_id,
                 file_path,
             )
-            return f"https://api.telegram.org/file/bot{bot_cfg.token}/{file_path}"
+            return telegram_file_url(bot_cfg.token, file_path)
         except Exception as error:
             logger.debug(
                 "Avatar resolve failed: bot_hash=%s tg_user_id=%s tg_chat_id=%s error=%s",
@@ -7108,7 +7109,7 @@ class TelegramBusinessCrmChannelIntegration(IntegrationTelegramBase, ClientBase)
         file_path = str(file_info.file_path or "").strip()
         if not file_path:
             raise RuntimeError("Telegram file_path is empty")
-        url = f"https://api.telegram.org/file/bot{token}/{file_path}"
+        url = telegram_file_url(token, file_path)
         client = await cls._get_http_client()
         response = await client.get(url)
         response.raise_for_status()

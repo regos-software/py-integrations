@@ -31,6 +31,7 @@ from core.redis import (
     redis_stream_group_create_with_ttl,
     redis_ttl_seconds,
 )
+from core.telegram_api import create_telegram_bot
 from schemas.api.integrations.connected_integration_setting import (
     ConnectedIntegrationSettingEditRequest,
     ConnectedIntegrationSettingRequest,
@@ -931,7 +932,7 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
                 _BOT_RUNTIME_CACHE.pop(ci, None)
                 await cached[1]._close_bot_session()
             try:
-                self.bot = Bot(
+                self.bot = create_telegram_bot(
                     token=bot_token,
                     default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN),
                 )
