@@ -27,6 +27,7 @@
   - `ChatMessageAdded`
   - `ChatMessageEdited`
   - `ChatMessageDeleted`
+  - `ChatMessageRead`
   - `ChatWriting`
   - `TicketClosed`
   - `ChannelEdited`
@@ -48,8 +49,6 @@
 | `telegram_secret_token` | Нет | String | `Секрет проверки Telegram` / `Telegram tekshiruv siri` / `Telegram verification secret` | `Секрет для проверки входящих webhook-запросов Telegram Business` / `Telegram Business webhook so'rovlarini tekshirish siri` / `Secret used to validate inbound Telegram Business webhook calls` | `secret-...` / `secret-...` / `secret-...` |
 | `send_private_messages` | Нет | Boolean | `Передавать private-сообщения` / `Private xabarlarni uzatish` / `Forward private messages` | `Разрешить отправку private-сообщений CRM в Telegram` / `CRM private xabarlarini Telegramga yuborishga ruxsat` / `Allow forwarding CRM private messages to Telegram` | `false` / `false` / `false` |
 | `forward_system_messages` | Нет | Boolean | `Передавать system-сообщения` / `System xabarlarni uzatish` / `Forward system messages` | `Разрешить отправку system-сообщений CRM в Telegram` / `CRM system xabarlarini Telegramga yuborishga ruxsat` / `Allow forwarding CRM system messages to Telegram` | `false` / `false` / `false` |
-| `phone_request_text` | Нет | String | `Текст запроса телефона` / `Telefon so'rovi matni` / `Phone request text` | `Текст, который бот отправляет при запросе номера телефона` / `Telefon raqamini so'raganda bot yuboradigan matn` / `Text sent when bot requests phone number` | `Поделитесь номером телефона` / `Telefon raqamingizni ulashing` / `Please share your phone number` |
-| `phone_share_button_text` | Нет | String | `Текст кнопки телефона` / `Telefon tugmasi matni` / `Phone button text` | `Подпись кнопки Telegram для отправки контакта` / `Kontakt yuborish uchun Telegram tugmasi matni` / `Telegram contact-share button label` | `Отправить номер / Raqamni ulashish` / `Raqamni ulashish` / `Share phone number` |
 
 Глобальные настройки сервиса (не поля интеграции):
 
