@@ -124,6 +124,7 @@ class TelegramBusinessCrmChannelConfig:
 
     POLLING_LOCK_TTL_SEC = 30
     LEAD_SYNC_AVATAR_RECHECK_SEC = 6 * 60 * 60
+    MAX_TELEGRAM_PHOTO_SIZE_BYTES = 10 * 1024 * 1024
     MAX_TELEGRAM_FILE_SIZE_BYTES = 50 * 1024 * 1024
     LARGE_FILE_NOTICE_TEXT = (
         "The file is too large to be sent. Maximum allowed size is 50 MB."
@@ -3253,29 +3254,29 @@ class TelegramBusinessCrmChannelIntegration(IntegrationTelegramBase, ClientBase)
             return None
 
         map_url = f"https://maps.google.com/?q={lat},{lon}"
-        return f"[Р›РѕРєР°С†РёСЏ]({map_url})\nРљРѕРѕСЂРґРёРЅР°С‚С‹: {lat}, {lon}"
+        return f"[Локация]({map_url})\nКоординаты: {lat}, {lon}"
 
     @staticmethod
     def _reply_message_placeholder_text(message: Dict[str, Any]) -> str:
         if message.get("photo"):
-            return "[Р¤РѕС‚Рѕ]"
+            return "[Фото]"
         if message.get("video"):
-            return "[Р’РёРґРµРѕ]"
+            return "[Видео]"
         if message.get("voice"):
-            return "[Р“РѕР»РѕСЃРѕРІРѕРµ СЃРѕРѕР±С‰РµРЅРёРµ]"
+            return "[Голосовое сообщение]"
         if message.get("audio"):
-            return "[РђСѓРґРёРѕ]"
+            return "[Аудио]"
         if message.get("document"):
-            return "[Р¤Р°Р№Р»]"
+            return "[Файл]"
         if message.get("sticker"):
-            return "[РЎС‚РёРєРµСЂ]"
+            return "[Стикер]"
         if message.get("contact"):
-            return "[РљРѕРЅС‚Р°РєС‚]"
+            return "[Контакт]"
         if message.get("location"):
-            return "[Р›РѕРєР°С†РёСЏ]"
+            return "[Локация]"
         if message.get("poll"):
-            return "[РћРїСЂРѕСЃ]"
-        return "[РЎРѕРѕР±С‰РµРЅРёРµ]"
+            return "[Опрос]"
+        return "[Сообщение]"
 
     @staticmethod
     def _build_crm_reply_quote(text: Optional[str]) -> Optional[str]:
@@ -6666,12 +6667,12 @@ class TelegramBusinessCrmChannelIntegration(IntegrationTelegramBase, ClientBase)
     @staticmethod
     def _delivery_action_label(action: str) -> str:
         labels = {
-            "TicketClosed": "Р·Р°РєСЂС‹С‚РёРµ РѕР±СЂР°С‰РµРЅРёСЏ",
-            "ChatMessageAdded": "РѕС‚РїСЂР°РІРєР° СЃРѕРѕР±С‰РµРЅРёСЏ",
-            "ChatMessageEdited": "СЂРµРґР°РєС‚РёСЂРѕРІР°РЅРёРµ СЃРѕРѕР±С‰РµРЅРёСЏ",
-            "ChatMessageDeleted": "СѓРґР°Р»РµРЅРёРµ СЃРѕРѕР±С‰РµРЅРёСЏ",
+            "TicketClosed": "закрытие обращения",
+            "ChatMessageAdded": "отправка сообщения",
+            "ChatMessageEdited": "редактирование сообщения",
+            "ChatMessageDeleted": "удаление сообщения",
         }
-        return labels.get(str(action or "").strip(), str(action or "").strip() or "РЅРµРёР·РІРµСЃС‚РЅРѕ")
+        return labels.get(str(action or "").strip(), str(action or "").strip() or "неизвестно")
 
     @staticmethod
     def _short_error_text(error_text: str) -> str:
@@ -6685,49 +6686,49 @@ class TelegramBusinessCrmChannelIntegration(IntegrationTelegramBase, ClientBase)
         raw = cls._short_error_text(error_text)
         lower = raw.lower()
         if not lower:
-            return "РќРµРёР·РІРµСЃС‚РЅР°СЏ РѕС€РёР±РєР° РґРѕСЃС‚Р°РІРєРё."
+            return "Неизвестная ошибка доставки."
 
         if "bot was blocked by the user" in lower:
-            return "РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ Р·Р°Р±Р»РѕРєРёСЂРѕРІР°Р» Р±РѕС‚Р°."
+            return "Пользователь заблокировал бота."
         if "bot can't initiate conversation with a user" in lower:
-            return "Р‘РѕС‚ РЅРµ РјРѕР¶РµС‚ РЅР°С‡Р°С‚СЊ РґРёР°Р»РѕРі РїРµСЂРІС‹Рј. РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ РґРѕР»Р¶РµРЅ РЅР°РїРёСЃР°С‚СЊ Р±РѕС‚Сѓ."
+            return "Бот не может начать диалог первым. Пользователь должен написать боту."
         if "chat not found" in lower or "user not found" in lower:
-            return "Р§Р°С‚ РЅРµ РЅР°Р№РґРµРЅ. РџРѕР»СЊР·РѕРІР°С‚РµР»СЊ РјРѕРі СѓРґР°Р»РёС‚СЊ С‡Р°С‚ РёР»Рё РЅРµ Р·Р°РїСѓСЃРєР°Р» Р±РѕС‚Р°."
+            return "Чат не найден. Пользователь мог удалить чат или не запускал бота."
         if "forbidden" in lower:
-            return "Telegram Р·Р°РїСЂРµС‚РёР» РѕС‚РїСЂР°РІРєСѓ РІ СЌС‚РѕС‚ С‡Р°С‚."
+            return "Telegram запретил отправку в этот чат."
         if "message is not modified" in lower:
-            return "РўРµРєСЃС‚ РЅРµ РёР·РјРµРЅРёР»СЃСЏ, Telegram РѕС‚РєР»РѕРЅРёР» РїРѕРІС‚РѕСЂРЅРѕРµ СЂРµРґР°РєС‚РёСЂРѕРІР°РЅРёРµ."
+            return "Текст не изменился, Telegram отклонил повторное редактирование."
         if "message to edit not found" in lower:
-            return "РЎРѕРѕР±С‰РµРЅРёРµ РґР»СЏ СЂРµРґР°РєС‚РёСЂРѕРІР°РЅРёСЏ РЅРµ РЅР°Р№РґРµРЅРѕ РІ Telegram."
+            return "Сообщение для редактирования не найдено в Telegram."
         if "message can't be edited" in lower:
-            return "Р­С‚Рѕ СЃРѕРѕР±С‰РµРЅРёРµ РЅРµР»СЊР·СЏ СЂРµРґР°РєС‚РёСЂРѕРІР°С‚СЊ РІ Telegram."
+            return "Это сообщение нельзя редактировать в Telegram."
         if "message to delete not found" in lower:
-            return "РЎРѕРѕР±С‰РµРЅРёРµ РґР»СЏ СѓРґР°Р»РµРЅРёСЏ РЅРµ РЅР°Р№РґРµРЅРѕ РІ Telegram."
+            return "Сообщение для удаления не найдено в Telegram."
         if "message can't be deleted" in lower:
-            return "Р­С‚Рѕ СЃРѕРѕР±С‰РµРЅРёРµ РЅРµР»СЊР·СЏ СѓРґР°Р»РёС‚СЊ РІ Telegram."
+            return "Это сообщение нельзя удалить в Telegram."
         if "can't parse entities" in lower:
-            return "РќРµРєРѕСЂСЂРµРєС‚РЅР°СЏ СЂР°Р·РјРµС‚РєР° СЃРѕРѕР±С‰РµРЅРёСЏ РґР»СЏ Telegram."
+            return "Некорректная разметка сообщения для Telegram."
         if "too many requests" in lower or "retry after" in lower or "flood control" in lower:
-            return "Telegram РІСЂРµРјРµРЅРЅРѕ РѕРіСЂР°РЅРёС‡РёР» С‡Р°СЃС‚РѕС‚Сѓ Р·Р°РїСЂРѕСЃРѕРІ."
+            return "Telegram временно ограничил частоту запросов."
         if "timed out" in lower or "timeout" in lower:
-            return "РўР°Р№РјР°СѓС‚ РїСЂРё РѕР±СЂР°С‰РµРЅРёРё Рє Telegram."
+            return "Таймаут при обращении к Telegram."
         if (
             "name or service not known" in lower
             or "temporary failure in name resolution" in lower
             or "nodename nor servname provided" in lower
         ):
-            return "DNS-РѕС€РёР±РєР° РїСЂРё РѕР±СЂР°С‰РµРЅРёРё Рє Telegram."
+            return "DNS-ошибка при обращении к Telegram."
         if (
             "connection reset" in lower
             or "connection refused" in lower
             or "network is unreachable" in lower
             or "server disconnected" in lower
         ):
-            return "РЎРµС‚РµРІР°СЏ РѕС€РёР±РєР° РїСЂРё РѕР±СЂР°С‰РµРЅРёРё Рє Telegram."
+            return "Сетевая ошибка при обращении к Telegram."
         if "telegram file exceeds size limit" in lower:
-            return "Р¤Р°Р№Р» РїСЂРµРІС‹С€Р°РµС‚ РґРѕРїСѓСЃС‚РёРјС‹Р№ СЂР°Р·РјРµСЂ РґР»СЏ Telegram."
+            return "Файл превышает допустимый размер для Telegram."
 
-        return "РћС€РёР±РєР° РґРѕСЃС‚Р°РІРєРё РІ Telegram."
+        return "Ошибка доставки в Telegram."
 
     @staticmethod
     def _format_delivery_alert_text(
@@ -6744,14 +6745,14 @@ class TelegramBusinessCrmChannelIntegration(IntegrationTelegramBase, ClientBase)
             technical_reason and technical_reason.lower() != human_reason.lower()
         )
         technical_reason_line = (
-            f"\nРўРµС…РЅРёС‡РµСЃРєР°СЏ РїСЂРёС‡РёРЅР°: {technical_reason}" if include_technical_reason else ""
+            f"\nТехническая причина: {technical_reason}" if include_technical_reason else ""
         )
         return (
-            "[Telegram Integration] РќРµ СѓРґР°Р»РѕСЃСЊ РІС‹РїРѕР»РЅРёС‚СЊ СЃРѕР±С‹С‚РёРµ РІ Telegram.\n"
-            f"РћРїРµСЂР°С†РёСЏ: {action_label}\n"
+            "[Telegram Integration] Не удалось выполнить событие в Telegram.\n"
+            f"Операция: {action_label}\n"
             f"Chat: {source_chat_id}\n"
             f"Message: {source_message_id}\n"
-            f"РџСЂРёС‡РёРЅР°: {human_reason}"
+            f"Причина: {human_reason}"
             f"{technical_reason_line}"
         )
 
@@ -7191,7 +7192,10 @@ class TelegramBusinessCrmChannelIntegration(IntegrationTelegramBase, ClientBase)
                 caption = rendered_text
                 caption_used = True
 
-            if _is_photo_extension(file_model.extension):
+            if (
+                _is_photo_extension(file_model.extension)
+                and len(file_bytes) <= TelegramBusinessCrmChannelConfig.MAX_TELEGRAM_PHOTO_SIZE_BYTES
+            ):
                 sent = await cls._telegram_send_with_optional_reply(
                     bot.send_photo,
                     reply_to_message_id=reply_to_message_id,

@@ -2047,6 +2047,17 @@ class ExternalChatCrmChannelIntegration(ClientBase):
     ) -> str:
         return f"webchat:dialog:{connected_integration_id}:{visitor_id}"
 
+    @staticmethod
+    def _is_own_ticket(ticket: Optional[Ticket], runtime: RuntimeConfig) -> bool:
+        if not ticket:
+            return False
+        external_dialog_id = str(getattr(ticket, "external_dialog_id", "") or "").strip()
+        expected_prefix = f"webchat:dialog:{runtime.connected_integration_id}:"
+        if not external_dialog_id.startswith(expected_prefix):
+            return False
+        ticket_channel_id = _parse_int(str(getattr(ticket, "channel_id", "") or ""), None)
+        return bool(ticket_channel_id and int(ticket_channel_id) == int(runtime.channel_id))
+
     @classmethod
     def _normalize_visitor_id(cls, value: Any) -> Optional[str]:
         raw = str(value or "").strip()
@@ -4962,6 +4973,19 @@ class ExternalChatCrmChannelIntegration(ClientBase):
         if not ticket_id:
             return {"status": "ignored", "reason": "invalid_payload:ticket_id"}
 
+        runtime = await cls._load_runtime(connected_integration_id)
+        try:
+            async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+                ticket = await cls._load_ticket_by_id(api, int(ticket_id))
+        except Exception:
+            ticket = None
+        if not cls._is_own_ticket(ticket, runtime):
+            return {
+                "status": "ignored",
+                "reason": "ticket_not_external_chat",
+                "ticket_id": int(ticket_id),
+            }
+
         status_value = _enum_value(payload.get("status")).strip()
         if webhook_action == "TicketClosed" and not status_value:
             status_value = TicketStatusEnum.Closed.value
@@ -4989,13 +5013,7 @@ class ExternalChatCrmChannelIntegration(ClientBase):
                 chat_id,
             )
 
-        ticket: Optional[Ticket] = None
         if not status_value or not chat_id:
-            try:
-                async with RegosAPI(connected_integration_id=connected_integration_id) as api:
-                    ticket = await cls._load_ticket_by_id(api, int(ticket_id))
-            except Exception:
-                ticket = None
             if ticket:
                 ticket_rating = _normalize_rating(getattr(ticket, "rating", None))
                 if not status_value:
@@ -5025,7 +5043,6 @@ class ExternalChatCrmChannelIntegration(ClientBase):
             revision = await cls._bump_chat_revision(connected_integration_id, chat_id)
             if ticket_closed:
                 try:
-                    runtime = await cls._load_runtime(connected_integration_id)
                     await cls._send_ticket_closed_auto_messages_if_needed(
                         connected_integration_id,
                         runtime=runtime,
