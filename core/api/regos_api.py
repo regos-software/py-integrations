@@ -7,7 +7,7 @@ from tenacity import (
     retry,
     wait_exponential,
     stop_after_attempt,
-    retry_if_exception_type,
+    retry_if_exception,
 )
 
 from core.api.batch import BatchService
@@ -17,6 +17,17 @@ from core.logger import setup_logger
 
 logger = setup_logger("regos_api")
 T = TypeVar("T")
+
+
+def _is_retryable_regos_error(error: BaseException) -> bool:
+    if isinstance(error, httpx.RequestError):
+        return True
+    if isinstance(error, httpx.HTTPStatusError):
+        response = error.response
+        if response is not None and response.status_code == 429:
+            return False
+        return True
+    return False
 
 
 class RegosAPI:
@@ -96,7 +107,7 @@ class RegosAPI:
     @retry(
         wait=wait_exponential(min=0.2, max=5),
         stop=stop_after_attempt(3),
-        retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)),
+        retry=retry_if_exception(_is_retryable_regos_error),
         reraise=True,
     )
     async def call(self, path: str, body: Any, response_model: Type[T]) -> T:
@@ -108,7 +119,7 @@ class RegosAPI:
     @retry(
         wait=wait_exponential(min=0.2, max=5),
         stop=stop_after_attempt(3),
-        retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)),
+        retry=retry_if_exception(_is_retryable_regos_error),
         reraise=True,
     )
     async def call_multipart(

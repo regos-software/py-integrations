@@ -9,7 +9,11 @@ class Settings(BaseSettings):
     integration_url: str = "https://integration.regos.uz"
     proxy_integration_url: str = ""
     integration_rps: int = 2
-    integration_burst: int = 50
+    integration_burst: int = 30
+    integration_429_retry_attempts: int = 3
+    integration_429_base_delay_sec: float = 1.0
+    integration_429_max_delay_sec: float = 30.0
+    integration_429_cooldown_ttl_sec: int = 120
     service_a_token: str = ""
     scheduler_hostname: str = Field(
         default="",
@@ -56,6 +60,7 @@ class Settings(BaseSettings):
     telegram_notification_chat_min_interval_sec: float = 1.0
     telegram_notification_flood_retry_attempts: int = 3
     telegram_notification_flood_extra_delay_sec: float = 0.5
+    telegram_notification_operating_cash_cache_ttl: int = 3600
     telegram_orders_stream_workers: int = 2
     telegram_orders_stream_batch_size: int = 50
     telegram_orders_stream_maxlen: int = 100000
