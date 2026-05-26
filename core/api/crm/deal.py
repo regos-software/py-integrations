@@ -68,7 +68,34 @@ class DealService:
         return await self.api.call(self.PATH_ADD, sanitized, DealAddResponse)
 
     async def edit(self, req: DealEditRequest) -> DealEditResponse:
-        return await self.api.call(self.PATH_EDIT, req, DealEditResponse)
+        payload = req.model_dump(exclude_none=True)
+        stage_id = payload.get("stage_id")
+        sanitized = {
+            "id": payload.get("id"),
+            "task_id": payload.get("task_id"),
+            "deal_type_id": payload.get("deal_type_id"),
+            "pipeline_id": payload.get("pipeline_id"),
+            "title": payload.get("title"),
+            "description": payload.get("description"),
+            "amount": payload.get("amount"),
+            "currency_id": payload.get("currency_id"),
+            "fields": payload.get("fields"),
+        }
+        sanitized = {key: value for key, value in sanitized.items() if value is not None}
+        response: DealEditResponse | None = None
+        if len(sanitized) > 1:
+            response = await self.api.call(self.PATH_EDIT, sanitized, DealEditResponse)
+            if not getattr(response, "ok", False) or stage_id is None:
+                return response
+
+        if stage_id is not None:
+            return await self.set_stage(
+                DealSetStageRequest(id=int(payload["id"]), stage_id=int(stage_id))
+            )
+
+        if response is not None:
+            return response
+        return await self.api.call(self.PATH_EDIT, sanitized, DealEditResponse)
 
     async def delete(self, req: DealDeleteRequest) -> DealDeleteResponse:
         return await self.api.call(self.PATH_DELETE, req, DealDeleteResponse)

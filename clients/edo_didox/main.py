@@ -287,7 +287,6 @@ class EdoDidoxNonRetryableError(EdoDidoxError):
 class DidoxClient:
     API_ENDPOINT = "https://api-partners.didox.uz"
     REQUIRED_SETTINGS = {
-        "DIDOX_PARTNER_TOKEN",
         "DIDOX_PASSWORD",
     }
     DEFAULT_DOCUMENT_TYPES = "002,005,008,023"
@@ -330,7 +329,10 @@ class DidoxClient:
             settings_map = await cls._load_settings(api, ci, parsed_firm_id)
 
         firm = firms[0]
-        base_url = _text(settings_map.get("DIDOX_BASE_URL"), cls.API_ENDPOINT)
+        base_url = _text(
+            settings_map.get("DIDOX_BASE_URL") or settings.didox_base_url,
+            cls.API_ENDPOINT,
+        )
         locale = _text(settings_map.get("DIDOX_LOCALE"), "ru").lower()
         if locale not in {"ru", "uz"}:
             locale = "ru"
@@ -363,9 +365,15 @@ class DidoxClient:
             key = _text(getattr(item, "key", "")).upper()
             if key:
                 settings_map[key] = _text(getattr(item, "value", ""))
+        if not settings_map.get("DIDOX_PARTNER_TOKEN"):
+            global_partner_token = _text(settings.didox_partner_token)
+            if global_partner_token:
+                settings_map["DIDOX_PARTNER_TOKEN"] = global_partner_token
         missing = sorted(key for key in cls.REQUIRED_SETTINGS if not settings_map.get(key))
         if missing:
             raise EdoDidoxError(112004, f"Missing Didox settings: {', '.join(missing)}", 400)
+        if not settings_map.get("DIDOX_PARTNER_TOKEN"):
+            raise EdoDidoxError(112004, "Missing Didox env: DIDOX_PARTNER_TOKEN", 400)
         return settings_map
 
     @classmethod
@@ -538,7 +546,10 @@ class DidoxClient:
             "owner": 0,
             "page": page,
             "limit": page_limit,
-            "doctype": _text(self.settings_map.get("DIDOX_DOCUMENT_TYPES"), self.DEFAULT_DOCUMENT_TYPES),
+            "doctype": _text(
+                self.settings_map.get("DIDOX_DOCUMENT_TYPES") or settings.didox_document_types,
+                self.DEFAULT_DOCUMENT_TYPES,
+            ),
         }
         if start_date:
             params["docDateFromCreated"] = _format_date(start_date)

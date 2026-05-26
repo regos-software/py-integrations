@@ -93,16 +93,29 @@ class LeadService:
     async def edit(self, req: LeadEditRequest) -> LeadEditResponse:
         payload = req.model_dump(exclude_none=True)
         title = self._first_non_empty(payload.get("title"), payload.get("subject"))
+        stage_id = payload.get("stage_id")
 
         sanitized = {
             "id": payload.get("id"),
-            "stage_id": payload.get("stage_id"),
             "title": title,
             "description": payload.get("description"),
             "amount": payload.get("amount"),
             "fields": payload.get("fields"),
         }
         sanitized = {key: value for key, value in sanitized.items() if value is not None}
+        response: LeadEditResponse | None = None
+        if len(sanitized) > 1:
+            response = await self.api.call(self.PATH_EDIT, sanitized, LeadEditResponse)
+            if not getattr(response, "ok", False) or stage_id is None:
+                return response
+
+        if stage_id is not None:
+            return await self.set_stage(
+                LeadSetStageRequest(id=int(payload["id"]), stage_id=int(stage_id))
+            )
+
+        if response is not None:
+            return response
         return await self.api.call(self.PATH_EDIT, sanitized, LeadEditResponse)
 
     async def delete(self, req: LeadDeleteRequest) -> LeadDeleteResponse:

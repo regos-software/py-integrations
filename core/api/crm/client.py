@@ -115,6 +115,7 @@ class ClientService:
     async def edit(self, req: ClientEditRequest) -> ClientEditResponse:
         payload = req.model_dump(exclude_none=True)
         self._normalize_external_id(payload)
+        responsible_user_id = payload.get("responsible_user_id")
 
         sanitized = {
             "id": payload.get("id"),
@@ -124,10 +125,25 @@ class ClientService:
             "email": payload.get("email"),
             "photo_url": payload.get("photo_url"),
             "description": payload.get("description"),
-            "responsible_user_id": payload.get("responsible_user_id"),
             "fields": payload.get("fields"),
         }
         sanitized = {key: value for key, value in sanitized.items() if value is not None}
+        response: ClientEditResponse | None = None
+        if len(sanitized) > 1:
+            response = await self.api.call(self.PATH_EDIT, sanitized, ClientEditResponse)
+            if not getattr(response, "ok", False) or responsible_user_id is None:
+                return response
+
+        if responsible_user_id is not None:
+            return await self.set_responsible(
+                ClientSetResponsibleRequest(
+                    id=int(payload["id"]),
+                    responsible_user_id=int(responsible_user_id),
+                )
+            )
+
+        if response is not None:
+            return response
         return await self.api.call(self.PATH_EDIT, sanitized, ClientEditResponse)
 
     async def delete(self, req: ClientDeleteRequest) -> ClientDeleteResponse:

@@ -40,15 +40,12 @@
 
 | Ключ | Обяз. | Тип данных | Скрывать в UI | Наименование (RU / UZ / EN) | Описание (RU / UZ / EN) | Placeholder (RU / UZ / EN) |
 |---|---|---|---|---|---|---|
-| `DIDOX_PARTNER_TOKEN` | Да | String | Да | `Партнерский токен Didox` / `Didox hamkor tokeni` / `Didox partner token` | `Служебный токен партнера Didox` / `Didox hamkorining xizmat tokeni` / `Service partner token issued by Didox` | `` / `` / `` |
 | `DIDOX_PASSWORD` | Да | String | Да | `Пароль Didox` / `Didox paroli` / `Didox password` | `Служебный пароль аккаунта, от имени которого выполняется обмен документами` / `Hujjat almashinuvi bajariladigan xizmat akkaunti paroli` / `Service account password used for document exchange` | `` / `` / `` |
-| `DIDOX_LOGIN_TAX_ID` | Нет | String | Да | `ИНН пользователя Didox` / `Didox foydalanuvchi STIR` / `Didox user tax ID` | `ИНН пользователя для первичного входа. Если не задан, используется ИНН компании` / `Kiritilmasa, kompaniya STIR ishlatiladi` / `User tax ID for login. If empty, company tax ID is used` | `` / `` / `` |
-| `DIDOX_COMPANY_TAX_ID` | Нет | String | Да | `ИНН компании Didox` / `Didox kompaniya STIR` / `Didox company tax ID` | `ИНН компании для обмена документами. Если не задан, используется ИНН выбранной фирмы` / `Kiritilmasa, tanlangan firma STIR ishlatiladi` / `Company tax ID for document exchange. If empty, the selected firm's tax ID is used` | `` / `` / `` |
-| `DIDOX_BASE_URL` | Нет | String | Да | `Адрес Didox API` / `Didox API manzili` / `Didox API URL` | `Адрес API Didox. Обычно заполняется только для тестового контура` / `Odatda faqat test muhiti uchun to'ldiriladi` / `Didox API endpoint. Usually set only for test environments` | `https://api-partners.didox.uz` / `https://api-partners.didox.uz` / `https://api-partners.didox.uz` |
 | `DIDOX_LOCALE` | Нет | String | Да | `Язык Didox API` / `Didox API tili` / `Didox API locale` | `Язык ответов Didox` / `Didox javoblari tili` / `Didox response language` | `ru` / `ru` / `ru` |
-| `DIDOX_DOCUMENT_TYPES` | Нет | String | Да | `Типы документов Didox` / `Didox hujjat turlari` / `Didox document types` | `Список типов документов для загрузки через запятую` / `Yuklash uchun hujjat turlari ro'yxati` / `Comma-separated document types to load` | `002,005,008,023` / `002,005,008,023` / `002,005,008,023` |
 
 Эти данные заполняются администратором при подключении обмена с Didox. Обычному пользователю не нужно вводить их при ежедневной работе с документами.
+
+Партнерский токен Didox задается один раз на уровне сервиса через env `DIDOX_PARTNER_TOKEN`. ИНН компании берется из выбранной фирмы REGOS.
 
 ## Порядок настройки
 

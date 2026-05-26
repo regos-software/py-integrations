@@ -38,11 +38,17 @@ class ItemOperation(BaseSchema):
     document_type: Optional[ItemOperationDocumentType] = PydField(
         None, description="Тип документа операции."
     )
+    document_type_name: Optional[str] = PydField(
+        None, description="Наименование типа документа."
+    )
+    document_code: Optional[str] = PydField(
+        None, description="Код документа."
+    )
     doc_type_name: Optional[str] = PydField(
-        None, description="Наименование типа документа (строка)."
+        None, description="Устаревшее поле. Используйте document_type_name."
     )
     doc_code: Optional[str] = PydField(
-        None, description="Номер документа, связанного с операцией."
+        None, description="Устаревшее поле. Используйте document_code."
     )
     stock: Optional[Stock] = PydField(
         None, description="Склад, по которому прошла операция."

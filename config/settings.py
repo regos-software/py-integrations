@@ -111,6 +111,18 @@ class Settings(BaseSettings):
     edo_didox_stream_retry_limit: int = 3
     edo_didox_stream_ttl: int = 86400
     edo_didox_token_cache_ttl: int = 21000
+    didox_partner_token: str = Field(
+        default="",
+        validation_alias=AliasChoices("didox_partner_token", "DIDOX_PARTNER_TOKEN"),
+    )
+    didox_base_url: str = Field(
+        default="https://api-partners.didox.uz",
+        validation_alias=AliasChoices("didox_base_url", "DIDOX_BASE_URL"),
+    )
+    didox_document_types: str = Field(
+        default="002,005,008,023",
+        validation_alias=AliasChoices("didox_document_types", "DIDOX_DOCUMENT_TYPES"),
+    )
     marketplace_external_timeout: int = 60
     marketplace_unload_page_size: int = 250
     marketplace_cache_ttl: int = 300
