@@ -5,6 +5,25 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 MessageSender = Callable[[str, str], Awaitable[Any]]
 
 
+def _telegram_permanent_error_reason(error: object) -> Optional[str]:
+    text = str(error or "").lower()
+    if "bot was blocked by the user" in text:
+        return "bot was blocked"
+    if "bot was kicked from" in text and "chat" in text:
+        return "bot was kicked from the chat"
+    if "chat not found" in text or "bot is not a member of the chat" in text:
+        return "chat is unavailable"
+    if "not enough rights to send text messages to the chat" in text:
+        return "bot lacks rights"
+    if "not enough rights to send messages" in text:
+        return "bot lacks rights"
+    if "forbidden: user is deactivated" in text:
+        return "user is deactivated"
+    if "marked unavailable" in text:
+        return "chat is marked unavailable"
+    return None
+
+
 async def send_messages(
     *,
     bot=None,
@@ -55,7 +74,16 @@ async def send_messages(
             logger.debug("Sent Telegram message to chat %s", chat_id)
             return {"status": "sent", "chat_id": chat_id, "message": text}
         except Exception as error:
-            logger.error("Telegram send error for chat %s: %s", chat_id, error)
+            permanent_reason = _telegram_permanent_error_reason(error)
+            if permanent_reason:
+                logger.info(
+                    "Telegram send skipped for chat %s because %s: %s",
+                    chat_id,
+                    permanent_reason,
+                    error,
+                )
+            else:
+                logger.error("Telegram send error for chat %s: %s", chat_id, error)
             result = {
                 "status": "error",
                 "chat_id": chat_id,

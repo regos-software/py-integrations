@@ -11,7 +11,7 @@ from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_t
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
-from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter, TelegramUnauthorizedError
 from aiogram.filters import Command
 from aiogram.types import Update as TelegramUpdate
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -30,6 +30,7 @@ from schemas.api.docs.cheque import DocCheque
 from schemas.api.docs.cheque_payment import DocChequePayment, DocChequePaymentGetRequest
 from schemas.api.reports.retail_report.count import CountsGetRequest
 from schemas.api.reports.retail_report.payment import PaymentGetRequest
+from schemas.api.references.operating_cash import OperatingCashGetRequest
 from .utils import parse_chat_ids, extract_chat_id
 from schemas.integration.telegram_integration_base import IntegrationTelegramBase
 from schemas.api.integrations.connected_integration_setting import (
@@ -69,6 +70,9 @@ _STREAM_GROUP_READY: Set[str] = set()
 _STREAM_CLAIM_TS: Dict[str, int] = {}
 _SETTINGS_LOCAL_CACHE: Dict[str, Tuple[int, Dict[str, str]]] = {}
 _WEBHOOK_LOCAL_CACHE: Dict[str, int] = {}
+_UNAVAILABLE_CHAT_LOCAL_CACHE: Dict[str, int] = {}
+_OPERATING_CASH_STOCK_LOCAL_CACHE: Dict[str, Tuple[int, Optional[int]]] = {}
+_OPERATING_CASH_STOCK_LOCKS: Dict[str, asyncio.Lock] = {}
 _BOT_RUNTIME_CACHE: Dict[str, Tuple[str, Any]] = {}
 _BOT_RUNTIME_LOCK = asyncio.Lock()
 
@@ -95,6 +99,14 @@ def _json_dumps(payload: Any) -> str:
 
 def _json_loads(raw: str) -> Any:
     return json.loads(raw)
+
+
+class TelegramChatUnavailableError(RuntimeError):
+    pass
+
+
+class StockFilterUnavailableError(RuntimeError):
+    pass
 
 
 # Define constants for Telegram settings
@@ -145,6 +157,11 @@ class TelegramBotConfig:
     FLOOD_EXTRA_DELAY_SEC = max(float(settings.telegram_notification_flood_extra_delay_sec or 0), 0.0)
     SEND_LOCK_TTL = 120
     SEND_LOCK_WAIT_SECONDS = 30.0
+    UNAVAILABLE_CHAT_TTL = 10 * 60
+    OPERATING_CASH_CACHE_TTL = max(
+        int(settings.telegram_notification_operating_cash_cache_ttl or 0),
+        60,
+    )
 
 
 class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
@@ -178,6 +195,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         self.bot = None
         self.dispatcher = None
         self.handlers_registered = False
+        self._bot_token_fingerprint = ""
 
     def _create_error_response(
         self, error_code: int, description: str
@@ -229,13 +247,132 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
 
         return result or None
 
+    def _operating_cash_stock_cache_key(self, operating_cash_id: int) -> str:
+        return self._redis_key(
+            "oc_stock",
+            self.connected_integration_id or "unknown",
+            str(int(operating_cash_id)),
+        )
+
+    @staticmethod
+    def _encode_cached_stock_id(stock_id: Optional[int]) -> str:
+        return "" if stock_id is None else str(int(stock_id))
+
+    @staticmethod
+    def _decode_cached_stock_id(raw: Any) -> Optional[int]:
+        if raw is None:
+            return None
+        text = str(raw).strip()
+        if not text:
+            return None
+        return int(text)
+
+    async def _read_cached_operating_cash_stock_id(
+        self,
+        operating_cash_id: int,
+    ) -> Tuple[bool, Optional[int]]:
+        key = self._operating_cash_stock_cache_key(operating_cash_id)
+        now_ts = _now_ts()
+        cached = _OPERATING_CASH_STOCK_LOCAL_CACHE.get(key)
+        if cached and cached[0] > now_ts:
+            return True, cached[1]
+        if cached:
+            _OPERATING_CASH_STOCK_LOCAL_CACHE.pop(key, None)
+        if not self._redis_enabled():
+            return False, None
+        try:
+            raw = await redis_ops.get(key)
+            if raw is None:
+                return False, None
+            stock_id = self._decode_cached_stock_id(raw)
+            _OPERATING_CASH_STOCK_LOCAL_CACHE[key] = (
+                now_ts + min(TelegramBotConfig.OPERATING_CASH_CACHE_TTL, 60),
+                stock_id,
+            )
+            return True, stock_id
+        except Exception as error:
+            logger.warning("Failed to read operating cash stock cache: %s", error)
+            return False, None
+
+    async def _write_cached_operating_cash_stock_id(
+        self,
+        operating_cash_id: int,
+        stock_id: Optional[int],
+    ) -> None:
+        key = self._operating_cash_stock_cache_key(operating_cash_id)
+        _OPERATING_CASH_STOCK_LOCAL_CACHE[key] = (
+            _now_ts() + min(TelegramBotConfig.OPERATING_CASH_CACHE_TTL, 60),
+            stock_id,
+        )
+        if not self._redis_enabled():
+            return
+        try:
+            await redis_ops.set(
+                key,
+                self._encode_cached_stock_id(stock_id),
+                ex=TelegramBotConfig.OPERATING_CASH_CACHE_TTL,
+            )
+        except Exception as error:
+            logger.warning("Failed to write operating cash stock cache: %s", error)
+
+    async def _get_operating_cash_stock_id(
+        self,
+        api: RegosAPI,
+        operating_cash_id: int,
+    ) -> Optional[int]:
+        oc_id = int(operating_cash_id)
+        hit, stock_id = await self._read_cached_operating_cash_stock_id(oc_id)
+        if hit:
+            return stock_id
+
+        key = self._operating_cash_stock_cache_key(oc_id)
+        lock = _OPERATING_CASH_STOCK_LOCKS.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _OPERATING_CASH_STOCK_LOCKS[key] = lock
+
+        async with lock:
+            hit, stock_id = await self._read_cached_operating_cash_stock_id(oc_id)
+            if hit:
+                return stock_id
+
+            oc_resp = await api.references.operating_cash.get(
+                OperatingCashGetRequest(ids=[oc_id])
+            )
+            oc_list = getattr(oc_resp, "result", oc_resp) or []
+            fetched_stock_id: Optional[int] = None
+            if oc_list:
+                operating_cash = oc_list[0]
+                stock = getattr(operating_cash, "stock", None)
+                raw_stock_id = getattr(stock, "id", None)
+                if raw_stock_id is not None:
+                    fetched_stock_id = int(raw_stock_id)
+            await self._write_cached_operating_cash_stock_id(oc_id, fetched_stock_id)
+            return fetched_stock_id
+
+    @staticmethod
+    def _stock_filter_error_response(
+        webhook_action: str,
+        uuid_value: str,
+        error: object,
+    ) -> IntegrationErrorResponse:
+        return IntegrationErrorResponse(
+            result=IntegrationErrorModel(
+                error=1011,
+                description=(
+                    f"Stock filter unavailable for {webhook_action} "
+                    f"uuid={uuid_value}: {error}"
+                ),
+            )
+        )
+
     @staticmethod
     def _subscriber_removal_reason(error: object) -> Optional[str]:
         text = str(error).lower()
         if "bot was blocked by the user" in text:
             return "bot was blocked"
-        if "bot was kicked from the group chat" in text:
-            return "bot was kicked from the group"
+        if "bot was kicked from" in text and "chat" in text:
+            return "bot was kicked from the chat"
         if "chat not found" in text or "bot is not a member of the chat" in text:
             return "chat is unavailable"
         if "not enough rights to send text messages to the chat" in text:
@@ -299,6 +436,93 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         )
         return max(int(match.group(1)), 1) if match else None
 
+    @staticmethod
+    def _is_telegram_unauthorized_error(error: object) -> bool:
+        if isinstance(error, TelegramUnauthorizedError):
+            return True
+        text = str(error or "").lower()
+        return (
+            "telegram server says - unauthorized" in text
+            or "token is invalid" in text
+            or "unauthorized" == text.strip()
+        )
+
+    @staticmethod
+    def _is_bot_session_closed(bot: Optional[Bot]) -> bool:
+        session = getattr(bot, "session", None)
+        aiohttp_session = getattr(session, "_session", None)
+        return bool(getattr(aiohttp_session, "closed", False))
+
+    async def _ensure_bot_initialized(self) -> Bot:
+        if self.bot and self._is_bot_session_closed(self.bot):
+            self.bot = None
+        if not self.bot:
+            await self._initialize_bot()
+        if not self.bot:
+            raise RuntimeError("Telegram bot is not initialized")
+        return self.bot
+
+    def _unavailable_chat_key(self, chat_id: str) -> str:
+        chat_hash = hashlib.sha256(str(chat_id or "").encode("utf-8")).hexdigest()[:16]
+        return self._redis_key(
+            "unavailable_chat",
+            self.connected_integration_id or "unknown",
+            chat_hash,
+        )
+
+    async def _mark_unavailable_chat(self, chat_id: str, reason: str) -> None:
+        if not chat_id:
+            return
+        key = self._unavailable_chat_key(chat_id)
+        _UNAVAILABLE_CHAT_LOCAL_CACHE[key] = (
+            _now_ts() + TelegramBotConfig.UNAVAILABLE_CHAT_TTL
+        )
+        if not self._redis_enabled():
+            return
+        try:
+            await redis_ops.setex(
+                key,
+                TelegramBotConfig.UNAVAILABLE_CHAT_TTL,
+                str(reason or "unavailable")[:200],
+            )
+        except Exception as error:
+            logger.warning("Failed to cache unavailable Telegram chat marker: %s", error)
+
+    async def _is_unavailable_chat(self, chat_id: str) -> bool:
+        if not chat_id:
+            return False
+        key = self._unavailable_chat_key(chat_id)
+        expires_at = int(_UNAVAILABLE_CHAT_LOCAL_CACHE.get(key) or 0)
+        now_ts = _now_ts()
+        if expires_at > now_ts:
+            return True
+        if expires_at:
+            _UNAVAILABLE_CHAT_LOCAL_CACHE.pop(key, None)
+        if not self._redis_enabled():
+            return False
+        try:
+            if await redis_ops.exists(key):
+                _UNAVAILABLE_CHAT_LOCAL_CACHE[key] = (
+                    now_ts + TelegramBotConfig.UNAVAILABLE_CHAT_TTL
+                )
+                return True
+        except Exception as error:
+            logger.warning("Failed to read unavailable Telegram chat marker: %s", error)
+        return False
+
+    async def _handle_telegram_unauthorized_error(self, error: object) -> None:
+        try:
+            settings_map = await self._fetch_settings(self._settings_cache_key())
+            bot_token = settings_map.get(TelegramSettings.BOT_TOKEN.value.lower())
+            if bot_token:
+                await self._mark_invalid_bot_token(bot_token)
+        except Exception as marker_error:
+            logger.warning(
+                "Failed to mark Telegram bot token invalid after unauthorized error: %s",
+                marker_error,
+            )
+        await self._close_bot_runtime_cache(self.connected_integration_id)
+
     async def _wait_chat_send_turn(self, chat_id: str) -> None:
         self._require_redis()
         raw = await redis_ops.get(self._chat_send_next_key(chat_id))
@@ -331,25 +555,38 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         text: str,
         reply_markup: Optional[InlineKeyboardMarkup],
     ) -> Any:
+        if await self._is_unavailable_chat(chat_id):
+            raise TelegramChatUnavailableError(
+                f"Telegram chat {chat_id} is marked unavailable"
+            )
+        bot = await self._ensure_bot_initialized()
         try:
-            return await self.bot.send_message(
+            return await bot.send_message(
                 chat_id=chat_id,
                 text=text,
                 reply_markup=reply_markup if reply_markup else None,
             )
         except Exception as error:
+            if self._is_telegram_unauthorized_error(error):
+                await self._handle_telegram_unauthorized_error(error)
+                raise
             if self._is_parse_entities_error(error):
                 logger.warning(
                     "Telegram markdown send rejected, retrying as plain text: chat_id=%s error=%s",
                     chat_id,
                     error,
                 )
-                return await self.bot.send_message(
-                    chat_id=chat_id,
-                    text=text,
-                    parse_mode=None,
-                    reply_markup=reply_markup if reply_markup else None,
-                )
+                try:
+                    return await bot.send_message(
+                        chat_id=chat_id,
+                        text=text,
+                        parse_mode=None,
+                        reply_markup=reply_markup if reply_markup else None,
+                    )
+                except Exception as fallback_error:
+                    if self._is_telegram_unauthorized_error(fallback_error):
+                        await self._handle_telegram_unauthorized_error(fallback_error)
+                    raise
             raise
 
     async def _edit_text_markdown_with_plain_fallback(
@@ -444,6 +681,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         reason = self._subscriber_removal_reason(error)
         if not reason:
             return None
+        await self._mark_unavailable_chat(str(chat_id), reason)
         try:
             await self._remove_subscriber(str(chat_id))
             logger.info("Removed subscriber %s because %s", chat_id, reason)
@@ -863,7 +1101,9 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                 "no bot token in settings",
                 "bot token not found",
                 "token is invalid",
+                "telegram server says - unauthorized",
                 "settings retrieval error: token is invalid",
+                "settings retrieval error: telegram server says - unauthorized",
             )
         )
 
@@ -1232,8 +1472,9 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             logger.warning("Failed to clear webhook refresh cache: %s", error)
 
     async def _ensure_webhook_from_regos(self, *, force: bool = False) -> None:
-        if self._is_longpolling_mode() or not self.bot or not self.connected_integration_id:
+        if self._is_longpolling_mode() or not self.connected_integration_id:
             return
+        bot = await self._ensure_bot_initialized()
 
         cache_key = self._webhook_refresh_cache_key()
         if not force and int(_WEBHOOK_LOCAL_CACHE.get(cache_key) or 0) > _now_ts():
@@ -1274,13 +1515,15 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                     logger.warning("Failed to re-read webhook refresh cache: %s", error)
 
             webhook_url = self._build_webhook_url()
-            info = await self.bot.get_webhook_info()
+            info = await bot.get_webhook_info()
             current_url = (getattr(info, "url", "") or "").rstrip("/")
             if current_url != webhook_url.rstrip("/"):
-                await self.bot.set_webhook(url=webhook_url)
+                await bot.set_webhook(url=webhook_url)
                 logger.info("Webhook url updated from REGOS webhook: %s", webhook_url)
             await self._touch_webhook_refresh_cache()
         except Exception as error:
+            if self._is_telegram_unauthorized_error(error):
+                await self._handle_telegram_unauthorized_error(error)
             logger.warning("Failed to refresh webhook from REGOS webhook: %s", error)
             if force:
                 raise
@@ -1574,7 +1817,10 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
     async def _initialize_bot(self, settings_map: Optional[Dict[str, str]] = None) -> None:
         """Initialize the Telegram bot if not already done."""
         if self.bot:
-            return
+            if self._is_bot_session_closed(self.bot):
+                self.bot = None
+            else:
+                return
         ci = str(self.connected_integration_id or "").strip()
         if not ci:
             raise ValueError("No connected_integration_id specified")
@@ -1594,28 +1840,51 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             cached = _BOT_RUNTIME_CACHE.get(ci)
             if cached and cached[0] == token_fingerprint:
                 runtime = cached[1]
-                self.bot = runtime.bot
-                self.dispatcher = runtime.dispatcher
-                self.handlers_registered = runtime.handlers_registered
-                self._bot_token_fingerprint = token_fingerprint
-                self._owns_bot_session = False
-                return
+                if (
+                    getattr(runtime, "bot", None)
+                    and not self._is_bot_session_closed(runtime.bot)
+                ):
+                    self.bot = runtime.bot
+                    self.dispatcher = runtime.dispatcher
+                    self.handlers_registered = runtime.handlers_registered
+                    self._bot_token_fingerprint = token_fingerprint
+                    self._owns_bot_session = False
+                    return
+                _BOT_RUNTIME_CACHE.pop(ci, None)
+                if isinstance(runtime, TelegramBotNotificationIntegration):
+                    await runtime._close_bot_session()
+                cached = None
             if cached:
                 _BOT_RUNTIME_CACHE.pop(ci, None)
                 await cached[1]._close_bot_session()
+            created_bot: Optional[Bot] = None
             try:
-                self.bot = create_telegram_bot(
+                created_bot = create_telegram_bot(
                     token=bot_token,
                     default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN),
                 )
+                await created_bot.get_me()
+                self.bot = created_bot
+                self._bot_token_fingerprint = token_fingerprint
+                await self._setup_handlers()
+                self._owns_bot_session = False
+                _BOT_RUNTIME_CACHE[ci] = (token_fingerprint, self)
             except Exception as error:
-                if "token is invalid" in str(error).lower():
+                if self._is_telegram_unauthorized_error(error):
                     await self._mark_invalid_bot_token(bot_token)
+                if created_bot and getattr(created_bot, "session", None):
+                    try:
+                        await created_bot.session.close()
+                    except Exception as close_error:
+                        logger.warning(
+                            "Failed to close bot session after init error: %s",
+                            close_error,
+                        )
+                self.bot = None
+                self.dispatcher = None
+                self.handlers_registered = False
+                self._bot_token_fingerprint = ""
                 raise
-            self._bot_token_fingerprint = token_fingerprint
-            await self._setup_handlers()
-            self._owns_bot_session = False
-            _BOT_RUNTIME_CACHE[ci] = (token_fingerprint, self)
 
     async def _setup_handlers(self) -> None:
         """Set up command and callback handlers for the bot."""
@@ -1847,12 +2116,13 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                 return self._create_error_response(1002, "No bot token in settings")
             await self._initialize_bot(settings_map)
             await self._setup_handlers()
+            bot = await self._ensure_bot_initialized()
 
             if self._is_longpolling_mode():
-                await self.bot.delete_webhook(drop_pending_updates=True)
+                await bot.delete_webhook(drop_pending_updates=True)
                 await self._clear_webhook_refresh_cache()
                 await telegram_polling_manager.start(
-                    self._polling_key(), self.bot, self.dispatcher
+                    self._polling_key(), bot, self.dispatcher
                 )
                 logger.info("Webhook deleted (longpolling mode).")
                 return {"status": "connected", "mode": "longpolling"}
@@ -1867,6 +2137,8 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             logger.error(f"Connection error: {error}")
             raise
         except Exception as error:
+            if self._is_telegram_unauthorized_error(error):
+                await self._handle_telegram_unauthorized_error(error)
             logger.error(f"Unexpected connection error: {error}")
             return self._create_error_response(1003, f"Webhook setup failed: {error}")
 
@@ -1885,8 +2157,9 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             await self._clear_webhook_refresh_cache()
             await self._close_bot_runtime_cache(self.connected_integration_id)
             return {"status": "disconnected", "message": "Bot not initialized"}
+        bot = self.bot
         try:
-            await self.bot.delete_webhook(drop_pending_updates=True)
+            await bot.delete_webhook(drop_pending_updates=True)
             await self._clear_webhook_refresh_cache()
             await self._close_bot_runtime_cache(self.connected_integration_id)
             self.bot = None
@@ -1895,6 +2168,8 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             logger.info("Webhook removed")
             return {"status": "disconnected"}
         except Exception as error:
+            if self._is_telegram_unauthorized_error(error):
+                await self._handle_telegram_unauthorized_error(error)
             logger.error(f"Disconnection error: {error}")
             return self._create_error_response(1004, f"Webhook removal failed: {error}")
 
@@ -2063,10 +2338,6 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             # ---------------- ЧЕК ----------------
             if webhook_action in {"DocChequeClosed", "DocChequeCanceled"}:
                 async with RegosAPI(self.connected_integration_id) as api:
-                    from schemas.api.references.operating_cash import (
-                        OperatingCashGetRequest,
-                    )
-
                     cheques_resp = await api.docs.cheque.get_by_uuids([uuid])
                     raw_cheques = getattr(cheques_resp, "result", cheques_resp) or []
 
@@ -2099,27 +2370,31 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                                     sessions_resp, "result", sessions_resp
                                 ) or []
 
-                                if sessions:
-                                    session = sessions[0]
+                                if not sessions:
+                                    raise StockFilterUnavailableError(
+                                        f"cash session {session_uuid} not found"
+                                    )
+                                session = sessions[0]
 
                                     # 2. Получаем кассу (OperatingCash)
-                                    oc_resp = await api.references.operating_cash.get(
-                                        OperatingCashGetRequest(
-                                            ids=[session.operating_cash_id]
-                                        )
+                                stock_id_for_filter = await self._get_operating_cash_stock_id(
+                                    api,
+                                    session.operating_cash_id,
+                                )
+                                if stock_id_for_filter is None:
+                                    raise StockFilterUnavailableError(
+                                        f"stock not found for operating_cash_id={session.operating_cash_id}"
                                     )
-                                    oc_list = getattr(
-                                        oc_resp, "result", oc_resp
-                                    ) or []
-                                    if oc_list:
-                                        operating_cash = oc_list[0]
-                                        stock = getattr(operating_cash, "stock", None)
-                                        stock_id_for_filter = getattr(stock, "id", None)
 
                             except Exception as error:
-                                logger.error(
-                                    "Error fetching session/operating cash for cheque %s: %s",
+                                logger.warning(
+                                    "Stock filter unavailable for cheque %s: %s",
                                     uuid,
+                                    error,
+                                )
+                                return self._stock_filter_error_response(
+                                    webhook_action,
+                                    str(uuid),
                                     error,
                                 )
 
@@ -2161,10 +2436,6 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             # ---------------- СМЕНА ----------------
             elif webhook_action in {"DocSessionOpened", "DocSessionClosed"}:
                 async with RegosAPI(self.connected_integration_id) as api:
-                    from schemas.api.references.operating_cash import (
-                        OperatingCashGetRequest,
-                    )
-
                     sessions_resp = await api.docs.cash_session.get_by_uuids([uuid])
                     sessions = getattr(sessions_resp, "result", sessions_resp) or []
 
@@ -2182,20 +2453,23 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                         stock_id_for_filter: Optional[int] = None
                         if allowed_stock_ids:
                             try:
-                                oc_resp = await api.references.operating_cash.get(
-                                    OperatingCashGetRequest(
-                                        ids=[session.operating_cash_id]
-                                    )
+                                stock_id_for_filter = await self._get_operating_cash_stock_id(
+                                    api,
+                                    session.operating_cash_id,
                                 )
-                                oc_list = getattr(oc_resp, "result", oc_resp) or []
-                                if oc_list:
-                                    operating_cash = oc_list[0]
-                                    stock = getattr(operating_cash, "stock", None)
-                                    stock_id_for_filter = getattr(stock, "id", None)
+                                if stock_id_for_filter is None:
+                                    raise StockFilterUnavailableError(
+                                        f"stock not found for operating_cash_id={session.operating_cash_id}"
+                                    )
                             except Exception as error:
-                                logger.error(
-                                    "Error fetching operating cash for session %s: %s",
+                                logger.warning(
+                                    "Stock filter unavailable for session %s: %s",
                                     uuid,
+                                    error,
+                                )
+                                return self._stock_filter_error_response(
+                                    webhook_action,
+                                    str(uuid),
                                     error,
                                 )
 
@@ -2277,6 +2551,12 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         message_text: str,
         keyboard: Optional[InlineKeyboardMarkup],
     ) -> Dict:
+        if await self._is_unavailable_chat(chat_id):
+            return {
+                "status": "skipped",
+                "chat_id": chat_id,
+                "reason": "chat_unavailable",
+            }
         try:
             await self._send_message_markdown_with_plain_fallback(
                 chat_id=chat_id,
@@ -2285,7 +2565,6 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             )
             return {"status": "sent", "chat_id": chat_id}
         except Exception as error:
-            logger.error("Error sending message to chat %s: %s", chat_id, error)
             migrated_to = self._migrate_to_chat_id(error)
             if migrated_to:
                 try:
@@ -2309,16 +2588,36 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                         "migrated_from": str(chat_id),
                     }
                 except Exception as retry_error:
-                    logger.error(
-                        "Error sending message to migrated chat %s from %s: %s",
-                        migrated_to,
-                        chat_id,
-                        retry_error,
-                    )
+                    retry_reason = self._subscriber_removal_reason(retry_error)
+                    if retry_reason:
+                        logger.info(
+                            "Skipped unavailable migrated Telegram chat %s from %s because %s: %s",
+                            migrated_to,
+                            chat_id,
+                            retry_reason,
+                            retry_error,
+                        )
+                    else:
+                        logger.error(
+                            "Error sending message to migrated chat %s from %s: %s",
+                            migrated_to,
+                            chat_id,
+                            retry_error,
+                        )
                     error = retry_error
                     chat_id = migrated_to
 
-            await self._cleanup_failed_subscriber(str(chat_id), error)
+            reason = self._subscriber_removal_reason(error)
+            if reason:
+                await self._cleanup_failed_subscriber(str(chat_id), error)
+                logger.info(
+                    "Skipped unavailable Telegram chat %s because %s",
+                    chat_id,
+                    reason,
+                )
+            else:
+                logger.error("Error sending message to chat %s: %s", chat_id, error)
+                await self._cleanup_failed_subscriber(str(chat_id), error)
             return {"status": "error", "chat_id": chat_id, "error": str(error)}
 
 

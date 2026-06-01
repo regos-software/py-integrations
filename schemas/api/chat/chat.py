@@ -56,11 +56,14 @@ class Chat(BaseSchema):
     id: Optional[str] = PydField(default=None, description="Chat UUID.")
     name: Optional[str] = PydField(default=None, description="Chat name.")
     logo_url: Optional[str] = PydField(default=None, description="Chat logo URL.")
+    external_id: Optional[str] = PydField(default=None, description="External chat id.")
     last_message_id: Optional[str] = PydField(default=None, description="Last message UUID.")
     last_message_date: Optional[int] = PydField(default=None, description="Last message unix time.")
     last_message_text: Optional[str] = PydField(default=None, description="Last visible message text.")
     created_user_id: Optional[int] = PydField(default=None, description="Created user id.")
     last_update: Optional[int] = PydField(default=None, description="Last update unix time.")
+    closed: Optional[bool] = PydField(default=None, description="Closed chat flag.")
+    closed_date: Optional[int] = PydField(default=None, description="Closed date unix time.")
     entity_type: Optional[ChatLinkedEntityTypeEnum] = PydField(default=None, description="Linked entity type.")
     entity_id: Optional[int] = PydField(default=None, description="Linked entity id.")
     unread_count: Optional[int] = PydField(default=None, description="Unread count for current user.")
@@ -100,9 +103,14 @@ class ChatGetRequest(BaseSchema):
     model_config = ConfigDict(extra="forbid")
 
     ids: Optional[List[str]] = PydField(default=None, description="Chat UUIDs.")
+    external_id: Optional[str] = PydField(default=None, description="External chat id exact filter.")
     participant_entity_type: Optional[ChatEntityTypeEnum] = PydField(
         default=None,
         description="Participant entity type filter.",
+    )
+    entity_type: Optional[ChatLinkedEntityTypeEnum] = PydField(
+        default=None,
+        description="Linked entity type filter.",
     )
     participant_entity_id: Optional[int] = PydField(
         default=None,
@@ -110,6 +118,7 @@ class ChatGetRequest(BaseSchema):
         description="Participant entity id filter.",
     )
     search: Optional[str] = PydField(default=None, description="Chat name search.")
+    closed: Optional[bool] = PydField(default=None, description="Closed chat filter.")
     sort_orders: Optional[SortOrders] = PydField(default=None, description="Sort payload.")
     limit: Optional[int] = PydField(default=None, ge=1, description="Page size.")
     offset: Optional[int] = PydField(default=None, ge=0, description="Page offset.")
@@ -122,6 +131,7 @@ class ChatAddRequest(BaseSchema):
 
     name: Optional[str] = PydField(default=None, description="Chat name.")
     logo_url: Optional[str] = PydField(default=None, description="Chat logo URL.")
+    external_id: Optional[str] = PydField(default=None, description="External chat id.")
     participants: Optional[List[ChatParticipantAddEdit]] = PydField(
         default=None,
         description="Participants payload.",
@@ -136,6 +146,7 @@ class ChatEditRequest(BaseSchema):
     id: str = PydField(..., description="Chat UUID.")
     name: Optional[str] = PydField(default=None, description="Chat name.")
     logo_url: Optional[str] = PydField(default=None, description="Chat logo URL.")
+    external_id: Optional[str] = PydField(default=None, description="External chat id.")
 
 
 class ChatRemoveParticipantsRequest(BaseSchema):

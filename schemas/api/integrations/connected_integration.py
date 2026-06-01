@@ -26,8 +26,10 @@ class ConnectedIntegrationHandlerEnum(str, Enum):
     EDO = "EDO"
     SMS = "SMS"
     TG_BOT = "TG_BOT"
-    ChatBot = "ChatBot"
     Custom = "Custom"
+    Email = "Email"
+    ChatBot = "ChatBot"
+    Widget = "Widget"
 
 
 class IntegrationSchedule(BaseSchema):
@@ -63,6 +65,10 @@ class ConnectedIntegration(BaseSchema):
         default=None,
         description="Integration handler type.",
     )
+    handlers: Optional[List[ConnectedIntegrationHandlerEnum]] = PydField(
+        default=None,
+        description="Supported integration handlers.",
+    )
     scheduled: Optional[bool] = PydField(default=None, description="Scheduled mode flag.")
     schedule: Optional[IntegrationSchedule] = PydField(
         default=None,
@@ -80,6 +86,10 @@ class ConnectedIntegration(BaseSchema):
     image_url: Optional[str] = PydField(default=None, description="Integration logo URL.")
     docs_url: Optional[str] = PydField(default=None, description="Integration docs URL.")
     version: Optional[str] = PydField(default=None, description="Integration version.")
+    has_web_ui: Optional[bool] = PydField(default=None, description="Web UI availability flag.")
+    proxy_enabled: Optional[bool] = PydField(default=None, description="Integration proxy mode flag.")
+    web_ui_url: Optional[str] = PydField(default=None, description="Connected integration web UI URL.")
+    has_iap: Optional[bool] = PydField(default=None, description="In-app purchase availability flag.")
 
 
 class ConnectedIntegrationGetRequest(BaseSchema):
@@ -105,6 +115,10 @@ class ConnectedIntegrationGetRequest(BaseSchema):
     handler: Optional[ConnectedIntegrationHandlerEnum] = PydField(
         default=None,
         description="Integration handler filter.",
+    )
+    handlers: Optional[List[ConnectedIntegrationHandlerEnum]] = PydField(
+        default=None,
+        description="Supported handlers filter.",
     )
 
 

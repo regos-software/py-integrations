@@ -16,13 +16,10 @@
 
 | Ключ | Обяз. | Назначение |
 |---|---|---|
-| `DIDOX_PARTNER_TOKEN` | Да | Partner token для Didox API. |
 | `DIDOX_PASSWORD` | Да | Пароль пользователя Didox. |
-| `DIDOX_LOGIN_TAX_ID` | Нет | ИНН пользователя для входа. Если пусто, используется ИНН компании. |
-| `DIDOX_COMPANY_TAX_ID` | Нет | ИНН компании. Если пусто, используется `Firm.inn`. |
-| `DIDOX_BASE_URL` | Нет | API endpoint. По умолчанию `https://api-partners.didox.uz`. |
 | `DIDOX_LOCALE` | Нет | Locale для Didox API. По умолчанию `ru`. |
-| `DIDOX_DOCUMENT_TYPES` | Нет | Типы документов для списка через запятую. По умолчанию `002,005,008,023`. |
+
+Сервисные настройки берутся из env/default. ИНН компании по умолчанию берется из `Firm.inn`.
 
 ## Env
 
@@ -34,6 +31,9 @@
 | `EDO_DIDOX_STREAM_RETRY_LIMIT` | `3` | Количество повторов задачи. |
 | `EDO_DIDOX_STREAM_TTL` | `86400` | TTL dedupe ключей и pending-записей stream. |
 | `EDO_DIDOX_TOKEN_CACHE_TTL` | `21000` | TTL кеша access token в Redis. |
+| `DIDOX_PARTNER_TOKEN` | `` | Единый partner token Didox для всех подключений. |
+| `DIDOX_BASE_URL` | `https://api-partners.didox.uz` | API endpoint Didox. |
+| `DIDOX_DOCUMENT_TYPES` | `002,005,008,023` | Типы документов для списка через запятую. |
 
 ## Redis
 

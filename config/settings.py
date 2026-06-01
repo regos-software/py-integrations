@@ -9,7 +9,11 @@ class Settings(BaseSettings):
     integration_url: str = "https://integration.regos.uz"
     proxy_integration_url: str = ""
     integration_rps: int = 2
-    integration_burst: int = 50
+    integration_burst: int = 30
+    integration_429_retry_attempts: int = 3
+    integration_429_base_delay_sec: float = 1.0
+    integration_429_max_delay_sec: float = 30.0
+    integration_429_cooldown_ttl_sec: int = 120
     service_a_token: str = ""
     scheduler_hostname: str = Field(
         default="",
@@ -56,6 +60,7 @@ class Settings(BaseSettings):
     telegram_notification_chat_min_interval_sec: float = 1.0
     telegram_notification_flood_retry_attempts: int = 3
     telegram_notification_flood_extra_delay_sec: float = 0.5
+    telegram_notification_operating_cash_cache_ttl: int = 3600
     telegram_orders_stream_workers: int = 2
     telegram_orders_stream_batch_size: int = 50
     telegram_orders_stream_maxlen: int = 100000
@@ -106,6 +111,18 @@ class Settings(BaseSettings):
     edo_didox_stream_retry_limit: int = 3
     edo_didox_stream_ttl: int = 86400
     edo_didox_token_cache_ttl: int = 21000
+    didox_partner_token: str = Field(
+        default="",
+        validation_alias=AliasChoices("didox_partner_token", "DIDOX_PARTNER_TOKEN"),
+    )
+    didox_base_url: str = Field(
+        default="https://api-partners.didox.uz",
+        validation_alias=AliasChoices("didox_base_url", "DIDOX_BASE_URL"),
+    )
+    didox_document_types: str = Field(
+        default="002,005,008,023",
+        validation_alias=AliasChoices("didox_document_types", "DIDOX_DOCUMENT_TYPES"),
+    )
     marketplace_external_timeout: int = 60
     marketplace_unload_page_size: int = 250
     marketplace_cache_ttl: int = 300

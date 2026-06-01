@@ -1,12 +1,16 @@
 # core/api/client.py
 from __future__ import annotations
 
+import asyncio
+import datetime
+import email.utils
 import gzip
 import json
+import random
 import time
 import uuid
 import logging
-from typing import Any, Dict, Optional, Type, TypeVar
+from typing import Any, Awaitable, Callable, Dict, Optional, Type, TypeVar
 
 import httpx
 from pydantic import BaseModel
@@ -15,10 +19,14 @@ from config.settings import settings
 from core.api.rate_limiter import get_shared_limiter
 from core.api.regos_oauth import RegosOAuthProvider
 from core.logger import setup_logger
+from core.redis import redis_is_enabled, redis_ops
 from schemas.api.base import APIBaseResponse
 
 logger = setup_logger("api_client")
 TResponse = TypeVar("TResponse", bound=BaseModel)
+
+_RATE_LIMIT_COOLDOWNS: Dict[str, float] = {}
+_RATE_LIMIT_COOLDOWN_LOCK = asyncio.Lock()
 
 
 class APIClient:
@@ -37,6 +45,22 @@ class APIClient:
     BASE_URL: str = settings.integration_url.rstrip("/")
     RATE_PER_SEC: int = settings.integration_rps
     BURST: int = settings.integration_burst
+    RATE_LIMIT_RETRY_ATTEMPTS: int = max(
+        int(settings.integration_429_retry_attempts or 0),
+        1,
+    )
+    RATE_LIMIT_BASE_DELAY_SEC: float = max(
+        float(settings.integration_429_base_delay_sec or 0),
+        0.1,
+    )
+    RATE_LIMIT_MAX_DELAY_SEC: float = max(
+        float(settings.integration_429_max_delay_sec or 0),
+        1.0,
+    )
+    RATE_LIMIT_COOLDOWN_TTL_SEC: int = max(
+        int(settings.integration_429_cooldown_ttl_sec or 0),
+        30,
+    )
 
     REQ_PREVIEW_LIMIT = 2_048    # bytes
     RESP_PREVIEW_LIMIT = 2_048   # chars
@@ -141,6 +165,142 @@ class APIClient:
             headers["Content-Type"] = "application/json"
         return headers
 
+    def _rate_limit_cooldown_key(self) -> str:
+        return f"api:regos:429:{self.integration_id}"
+
+    @staticmethod
+    def _parse_retry_after(value: Optional[str]) -> Optional[float]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        try:
+            seconds = float(text)
+            return max(seconds, 0.0)
+        except ValueError:
+            pass
+        try:
+            retry_at = email.utils.parsedate_to_datetime(text)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=datetime.timezone.utc)
+            delay = retry_at.timestamp() - time.time()
+            return max(delay, 0.0)
+        except Exception:
+            return None
+
+    def _rate_limit_delay(self, response: httpx.Response, attempt: int) -> float:
+        retry_after = self._parse_retry_after(response.headers.get("Retry-After"))
+        if retry_after is not None:
+            return min(max(retry_after, 0.1), self.RATE_LIMIT_MAX_DELAY_SEC)
+        exponential = self.RATE_LIMIT_BASE_DELAY_SEC * (2 ** max(attempt, 0))
+        jitter = random.uniform(0, min(exponential * 0.25, 1.0))
+        return min(exponential + jitter, self.RATE_LIMIT_MAX_DELAY_SEC)
+
+    async def _wait_for_rate_limit_cooldown(self, *, trace_id: str, url: str) -> None:
+        key = self._rate_limit_cooldown_key()
+        now = time.time()
+        async with _RATE_LIMIT_COOLDOWN_LOCK:
+            cooldown_until = float(_RATE_LIMIT_COOLDOWNS.get(key) or 0)
+            if cooldown_until <= now:
+                _RATE_LIMIT_COOLDOWNS.pop(key, None)
+                cooldown_until = 0
+
+        if redis_is_enabled():
+            try:
+                raw = await redis_ops.get(key)
+                if raw:
+                    cooldown_until = max(cooldown_until, float(raw))
+            except Exception as error:
+                logger.warning(
+                    "[trace:%s] Failed to read REGOS 429 cooldown: integration_id=%s error=%s",
+                    trace_id,
+                    self.integration_id,
+                    error,
+                )
+
+        delay = cooldown_until - time.time()
+        if delay <= 0:
+            return
+        logger.warning(
+            "[trace:%s] Waiting %.2fs for REGOS 429 cooldown: integration_id=%s url=%s",
+            trace_id,
+            delay,
+            self.integration_id,
+            url,
+        )
+        await asyncio.sleep(delay)
+
+    async def _mark_rate_limit_cooldown(
+        self,
+        *,
+        trace_id: str,
+        url: str,
+        delay_seconds: float,
+    ) -> None:
+        delay = min(
+            max(float(delay_seconds or 0), 0.1),
+            self.RATE_LIMIT_MAX_DELAY_SEC,
+        )
+        cooldown_until = time.time() + delay
+        key = self._rate_limit_cooldown_key()
+        async with _RATE_LIMIT_COOLDOWN_LOCK:
+            _RATE_LIMIT_COOLDOWNS[key] = max(
+                float(_RATE_LIMIT_COOLDOWNS.get(key) or 0),
+                cooldown_until,
+            )
+
+        if redis_is_enabled():
+            try:
+                ttl = max(
+                    int(delay) + 5,
+                    min(self.RATE_LIMIT_COOLDOWN_TTL_SEC, 30),
+                )
+                await redis_ops.set(key, str(cooldown_until), ex=ttl)
+            except Exception as error:
+                logger.warning(
+                    "[trace:%s] Failed to write REGOS 429 cooldown: integration_id=%s error=%s",
+                    trace_id,
+                    self.integration_id,
+                    error,
+                )
+
+        logger.warning(
+            "[trace:%s] REGOS 429 cooldown set for %.2fs: integration_id=%s url=%s",
+            trace_id,
+            delay,
+            self.integration_id,
+            url,
+        )
+
+    async def _send_with_rate_limit_retry(
+        self,
+        *,
+        trace_id: str,
+        url: str,
+        send_once: Callable[[], Awaitable[httpx.Response]],
+    ) -> httpx.Response:
+        last_response: Optional[httpx.Response] = None
+        for attempt in range(self.RATE_LIMIT_RETRY_ATTEMPTS):
+            await self._wait_for_rate_limit_cooldown(trace_id=trace_id, url=url)
+            await self._limiter.acquire()
+            response = await send_once()
+            last_response = response
+            if response.status_code != 429:
+                return response
+
+            delay = self._rate_limit_delay(response, attempt)
+            await self._mark_rate_limit_cooldown(
+                trace_id=trace_id,
+                url=url,
+                delay_seconds=delay,
+            )
+            if attempt >= self.RATE_LIMIT_RETRY_ATTEMPTS - 1:
+                return response
+            await asyncio.sleep(delay)
+
+        if last_response is None:
+            raise RuntimeError("REGOS request was not sent")
+        return last_response
+
     # ------------------------- POST ---------------------------
 
     async def post(
@@ -153,8 +313,6 @@ class APIClient:
         POST {BASE_URL}/gateway/out/{integration_id}/v1/{method_path}
         Сериализация -> рейтлимит -> Bearer -> запрос -> (401→рефреш) -> JSON -> валидация.
         """
-        await self._limiter.acquire()
-
         url = f"{self.BASE_URL}/gateway/out/{self.integration_id}/v1/{method_path.lstrip('/')}"
         trace_id = self._new_trace_id()
         payload = self._serialize_payload(data)
@@ -210,19 +368,31 @@ class APIClient:
             return resp
 
         # Первая попытка
-        resp = await send_once(force_refresh=False)
+        resp = await self._send_with_rate_limit_retry(
+            trace_id=trace_id,
+            url=url,
+            send_once=lambda: send_once(force_refresh=False),
+        )
 
         # Повтор при 401
         if resp.status_code == 401:
             logger.warning("[trace:%s] 401 Unauthorized. Refreshing token and retrying...", trace_id)
-            resp = await send_once(force_refresh=True)
+            resp = await self._send_with_rate_limit_retry(
+                trace_id=trace_id,
+                url=url,
+                send_once=lambda: send_once(force_refresh=True),
+            )
             if resp.status_code == 401:
                 logger.warning(
                     "[trace:%s] 401 persists after token refresh. Resetting transport and retrying once more...",
                     trace_id,
                 )
                 await self._reset_http_client()
-                resp = await send_once(force_refresh=True)
+                resp = await self._send_with_rate_limit_retry(
+                    trace_id=trace_id,
+                    url=url,
+                    send_once=lambda: send_once(force_refresh=True),
+                )
 
         # Ошибки статуса
         resp.raise_for_status()
@@ -253,8 +423,6 @@ class APIClient:
         POST multipart/form-data
         {BASE_URL}/gateway/out/{integration_id}/v1/{method_path}
         """
-        await self._limiter.acquire()
-
         url = f"{self.BASE_URL}/gateway/out/{self.integration_id}/v1/{method_path.lstrip('/')}"
         trace_id = self._new_trace_id()
         form_data = {k: str(v) for k, v in data.items() if v is not None}
@@ -331,19 +499,31 @@ class APIClient:
             resp._decoded_text = text
             return resp
 
-        resp = await send_once(force_refresh=False)
+        resp = await self._send_with_rate_limit_retry(
+            trace_id=trace_id,
+            url=url,
+            send_once=lambda: send_once(force_refresh=False),
+        )
         if resp.status_code == 401:
             logger.warning(
                 "[trace:%s] 401 Unauthorized. Refreshing token and retrying...", trace_id
             )
-            resp = await send_once(force_refresh=True)
+            resp = await self._send_with_rate_limit_retry(
+                trace_id=trace_id,
+                url=url,
+                send_once=lambda: send_once(force_refresh=True),
+            )
             if resp.status_code == 401:
                 logger.warning(
                     "[trace:%s] 401 persists after token refresh. Resetting transport and retrying once more...",
                     trace_id,
                 )
                 await self._reset_http_client()
-                resp = await send_once(force_refresh=True)
+                resp = await self._send_with_rate_limit_retry(
+                    trace_id=trace_id,
+                    url=url,
+                    send_once=lambda: send_once(force_refresh=True),
+                )
 
         resp.raise_for_status()
 
