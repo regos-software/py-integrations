@@ -5,6 +5,7 @@ import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 import redis.asyncio as redis
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from config.settings import settings
 
@@ -110,7 +111,19 @@ class RedisOps:
         return await _require_redis_client().xautoclaim(*args, **kwargs)
 
     async def xreadgroup(self, *args: Any, **kwargs: Any):
-        return await _require_redis_client().xreadgroup(*args, **kwargs)
+        try:
+            return await _require_redis_client().xreadgroup(*args, **kwargs)
+        except RedisTimeoutError as error:
+            block = kwargs.get("block")
+            if block is None and len(args) >= 5:
+                block = args[4]
+            try:
+                block_ms = int(block or 0)
+            except (TypeError, ValueError):
+                block_ms = 0
+            if block_ms > 0 and redis_error_contains(error, "Timeout reading"):
+                return []
+            raise
 
 
 redis_ops = RedisOps()
