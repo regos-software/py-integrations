@@ -44,6 +44,8 @@ from schemas.api.crm.ticket import (
     TicketDirectionEnum,
     TicketGetRequest,
     TicketSetResponsibleRequest,
+    TicketSetStatusRequest,
+    TicketStatusEnum,
 )
 from schemas.api.integrations.connected_integration_setting import (
     ConnectedIntegrationSettingRequest,
@@ -1488,8 +1490,6 @@ return 0
             "no_answer": "missed",
             "noanswer": "missed",
             "completed": "completed",
-            "hangup": "completed",
-            "stasisend": "completed",
             "ended": "completed",
             "failed": "failed",
             "busy": "failed",
@@ -1502,6 +1502,51 @@ return 0
         if normalized in AsteriskCrmChannelConfig.EVENT_STATUSES:
             return normalized
         return None
+
+    @classmethod
+    def _raw_event_type(cls, payload: Dict[str, Any]) -> str:
+        return str(
+            cls._payload_pick(payload or {}, "event", "event_name", "type") or ""
+        ).strip().lower()
+
+    @classmethod
+    def _recording_value_from_payload(cls, payload: Dict[str, Any]) -> Any:
+        return cls._payload_pick(
+            payload or {},
+            "recording_url",
+            "recording.url",
+            "recording.file",
+            "file_url",
+            "recordingfile",
+            "recording_file",
+            "mixmonitorfilename",
+            "mixmonitor_filename",
+            "monitorfilename",
+            "filename",
+            "file",
+        )
+
+    @classmethod
+    def _cdr_disposition(cls, payload: Dict[str, Any]) -> str:
+        raw = str(cls._payload_pick(payload or {}, "disposition") or "").strip().lower()
+        return re.sub(r"[\s_-]+", "", raw)
+
+    @classmethod
+    def _ami_completed_is_strong(cls, payload: Dict[str, Any]) -> bool:
+        event_type = cls._raw_event_type(payload)
+        if event_type == "agentcomplete":
+            talk_time = _to_int(
+                cls._payload_pick(payload, "talktime", "talk_time", "talk_duration_sec"),
+                0,
+            ) or 0
+            return talk_time > 0
+        if event_type == "cdr":
+            billsec = _to_int(
+                cls._payload_pick(payload, "billableseconds", "billsec", "talk_duration_sec"),
+                0,
+            ) or 0
+            return cls._cdr_disposition(payload) in {"answer", "answered"} and billsec > 0
+        return False
 
     @classmethod
     def _normalize_external_event(
@@ -1612,18 +1657,7 @@ return 0
         )
         recording_url = _resolve_recording_url(
             runtime.recording_base_url,
-            cls._payload_pick(
-                source,
-                "recording_url",
-                "recording.url",
-                "recording.file",
-                "file_url",
-                "recordingfile",
-                "recording_file",
-                "mixmonitorfilename",
-                "filename",
-                "file",
-            ),
+            cls._recording_value_from_payload(source),
         )
         operator_ext = _normalize_phone(
             cls._payload_pick(source, "operator_ext", "agent_ext", "extension")
@@ -1673,6 +1707,8 @@ return 0
         compact: Dict[str, Any] = {}
         for key in (
             "event",
+            "event_name",
+            "type",
             "linkedid",
             "linked_id",
             "external_call_id",
@@ -1680,6 +1716,25 @@ return 0
             "uniqueid",
             "destuniqueid",
             "bridgeuniqueid",
+            "dialstatus",
+            "disposition",
+            "billableseconds",
+            "billsec",
+            "talktime",
+            "talk_time",
+            "talk_duration_sec",
+            "cause",
+            "cause-txt",
+            "cause_txt",
+            "causetxt",
+            "recording_url",
+            "recordingfile",
+            "recording_file",
+            "mixmonitorfilename",
+            "mixmonitor_filename",
+            "monitorfilename",
+            "filename",
+            "file",
         ):
             value = payload.get(key)
             if value not in (None, ""):
@@ -1755,7 +1810,7 @@ return 0
 
     @classmethod
     def _derive_status_from_ami(cls, payload: Dict[str, Any]) -> Optional[str]:
-        event_type = str(payload.get("event") or payload.get("event_name") or "").strip().lower()
+        event_type = cls._raw_event_type(payload)
         if not event_type:
             return None
 
@@ -1769,7 +1824,7 @@ return 0
         if event_type == "agentconnect":
             return "answered"
         if event_type == "agentcomplete":
-            return "completed"
+            return "completed" if cls._ami_completed_is_strong(payload) else None
         if event_type == "newstate":
             normalized = cls._normalize_status(
                 cls._payload_pick(payload, "channelstatedesc", "state", "channelstate")
@@ -1790,9 +1845,18 @@ return 0
             # Per-leg DialEnd noanswer/cancel frequently appears in queue fan-out
             # while the same linked call is later answered by another operator.
             # Treat it as non-final noise to avoid false "missed" in CRM.
-            if dial_status in {"noanswer", "no_answer", "cancel", "cancelled", "canceled"}:
+            if dial_status in {
+                "noanswer",
+                "no_answer",
+                "cancel",
+                "cancelled",
+                "canceled",
+                "continue",
+                "goto",
+            } or dial_status.startswith("goto:"):
                 return None
             if dial_status in {
+                "abort",
                 "busy",
                 "congestion",
                 "chanunavail",
@@ -1800,7 +1864,7 @@ return 0
                 "invalidargs",
             }:
                 return "failed"
-            return "completed"
+            return None
         if event_type in {"hangup", "hanguprequest", "softhanguprequest", "unlink", "bridgeleave"}:
             cause_text = str(
                 cls._payload_pick(payload, "cause_txt", "cause-txt", "causetxt") or ""
@@ -1820,31 +1884,17 @@ return 0
                 58,
             }:
                 return "failed"
-            return "completed"
+            return None
         if event_type == "cdr":
-            recording_value = cls._payload_pick(
-                payload,
-                "recording_url",
-                "recordingfile",
-                "recording_file",
-                "mixmonitorfilename",
-                "mixmonitor_filename",
-                "monitorfilename",
-                "filename",
-                "file",
-            )
-            if str(recording_value or "").strip():
-                # Many PBX setups publish recording path in CDR instead of MixMonitorStop.
-                return "recording_ready"
-            disposition = str(cls._payload_pick(payload, "disposition") or "").strip().lower()
+            disposition = cls._cdr_disposition(payload)
             billsec = _to_int(cls._payload_pick(payload, "billableseconds", "billsec"), 0) or 0
-            if billsec > 0 or disposition in {"answer", "answered"}:
+            if disposition in {"answer", "answered"} and billsec > 0:
                 return "completed"
-            if disposition in {"noanswer", "no_answer", "no answer"}:
+            if disposition == "noanswer":
                 return "missed"
             if disposition in {"busy", "failed", "congestion"}:
                 return "failed"
-            return "completed"
+            return None
         return cls._normalize_status(event_type)
 
     @classmethod
@@ -2114,21 +2164,12 @@ return 0
         if talk_duration_sec is not None:
             normalized["talk_duration_sec"] = int(talk_duration_sec)
 
-        if status == "recording_ready":
-            recording_value = cls._payload_pick(
-                source,
-                "recording_url",
-                "recordingfile",
-                "recording_file",
-                "mixmonitorfilename",
-                "filename",
-                "file",
+        recording_value = cls._recording_value_from_payload(source)
+        if recording_value:
+            normalized["recording_url"] = _resolve_recording_url(
+                runtime.recording_base_url,
+                str(recording_value),
             )
-            if recording_value:
-                normalized["recording_url"] = _resolve_recording_url(
-                    runtime.recording_base_url,
-                    str(recording_value),
-                )
 
         if not cls._payload_pick(normalized, "event_id"):
             try:
@@ -3165,8 +3206,23 @@ return 0
                 event=event,
                 lead_ctx=lead_ctx,
             )
-            lead_ctx = await cls._write_event_with_1220_policy(runtime, event, lead_ctx)
+            lead_ctx, event_written = await cls._write_event_with_1220_policy(
+                runtime,
+                event,
+                lead_ctx,
+            )
             await cls._save_mapping(runtime, event, lead_ctx)
+            if event_written:
+                await cls._apply_answered_status_policy_best_effort(
+                    runtime=runtime,
+                    event=event,
+                    lead_ctx=lead_ctx,
+                )
+            await cls._post_recording_sidecar_event_best_effort(
+                runtime=runtime,
+                event=event,
+                lead_ctx=lead_ctx,
+            )
             await cls._apply_status_policy_best_effort(runtime, event, lead_ctx)
             await cls._redis_set_with_ttl(
                 dedupe_key,
@@ -3289,9 +3345,7 @@ return 0
         # Per-leg dial/hangup events can report inbound missed even when another
         # operator accepted the same call later (queue fan-out noise).
         if event.direction == "inbound" and status in {"missed", "failed"} and talk_duration <= 0:
-            raw_event_type = str(
-                cls._payload_get(event.raw_payload or {}, "event") or ""
-            ).strip().lower()
+            raw_event_type = cls._raw_event_type(event.raw_payload or {})
             if raw_event_type in {
                 "dialend",
                 "hangup",
@@ -3305,9 +3359,7 @@ return 0
         # Early per-leg hangup events may emit "completed" before CDR with billsec.
         # Suppress these interim zero-talk completions and wait for final call result.
         if status == "completed" and talk_duration <= 0:
-            raw_event_type = str(
-                cls._payload_get(event.raw_payload or {}, "event") or ""
-            ).strip().lower()
+            raw_event_type = cls._raw_event_type(event.raw_payload or {})
             if raw_event_type in {
                 "hangup",
                 "hanguprequest",
@@ -3361,9 +3413,7 @@ return 0
         event_ts = _to_int(event.event_ts, _now_ts()) or _now_ts()
         event.event_ts = int(event_ts)
         answered_at = _to_int(cached.get("answered_at"), None)
-        raw_event_type = str(
-            cls._payload_get(event.raw_payload or {}, "event") or ""
-        ).strip().lower()
+        raw_event_type = cls._raw_event_type(event.raw_payload or {})
         raw_operator_phone = cls._operator_phone_from_event(event) or _normalize_phone(
             event.operator_ext
         )
@@ -3409,7 +3459,7 @@ return 0
                 talk_duration > 0
                 and operator_phone
                 and _is_internal_extension(operator_phone)
-                and raw_event_type in {"cdr", ""}
+                and raw_event_type in {"cdr", "agentcomplete", ""}
             ):
                 resolved_operator_user_id = await cls._resolve_user_id_by_operator_ext_best_effort(
                     runtime,
@@ -3612,9 +3662,7 @@ return 0
         if not changed:
             return
 
-        raw_event_type = str(
-            cls._payload_get(event.raw_payload or {}, "event") or ""
-        ).strip().lower()
+        raw_event_type = cls._raw_event_type(event.raw_payload or {})
         rollback_entry = {
             "at": _now_ts(),
             "event_ts": int(event.event_ts),
@@ -4657,6 +4705,76 @@ return 0
         )
 
     @classmethod
+    async def _post_recording_sidecar_event_best_effort(
+        cls,
+        runtime: RuntimeConfig,
+        event: CallEvent,
+        lead_ctx: LeadContext,
+    ) -> None:
+        if event.status == "recording_ready" or not event.recording_url:
+            return
+        if not event.external_call_id:
+            return
+
+        progress_key = cls._call_progress_key(
+            runtime.connected_integration_id,
+            runtime.asterisk_hash,
+            event.external_call_id,
+        )
+        cached = cls._parse_cached_json(await cls._redis_get(progress_key)) or {}
+        if bool(cached.get("recording_posted")):
+            return
+
+        raw_payload = dict(event.raw_payload or {})
+        raw_payload["recording_source_event"] = cls._raw_event_type(raw_payload) or None
+        recording_event = CallEvent(
+            event_id=hashlib.md5(
+                f"{event.event_id}:recording_ready".encode("utf-8")
+            ).hexdigest(),
+            external_call_id=event.external_call_id,
+            asterisk_hash=event.asterisk_hash,
+            direction=event.direction,
+            from_phone=event.from_phone,
+            to_phone=event.to_phone,
+            client_phone=event.client_phone,
+            status="recording_ready",
+            event_ts=event.event_ts,
+            talk_duration_sec=event.talk_duration_sec,
+            recording_url=event.recording_url,
+            operator_ext=event.operator_ext,
+            raw_payload=raw_payload,
+        )
+
+        try:
+            await cls._post_recording_event(runtime, recording_event, lead_ctx)
+        except ChatMessageAddClosedEntityError as error:
+            await cls._store_late_closed_event_state(
+                runtime=runtime,
+                event=recording_event,
+                lead_ctx=lead_ctx,
+                reason=error.description,
+            )
+            return
+        except Exception as error:
+            logger.warning(
+                "Asterisk recording sidecar post failed: ci=%s call_id=%s event_id=%s error=%s",
+                runtime.connected_integration_id,
+                event.external_call_id,
+                event.event_id,
+                error,
+            )
+            return
+
+        cached["recording_posted"] = True
+        cached["updated_at"] = _now_ts()
+        await cls._redis_set_json_with_ttl(
+            progress_key,
+            cached,
+            runtime.state_ttl_sec,
+            min_ttl_sec=300,
+        )
+
+    @classmethod
     async def _store_late_closed_event_state(
         cls,
         runtime: RuntimeConfig,
@@ -4696,7 +4814,7 @@ return 0
         runtime: RuntimeConfig,
         event: CallEvent,
         lead_ctx: LeadContext,
-    ) -> LeadContext:
+    ) -> Tuple[LeadContext, bool]:
         try:
             if event.status == "recording_ready":
                 await cls._post_recording_event(runtime, event, lead_ctx)
@@ -4717,7 +4835,7 @@ return 0
                         operator_name=operator_name,
                     ),
                 )
-            return lead_ctx
+            return lead_ctx, True
         except ChatMessageAddClosedEntityError as error:
             # Keep 1 call = 1 ticket. If ticket is already closed, never reopen/create new.
             await cls._store_late_closed_event_state(
@@ -4726,7 +4844,74 @@ return 0
                 lead_ctx=lead_ctx,
                 reason=error.description,
             )
-            return lead_ctx
+            return lead_ctx, False
+
+    @classmethod
+    async def _apply_answered_status_policy_best_effort(
+        cls,
+        runtime: RuntimeConfig,
+        event: CallEvent,
+        lead_ctx: LeadContext,
+    ) -> None:
+        if lead_ctx.ticket_id <= 0:
+            return
+        if str(event.status or "").strip().lower() != "answered":
+            return
+        if cls._chat_event_code(event) not in {"inbound_answered", "outbound_answered"}:
+            return
+
+        try:
+            async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
+                response = await api.crm.ticket.set_status(
+                    TicketSetStatusRequest(
+                        id=int(lead_ctx.ticket_id),
+                        status=TicketStatusEnum.WaitingClient,
+                    )
+                )
+            if response.ok:
+                return
+            payload = cls._row_to_dict(response.result)
+            logger.warning(
+                "Ticket/SetStatus WaitingClient rejected after answered call: ci=%s ticket_id=%s call_id=%s error=%s description=%s",
+                runtime.connected_integration_id,
+                lead_ctx.ticket_id,
+                event.external_call_id,
+                payload.get("error"),
+                payload.get("description"),
+            )
+        except Exception as error:
+            logger.warning(
+                "Ticket/SetStatus WaitingClient failed after answered call: ci=%s ticket_id=%s call_id=%s error=%s",
+                runtime.connected_integration_id,
+                lead_ctx.ticket_id,
+                event.external_call_id,
+                error,
+            )
+
+    @classmethod
+    def _event_is_safe_for_ticket_close(cls, event: CallEvent) -> bool:
+        if str(event.status or "").strip().lower() != "completed":
+            return False
+        talk_duration = _to_int(event.talk_duration_sec, 0) or 0
+        if talk_duration <= 0:
+            return False
+
+        raw_event_type = cls._raw_event_type(event.raw_payload or {})
+        if raw_event_type in {"cdr", "agentcomplete"}:
+            return True
+        if raw_event_type in {
+            "dialend",
+            "hangup",
+            "hanguprequest",
+            "softhanguprequest",
+            "unlink",
+            "bridgeleave",
+            "stasisend",
+        }:
+            return False
+
+        # Explicit external "completed" events are still accepted, but only with duration.
+        return not raw_event_type
 
     @classmethod
     async def _apply_status_policy_best_effort(
@@ -4741,6 +4926,17 @@ return 0
             return
         status = str(event.status or "").strip().lower()
         if status not in AsteriskCrmChannelConfig.CLOSE_ON_CALL_END_STATUSES:
+            return
+        if not cls._event_is_safe_for_ticket_close(event):
+            logger.info(
+                "Ticket close skipped for unsafe call final: ci=%s ticket_id=%s call_id=%s status=%s raw_event=%s duration=%s",
+                runtime.connected_integration_id,
+                lead_ctx.ticket_id,
+                event.external_call_id,
+                status,
+                cls._raw_event_type(event.raw_payload or {}) or None,
+                event.talk_duration_sec,
+            )
             return
         has_responsible = await cls._ticket_has_responsible_before_close(
             runtime=runtime,
