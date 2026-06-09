@@ -1361,9 +1361,9 @@ class TelegramBotMinQuantityIntegration(IntegrationTelegramBase, ClientBase):
             )
 
         for message in messages:
-            if "message" not in message or not message["message"]:
+            if not message.get("message") and not message.get("image_url"):
                 return self._create_error_response(
-                    1009, f"Message missing text: {message}"
+                    1009, f"Message missing text/image_url: {message}"
                 )
             if "recipient" not in message or not message["recipient"]:
                 return self._create_error_response(
@@ -1576,9 +1576,9 @@ class TelegramBotMinQuantityIntegration(IntegrationTelegramBase, ClientBase):
 
         # Validate messages
         for message in messages:
-            if "message" not in message or not message["message"]:
+            if not message.get("message") and not message.get("image_url"):
                 return self._create_error_response(
-                    1009, f"Message missing text: {message}"
+                    1009, f"Message missing text/image_url: {message}"
                 )
             if "recipient" not in message or not message["recipient"]:
                 return self._create_error_response(
