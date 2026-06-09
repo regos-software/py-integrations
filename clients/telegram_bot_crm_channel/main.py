@@ -2886,21 +2886,33 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
 
         async def send_one(item: Dict[str, Any]) -> Dict[str, Any]:
             text = str(item.get("message") or "").strip()
+            image_url = str(item.get("image_url") or "").strip()
             recipient = str(item.get("recipient") or "").strip()
             bot_hash = str(item.get("bot_hash") or "").strip()
-            if not text or not recipient:
-                return {"status": "error", "error": "recipient/message required"}
+            if not recipient or (not text and not image_url):
+                return {"status": "error", "error": "recipient/message or image_url required"}
             if bot_hash and bot_hash != bot_cfg.bot_hash:
                 return {
                     "status": "error",
                     "error": "single-bot mode: unknown bot_hash",
                 }
             try:
-                sent = await bot.send_message(chat_id=_tg_chat_id_cast(recipient), text=text)
+                if image_url:
+                    sent = await bot.send_photo(
+                        chat_id=_tg_chat_id_cast(recipient),
+                        photo=image_url,
+                        caption=text or None,
+                    )
+                else:
+                    sent = await bot.send_message(
+                        chat_id=_tg_chat_id_cast(recipient),
+                        text=text,
+                    )
                 return {
                     "status": "sent",
                     "bot_hash": bot_cfg.bot_hash,
                     "recipient": recipient,
+                    "image_url": image_url or None,
                     "telegram_message_id": sent.message_id,
                 }
             except Exception as error:

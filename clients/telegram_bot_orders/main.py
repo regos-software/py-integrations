@@ -1447,7 +1447,9 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
         if not self.connected_integration_id:
             return self._error_response(1000, Texts.ERROR_CONNECTED_ID_MISSING)
         for msg in messages:
-            if not msg.get("recipient") or not msg.get("message"):
+            if not msg.get("recipient") or (
+                not msg.get("message") and not msg.get("image_url")
+            ):
                 return self._error_response(1001, Texts.ERROR_INVALID_MESSAGE_FORMAT)
         queued = await self._enqueue_event(
             self.connected_integration_id,
@@ -1468,12 +1470,24 @@ class TelegramBotOrdersIntegration(IntegrationTelegramBase, ClientBase):
 
         async def send_one(msg: Dict) -> Dict:
             chat_id = msg.get("recipient")
-            text = msg.get("message")
-            if not chat_id or not text:
+            text = str(msg.get("message") or "")
+            image_url = str(msg.get("image_url") or "").strip()
+            if not chat_id or (not text and not image_url):
                 return {"status": "error", "error": Texts.ERROR_INVALID_MESSAGE_FORMAT}
             try:
-                await self.bot.send_message(chat_id=chat_id, text=text)
-                return {"status": "sent", "chat_id": chat_id}
+                if image_url:
+                    await self.bot.send_photo(
+                        chat_id=chat_id,
+                        photo=image_url,
+                        caption=text or None,
+                    )
+                else:
+                    await self.bot.send_message(chat_id=chat_id, text=text)
+                return {
+                    "status": "sent",
+                    "chat_id": chat_id,
+                    "image_url": image_url or None,
+                }
             except Exception as error:
                 logger.error(Texts.log_send_message_error(chat_id, error))
                 return {"status": "error", "chat_id": chat_id, "error": str(error)}

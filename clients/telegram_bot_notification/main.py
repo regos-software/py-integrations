@@ -553,7 +553,8 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         *,
         chat_id: str,
         text: str,
-        reply_markup: Optional[InlineKeyboardMarkup],
+        image_url: Optional[str] = None,
+        reply_markup: Optional[InlineKeyboardMarkup] = None,
     ) -> Any:
         if await self._is_unavailable_chat(chat_id):
             raise TelegramChatUnavailableError(
@@ -561,6 +562,13 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
             )
         bot = await self._ensure_bot_initialized()
         try:
+            if image_url:
+                return await bot.send_photo(
+                    chat_id=chat_id,
+                    photo=image_url,
+                    caption=text or None,
+                    reply_markup=reply_markup if reply_markup else None,
+                )
             return await bot.send_message(
                 chat_id=chat_id,
                 text=text,
@@ -577,6 +585,14 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                     error,
                 )
                 try:
+                    if image_url:
+                        return await bot.send_photo(
+                            chat_id=chat_id,
+                            photo=image_url,
+                            caption=text or None,
+                            parse_mode=None,
+                            reply_markup=reply_markup if reply_markup else None,
+                        )
                     return await bot.send_message(
                         chat_id=chat_id,
                         text=text,
@@ -612,6 +628,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         *,
         chat_id: str,
         text: str,
+        image_url: Optional[str] = None,
         reply_markup: Optional[InlineKeyboardMarkup] = None,
     ) -> Any:
         self._require_redis()
@@ -631,6 +648,7 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                     result = await self._send_message_once(
                         chat_id=chat_id,
                         text=text,
+                        image_url=image_url,
                         reply_markup=reply_markup,
                     )
                     await self._mark_chat_send_after(
@@ -2627,9 +2645,9 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
                 1000, "No connected_integration_id specified"
             )
         for message in messages:
-            if "message" not in message or not message["message"]:
+            if not message.get("message") and not message.get("image_url"):
                 return self._create_error_response(
-                    1009, f"Message missing text: {message}"
+                    1009, f"Message missing text/image_url: {message}"
                 )
             if "recipient" not in message or not message["recipient"]:
                 return self._create_error_response(
@@ -2658,9 +2676,9 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
 
         # Validate messages
         for message in messages:
-            if "message" not in message or not message["message"]:
+            if not message.get("message") and not message.get("image_url"):
                 return self._create_error_response(
-                    1009, f"Message missing text: {message}"
+                    1009, f"Message missing text/image_url: {message}"
                 )
             if "recipient" not in message or not message["recipient"]:
                 return self._create_error_response(
@@ -2683,10 +2701,15 @@ class TelegramBotNotificationIntegration(IntegrationTelegramBase, ClientBase):
         await self._initialize_bot(settings_map)
         await self._setup_handlers()
 
-        async def throttled_sender(chat_id: str, text: str) -> None:
+        async def throttled_sender(
+            chat_id: str,
+            text: str,
+            image_url: Optional[str] = None,
+        ) -> None:
             await self._send_message_markdown_with_plain_fallback(
                 chat_id=chat_id,
                 text=text,
+                image_url=image_url,
             )
 
         results = []

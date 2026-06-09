@@ -2,7 +2,7 @@ import asyncio
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 
-MessageSender = Callable[[str, str], Awaitable[Any]]
+MessageSender = Callable[[str, str, Optional[str]], Awaitable[Any]]
 
 
 def _telegram_permanent_error_reason(error: object) -> Optional[str]:
@@ -39,23 +39,34 @@ async def send_messages(
     """
 
     async def send_one(msg: Dict[str, str]) -> Dict:
-        if "message" not in msg or not msg["message"]:
-            return {"status": "error", "error": "Empty message text", "message": msg}
-
         if "recipient" not in msg or not msg["recipient"]:
             return {"status": "error", "error": "Missing recipient", "message": msg}
 
         chat_id = str(msg["recipient"])
-        text = msg["message"]
+        text = str(msg.get("message") or "")
+        image_url = str(msg.get("image_url") or "").strip() or None
+        if not text and not image_url:
+            return {
+                "status": "error",
+                "error": "Empty message text/image_url",
+                "message": msg,
+            }
 
         try:
             if sender:
-                await sender(chat_id, text)
+                await sender(chat_id, text, image_url)
             else:
                 if bot is None:
                     raise RuntimeError("Telegram bot or sender is required")
                 try:
-                    await bot.send_message(chat_id=chat_id, text=text)
+                    if image_url:
+                        await bot.send_photo(
+                            chat_id=chat_id,
+                            photo=image_url,
+                            caption=text or None,
+                        )
+                    else:
+                        await bot.send_message(chat_id=chat_id, text=text)
                 except Exception as error:
                     error_text = str(error or "").lower()
                     if not (
@@ -70,9 +81,22 @@ async def send_messages(
                         chat_id,
                         error,
                     )
-                    await bot.send_message(chat_id=chat_id, text=text, parse_mode=None)
+                    if image_url:
+                        await bot.send_photo(
+                            chat_id=chat_id,
+                            photo=image_url,
+                            caption=text or None,
+                            parse_mode=None,
+                        )
+                    else:
+                        await bot.send_message(chat_id=chat_id, text=text, parse_mode=None)
             logger.debug("Sent Telegram message to chat %s", chat_id)
-            return {"status": "sent", "chat_id": chat_id, "message": text}
+            return {
+                "status": "sent",
+                "chat_id": chat_id,
+                "message": text,
+                "image_url": image_url,
+            }
         except Exception as error:
             permanent_reason = _telegram_permanent_error_reason(error)
             if permanent_reason:
@@ -88,6 +112,7 @@ async def send_messages(
                 "status": "error",
                 "chat_id": chat_id,
                 "message": text,
+                "image_url": image_url,
                 "error": str(error),
             }
             migrate_to_chat_id = getattr(error, "migrate_to_chat_id", None)
