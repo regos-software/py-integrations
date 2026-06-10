@@ -14,12 +14,23 @@ _LOCAL_JSON_CACHE: Dict[str, Tuple[float, Any]] = {}
 _LOCAL_JSON_CACHE_LOCK = asyncio.Lock()
 _LOCAL_JSON_CACHE_MAX_ITEMS = 10000
 
+
+def _redis_timeout(value: Any) -> Optional[float]:
+    try:
+        timeout = float(value or 0)
+    except (TypeError, ValueError):
+        return None
+    return timeout if timeout > 0 else None
+
+
 if settings.redis_enabled:
     _redis_client = redis.Redis(
         host=settings.redis_host,
         port=settings.redis_port,
         db=settings.redis_db,
         password=settings.redis_password or None,
+        socket_timeout=_redis_timeout(settings.redis_socket_timeout),
+        socket_connect_timeout=_redis_timeout(settings.redis_socket_connect_timeout),
         decode_responses=True,
     )
 

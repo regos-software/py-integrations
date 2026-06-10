@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     redis_db: int = 0
     redis_password: str = "psw"
     redis_cache_ttl: int = 60
+    redis_socket_timeout: float = 10.0
+    redis_socket_connect_timeout: float = 5.0
     mariadb_enabled: bool = False
     mariadb_host: str = "host"
     mariadb_port: int = 3306
