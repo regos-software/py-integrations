@@ -114,6 +114,7 @@ class AsteriskCrmChannelConfig:
     }
     EVENT_STATUSES = CALL_STATE_STATUSES | {"recording_ready"}
     CLOSE_ON_CALL_END_STATUSES = {"completed"}
+    CLIENT_PHONE_OPTIONAL_STATUSES = {"answered", "recording_ready"}
 
 
 @dataclass
@@ -1527,6 +1528,46 @@ return 0
         )
 
     @classmethod
+    def _extract_internal_extension_from_payload(
+        cls,
+        payload: Dict[str, Any],
+        *paths: str,
+    ) -> Optional[str]:
+        for path in paths:
+            candidate = _extract_internal_extension_candidate(
+                cls._payload_get(payload or {}, path)
+            )
+            if candidate:
+                return candidate
+        return None
+
+    @classmethod
+    def _is_allowed_did_phone(cls, runtime: RuntimeConfig, value: Any) -> bool:
+        if not runtime.allowed_did_set:
+            return False
+        normalized = _to_international_phone(value, runtime.default_country_code)
+        if normalized and normalized in runtime.allowed_did_set:
+            return True
+        raw = _normalize_phone(value)
+        return bool(raw and raw in runtime.allowed_did_set)
+
+    @classmethod
+    def _operator_candidate_is_usable(
+        cls,
+        runtime: RuntimeConfig,
+        candidate: Any,
+        client_phone: Optional[str],
+    ) -> bool:
+        normalized = _normalize_phone(candidate)
+        if not normalized:
+            return False
+        if client_phone and normalized == _normalize_phone(client_phone):
+            return False
+        if cls._is_allowed_did_phone(runtime, normalized):
+            return False
+        return True
+
+    @classmethod
     def _cdr_disposition(cls, payload: Dict[str, Any]) -> str:
         raw = str(cls._payload_pick(payload or {}, "disposition") or "").strip().lower()
         return re.sub(r"[\s_-]+", "", raw)
@@ -1632,7 +1673,10 @@ return 0
         )
         if not client_phone:
             client_phone = from_phone if direction == "inbound" else to_phone
-        if not client_phone and status != "recording_ready":
+        if (
+            not client_phone
+            and status not in AsteriskCrmChannelConfig.CLIENT_PHONE_OPTIONAL_STATUSES
+        ):
             return None
 
         event_ts = _parse_event_ts(
@@ -1774,7 +1818,10 @@ return 0
             if payload.get(field) in (None, ""):
                 return None
         client_phone = _normalize_phone(payload.get("client_phone"))
-        if status != "recording_ready" and not client_phone:
+        if (
+            status not in AsteriskCrmChannelConfig.CLIENT_PHONE_OPTIONAL_STATUSES
+            and not client_phone
+        ):
             return None
 
         return CallEvent(
@@ -1833,8 +1880,10 @@ return 0
             if normalized == "answered":
                 return None
             return normalized
-        if event_type in {"bridgeenter", "bridgecreate", "bridge", "link"}:
-            # Bridge lifecycle events are too noisy for reliable "answered" signal.
+        if event_type in {"bridgeenter", "bridge", "link"}:
+            return "answered"
+        if event_type == "bridgecreate":
+            # Bridge creation alone is not enough to prove that an operator joined.
             return None
         if event_type in {"mixmonitorstop", "monitorstop"}:
             return "recording_ready"
@@ -2085,42 +2134,41 @@ return 0
         if client_phone:
             normalized["client_phone"] = client_phone
 
-        queue_operator_ext = _extract_internal_extension_candidate(
-            cls._payload_pick(
-                source,
-                "interface",
-                "member",
-                "membername",
-                "destchannel",
-                "destinationchannel",
-                "peer",
-                "peerchannel",
-                "channel",
-            )
+        channel_operator_ext = cls._extract_internal_extension_from_payload(
+            source,
+            "operator_ext",
+            "agent_ext",
+            "agent",
+            "interface",
+            "member",
+            "membername",
+            "channel",
+            "sourcechannel",
+            "srcchannel",
+            "destchannel",
+            "destinationchannel",
+            "peer",
+            "peerchannel",
+        )
+        field_operator_ext = cls._extract_internal_extension_from_payload(
+            source,
+            "sourceextension",
+            "destinationextension",
+            "extension",
+            "connectedlinenum",
+            "destcalleridnum",
+            "exten",
         )
         operator_candidates = [
             _to_international_phone(
                 cls._payload_pick(source, "operator_ext", "agent_ext", "agent"), runtime.default_country_code
             ),
-            _to_international_phone(queue_operator_ext, runtime.default_country_code),
-            _to_international_phone(
-                cls._payload_pick(
-                    source,
-                    "extension",
-                    "sourceextension",
-                    "destinationextension",
-                    "connectedlinenum",
-                    "destcalleridnum",
-                    "exten",
-                ),
-                runtime.default_country_code,
-            ),
+            _to_international_phone(channel_operator_ext, runtime.default_country_code),
+            _to_international_phone(field_operator_ext, runtime.default_country_code),
         ]
         operator_ext: Optional[str] = None
         for candidate in operator_candidates:
-            if not candidate:
-                continue
-            if client_phone and candidate == client_phone:
+            if not cls._operator_candidate_is_usable(runtime, candidate, client_phone):
                 continue
             operator_ext = candidate
             if _is_internal_extension(candidate):
@@ -2128,14 +2176,14 @@ return 0
 
         if not operator_ext:
             if direction == "inbound":
-                if to_phone and to_phone != client_phone:
+                if cls._operator_candidate_is_usable(runtime, to_phone, client_phone):
                     operator_ext = to_phone
-                elif from_phone and from_phone != client_phone:
+                elif cls._operator_candidate_is_usable(runtime, from_phone, client_phone):
                     operator_ext = from_phone
             else:
-                if from_phone and from_phone != client_phone:
+                if cls._operator_candidate_is_usable(runtime, from_phone, client_phone):
                     operator_ext = from_phone
-                elif to_phone and to_phone != client_phone:
+                elif cls._operator_candidate_is_usable(runtime, to_phone, client_phone):
                     operator_ext = to_phone
         if operator_ext:
             normalized["operator_ext"] = operator_ext
@@ -3390,6 +3438,12 @@ return 0
         finalize_defer_sec = 0
         converted_to_missed_by_timeout = False
         pending_inbound_completed_at = _to_int(cached.get("pending_inbound_completed_at"), None)
+        pending_clientless_answered_at = _to_int(
+            cached.get("pending_clientless_answered_at"),
+            None,
+        )
+        suppress_clientless_answered = False
+        suppress_untrusted_answered = False
 
         stable_direction = str(cached.get("direction") or "").strip().lower()
         if stable_direction in {"inbound", "outbound"}:
@@ -3414,21 +3468,57 @@ return 0
         event.event_ts = int(event_ts)
         answered_at = _to_int(cached.get("answered_at"), None)
         raw_event_type = cls._raw_event_type(event.raw_payload or {})
-        raw_operator_phone = cls._operator_phone_from_event(event) or _normalize_phone(
-            event.operator_ext
-        )
+        raw_operator_phone = cls._operator_phone_from_event_for_runtime(runtime, event)
         operator_phone = locked_operator_ext or raw_operator_phone
         if locked_operator_ext:
             event.operator_ext = locked_operator_ext
+        if event.status == "answered" and not _normalize_phone(event.client_phone):
+            now_ts = _now_ts()
+            if pending_clientless_answered_at is None:
+                pending_clientless_answered_at = now_ts
+            elapsed = max(now_ts - pending_clientless_answered_at, 0)
+            wait_sec = max(AsteriskCrmChannelConfig.INBOUND_FINALIZE_DELAY_SEC, 1)
+            if elapsed < wait_sec:
+                finalize_defer_sec = min(2, max(wait_sec - elapsed, 1))
+                decision_reasons.append("await_answered_client_context")
+            else:
+                suppress_clientless_answered = True
+                decision_reasons.append("suppressed_answered_without_client")
+        elif event.status == "answered":
+            pending_clientless_answered_at = None
+        inbound_answered_operator_trusted = False
+        if (
+            event.status == "answered"
+            and event.direction == "inbound"
+            and finalize_defer_sec <= 0
+            and not suppress_clientless_answered
+        ):
+            if operator_phone and _is_internal_extension(operator_phone):
+                if raw_event_type == "agentconnect":
+                    inbound_answered_operator_trusted = True
+                    decision_reasons.append("agentconnect_answered")
+                else:
+                    resolved_operator_user_id = await cls._resolve_user_id_by_operator_ext_best_effort(
+                        runtime,
+                        operator_phone,
+                    )
+                    if resolved_operator_user_id:
+                        inbound_answered_operator_trusted = True
+                        decision_reasons.append("operator_resolved_for_answered")
+                    else:
+                        suppress_untrusted_answered = True
+                        decision_reasons.append("operator_unresolved_for_answered")
+            else:
+                suppress_untrusted_answered = True
+                decision_reasons.append("operator_missing_for_answered")
         trusted_answered_event = (
             event.status == "answered"
+            and not suppress_clientless_answered
+            and not suppress_untrusted_answered
+            and finalize_defer_sec <= 0
             and (
                 event.direction == "outbound"
-                or (
-                    event.direction == "inbound"
-                    and bool(operator_phone)
-                    and _is_internal_extension(operator_phone)
-                )
+                or inbound_answered_operator_trusted
             )
         )
         if trusted_answered_event:
@@ -3500,6 +3590,8 @@ return 0
 
         if event.status in {"answered", "missed", "failed", "recording_ready"}:
             pending_inbound_completed_at = None
+        if event.status in {"completed", "missed", "failed", "recording_ready"}:
+            pending_clientless_answered_at = None
 
         posted_statuses = {
             str(item).strip().lower()
@@ -3516,7 +3608,12 @@ return 0
         )
         if suppressed_as_noise:
             decision_reasons.append("suppressed_as_leg_noise")
-        should_emit = not suppressed_as_noise and finalize_defer_sec <= 0
+        should_emit = (
+            not suppressed_as_noise
+            and finalize_defer_sec <= 0
+            and not suppress_clientless_answered
+            and not suppress_untrusted_answered
+        )
         completed_with_talk = (
             status in {"inbound_completed", "outbound_completed"}
             and (_to_int(event.talk_duration_sec, 0) or 0) > 0
@@ -3597,6 +3694,11 @@ return 0
             "pending_inbound_completed_at": (
                 int(pending_inbound_completed_at)
                 if pending_inbound_completed_at is not None
+                else None
+            ),
+            "pending_clientless_answered_at": (
+                int(pending_clientless_answered_at)
+                if pending_clientless_answered_at is not None
                 else None
             ),
             "last_decision": trace_entry,
@@ -4053,7 +4155,7 @@ return 0
         runtime: RuntimeConfig,
         event: CallEvent,
     ) -> Optional[str]:
-        operator_ext = _normalize_phone(event.operator_ext) or cls._operator_phone_from_event(event)
+        operator_ext = cls._operator_phone_from_event_for_runtime(runtime, event)
         if not event.external_call_id:
             if not operator_ext:
                 return None
@@ -4122,9 +4224,7 @@ return 0
             return
         if event.status not in {"answered", "completed"}:
             return
-        operator_ext = _normalize_phone(event.operator_ext) or cls._operator_phone_from_event(
-            event
-        )
+        operator_ext = cls._operator_phone_from_event_for_runtime(runtime, event)
         if not operator_ext:
             return
 
@@ -4489,8 +4589,14 @@ return 0
         return f"astmsg:{event.asterisk_hash}:{event.external_call_id}:{cls._chat_event_code(event)}"
 
     @staticmethod
-    def _operator_phone_from_event(event: CallEvent) -> Optional[str]:
+    def _operator_phone_from_event(
+        event: CallEvent,
+        *,
+        excluded_phones: Optional[Set[str]] = None,
+    ) -> Optional[str]:
         client_phone = _normalize_phone(event.client_phone)
+        excluded = {_normalize_phone(item) for item in (excluded_phones or set())}
+        excluded.discard(None)
         preferred: List[Optional[str]]
         if event.direction == "inbound":
             preferred = [event.to_phone, event.from_phone]
@@ -4503,8 +4609,24 @@ return 0
                 continue
             if client_phone and normalized == client_phone:
                 continue
+            if normalized in excluded:
+                continue
             return normalized
         return None
+
+    @classmethod
+    def _operator_phone_from_event_for_runtime(
+        cls,
+        runtime: RuntimeConfig,
+        event: CallEvent,
+    ) -> Optional[str]:
+        operator_ext = _normalize_phone(event.operator_ext)
+        if operator_ext and not cls._is_allowed_did_phone(runtime, operator_ext):
+            return operator_ext
+        return cls._operator_phone_from_event(
+            event,
+            excluded_phones=runtime.allowed_did_set,
+        )
 
     @classmethod
     def _render_call_text(
@@ -4513,10 +4635,11 @@ return 0
         language: str,
         *,
         operator_name: Optional[str] = None,
+        operator_phone: Optional[str] = None,
     ) -> str:
         code = cls._chat_event_code(event)
         client_phone = event.client_phone or "-"
-        operator_phone = cls._operator_phone_from_event(event)
+        operator_phone = operator_phone or cls._operator_phone_from_event(event)
         talk_duration = _to_int(event.talk_duration_sec, None)
 
         if code == "inbound_started":
@@ -4833,6 +4956,10 @@ return 0
                         event,
                         runtime.message_language,
                         operator_name=operator_name,
+                        operator_phone=cls._operator_phone_from_event_for_runtime(
+                            runtime,
+                            event,
+                        ),
                     ),
                 )
             return lead_ctx, True
