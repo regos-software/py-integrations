@@ -1687,7 +1687,7 @@ class RegosPayDealsIntegration(ClientBase):
         text = (
             "REGOS Pay payment link\n"
             f"Amount: {_money_string(amount)}\n"
-            f"Order: {order_id}\n"
+            "\n"
             f"{payment_url}"
         )
         await self._add_deal_chat_message(
@@ -1708,8 +1708,11 @@ class RegosPayDealsIntegration(ClientBase):
         if not chat_id:
             return
         amount = self._expected_amount(deal)
-        amount_line = f"\nAmount: {_money_string(amount)}" if amount is not None else ""
-        text = f"REGOS Pay payment received{amount_line}\nOrder: {order_id}"
+        lines = ["REGOS Pay payment received"]
+        if amount is not None:
+            lines.append(f"Amount: {_money_string(amount)}")
+        lines.append(f"Order: {order_id}")
+        text = "\n".join(lines)
         await self._add_deal_chat_message(
             api=api,
             chat_id=chat_id,
