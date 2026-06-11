@@ -874,8 +874,7 @@ class RegosPayDealsIntegration(ClientBase):
             "fields": fields,
             "queue_enabled": True,
             "callbacks": {
-                "check": f"/clients/{self.integration_key}/{runtime.connected_integration_id}/Check",
-                "perform": f"/clients/{self.integration_key}/{runtime.connected_integration_id}/Perform",
+                "regos_pay": f"/external/{runtime.connected_integration_id}",
             },
             "diagnostics": {
                 "trace_key": self._trace_key(runtime.connected_integration_id),
