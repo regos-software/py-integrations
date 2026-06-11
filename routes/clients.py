@@ -274,6 +274,40 @@ async def _read_body_safely(request: Request, raw: Optional[bytes] = None) -> An
         return raw  # bytes
 
 
+async def _connected_integration_key_from_id(
+    connected_integration_id: str,
+) -> Tuple[Optional[str], Optional[bool]]:
+    ci = str(connected_integration_id or "").strip()
+    if not ci:
+        return None, None
+    async with RegosAPI(connected_integration_id=ci) as api:
+        response = await api.integrations.connected_integration.get(
+            ConnectedIntegrationGetRequest(
+                connected_integration_ids=[ci],
+                include_name=False,
+                include_schedule=False,
+            )
+        )
+    if not response.ok or not isinstance(response.result, list):
+        return None, None
+    for row in response.result:
+        row_ci = str(getattr(row, "connected_integration_id", "") or "").strip()
+        if row_ci and row_ci != ci:
+            continue
+        key = str(getattr(row, "key", "") or "").strip()
+        if not key:
+            continue
+        is_active = getattr(row, "is_active", None)
+        if isinstance(is_active, bool):
+            async with _CONNECTED_INTEGRATION_ACTIVE_CACHE_LOCK:
+                _CONNECTED_INTEGRATION_ACTIVE_CACHE[ci] = (
+                    is_active,
+                    time.monotonic() + CONNECTED_INTEGRATION_ACTIVE_CACHE_TTL_SEC,
+                )
+        return key, is_active if isinstance(is_active, bool) else None
+    return None, None
+
+
 # ------------------------------- #
 #          REGOS endpoint         #
 # ------------------------------- #
@@ -532,6 +566,58 @@ async def handel_ui(
 # ---------------------------------------- #
 #        EXTERNAL → handle_external        #
 # ---------------------------------------- #
+
+
+@router.api_route(
+    "/external/{connected_integration_id}",
+    methods=["GET", "POST", "PUT", "DELETE"],
+    include_in_schema=False,
+)
+@router.api_route(
+    "/external/{connected_integration_id}/",
+    methods=["GET", "POST", "PUT", "DELETE"],
+    include_in_schema=False,
+)
+@router.api_route(
+    "/external/{connected_integration_id}/{external_path:path}",
+    methods=["GET", "POST", "PUT", "DELETE"],
+    include_in_schema=False,
+)
+async def handle_external_by_connected_integration(
+    connected_integration_id: str,
+    external_path: Optional[str] = None,
+    request: Request = ...,
+) -> Any:
+    ci = str(connected_integration_id or "").strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{32}", ci):
+        return JSONResponse(
+            status_code=400,
+            content={"error": 400, "description": "Invalid connected integration id"},
+        )
+    try:
+        client, is_active = await _connected_integration_key_from_id(ci)
+    except Exception as error:
+        logger.exception("[external] Failed to resolve connected integration %s: %s", ci, error)
+        return JSONResponse(
+            status_code=500,
+            content={"error": 500, "description": "Failed to resolve connected integration"},
+        )
+    if not client:
+        return JSONResponse(
+            status_code=404,
+            content={"error": 404, "description": "Connected integration not found"},
+        )
+    if is_active is False:
+        return JSONResponse(
+            status_code=200,
+            content={"status": "ignored", "reason": "connected_integration_inactive"},
+        )
+    return await handle_external(
+        client=client,
+        external_path=external_path,
+        request=request,
+        connected_integration_id=ci,
+    )
 
 
 @router.api_route(
