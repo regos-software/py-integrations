@@ -80,5 +80,5 @@ REGOS Pay отправляет `check` и `perform` на один merchant endpo
 Для подключенной интеграции с ID `<connected_integration_id>` в REGOS Pay указывается публичный URL:
 
 ```text
-POST https://integration.regos.uz/external/<connected_integration_id>
+POST https://integration.regos.uz/external/<connected_integration_id>/external/
 ```

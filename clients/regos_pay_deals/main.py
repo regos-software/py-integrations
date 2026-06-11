@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import httpx
 
 from clients.base import ClientBase
+from config.settings import settings as app_settings
 from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
 from core.redis import (
@@ -445,6 +446,19 @@ class RegosPayDealsIntegration(ClientBase):
         event_hash = hashlib.sha256(raw_event_key.encode("utf-8")).hexdigest()[:24]
         return cls._redis_key("qd", connected_integration_id, event_hash)
 
+    @staticmethod
+    def _resolve_external_base_url() -> str:
+        base_url = str(
+            app_settings.proxy_integration_url or app_settings.integration_url
+        ).strip()
+        if not base_url:
+            base_url = str(app_settings.integration_url).strip()
+        return f"{base_url.rstrip('/')}/external"
+
+    @classmethod
+    def _regos_pay_callback_url(cls, connected_integration_id: str) -> str:
+        return f"{cls._resolve_external_base_url()}/{connected_integration_id}/external/"
+
     @classmethod
     def _resolve_stream_ttl(cls) -> int:
         return redis_ttl_seconds(STREAM_TTL_SEC)
@@ -874,7 +888,7 @@ class RegosPayDealsIntegration(ClientBase):
             "fields": fields,
             "queue_enabled": True,
             "callbacks": {
-                "regos_pay": f"/external/{runtime.connected_integration_id}",
+                "regos_pay": self._regos_pay_callback_url(runtime.connected_integration_id),
             },
             "diagnostics": {
                 "trace_key": self._trace_key(runtime.connected_integration_id),
