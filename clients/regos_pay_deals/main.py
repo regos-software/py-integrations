@@ -1068,25 +1068,30 @@ class RegosPayDealsIntegration(ClientBase):
                     error=str(error),
                 )
                 raise
-            error_code = _to_int(response_payload.get("error_code"), 1)
+            error_code = _to_int(_lookup(response_payload, "error_code"), 1)
             if error_code != 0:
+                error_description = _text(
+                    _lookup(response_payload, "error_description"),
+                    "CheckOut failed",
+                )
                 await self._trace(
                     runtime.connected_integration_id,
                     "checkout_error",
                     event_id=event_id,
                     deal_id=deal_id_int,
                     error_code=error_code,
-                    error_description=_text(response_payload.get("error_description"), "CheckOut failed"),
+                    error_description=error_description,
+                    response_keys=list(response_payload.keys()),
                 )
                 return {
                     "status": "error",
                     "source": "regos_pay",
                     "error_code": error_code,
-                    "error_description": _text(response_payload.get("error_description"), "CheckOut failed"),
+                    "error_description": error_description,
                 }
 
-            order_id = _text(response_payload.get("id"))
-            payment_url = _optional_text(response_payload.get("url"))
+            order_id = _text(_lookup(response_payload, "id"))
+            payment_url = _optional_text(_lookup(response_payload, "url"))
             if not order_id:
                 await self._trace(
                     runtime.connected_integration_id,
@@ -1095,6 +1100,7 @@ class RegosPayDealsIntegration(ClientBase):
                     deal_id=deal_id_int,
                     error_code=error_code,
                     error_description="CheckOut response does not contain id",
+                    response_keys=list(response_payload.keys()),
                 )
                 return {
                     "status": "error",
