@@ -457,7 +457,7 @@ class RegosPayDealsIntegration(ClientBase):
 
     @classmethod
     def _regos_pay_callback_url(cls, connected_integration_id: str) -> str:
-        return f"{cls._resolve_external_base_url()}/{connected_integration_id}/external/"
+        return f"{cls._resolve_external_base_url()}/{connected_integration_id}/"
 
     @classmethod
     def _resolve_stream_ttl(cls) -> int:
