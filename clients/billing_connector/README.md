@@ -38,11 +38,11 @@ Redis обязателен для работы интеграции. Ключи 
 
 ## Настройки интеграции
 
-| Ключ | Обяз. | Тип | Назначение |
-| --- | --- | --- | --- |
-| `billing_client_info_url` | Да | String | URL метода биллинга для получения данных клиента. |
-| `billing_bearer_token` | Да | String | Токен биллинга без префикса `Bearer`; интеграция сама добавляет его в заголовок. |
-| `billing_message_template` | Нет | String | Шаблон системного сообщения. Если задан, переопределяет `message_template` из ответа биллинга. |
+| Ключ | Обяз. | Тип данных | Наименование (RU / UZ / EN) | Описание (RU / UZ / EN) | Placeholder (RU / UZ / EN) |
+|---|---|---|---|---|---|
+| `billing_client_info_url` | Да | String | `URL метода биллинга` / `Billing metodi URL manzili` / `Billing method URL` | `Endpoint, куда интеграция отправляет данные клиента и обращения для получения биллингового контекста` / `Integratsiya mijoz va murojaat ma'lumotlarini billing kontekstini olish uchun yuboradigan endpoint` / `Endpoint where the integration sends client and ticket data to receive billing context` | `https://billing.example.com/api/client-info` / `https://billing.example.com/api/client-info` / `https://billing.example.com/api/client-info` |
+| `billing_bearer_token` | Да | String | `Токен биллинга` / `Billing tokeni` / `Billing token` | `Токен без префикса Bearer; интеграция сама добавляет его в заголовок Authorization` / `Bearer prefiksisiz token; integratsiya uni Authorization sarlavhasiga o'zi qo'shadi` / `Token without the Bearer prefix; the integration adds it to the Authorization header` | `token-...` / `token-...` / `token-...` |
+| `billing_message_template` | Нет | String | `Шаблон системного сообщения` / `Tizimli xabar shabloni` / `System message template` | `Текст сообщения в чат обращения; если задан, заменяет message_template из ответа биллинга` / `Murojaat chatiga yoziladigan xabar matni; berilgan bo'lsa, billing javobidagi message_template o'rniga ishlatiladi` / `Text posted to the ticket chat; when set, it overrides message_template from the billing response` | `Баланс: {balance}\nТариф: {tariff}` / `Balans: {balance}\nTarif: {tariff}` / `Balance: {balance}\nTariff: {tariff}` |
 
 ## Авторизация в биллинге
 

@@ -40,13 +40,13 @@ Callback-и REGOS Pay `Check` и `Perform` не ставятся в очеред
 
 ## Настройки интеграции
 
-| Ключ | Обяз. | Тип | Назначение |
-| --- | --- | --- | --- |
-| `regos_pay_service_id` | Да | String | ID сервиса REGOS Pay, по которому создается платеж. |
-| `regos_pay_secret_key` | Да | String | Секретный ключ для проверки подписи callback-ов REGOS Pay. |
-| `regos_pay_deal_pipeline_id` | Да | Integer | ID воронки сделок, где работает платежный сценарий. |
-| `regos_pay_checkout_stage_id` | Да | Integer | ID стадии, на которой нужно выставить счет. |
-| `regos_pay_paid_stage_id` | Нет | Integer | ID стадии после успешной оплаты. Если пусто или `0`, стадия не меняется. |
+| Ключ | Обяз. | Тип данных | Наименование (RU / UZ / EN) | Описание (RU / UZ / EN) | Placeholder (RU / UZ / EN) |
+|---|---|---|---|---|---|
+| `regos_pay_service_id` | Да | String | `ID сервиса REGOS Pay` / `REGOS Pay xizmat ID si` / `REGOS Pay service ID` | `Сервис REGOS Pay, по которому создается платежная ссылка` / `To'lov havolasi yaratiladigan REGOS Pay xizmati` / `REGOS Pay service used to create the payment link` | `1` / `1` / `1` |
+| `regos_pay_secret_key` | Да | String | `Секретный ключ REGOS Pay` / `REGOS Pay maxfiy kaliti` / `REGOS Pay secret key` | `Ключ для проверки подписи callback-ов Check и Perform` / `Check va Perform callback imzolarini tekshirish kaliti` / `Key used to verify Check and Perform callback signatures` | `secret-...` / `secret-...` / `secret-...` |
+| `regos_pay_deal_pipeline_id` | Да | Integer | `Воронка сделок` / `Bitimlar voronkasi` / `Deal pipeline` | `ID воронки, в которой работает сценарий выставления счета` / `Hisob chiqarish ssenariysi ishlaydigan voronka ID si` / `Pipeline ID where the checkout scenario is active` | `3` / `3` / `3` |
+| `regos_pay_checkout_stage_id` | Да | Integer | `Стадия выставления счета` / `Hisob chiqarish bosqichi` / `Checkout stage` | `ID стадии сделки, на которой нужно создать ссылку REGOS Pay` / `REGOS Pay havolasini yaratish kerak bo'lgan bitim bosqichi ID si` / `Deal stage ID where the REGOS Pay link should be created` | `12` / `12` / `12` |
+| `regos_pay_paid_stage_id` | Нет | Integer | `Стадия после оплаты` / `To'lovdan keyingi bosqich` / `Paid stage` | `ID стадии, куда сделка переводится после успешной оплаты; если пусто или 0, стадия не меняется` / `Muvaffaqiyatli to'lovdan keyin bitim o'tkaziladigan bosqich ID si; bo'sh yoki 0 bo'lsa, bosqich o'zgarmaydi` / `Stage ID where the deal moves after successful payment; when empty or 0, the stage is not changed` | `15` / `15` / `15` |
 
 ## Логика работы
 

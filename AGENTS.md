@@ -71,6 +71,7 @@ Use these sources before changing REGOS API contracts, webhook names, or user-fa
 - Treat integration README files as marketplace-facing product documentation plus concise technical setup notes.
 - Follow the established README shape used by mature integrations: localized name, short description, full description, processed events/actions, settings table, and setup flow.
 - Write names and descriptions in RU, UZ, and EN when the README is intended for marketplace/catalog use.
+- Document integration settings in RU, UZ, and EN too. Keep technical columns such as key, required flag, and type once, then add localized setting name, description, and placeholder columns following the mature integration pattern.
 - Descriptions must sound human, commercial, and motivational: explain the business scenario, the value for the team, and the outcome for the customer.
 - Avoid generic AI-sounding copy: no filler promises, no repeated "this integration allows you to...", no unsupported claims, and no feature lists disguised as prose.
 - Before writing marketing descriptions, search current REGOS public materials and align wording with REGOS positioning and terminology.
