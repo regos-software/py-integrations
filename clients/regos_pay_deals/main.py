@@ -1711,7 +1711,6 @@ class RegosPayDealsIntegration(ClientBase):
         lines = ["REGOS Pay payment received"]
         if amount is not None:
             lines.append(f"Amount: {_money_string(amount)}")
-        lines.append(f"Order: {order_id}")
         text = "\n".join(lines)
         await self._add_deal_chat_message(
             api=api,
