@@ -38,6 +38,7 @@ from clients.marketplace_uzum_tezkor.main import UzumTezkorIntegration
 from clients.marketplace_toserver.main import MarketplaceToServerIntegration
 from clients.edo_fakturauz.main import EdoFakturaUzIntegration
 from clients.edo_didox.main import EdoDidoxIntegration
+from clients.regos_pay_deals.main import RegosPayDealsIntegration
 
 router = APIRouter()
 logger = setup_logger("clients_route")
@@ -65,6 +66,7 @@ INTEGRATION_CLASSES = {
     "marketplace_toserver": MarketplaceToServerIntegration,
     "edo_fakturauz": EdoFakturaUzIntegration,
     "edo_didox": EdoDidoxIntegration,
+    "regos_pay_deals": RegosPayDealsIntegration,
 }
 
 # Служебные заголовки, которые не нужно прокидывать обработчикам
