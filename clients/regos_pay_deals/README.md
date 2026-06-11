@@ -75,9 +75,10 @@ Callback-и REGOS Pay `Check` и `Perform` не ставятся в очеред
 
 ## Callback URL для REGOS Pay
 
-Для подключенной интеграции с ID `<connected_integration_id>`:
+REGOS Pay отправляет `check` и `perform` на один merchant endpoint. Метод определяется полем `method` в JSON-теле запроса.
+
+Для подключенной интеграции с ID `<connected_integration_id>` в REGOS Pay указывается публичный URL:
 
 ```text
-POST /clients/regos_pay_deals/<connected_integration_id>/Check
-POST /clients/regos_pay_deals/<connected_integration_id>/Perform
+POST https://integration.regos.uz/external/<connected_integration_id>
 ```
