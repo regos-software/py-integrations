@@ -238,7 +238,7 @@ def _extract_field_value(entity: Any, field_key: str) -> Optional[str]:
 
 
 def _request_id(payload: Dict[str, Any]) -> int:
-    value = _to_int(payload.get("id"), 0)
+    value = _to_int(_lookup(payload, "id"), 0)
     return value if value > 0 else 0
 
 
@@ -1137,7 +1137,7 @@ class RegosPayDealsIntegration(ClientBase):
     async def handle_external(self, envelope: Dict[str, Any]) -> Dict[str, Any]:
         """REGOS Pay callback entrypoint for Check and Perform external URLs."""
         body = _parse_json_body((envelope or {}).get("body"))
-        method = _text(body.get("method")).lower()
+        method = _text(_lookup(body, "method")).lower()
         if not method:
             method = _callback_method_from_path((envelope or {}).get("external_path"))
         if method in {"check", "perform"}:
@@ -1299,8 +1299,9 @@ class RegosPayDealsIntegration(ClientBase):
         envelope: Dict[str, Any],
     ) -> Dict[str, Any]:
         request_id = _request_id(payload)
-        params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
-        sign = _text(payload.get("sign")).lower()
+        raw_params = _lookup(payload, "params")
+        params = raw_params if isinstance(raw_params, dict) else {}
+        sign = _text(_lookup(payload, "sign")).lower()
         try:
             runtime = await self._load_runtime(
                 connected_integration_id=_optional_text(envelope.get("connected_integration_id"))
@@ -1316,6 +1317,14 @@ class RegosPayDealsIntegration(ClientBase):
                 method=method,
                 request_id=request_id,
                 reason="invalid_sign",
+                sign_present=bool(sign),
+                payload_keys=list(payload.keys()),
+                param_keys=list(params.keys()),
+                date=_plain_int_text(_param(params, "date")),
+                order_id=_text(_param(params, "order_Id", "order_id")),
+                external_id=_text(_param(params, "external_Id", "external_id")),
+                amount=_text(_param(params, "amount")),
+                amount_minor=_amount_minor_string(_param(params, "amount")),
             )
             logger.warning(
                 "REGOS Pay callback signature mismatch: ci=%s method=%s params=%s",
