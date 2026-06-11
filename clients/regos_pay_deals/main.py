@@ -40,7 +40,7 @@ from schemas.api.references.field import FieldAddRequest, FieldGetRequest
 logger = setup_logger("regos_pay_deals")
 
 
-DEFAULT_CHECKOUT_URL = "https://pay.regos.uz/api/CheckOut"
+DEFAULT_CHECKOUT_URL = "https://pay.regos.uz/api/checkout"
 DEFAULT_DESCRIPTION_TEMPLATE = "Payment for deal #{deal_id}: {title}"
 DEAL_ENTITY_TYPE = "Deal"
 CHECKOUT_HTTP_TIMEOUT = 30.0
@@ -147,28 +147,8 @@ def _amount_minor_string(value: Any) -> str:
     amount = _to_decimal(value)
     if amount is None:
         return ""
-    minor = (amount * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    minor = amount * Decimal("100")
     return str(int(minor))
-
-
-def _amount_minor_sign_values(value: Any) -> List[str]:
-    amount = _to_decimal(value)
-    if amount is None:
-        return []
-    scaled = amount * Decimal("100")
-    candidates = [
-        _amount_minor_string(value),
-        format(scaled, "f"),
-        format(scaled.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP), "f"),
-    ]
-    if scaled == scaled.to_integral_value():
-        integral = str(int(scaled))
-        candidates.extend([f"{integral}.0", f"{integral}.00"])
-    result: List[str] = []
-    for candidate in candidates:
-        if candidate and candidate not in result:
-            result.append(candidate)
-    return result
 
 
 def _json_amount(value: Decimal) -> float:
@@ -258,19 +238,8 @@ def _extract_field_value(entity: Any, field_key: str) -> Optional[str]:
 
 
 def _request_id(payload: Dict[str, Any]) -> int:
-    value = _to_int(_lookup(payload, "id"), 0)
+    value = _to_int(payload.get("id"), 0)
     return value if value > 0 else 0
-
-
-def _param(params: Dict[str, Any], *names: str) -> Any:
-    lower_map = {str(key).lower(): value for key, value in params.items()}
-    for name in names:
-        if name in params:
-            return params[name]
-        value = lower_map.get(str(name).lower())
-        if value is not None:
-            return value
-    return None
 
 
 def _lookup(data: Any, *keys: str) -> Any:
@@ -297,15 +266,6 @@ def _plain_int_text(value: Any) -> str:
 
 def _md5(text: str) -> str:
     return hashlib.md5(text.encode("utf-8")).hexdigest()
-
-
-def _callback_sign_method(method: str) -> str:
-    text = _text(method).lower()
-    if text == "check":
-        return "Check"
-    if text == "perform":
-        return "Perform"
-    return method
 
 
 def _parse_json_body(body: Any) -> Dict[str, Any]:
@@ -344,19 +304,6 @@ def _extract_deal_id(payload: Dict[str, Any]) -> int:
         if deal_id > 0:
             return deal_id
     return 0
-
-
-def _callback_method_from_path(external_path: Any) -> str:
-    parts = [
-        part.strip()
-        for part in str(external_path or "").strip("/").split("/")
-        if part.strip()
-    ]
-    if parts and re.fullmatch(r"[0-9a-fA-F]{32}", parts[0]):
-        parts = parts[1:]
-    if not parts:
-        return ""
-    return parts[-1].lower()
 
 
 def _normalize_regos_webhook_payload(
@@ -1070,23 +1017,46 @@ class RegosPayDealsIntegration(ClientBase):
                 raise
             error_code = _to_int(response_payload.get("error_code"), 1)
             if error_code != 0:
+                error_description = _text(
+                    response_payload.get("error_description"),
+                    "checkout failed",
+                )
                 await self._trace(
                     runtime.connected_integration_id,
                     "checkout_error",
                     event_id=event_id,
                     deal_id=deal_id_int,
                     error_code=error_code,
-                    error_description=_text(response_payload.get("error_description"), "CheckOut failed"),
+                    error_description=error_description,
+                    response_keys=list(response_payload.keys()),
                 )
                 return {
                     "status": "error",
                     "source": "regos_pay",
                     "error_code": error_code,
-                    "error_description": _text(response_payload.get("error_description"), "CheckOut failed"),
+                    "error_description": error_description,
                 }
 
-            order_id = _text(response_payload.get("id"))
             payment_url = _optional_text(response_payload.get("url"))
+            if not payment_url:
+                await self._trace(
+                    runtime.connected_integration_id,
+                    "checkout_error",
+                    event_id=event_id,
+                    deal_id=deal_id_int,
+                    error_code=error_code,
+                    error_description="checkout response does not contain url",
+                    response_keys=list(response_payload.keys()),
+                )
+                return {
+                    "status": "error",
+                    "source": "regos_pay",
+                    "error_code": error_code,
+                    "error_description": "checkout response does not contain url",
+                }
+
+            refreshed_deal = await self._get_deal(api, deal_id_int)
+            order_id = _text(_extract_field_value(refreshed_deal, ORDER_ID_FIELD_KEY))
             if not order_id:
                 await self._trace(
                     runtime.connected_integration_id,
@@ -1094,42 +1064,14 @@ class RegosPayDealsIntegration(ClientBase):
                     event_id=event_id,
                     deal_id=deal_id_int,
                     error_code=error_code,
-                    error_description="CheckOut response does not contain id",
+                    error_description="Check callback did not save order_id",
+                    response_keys=list(response_payload.keys()),
                 )
                 return {
                     "status": "error",
                     "source": "regos_pay",
                     "error_code": error_code,
-                    "error_description": "CheckOut response does not contain id",
-                }
-
-            fields = [{"key": ORDER_ID_FIELD_KEY, "value": order_id}]
-
-            edit_response = await api.crm.deal.edit(
-                DealEditRequest(id=deal_id_int, fields=fields)
-            )
-            if not edit_response.ok:
-                logger.warning(
-                    "Deal/Edit rejected while saving REGOS Pay order id: ci=%s deal_id=%s payload=%s",
-                    runtime.connected_integration_id,
-                    deal_id_int,
-                    edit_response.result,
-                )
-                await self._trace(
-                    runtime.connected_integration_id,
-                    "checkout_not_saved",
-                    event_id=event_id,
-                    deal_id=deal_id_int,
-                    order_id=order_id,
-                    payment_url_present=bool(payment_url),
-                )
-                return {
-                    "status": "created_not_saved",
-                    "deal_id": deal_id_int,
-                    "order_id": order_id,
-                    "external_id": checkout_external_id,
-                    "payment_url": payment_url,
-                    "warning": "REGOS Pay order was created, but CRM deal field was not updated",
+                    "error_description": "Check callback did not save order_id",
                 }
 
             if publish_to_chat:
@@ -1166,11 +1108,11 @@ class RegosPayDealsIntegration(ClientBase):
     async def handle_external(self, envelope: Dict[str, Any]) -> Dict[str, Any]:
         """REGOS Pay callback entrypoint for Check and Perform external URLs."""
         body = _parse_json_body((envelope or {}).get("body"))
-        method = _text(_lookup(body, "method")).lower()
-        if not method:
-            method = _callback_method_from_path((envelope or {}).get("external_path"))
-        if method in {"check", "perform"}:
-            return await self._handle_callback(method, body, envelope or {})
+        method = _text(body.get("method"))
+        if method == "Check":
+            return await self._handle_callback("check", body, envelope or {})
+        if method == "Perform":
+            return await self._handle_callback("perform", body, envelope or {})
         request_id = _request_id(body)
         return self._callback_response(
             request_id,
@@ -1328,9 +1270,9 @@ class RegosPayDealsIntegration(ClientBase):
         envelope: Dict[str, Any],
     ) -> Dict[str, Any]:
         request_id = _request_id(payload)
-        raw_params = _lookup(payload, "params")
+        raw_params = payload.get("params")
         params = raw_params if isinstance(raw_params, dict) else {}
-        sign = _text(_lookup(payload, "sign")).lower()
+        sign = _text(payload.get("sign")).lower()
         try:
             runtime = await self._load_runtime(
                 connected_integration_id=_optional_text(envelope.get("connected_integration_id"))
@@ -1347,15 +1289,13 @@ class RegosPayDealsIntegration(ClientBase):
                 request_id=request_id,
                 reason="invalid_sign",
                 sign_present=bool(sign),
-                sign_method=_callback_sign_method(method),
                 payload_keys=list(payload.keys()),
                 param_keys=list(params.keys()),
-                date=_plain_int_text(_param(params, "date")),
-                order_id=_text(_param(params, "order_Id", "order_id")),
-                external_id=_text(_param(params, "external_Id", "external_id")),
-                amount=_text(_param(params, "amount")),
-                amount_minor=_amount_minor_string(_param(params, "amount")),
-                amount_minor_variants=_amount_minor_sign_values(_param(params, "amount")),
+                date=_plain_int_text(params.get("date")),
+                order_id=_text(params.get("order_id")),
+                external_id=_text(params.get("external_id")),
+                amount=_text(params.get("amount")),
+                amount_minor=_amount_minor_string(params.get("amount")),
             )
             logger.warning(
                 "REGOS Pay callback signature mismatch: ci=%s method=%s params=%s",
@@ -1371,9 +1311,9 @@ class RegosPayDealsIntegration(ClientBase):
                 "callback_received",
                 method=method,
                 request_id=request_id,
-                order_id=_text(_param(params, "order_Id", "order_id")),
-                external_id=_text(_param(params, "external_Id", "external_id")),
-                amount=_text(_param(params, "amount")),
+                order_id=_text(params.get("order_id")),
+                external_id=_text(params.get("external_id")),
+                amount=_text(params.get("amount")),
             )
             if method == "check":
                 return await self._callback_check(runtime, request_id, params)
@@ -1404,10 +1344,10 @@ class RegosPayDealsIntegration(ClientBase):
         request_id: int,
         params: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Confirm by external_Id that the linked deal exists and still has the same amount."""
-        order_id = _text(_param(params, "order_Id", "order_id"))
-        external_id = _text(_param(params, "external_Id", "external_id"))
-        amount = _to_decimal(_param(params, "amount"))
+        """Confirm by external_id that the linked deal exists and still has the same amount."""
+        order_id = _text(params.get("order_id"))
+        external_id = _text(params.get("external_id"))
+        amount = _to_decimal(params.get("amount"))
         if not order_id or not external_id or amount is None:
             return await self._callback_error(
                 runtime,
@@ -1480,6 +1420,38 @@ class RegosPayDealsIntegration(ClientBase):
                     expected_amount=_money_string(expected_amount),
                 )
 
+            if not saved_order_id:
+                edit_response = await api.crm.deal.edit(
+                    DealEditRequest(
+                        id=external_deal_id,
+                        fields=[{"key": ORDER_ID_FIELD_KEY, "value": order_id}],
+                    )
+                )
+                if not edit_response.ok:
+                    logger.warning(
+                        "Deal/Edit rejected while saving REGOS Pay order id from Check: "
+                        "ci=%s deal_id=%s payload=%s",
+                        runtime.connected_integration_id,
+                        external_deal_id,
+                        edit_response.result,
+                    )
+                    return await self._callback_error(
+                        runtime,
+                        request_id,
+                        "check",
+                        "Deal order id update failed",
+                        deal_id=external_deal_id,
+                        order_id=order_id,
+                    )
+                await self._trace(
+                    runtime.connected_integration_id,
+                    "callback_order_id_saved",
+                    method="check",
+                    request_id=request_id,
+                    deal_id=external_deal_id,
+                    order_id=order_id,
+                )
+
         return await self._callback_ok(
             runtime,
             request_id,
@@ -1495,13 +1467,13 @@ class RegosPayDealsIntegration(ClientBase):
         params: Dict[str, Any],
     ) -> Dict[str, Any]:
         """Mark successful REGOS Pay payment in the deal chat and optional paid stage."""
-        order_id = _text(_param(params, "order_Id", "order_id"))
+        order_id = _text(params.get("order_id"))
         if not order_id:
             return await self._callback_error(
                 runtime,
                 request_id,
                 "perform",
-                "order_Id is required",
+                "order_id is required",
             )
 
         async with RegosAPI(runtime.connected_integration_id) as api:
@@ -1627,9 +1599,9 @@ class RegosPayDealsIntegration(ClientBase):
         try:
             data = response.json()
         except Exception as error:
-            raise RegosPayDealsError("CheckOut response is not valid JSON") from error
+            raise RegosPayDealsError("checkout response is not valid JSON") from error
         if not isinstance(data, dict):
-            raise RegosPayDealsError("CheckOut response must be an object")
+            raise RegosPayDealsError("checkout response must be an object")
         return data
 
     async def _get_deal(self, api: RegosAPI, deal_id: int) -> Optional[Deal]:
@@ -1859,25 +1831,16 @@ class RegosPayDealsIntegration(ClientBase):
         params: Dict[str, Any],
     ) -> bool:
         if method == "check":
-            date = _plain_int_text(_param(params, "date"))
-            order_id = _text(_param(params, "order_Id", "order_id"))
-            external_id = _text(_param(params, "external_Id", "external_id"))
-            sign_methods = [_callback_sign_method(method), method]
-            for amount_minor in _amount_minor_sign_values(_param(params, "amount")):
-                for sign_method in sign_methods:
-                    source = f"{sign_method}{runtime.secret_key}{date}{order_id}{external_id}{amount_minor}"
-                    expected = _md5(source)
-                    if sign and sign == expected.lower():
-                        return True
-            return False
+            date = _plain_int_text(params.get("date"))
+            order_id = _text(params.get("order_id"))
+            external_id = _text(params.get("external_id"))
+            amount_minor = _amount_minor_string(params.get("amount"))
+            source = f"Check{runtime.secret_key}{date}{order_id}{external_id}{amount_minor}"
+            return bool(sign) and sign == _md5(source).lower()
         if method == "perform":
-            order_id = _text(_param(params, "order_Id", "order_id"))
-            for sign_method in [_callback_sign_method(method), method]:
-                source = f"{sign_method}{runtime.secret_key}{order_id}"
-                expected = _md5(source)
-                if sign and sign == expected.lower():
-                    return True
-            return False
+            order_id = _text(params.get("order_id"))
+            source = f"Perform{runtime.secret_key}{order_id}"
+            return bool(sign) and sign == _md5(source).lower()
         return False
 
     async def _callback_error(
