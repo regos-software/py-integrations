@@ -720,6 +720,11 @@ class BillingConnectorIntegration(ClientBase):
         _ = settings
         return await self.connect(**kwargs)
 
+    async def handle_external(self, envelope: Dict[str, Any]) -> Dict[str, Any]:
+        """Billing Connector has no external callback endpoint."""
+        _ = envelope
+        return {"status": "ignored", "reason": "external_endpoint_not_supported"}
+
     async def handle_webhook(
         self,
         action: Optional[str] = None,
