@@ -151,6 +151,26 @@ def _amount_minor_string(value: Any) -> str:
     return str(int(minor))
 
 
+def _amount_minor_sign_values(value: Any) -> List[str]:
+    amount = _to_decimal(value)
+    if amount is None:
+        return []
+    scaled = amount * Decimal("100")
+    candidates = [
+        _amount_minor_string(value),
+        format(scaled, "f"),
+        format(scaled.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP), "f"),
+    ]
+    if scaled == scaled.to_integral_value():
+        integral = str(int(scaled))
+        candidates.extend([f"{integral}.0", f"{integral}.00"])
+    result: List[str] = []
+    for candidate in candidates:
+        if candidate and candidate not in result:
+            result.append(candidate)
+    return result
+
+
 def _json_amount(value: Decimal) -> float:
     return float(value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
@@ -277,6 +297,15 @@ def _plain_int_text(value: Any) -> str:
 
 def _md5(text: str) -> str:
     return hashlib.md5(text.encode("utf-8")).hexdigest()
+
+
+def _callback_sign_method(method: str) -> str:
+    text = _text(method).lower()
+    if text == "check":
+        return "Check"
+    if text == "perform":
+        return "Perform"
+    return method
 
 
 def _parse_json_body(body: Any) -> Dict[str, Any]:
@@ -1318,6 +1347,7 @@ class RegosPayDealsIntegration(ClientBase):
                 request_id=request_id,
                 reason="invalid_sign",
                 sign_present=bool(sign),
+                sign_method=_callback_sign_method(method),
                 payload_keys=list(payload.keys()),
                 param_keys=list(params.keys()),
                 date=_plain_int_text(_param(params, "date")),
@@ -1325,6 +1355,7 @@ class RegosPayDealsIntegration(ClientBase):
                 external_id=_text(_param(params, "external_Id", "external_id")),
                 amount=_text(_param(params, "amount")),
                 amount_minor=_amount_minor_string(_param(params, "amount")),
+                amount_minor_variants=_amount_minor_sign_values(_param(params, "amount")),
             )
             logger.warning(
                 "REGOS Pay callback signature mismatch: ci=%s method=%s params=%s",
@@ -1831,15 +1862,22 @@ class RegosPayDealsIntegration(ClientBase):
             date = _plain_int_text(_param(params, "date"))
             order_id = _text(_param(params, "order_Id", "order_id"))
             external_id = _text(_param(params, "external_Id", "external_id"))
-            amount_minor = _amount_minor_string(_param(params, "amount"))
-            source = f"{method}{runtime.secret_key}{date}{order_id}{external_id}{amount_minor}"
-            expected = _md5(source)
-            return bool(sign) and sign == expected.lower()
+            sign_methods = [_callback_sign_method(method), method]
+            for amount_minor in _amount_minor_sign_values(_param(params, "amount")):
+                for sign_method in sign_methods:
+                    source = f"{sign_method}{runtime.secret_key}{date}{order_id}{external_id}{amount_minor}"
+                    expected = _md5(source)
+                    if sign and sign == expected.lower():
+                        return True
+            return False
         if method == "perform":
             order_id = _text(_param(params, "order_Id", "order_id"))
-            source = f"{method}{runtime.secret_key}{order_id}"
-            expected = _md5(source)
-            return bool(sign) and sign == expected.lower()
+            for sign_method in [_callback_sign_method(method), method]:
+                source = f"{sign_method}{runtime.secret_key}{order_id}"
+                expected = _md5(source)
+                if sign and sign == expected.lower():
+                    return True
+            return False
         return False
 
     async def _callback_error(
