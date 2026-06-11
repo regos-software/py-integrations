@@ -39,6 +39,7 @@ from clients.marketplace_toserver.main import MarketplaceToServerIntegration
 from clients.edo_fakturauz.main import EdoFakturaUzIntegration
 from clients.edo_didox.main import EdoDidoxIntegration
 from clients.regos_pay_deals.main import RegosPayDealsIntegration
+from clients.billing_connector.main import BillingConnectorIntegration
 
 router = APIRouter()
 logger = setup_logger("clients_route")
@@ -67,6 +68,7 @@ INTEGRATION_CLASSES = {
     "edo_fakturauz": EdoFakturaUzIntegration,
     "edo_didox": EdoDidoxIntegration,
     "regos_pay_deals": RegosPayDealsIntegration,
+    "billing_connector": BillingConnectorIntegration,
 }
 
 # Служебные заголовки, которые не нужно прокидывать обработчикам
@@ -300,6 +302,14 @@ async def handle_integration(
     logger.info(f"Заголовок 'connected-integration-id': {connected_integration_id}")
     logger.debug(f"Содержимое запроса: {request_body.dict()}")
 
+    request_json: Dict[str, Any] = {}
+    try:
+        raw_request_json = await request.json()
+        if isinstance(raw_request_json, dict):
+            request_json = raw_request_json
+    except Exception:
+        request_json = {}
+
     integration_instance = None
     result = None
     integration_class = INTEGRATION_CLASSES.get(client)
@@ -359,7 +369,12 @@ async def handle_integration(
         )
 
         if isinstance(request_body.data, dict):
-            result = await action_method(**request_body.data)
+            call_data = dict(request_body.data)
+            if action_key == "handle_webhook":
+                for key in ("event_id", "occurred_at", "connected_integration_id"):
+                    if key in request_json and key not in call_data:
+                        call_data[key] = request_json[key]
+            result = await action_method(**call_data)
         elif isinstance(request_body.data, list):
             result = await action_method(messages=request_body.data)
         else:

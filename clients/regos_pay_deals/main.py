@@ -1,17 +1,31 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
+import time
+import uuid
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import httpx
 
 from clients.base import ClientBase
 from core.api.regos_api import RegosAPI
 from core.logger import setup_logger
+from core.redis import (
+    redis_error_contains,
+    redis_expire_if_due,
+    redis_is_enabled,
+    redis_make_key,
+    redis_ops,
+    redis_stream_ack_delete,
+    redis_stream_add_with_ttl,
+    redis_stream_group_create_with_ttl,
+    redis_ttl_seconds,
+)
 from schemas.api.chat.chat_message import ChatMessageAddRequest, ChatMessageTypeEnum
 from schemas.api.common.filters import Filter, FilterOperator
 from schemas.api.crm.deal import Deal, DealEditRequest, DealGetRequest, DealSetStageRequest
@@ -29,12 +43,41 @@ DEFAULT_CHECKOUT_URL = "https://pay.regos.uz/api/CheckOut"
 DEFAULT_DESCRIPTION_TEMPLATE = "Payment for deal #{deal_id}: {title}"
 DEAL_ENTITY_TYPE = "Deal"
 CHECKOUT_HTTP_TIMEOUT = 30.0
+QUEUE_DEDUPE_TTL_SEC = 10 * 60
+STREAM_GROUP = "rpdw"
+STREAM_TTL_SEC = 24 * 60 * 60
+STREAM_MAXLEN = 10000
+STREAM_BATCH_SIZE = 10
+STREAM_WORKERS = 1
+STREAM_READ_BLOCK_MS = 5000
+STREAM_MIN_IDLE_MS = 60_000
+STREAM_CLAIM_INTERVAL_SEC = 30
+STREAM_MAX_RETRIES = 3
 ORDER_ID_FIELD_RAW_KEY = "regos_pay_order_id"
 ORDER_ID_FIELD_KEY = f"field_{ORDER_ID_FIELD_RAW_KEY}"
 ORDER_ID_FIELD_NAME = "REGOS Pay order ID"
 ACCEPTED_DEAL_WEBHOOKS = {
     "DealStageSet",
 }
+
+_INSTANCE_ID = uuid.uuid4().hex[:12]
+_STREAM_WORKER_TASKS: Dict[str, asyncio.Task] = {}
+_STREAM_WORKER_LOCK = asyncio.Lock()
+_STREAM_TTL_TOUCH_TS: Dict[str, int] = {}
+_STREAM_GROUP_READY: Set[str] = set()
+_STREAM_CLAIM_TS: Dict[str, int] = {}
+
+_ENQUEUE_DEDUPE_LUA = """
+local ok = redis.call('set', KEYS[1], '1', 'EX', ARGV[1], 'NX')
+if not ok then
+  return 0
+end
+redis.call('xadd', KEYS[2], 'MAXLEN', '~', ARGV[2], '*', unpack(ARGV, 5))
+if ARGV[4] == '1' then
+  redis.call('expire', KEYS[2], ARGV[3])
+end
+return 1
+"""
 
 
 @dataclass(frozen=True)
@@ -106,6 +149,23 @@ def _amount_minor_string(value: Any) -> str:
 
 def _json_amount(value: Decimal) -> float:
     return float(value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
+def _stable_hash(payload: Any) -> str:
+    dumped = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(dumped.encode("utf-8")).hexdigest()
+
+
+def _json_dumps(payload: Any) -> str:
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def _json_loads(raw: str) -> Any:
+    return json.loads(raw)
+
+
+def _now_ts() -> int:
+    return int(time.time())
 
 
 def _normalize_settings(rows: Any) -> Dict[str, str]:
@@ -306,6 +366,386 @@ class RegosPayDealsIntegration(ClientBase):
     def __init__(self) -> None:
         self.connected_integration_id: Optional[str] = None
 
+    @classmethod
+    def _redis_key(cls, *parts: Any) -> str:
+        return redis_make_key(cls.integration_key, *parts)
+
+    @classmethod
+    def _require_redis(cls) -> None:
+        if not redis_is_enabled():
+            raise RegosPayDealsError("Redis is required for regos_pay_deals queue")
+
+    @classmethod
+    def _stream_key(cls) -> str:
+        return cls._redis_key("stream", "events")
+
+    @classmethod
+    def _dlq_stream_key(cls) -> str:
+        return cls._redis_key("stream", "dlq")
+
+    @classmethod
+    def _worker_task_key(cls, worker_index: int) -> str:
+        return f"{cls._stream_key()}:{int(worker_index)}"
+
+    @classmethod
+    def _queue_dedupe_key(
+        cls,
+        connected_integration_id: str,
+        action: str,
+        payload: Dict[str, Any],
+        event_id: Optional[str],
+    ) -> str:
+        raw_event_key = _text(event_id) or _stable_hash({"action": action, "payload": payload})
+        event_hash = hashlib.sha256(raw_event_key.encode("utf-8")).hexdigest()[:24]
+        return cls._redis_key("queue_dedupe", connected_integration_id, event_hash)
+
+    @classmethod
+    def _resolve_stream_ttl(cls) -> int:
+        return redis_ttl_seconds(STREAM_TTL_SEC)
+
+    @classmethod
+    async def _touch_stream_ttl(cls, stream_key: str, *, force: bool = False) -> None:
+        cls._require_redis()
+        await redis_expire_if_due(
+            stream_key,
+            cls._resolve_stream_ttl(),
+            _STREAM_TTL_TOUCH_TS,
+            _now_ts(),
+            min_refresh_sec=10,
+            force=force,
+        )
+
+    @classmethod
+    async def _ensure_consumer_group(cls, stream_key: str, *, force: bool = False) -> None:
+        cls._require_redis()
+        if not force and stream_key in _STREAM_GROUP_READY:
+            return
+        await redis_stream_group_create_with_ttl(
+            stream_key,
+            STREAM_GROUP,
+            ttl_sec=cls._resolve_stream_ttl(),
+            touch_ts_by_key=_STREAM_TTL_TOUCH_TS,
+            now_ts=_now_ts(),
+        )
+        _STREAM_GROUP_READY.add(stream_key)
+
+    @classmethod
+    def _serialize_stream_fields(cls, fields: Dict[str, Any]) -> Dict[str, str]:
+        serialized: Dict[str, str] = {}
+        for key, value in fields.items():
+            if isinstance(value, (dict, list)):
+                serialized[str(key)] = _json_dumps(value)
+            elif value is None:
+                serialized[str(key)] = ""
+            else:
+                serialized[str(key)] = str(value)
+        return serialized
+
+    @classmethod
+    def _decode_stream_payload(cls, raw: Any) -> Any:
+        if isinstance(raw, (dict, list)):
+            return raw
+        text = _text(raw)
+        if not text:
+            return {}
+        try:
+            return _json_loads(text)
+        except Exception:
+            return {}
+
+    @classmethod
+    async def _enqueue_stream(cls, stream_key: str, fields: Dict[str, Any]) -> None:
+        cls._require_redis()
+        await redis_stream_add_with_ttl(
+            stream_key,
+            cls._serialize_stream_fields(fields),
+            maxlen=STREAM_MAXLEN,
+            ttl_sec=cls._resolve_stream_ttl(),
+            touch_ts_by_key=_STREAM_TTL_TOUCH_TS,
+            now_ts=_now_ts(),
+        )
+
+    @classmethod
+    async def _enqueue_stream_deduped(
+        cls,
+        *,
+        stream_key: str,
+        dedupe_key: str,
+        fields: Dict[str, Any],
+    ) -> bool:
+        cls._require_redis()
+        stream_ttl = cls._resolve_stream_ttl()
+        now_ts = _now_ts()
+        should_touch = (
+            now_ts - int(_STREAM_TTL_TOUCH_TS.get(stream_key) or 0)
+            >= min(3600, max(10, stream_ttl // 4))
+        )
+        serialized = cls._serialize_stream_fields(fields)
+        field_args: List[str] = []
+        for key, value in serialized.items():
+            field_args.extend([key, value])
+        queued = await redis_ops.eval(
+            _ENQUEUE_DEDUPE_LUA,
+            2,
+            dedupe_key,
+            stream_key,
+            str(QUEUE_DEDUPE_TTL_SEC),
+            str(STREAM_MAXLEN),
+            str(stream_ttl),
+            "1" if should_touch else "0",
+            *field_args,
+        )
+        if queued and should_touch:
+            _STREAM_TTL_TOUCH_TS[stream_key] = now_ts
+        return bool(queued)
+
+    @classmethod
+    async def _enqueue_event(
+        cls,
+        *,
+        connected_integration_id: str,
+        action: str,
+        payload: Dict[str, Any],
+        event_id: Optional[str],
+        attempt: int = 0,
+        last_error: Optional[str] = None,
+        dedupe: bool = True,
+    ) -> bool:
+        await cls._ensure_stream_workers(ensure_groups=False)
+        stream_key = cls._stream_key()
+        fields = {
+            "connected_integration_id": connected_integration_id,
+            "action": action,
+            "event_id": _text(event_id),
+            "payload": payload,
+            "attempt": str(max(int(attempt), 0)),
+            "enqueued_at": str(_now_ts()),
+            "last_error": _text(last_error),
+        }
+        if not dedupe:
+            await cls._enqueue_stream(stream_key, fields)
+            return True
+        return await cls._enqueue_stream_deduped(
+            stream_key=stream_key,
+            dedupe_key=cls._queue_dedupe_key(
+                connected_integration_id,
+                action,
+                payload,
+                event_id,
+            ),
+            fields=fields,
+        )
+
+    @classmethod
+    async def _ensure_stream_workers(cls, *, ensure_groups: bool = True) -> None:
+        cls._require_redis()
+        stream_key = cls._stream_key()
+        if ensure_groups:
+            await cls._ensure_consumer_group(stream_key)
+        for worker_index in range(STREAM_WORKERS):
+            task_key = cls._worker_task_key(worker_index)
+            async with _STREAM_WORKER_LOCK:
+                task = _STREAM_WORKER_TASKS.get(task_key)
+                if task and not task.done():
+                    continue
+                _STREAM_WORKER_TASKS[task_key] = asyncio.create_task(
+                    cls._stream_worker_loop(worker_index),
+                    name=f"regos_pay_deals_stream_{worker_index}",
+                )
+
+    @classmethod
+    async def _ack_stream_entry(cls, stream_key: str, entry_id: str) -> None:
+        await redis_stream_ack_delete(stream_key, STREAM_GROUP, entry_id)
+
+    @classmethod
+    async def _process_claimed_entries(
+        cls,
+        stream_key: str,
+        consumer: str,
+    ) -> List[Tuple[str, Dict[str, Any]]]:
+        try:
+            claimed_raw = await redis_ops.xautoclaim(
+                stream_key,
+                STREAM_GROUP,
+                consumer,
+                min_idle_time=STREAM_MIN_IDLE_MS,
+                start_id="0-0",
+                count=STREAM_BATCH_SIZE,
+            )
+        except Exception as error:
+            if redis_error_contains(error, "NOGROUP"):
+                await cls._ensure_consumer_group(stream_key, force=True)
+                return []
+            logger.warning("REGOS Pay deals stream xautoclaim failed: %s", error)
+            return []
+
+        entries: List[Tuple[str, Dict[str, Any]]] = []
+        if isinstance(claimed_raw, (list, tuple)) and len(claimed_raw) >= 2:
+            entries = claimed_raw[1] or []
+        return [
+            (str(entry_id), fields if isinstance(fields, dict) else {})
+            for entry_id, fields in entries
+        ]
+
+    @classmethod
+    async def _stream_worker_loop(cls, worker_index: int) -> None:
+        stream_key = cls._stream_key()
+        task_key = cls._worker_task_key(worker_index)
+        consumer = f"{_INSTANCE_ID}:events:{worker_index}"
+        logger.info("REGOS Pay deals stream worker started: stream=%s", stream_key)
+        try:
+            await cls._ensure_consumer_group(stream_key)
+            while True:
+                try:
+                    await cls._touch_stream_ttl(stream_key)
+                    now_ts = _now_ts()
+                    last_claim_ts = int(_STREAM_CLAIM_TS.get(stream_key) or 0)
+                    if now_ts - last_claim_ts >= STREAM_CLAIM_INTERVAL_SEC:
+                        _STREAM_CLAIM_TS[stream_key] = now_ts
+                        claimed_entries = await cls._process_claimed_entries(
+                            stream_key,
+                            consumer,
+                        )
+                        for entry_id, fields in claimed_entries:
+                            await cls._process_stream_entry(
+                                stream_key=stream_key,
+                                entry_id=entry_id,
+                                fields=fields,
+                            )
+
+                    try:
+                        records = await redis_ops.xreadgroup(
+                            groupname=STREAM_GROUP,
+                            consumername=consumer,
+                            streams={stream_key: ">"},
+                            count=STREAM_BATCH_SIZE,
+                            block=STREAM_READ_BLOCK_MS,
+                        )
+                    except Exception as error:
+                        if redis_error_contains(error, "NOGROUP"):
+                            await cls._ensure_consumer_group(stream_key, force=True)
+                            continue
+                        raise
+
+                    for _, entries in records or []:
+                        for entry_id, fields in entries or []:
+                            await cls._process_stream_entry(
+                                stream_key=stream_key,
+                                entry_id=str(entry_id),
+                                fields=fields if isinstance(fields, dict) else {},
+                            )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    logger.exception("REGOS Pay deals stream worker error: %s", error)
+                    await asyncio.sleep(2)
+        finally:
+            async with _STREAM_WORKER_LOCK:
+                current = _STREAM_WORKER_TASKS.get(task_key)
+                if current is asyncio.current_task():
+                    _STREAM_WORKER_TASKS.pop(task_key, None)
+
+    @classmethod
+    def _stream_entry_attempt(cls, fields: Dict[str, Any]) -> int:
+        return max(_to_int(fields.get("attempt"), 0), 0)
+
+    @classmethod
+    def _is_non_retryable_error(cls, error: object) -> bool:
+        text = str(error or "")
+        return (
+            "Missing settings:" in text
+            or "connected_integration_id is required" in text
+        )
+
+    @classmethod
+    async def _process_stream_entry(
+        cls,
+        *,
+        stream_key: str,
+        entry_id: str,
+        fields: Dict[str, Any],
+    ) -> None:
+        ci = _text(fields.get("connected_integration_id"))
+        action = _text(fields.get("action"))
+        event_id = _optional_text(fields.get("event_id"))
+        payload = cls._decode_stream_payload(fields.get("payload"))
+        if not ci or action not in ACCEPTED_DEAL_WEBHOOKS or not isinstance(payload, dict):
+            logger.warning(
+                "REGOS Pay deals stream entry has invalid payload: "
+                "entry_id=%s fields=%s",
+                entry_id,
+                fields,
+            )
+            await cls._ack_stream_entry(stream_key, entry_id)
+            return
+
+        attempt = cls._stream_entry_attempt(fields)
+        worker = cls()
+        worker.connected_integration_id = ci
+        try:
+            result = await worker._process_webhook_event(action, payload, event_id)
+            logger.debug(
+                "REGOS Pay deals stream job processed: "
+                "ci=%s action=%s entry_id=%s status=%s",
+                ci,
+                action,
+                entry_id,
+                result.get("status") if isinstance(result, dict) else result,
+            )
+            await cls._ack_stream_entry(stream_key, entry_id)
+        except Exception as error:
+            if cls._is_non_retryable_error(error):
+                logger.warning(
+                    "REGOS Pay deals stream job skipped: "
+                    "ci=%s action=%s entry_id=%s error=%s",
+                    ci,
+                    action,
+                    entry_id,
+                    error,
+                )
+                await cls._ack_stream_entry(stream_key, entry_id)
+                return
+
+            next_attempt = attempt + 1
+            if next_attempt >= STREAM_MAX_RETRIES:
+                dlq_payload = dict(fields)
+                dlq_payload["attempt"] = str(next_attempt)
+                dlq_payload["source_stream"] = stream_key
+                dlq_payload["source_entry_id"] = entry_id
+                dlq_payload["failed_at"] = str(_now_ts())
+                dlq_payload["error"] = str(error)
+                await cls._enqueue_stream(cls._dlq_stream_key(), dlq_payload)
+                await cls._ack_stream_entry(stream_key, entry_id)
+                logger.error(
+                    "REGOS Pay deals stream job moved to DLQ: "
+                    "ci=%s action=%s entry_id=%s error=%s",
+                    ci,
+                    action,
+                    entry_id,
+                    error,
+                )
+                return
+
+            await cls._enqueue_event(
+                connected_integration_id=ci,
+                action=action,
+                payload=payload,
+                event_id=event_id,
+                attempt=next_attempt,
+                last_error=str(error),
+                dedupe=False,
+            )
+            await cls._ack_stream_entry(stream_key, entry_id)
+            logger.warning(
+                "REGOS Pay deals stream job requeued: "
+                "ci=%s action=%s entry_id=%s attempt=%s error=%s",
+                ci,
+                action,
+                entry_id,
+                next_attempt,
+                error,
+            )
+
     def _ci(self, connected_integration_id: Optional[str] = None) -> str:
         ci = _text(connected_integration_id or self.connected_integration_id)
         if not ci:
@@ -317,9 +757,11 @@ class RegosPayDealsIntegration(ClientBase):
         runtime = await self._load_runtime(
             connected_integration_id=_optional_text(kwargs.get("connected_integration_id")),
         )
+        self._require_redis()
         async with RegosAPI(runtime.connected_integration_id) as api:
             await self._ensure_pipeline_stages(api, runtime)
             fields = await self._ensure_configured_fields(api)
+        await self._ensure_stream_workers()
         return {
             "status": "connected",
             "integration_key": self.integration_key,
@@ -327,6 +769,7 @@ class RegosPayDealsIntegration(ClientBase):
             "checkout_stage_id": runtime.checkout_stage_id,
             "paid_stage_id": runtime.paid_stage_id,
             "fields": fields,
+            "queue_enabled": True,
             "callbacks": {
                 "check": f"/clients/{self.integration_key}/{runtime.connected_integration_id}/Check",
                 "perform": f"/clients/{self.integration_key}/{runtime.connected_integration_id}/Perform",
@@ -347,21 +790,6 @@ class RegosPayDealsIntegration(ClientBase):
     ) -> Dict[str, Any]:
         _ = settings
         return await self.connect(**kwargs)
-
-    async def create_checkout(
-        self,
-        deal_id: int,
-        **kwargs: Any,
-    ) -> Dict[str, Any]:
-        """Manual action for the same stage-gated checkout flow used by webhooks."""
-        runtime = await self._load_runtime(
-            connected_integration_id=_optional_text(kwargs.get("connected_integration_id"))
-        )
-        return await self._create_checkout_for_deal(
-            runtime=runtime,
-            deal_id=deal_id,
-            publish_to_chat=True,
-        )
 
     async def _create_checkout_for_deal(
         self,
@@ -497,7 +925,7 @@ class RegosPayDealsIntegration(ClientBase):
         data: Optional[Dict[str, Any]] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        """Handle REGOS deal webhooks and create a checkout only on the configured stage."""
+        """Accept REGOS deal webhooks quickly and process checkout creation from Redis Stream."""
         if not self.connected_integration_id:
             return {"status": "error", "description": "connected_integration_id is required"}
 
@@ -509,6 +937,49 @@ class RegosPayDealsIntegration(ClientBase):
         if webhook_action not in ACCEPTED_DEAL_WEBHOOKS:
             return {"status": "ignored", "reason": f"unsupported_action:{webhook_action}"}
 
+        deal_id = _extract_deal_id(payload)
+        if deal_id <= 0:
+            return {"status": "ignored", "reason": "deal_id_missing", "action": webhook_action}
+
+        try:
+            queued = await self._enqueue_event(
+                connected_integration_id=self._ci(),
+                action=webhook_action,
+                payload=payload,
+                event_id=event_id,
+            )
+        except RegosPayDealsError as error:
+            logger.warning(
+                "REGOS Pay deals enqueue error: ci=%s action=%s error=%s",
+                self.connected_integration_id,
+                webhook_action,
+                error,
+            )
+            return {"status": "error", "action": webhook_action, "reason": str(error)}
+        except Exception as error:
+            logger.exception(
+                "REGOS Pay deals enqueue failed: ci=%s action=%s error=%s",
+                self.connected_integration_id,
+                webhook_action,
+                error,
+            )
+            return {"status": "error", "action": webhook_action, "reason": "enqueue_failed"}
+
+        return {
+            "status": "accepted",
+            "action": webhook_action,
+            "event_id": event_id,
+            "deal_id": deal_id,
+            "queued": 1 if queued else 0,
+            "duplicate": not queued,
+        }
+
+    async def _process_webhook_event(
+        self,
+        webhook_action: str,
+        payload: Dict[str, Any],
+        event_id: Optional[str],
+    ) -> Dict[str, Any]:
         deal_id = _extract_deal_id(payload)
         if deal_id <= 0:
             return {"status": "ignored", "reason": "deal_id_missing", "action": webhook_action}
