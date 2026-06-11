@@ -55,8 +55,6 @@ STREAM_READ_BLOCK_MS = 5000
 STREAM_MIN_IDLE_MS = 60_000
 STREAM_CLAIM_INTERVAL_SEC = 30
 STREAM_MAX_RETRIES = 3
-TRACE_TTL_SEC = 24 * 60 * 60
-TRACE_MAXLEN = 200
 ORDER_ID_FIELD_RAW_KEY = "regos_pay_order_id"
 ORDER_ID_FIELD_KEY = f"field_{ORDER_ID_FIELD_RAW_KEY}"
 ORDER_ID_FIELD_NAME = "REGOS Pay order ID"
@@ -198,18 +196,6 @@ def _drop_none(value: Any) -> Any:
     if isinstance(value, list):
         return [_drop_none(v) for v in value]
     return value
-
-
-def _trace_value(value: Any) -> Any:
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
-    if isinstance(value, Decimal):
-        return str(value)
-    if isinstance(value, dict):
-        return {str(key): _trace_value(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_trace_value(item) for item in value]
-    return str(value)
 
 
 def _payload_dict(value: Any) -> Dict[str, Any]:
@@ -361,37 +347,6 @@ class RegosPayDealsIntegration(ClientBase):
     @classmethod
     def _redis_key(cls, *parts: Any) -> str:
         return redis_make_key(REDIS_PREFIX, *parts)
-
-    @classmethod
-    def _trace_key(cls, connected_integration_id: str) -> str:
-        return cls._redis_key("t", connected_integration_id)
-
-    @classmethod
-    async def _trace(
-        cls,
-        connected_integration_id: str,
-        event: str,
-        **details: Any,
-    ) -> None:
-        ci = _text(connected_integration_id)
-        if not ci or not redis_is_enabled():
-            return
-        entry = _drop_none(
-            {
-                "ts": _now_ts(),
-                "event": _text(event),
-                **{str(key): _trace_value(value) for key, value in details.items()},
-            }
-        )
-        try:
-            key = cls._trace_key(ci)
-            async with redis_ops.pipeline(transaction=True) as pipe:
-                await pipe.rpush(key, _json_dumps(entry))
-                await pipe.ltrim(key, -TRACE_MAXLEN, -1)
-                await pipe.expire(key, TRACE_TTL_SEC)
-                await pipe.execute()
-        except Exception as error:
-            logger.debug("REGOS Pay Redis trace write failed: ci=%s error=%s", ci, error)
 
     @classmethod
     def _require_redis(cls) -> None:
@@ -716,31 +671,10 @@ class RegosPayDealsIntegration(ClientBase):
             return
 
         attempt = cls._stream_entry_attempt(fields)
-        await cls._trace(
-            ci,
-            "worker_started",
-            action=action,
-            event_id=event_id,
-            entry_id=entry_id,
-            attempt=attempt,
-        )
         worker = cls()
         worker.connected_integration_id = ci
         try:
             result = await worker._process_webhook_event(action, payload, event_id)
-            result_status = result.get("status") if isinstance(result, dict) else None
-            result_payload = result.get("result") if isinstance(result, dict) else {}
-            result_reason = result_payload.get("reason") if isinstance(result_payload, dict) else None
-            await cls._trace(
-                ci,
-                "worker_done",
-                action=action,
-                event_id=event_id,
-                entry_id=entry_id,
-                attempt=attempt,
-                status=result_status,
-                reason=result_reason,
-            )
             logger.debug(
                 "REGOS Pay deals stream job processed: "
                 "ci=%s action=%s entry_id=%s status=%s",
@@ -752,15 +686,6 @@ class RegosPayDealsIntegration(ClientBase):
             await cls._ack_stream_entry(stream_key, entry_id)
         except Exception as error:
             if cls._is_non_retryable_error(error):
-                await cls._trace(
-                    ci,
-                    "worker_skipped",
-                    action=action,
-                    event_id=event_id,
-                    entry_id=entry_id,
-                    attempt=attempt,
-                    error=str(error),
-                )
                 logger.warning(
                     "REGOS Pay deals stream job skipped: "
                     "ci=%s action=%s entry_id=%s error=%s",
@@ -781,15 +706,6 @@ class RegosPayDealsIntegration(ClientBase):
                 dlq_payload["failed_at"] = str(_now_ts())
                 dlq_payload["error"] = str(error)
                 await cls._enqueue_stream(cls._dlq_stream_key(), dlq_payload)
-                await cls._trace(
-                    ci,
-                    "worker_dlq",
-                    action=action,
-                    event_id=event_id,
-                    entry_id=entry_id,
-                    attempt=next_attempt,
-                    error=str(error),
-                )
                 await cls._ack_stream_entry(stream_key, entry_id)
                 logger.error(
                     "REGOS Pay deals stream job moved to DLQ: "
@@ -809,15 +725,6 @@ class RegosPayDealsIntegration(ClientBase):
                 attempt=next_attempt,
                 last_error=str(error),
                 dedupe=False,
-            )
-            await cls._trace(
-                ci,
-                "worker_retry",
-                action=action,
-                event_id=event_id,
-                entry_id=entry_id,
-                attempt=next_attempt,
-                error=str(error),
             )
             await cls._ack_stream_entry(stream_key, entry_id)
             logger.warning(
@@ -846,15 +753,6 @@ class RegosPayDealsIntegration(ClientBase):
             await self._ensure_pipeline_stages(api, runtime)
             fields = await self._ensure_configured_fields(api)
         await self._ensure_stream_workers()
-        await self._trace(
-            runtime.connected_integration_id,
-            "connect_ready",
-            pipeline_id=runtime.pipeline_id,
-            checkout_stage_id=runtime.checkout_stage_id,
-            paid_stage_id=runtime.paid_stage_id,
-            stream_key=self._stream_key(),
-            trace_key=self._trace_key(runtime.connected_integration_id),
-        )
         return {
             "status": "connected",
             "integration_key": self.integration_key,
@@ -865,11 +763,6 @@ class RegosPayDealsIntegration(ClientBase):
             "queue_enabled": True,
             "callbacks": {
                 "regos_pay": self._regos_pay_callback_url(runtime.connected_integration_id),
-            },
-            "diagnostics": {
-                "trace_key": self._trace_key(runtime.connected_integration_id),
-                "trace_ttl_sec": TRACE_TTL_SEC,
-                "trace_maxlen": TRACE_MAXLEN,
             },
         }
 
@@ -894,7 +787,6 @@ class RegosPayDealsIntegration(ClientBase):
         runtime: RuntimeConfig,
         deal_id: int,
         publish_to_chat: bool = True,
-        event_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create one REGOS Pay order for a deal that is on the configured checkout stage."""
         deal_id_int = _to_int(deal_id)
@@ -907,25 +799,7 @@ class RegosPayDealsIntegration(ClientBase):
                 raise RegosPayDealsError(f"deal {deal_id_int} not found")
             deal_pipeline_id = _to_int(getattr(deal, "pipeline_id", None))
             deal_stage_id = _to_int(getattr(deal, "stage_id", None))
-            await self._trace(
-                runtime.connected_integration_id,
-                "deal_loaded",
-                event_id=event_id,
-                deal_id=deal_id_int,
-                pipeline_id=deal_pipeline_id,
-                stage_id=deal_stage_id,
-                checkout_stage_id=runtime.checkout_stage_id,
-            )
             if not self._deal_pipeline_matches(deal, runtime):
-                await self._trace(
-                    runtime.connected_integration_id,
-                    "checkout_ignored",
-                    event_id=event_id,
-                    deal_id=deal_id_int,
-                    reason="pipeline_mismatch",
-                    pipeline_id=deal_pipeline_id,
-                    expected_pipeline_id=runtime.pipeline_id,
-                )
                 return {
                     "status": "ignored",
                     "reason": "pipeline_mismatch",
@@ -934,15 +808,6 @@ class RegosPayDealsIntegration(ClientBase):
                     "expected_pipeline_id": runtime.pipeline_id,
                 }
             if not self._deal_checkout_stage_matches(deal, runtime):
-                await self._trace(
-                    runtime.connected_integration_id,
-                    "checkout_ignored",
-                    event_id=event_id,
-                    deal_id=deal_id_int,
-                    reason="stage_mismatch",
-                    stage_id=deal_stage_id,
-                    checkout_stage_id=runtime.checkout_stage_id,
-                )
                 return {
                     "status": "ignored",
                     "reason": "stage_mismatch",
@@ -953,13 +818,6 @@ class RegosPayDealsIntegration(ClientBase):
 
             current_order_id = _text(_extract_field_value(deal, ORDER_ID_FIELD_KEY))
             if current_order_id:
-                await self._trace(
-                    runtime.connected_integration_id,
-                    "checkout_already_created",
-                    event_id=event_id,
-                    deal_id=deal_id_int,
-                    order_id=current_order_id,
-                )
                 return _drop_none(
                     {
                         "status": "already_created",
@@ -971,14 +829,6 @@ class RegosPayDealsIntegration(ClientBase):
             try:
                 checkout_amount = _money(getattr(deal, "amount", None))
             except RegosPayDealsError as error:
-                await self._trace(
-                    runtime.connected_integration_id,
-                    "checkout_error",
-                    event_id=event_id,
-                    deal_id=deal_id_int,
-                    reason="amount_invalid",
-                    error=str(error),
-                )
                 raise
             checkout_external_id = f"deal:{deal_id_int}"
             checkout_description = _format_description(
@@ -995,40 +845,12 @@ class RegosPayDealsIntegration(ClientBase):
             }
             payload = _drop_none(payload)
 
-            await self._trace(
-                runtime.connected_integration_id,
-                "checkout_request",
-                event_id=event_id,
-                deal_id=deal_id_int,
-                external_id=checkout_external_id,
-                amount=_money_string(checkout_amount),
-                checkout_url=runtime.checkout_url,
-            )
-            try:
-                response_payload = await self._send_checkout(runtime, payload)
-            except Exception as error:
-                await self._trace(
-                    runtime.connected_integration_id,
-                    "checkout_exception",
-                    event_id=event_id,
-                    deal_id=deal_id_int,
-                    error=str(error),
-                )
-                raise
+            response_payload = await self._send_checkout(runtime, payload)
             error_code = _to_int(response_payload.get("error_code"), 1)
             if error_code != 0:
                 error_description = _text(
                     response_payload.get("error_description"),
                     "checkout failed",
-                )
-                await self._trace(
-                    runtime.connected_integration_id,
-                    "checkout_error",
-                    event_id=event_id,
-                    deal_id=deal_id_int,
-                    error_code=error_code,
-                    error_description=error_description,
-                    response_keys=list(response_payload.keys()),
                 )
                 return {
                     "status": "error",
@@ -1039,15 +861,6 @@ class RegosPayDealsIntegration(ClientBase):
 
             payment_url = _optional_text(response_payload.get("url"))
             if not payment_url:
-                await self._trace(
-                    runtime.connected_integration_id,
-                    "checkout_error",
-                    event_id=event_id,
-                    deal_id=deal_id_int,
-                    error_code=error_code,
-                    error_description="checkout response does not contain url",
-                    response_keys=list(response_payload.keys()),
-                )
                 return {
                     "status": "error",
                     "source": "regos_pay",
@@ -1058,15 +871,6 @@ class RegosPayDealsIntegration(ClientBase):
             refreshed_deal = await self._get_deal(api, deal_id_int)
             order_id = _text(_extract_field_value(refreshed_deal, ORDER_ID_FIELD_KEY))
             if not order_id:
-                await self._trace(
-                    runtime.connected_integration_id,
-                    "checkout_error",
-                    event_id=event_id,
-                    deal_id=deal_id_int,
-                    error_code=error_code,
-                    error_description="Check callback did not save order_id",
-                    response_keys=list(response_payload.keys()),
-                )
                 return {
                     "status": "error",
                     "source": "regos_pay",
@@ -1082,17 +886,6 @@ class RegosPayDealsIntegration(ClientBase):
                     amount=checkout_amount,
                     payment_url=payment_url,
                 )
-
-            await self._trace(
-                runtime.connected_integration_id,
-                "checkout_created",
-                event_id=event_id,
-                deal_id=deal_id_int,
-                order_id=order_id,
-                external_id=checkout_external_id,
-                amount=_money_string(checkout_amount),
-                payment_url_present=bool(payment_url),
-            )
 
         return _drop_none(
             {
@@ -1137,33 +930,12 @@ class RegosPayDealsIntegration(ClientBase):
             extra=kwargs,
         )
         if webhook_action not in ACCEPTED_DEAL_WEBHOOKS:
-            await self._trace(
-                ci,
-                "webhook_ignored",
-                action=webhook_action,
-                event_id=event_id,
-                reason="unsupported_action",
-            )
             return {"status": "ignored", "reason": f"unsupported_action:{webhook_action}"}
 
         deal_id = _extract_deal_id(payload)
         if deal_id <= 0:
-            await self._trace(
-                ci,
-                "webhook_ignored",
-                action=webhook_action,
-                event_id=event_id,
-                reason="deal_id_missing",
-            )
             return {"status": "ignored", "reason": "deal_id_missing", "action": webhook_action}
 
-        await self._trace(
-            ci,
-            "webhook_received",
-            action=webhook_action,
-            event_id=event_id,
-            deal_id=deal_id,
-        )
         try:
             queued = await self._enqueue_event(
                 connected_integration_id=ci,
@@ -1171,24 +943,7 @@ class RegosPayDealsIntegration(ClientBase):
                 payload=payload,
                 event_id=event_id,
             )
-            await self._trace(
-                ci,
-                "webhook_queued",
-                action=webhook_action,
-                event_id=event_id,
-                deal_id=deal_id,
-                queued=bool(queued),
-                duplicate=not queued,
-            )
         except RegosPayDealsError as error:
-            await self._trace(
-                ci,
-                "webhook_enqueue_error",
-                action=webhook_action,
-                event_id=event_id,
-                deal_id=deal_id,
-                error=str(error),
-            )
             logger.warning(
                 "REGOS Pay deals enqueue error: ci=%s action=%s error=%s",
                 self.connected_integration_id,
@@ -1197,14 +952,6 @@ class RegosPayDealsIntegration(ClientBase):
             )
             return {"status": "error", "action": webhook_action, "reason": str(error)}
         except Exception as error:
-            await self._trace(
-                ci,
-                "webhook_enqueue_error",
-                action=webhook_action,
-                event_id=event_id,
-                deal_id=deal_id,
-                error=str(error),
-            )
             logger.exception(
                 "REGOS Pay deals enqueue failed: ci=%s action=%s error=%s",
                 self.connected_integration_id,
@@ -1237,7 +984,6 @@ class RegosPayDealsIntegration(ClientBase):
             runtime=runtime,
             deal_id=deal_id,
             publish_to_chat=True,
-            event_id=event_id,
         )
         return {
             "status": result.get("status", "processed"),
@@ -1282,21 +1028,6 @@ class RegosPayDealsIntegration(ClientBase):
             return self._callback_response(request_id, 1, "Integration settings error")
 
         if not self._verify_callback_sign(runtime, method, sign, params):
-            await self._trace(
-                runtime.connected_integration_id,
-                "callback_error",
-                method=method,
-                request_id=request_id,
-                reason="invalid_sign",
-                sign_present=bool(sign),
-                payload_keys=list(payload.keys()),
-                param_keys=list(params.keys()),
-                date=_plain_int_text(params.get("date")),
-                order_id=_text(params.get("order_id")),
-                external_id=_text(params.get("external_id")),
-                amount=_text(params.get("amount")),
-                amount_minor=_amount_minor_string(params.get("amount")),
-            )
             logger.warning(
                 "REGOS Pay callback signature mismatch: ci=%s method=%s params=%s",
                 runtime.connected_integration_id,
@@ -1306,28 +1037,11 @@ class RegosPayDealsIntegration(ClientBase):
             return self._callback_response(request_id, 1, "Invalid sign")
 
         try:
-            await self._trace(
-                runtime.connected_integration_id,
-                "callback_received",
-                method=method,
-                request_id=request_id,
-                order_id=_text(params.get("order_id")),
-                external_id=_text(params.get("external_id")),
-                amount=_text(params.get("amount")),
-            )
             if method == "check":
                 return await self._callback_check(runtime, request_id, params)
             if method == "perform":
                 return await self._callback_perform(runtime, request_id, params)
         except Exception as error:
-            await self._trace(
-                runtime.connected_integration_id,
-                "callback_error",
-                method=method,
-                request_id=request_id,
-                reason="exception",
-                error=str(error),
-            )
             logger.exception(
                 "REGOS Pay callback failed: ci=%s method=%s error=%s",
                 runtime.connected_integration_id,
@@ -1443,14 +1157,6 @@ class RegosPayDealsIntegration(ClientBase):
                         deal_id=external_deal_id,
                         order_id=order_id,
                     )
-                await self._trace(
-                    runtime.connected_integration_id,
-                    "callback_order_id_saved",
-                    method="check",
-                    request_id=request_id,
-                    deal_id=external_deal_id,
-                    order_id=order_id,
-                )
 
         return await self._callback_ok(
             runtime,
@@ -1853,14 +1559,7 @@ class RegosPayDealsIntegration(ClientBase):
         description: str,
         **details: Any,
     ) -> Dict[str, Any]:
-        await self._trace(
-            runtime.connected_integration_id,
-            "callback_error",
-            method=method,
-            request_id=request_id,
-            reason=description,
-            **details,
-        )
+        _ = runtime, method, details
         return self._callback_response(request_id, 1, description)
 
     async def _callback_ok(
@@ -1870,13 +1569,7 @@ class RegosPayDealsIntegration(ClientBase):
         method: str,
         **details: Any,
     ) -> Dict[str, Any]:
-        await self._trace(
-            runtime.connected_integration_id,
-            "callback_ok",
-            method=method,
-            request_id=request_id,
-            **details,
-        )
+        _ = runtime, method, details
         return self._callback_response(request_id, 0)
 
     def _callback_response(

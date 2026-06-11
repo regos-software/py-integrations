@@ -38,16 +38,6 @@ Redis обязателен для обработки `DealStageSet`. Ключи 
 
 Служебные Redis-ключи используют короткий namespace `rpd`: основная очередь `rpd:s:e`, DLQ `rpd:s:dlq`, dedupe `rpd:qd:<connected_integration_id>:<hash>`.
 
-## Временная диагностика в Redis
-
-Чтобы быстро понять, почему счет не создается, интеграция пишет короткий trace в Redis list `rpd:t:<connected_integration_id>`. В списке хранятся последние 200 событий с TTL 24 часа: получение webhook-а, постановка в очередь, старт worker-а, проверка воронки и стадии, вызов REGOS Pay `checkout`, ответ REGOS Pay, callback-и `Check`/`Perform`, сохранение `order_id` и причины игнорирования.
-
-Посмотреть последние записи можно так:
-
-```bash
-redis-cli LRANGE rpd:t:<connected_integration_id> -200 -1
-```
-
 Callback-и REGOS Pay `Check` и `Perform` не ставятся в очередь: платежный сервис ожидает синхронный ответ проверки или проведения платежа.
 
 ## Настройки интеграции

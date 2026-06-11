@@ -82,6 +82,7 @@ EXCLUDED_SERVICE_HEADERS = {
 CONNECTED_INTEGRATION_ACTIVE_CACHE_TTL_SEC = 60
 _CONNECTED_INTEGRATION_ACTIVE_CACHE: Dict[str, Tuple[bool, float]] = {}
 _CONNECTED_INTEGRATION_ACTIVE_CACHE_LOCK = asyncio.Lock()
+BILLING_CONNECTOR_LIFECYCLE_ACTIONS = {"connect", "reconnect"}
 
 
 async def _is_connected_integration_active(
@@ -388,7 +389,12 @@ async def handle_integration(
         )
 
     action_key = camel_to_snake(request_body.action)
-    if resolved_connected_integration_id and action_key not in {"disconnect", "update_settings"}:
+    # Billing Connector resolves the new connected integration id from lifecycle data.
+    # During reconnect the old id may already be deleted, so preflight would fail early.
+    skip_active_check = action_key in {"disconnect", "update_settings"} or (
+        client == "billing_connector" and action_key in BILLING_CONNECTOR_LIFECYCLE_ACTIONS
+    )
+    if resolved_connected_integration_id and not skip_active_check:
         is_active = await _is_connected_integration_active(
             resolved_connected_integration_id,
             force_refresh=action_key in {"connect", "reconnect"},
