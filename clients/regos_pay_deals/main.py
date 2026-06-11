@@ -1297,6 +1297,13 @@ class RegosPayDealsIntegration(ClientBase):
             return self._callback_response(request_id, 1, "Integration settings error")
 
         if not self._verify_callback_sign(runtime, method, sign, params):
+            await self._trace(
+                runtime.connected_integration_id,
+                "callback_error",
+                method=method,
+                request_id=request_id,
+                reason="invalid_sign",
+            )
             logger.warning(
                 "REGOS Pay callback signature mismatch: ci=%s method=%s params=%s",
                 runtime.connected_integration_id,
@@ -1306,11 +1313,28 @@ class RegosPayDealsIntegration(ClientBase):
             return self._callback_response(request_id, 1, "Invalid sign")
 
         try:
+            await self._trace(
+                runtime.connected_integration_id,
+                "callback_received",
+                method=method,
+                request_id=request_id,
+                order_id=_text(_param(params, "order_Id", "order_id")),
+                external_id=_text(_param(params, "external_Id", "external_id")),
+                amount=_text(_param(params, "amount")),
+            )
             if method == "check":
                 return await self._callback_check(runtime, request_id, params)
             if method == "perform":
                 return await self._callback_perform(runtime, request_id, params)
         except Exception as error:
+            await self._trace(
+                runtime.connected_integration_id,
+                "callback_error",
+                method=method,
+                request_id=request_id,
+                reason="exception",
+                error=str(error),
+            )
             logger.exception(
                 "REGOS Pay callback failed: ci=%s method=%s error=%s",
                 runtime.connected_integration_id,
@@ -1327,32 +1351,89 @@ class RegosPayDealsIntegration(ClientBase):
         request_id: int,
         params: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Confirm to REGOS Pay that the linked deal exists and still has the same amount."""
+        """Confirm by external_Id that the linked deal exists and still has the same amount."""
         order_id = _text(_param(params, "order_Id", "order_id"))
         external_id = _text(_param(params, "external_Id", "external_id"))
         amount = _to_decimal(_param(params, "amount"))
         if not order_id or not external_id or amount is None:
-            return self._callback_response(request_id, 1, "Required params are missing")
+            return await self._callback_error(
+                runtime,
+                request_id,
+                "check",
+                "Required params are missing",
+            )
+
+        external_deal_id = _parse_deal_id_from_external_id(external_id)
+        if external_deal_id <= 0:
+            return await self._callback_error(
+                runtime,
+                request_id,
+                "check",
+                "External id mismatch",
+                external_id=external_id,
+            )
 
         async with RegosAPI(runtime.connected_integration_id) as api:
-            deal = await self._find_deal_by_order_id(api, runtime, order_id)
+            deal = await self._get_deal(api, external_deal_id)
             if deal is None:
-                return self._callback_response(request_id, 1, "Deal not found")
+                return await self._callback_error(
+                    runtime,
+                    request_id,
+                    "check",
+                    "Deal not found",
+                    deal_id=external_deal_id,
+                )
 
             if not self._deal_pipeline_matches(deal, runtime):
-                return self._callback_response(request_id, 1, "Deal pipeline mismatch")
+                return await self._callback_error(
+                    runtime,
+                    request_id,
+                    "check",
+                    "Deal pipeline mismatch",
+                    deal_id=external_deal_id,
+                    pipeline_id=_to_int(getattr(deal, "pipeline_id", None)),
+                    expected_pipeline_id=runtime.pipeline_id,
+                )
 
-            external_deal_id = _parse_deal_id_from_external_id(external_id)
-            if external_deal_id <= 0 or external_deal_id != _to_int(getattr(deal, "id", None)):
-                return self._callback_response(request_id, 1, "External id mismatch")
+            saved_order_id = _text(_extract_field_value(deal, ORDER_ID_FIELD_KEY))
+            if saved_order_id and saved_order_id != order_id:
+                return await self._callback_error(
+                    runtime,
+                    request_id,
+                    "check",
+                    "Order id mismatch",
+                    deal_id=external_deal_id,
+                    order_id=order_id,
+                    saved_order_id=saved_order_id,
+                )
 
             expected_amount = self._expected_amount(deal)
             if expected_amount is None:
-                return self._callback_response(request_id, 1, "Deal amount is empty")
+                return await self._callback_error(
+                    runtime,
+                    request_id,
+                    "check",
+                    "Deal amount is empty",
+                    deal_id=external_deal_id,
+                )
             if _amount_minor_string(amount) != _amount_minor_string(expected_amount):
-                return self._callback_response(request_id, 1, "Amount mismatch")
+                return await self._callback_error(
+                    runtime,
+                    request_id,
+                    "check",
+                    "Amount mismatch",
+                    deal_id=external_deal_id,
+                    amount=_money_string(amount),
+                    expected_amount=_money_string(expected_amount),
+                )
 
-        return self._callback_response(request_id, 0)
+        return await self._callback_ok(
+            runtime,
+            request_id,
+            "check",
+            deal_id=external_deal_id,
+            order_id=order_id,
+        )
 
     async def _callback_perform(
         self,
@@ -1363,18 +1444,43 @@ class RegosPayDealsIntegration(ClientBase):
         """Mark successful REGOS Pay payment in the deal chat and optional paid stage."""
         order_id = _text(_param(params, "order_Id", "order_id"))
         if not order_id:
-            return self._callback_response(request_id, 1, "order_Id is required")
+            return await self._callback_error(
+                runtime,
+                request_id,
+                "perform",
+                "order_Id is required",
+            )
 
         async with RegosAPI(runtime.connected_integration_id) as api:
             deal = await self._find_deal_by_order_id(api, runtime, order_id)
             if deal is None:
-                return self._callback_response(request_id, 1, "Deal not found")
+                return await self._callback_error(
+                    runtime,
+                    request_id,
+                    "perform",
+                    "Deal not found",
+                    order_id=order_id,
+                )
             if not self._deal_pipeline_matches(deal, runtime):
-                return self._callback_response(request_id, 1, "Deal pipeline mismatch")
+                return await self._callback_error(
+                    runtime,
+                    request_id,
+                    "perform",
+                    "Deal pipeline mismatch",
+                    order_id=order_id,
+                    pipeline_id=_to_int(getattr(deal, "pipeline_id", None)),
+                    expected_pipeline_id=runtime.pipeline_id,
+                )
 
             deal_id = _to_int(getattr(deal, "id", None))
             if deal_id <= 0:
-                return self._callback_response(request_id, 1, "Deal id is empty")
+                return await self._callback_error(
+                    runtime,
+                    request_id,
+                    "perform",
+                    "Deal id is empty",
+                    order_id=order_id,
+                )
             if (
                 runtime.paid_stage_id > 0
                 and _to_int(getattr(deal, "stage_id", None)) != runtime.paid_stage_id
@@ -1393,7 +1499,14 @@ class RegosPayDealsIntegration(ClientBase):
                         deal_id,
                         response.result,
                     )
-                    return self._callback_response(request_id, 1, "Deal stage update failed")
+                    return await self._callback_error(
+                        runtime,
+                        request_id,
+                        "perform",
+                        "Deal stage update failed",
+                        deal_id=deal_id,
+                        order_id=order_id,
+                    )
 
             await self._publish_paid_message(
                 api=api,
@@ -1401,7 +1514,13 @@ class RegosPayDealsIntegration(ClientBase):
                 order_id=order_id,
             )
 
-        return self._callback_response(request_id, 0)
+        return await self._callback_ok(
+            runtime,
+            request_id,
+            "perform",
+            deal_id=deal_id,
+            order_id=order_id,
+        )
 
     async def _load_runtime(
         self,
@@ -1700,6 +1819,40 @@ class RegosPayDealsIntegration(ClientBase):
             expected = _md5(source)
             return bool(sign) and sign == expected.lower()
         return False
+
+    async def _callback_error(
+        self,
+        runtime: RuntimeConfig,
+        request_id: int,
+        method: str,
+        description: str,
+        **details: Any,
+    ) -> Dict[str, Any]:
+        await self._trace(
+            runtime.connected_integration_id,
+            "callback_error",
+            method=method,
+            request_id=request_id,
+            reason=description,
+            **details,
+        )
+        return self._callback_response(request_id, 1, description)
+
+    async def _callback_ok(
+        self,
+        runtime: RuntimeConfig,
+        request_id: int,
+        method: str,
+        **details: Any,
+    ) -> Dict[str, Any]:
+        await self._trace(
+            runtime.connected_integration_id,
+            "callback_ok",
+            method=method,
+            request_id=request_id,
+            **details,
+        )
+        return self._callback_response(request_id, 0)
 
     def _callback_response(
         self,
