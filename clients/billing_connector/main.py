@@ -300,13 +300,14 @@ def _normalize_webhook_payload(
 
 class BillingConnectorIntegration(ClientBase):
     integration_key = "billing_connector"
+    redis_prefix = "bc"
 
     def __init__(self) -> None:
         self.connected_integration_id: Optional[str] = None
 
     @classmethod
     def _redis_key(cls, *parts: Any) -> str:
-        return redis_make_key(cls.integration_key, *parts)
+        return redis_make_key(cls.redis_prefix, *parts)
 
     @classmethod
     def _require_redis(cls) -> None:
@@ -315,11 +316,11 @@ class BillingConnectorIntegration(ClientBase):
 
     @classmethod
     def _stream_key(cls) -> str:
-        return cls._redis_key("stream", "events")
+        return cls._redis_key("s", "e")
 
     @classmethod
     def _dlq_stream_key(cls) -> str:
-        return cls._redis_key("stream", "dlq")
+        return cls._redis_key("s", "dlq")
 
     @classmethod
     def _worker_task_key(cls, worker_index: int) -> str:
@@ -335,7 +336,7 @@ class BillingConnectorIntegration(ClientBase):
     ) -> str:
         raw_event_key = _text(event_id) or _stable_hash({"action": action, "payload": payload})
         event_hash = hashlib.sha256(raw_event_key.encode("utf-8")).hexdigest()[:24]
-        return cls._redis_key("queue_dedupe", connected_integration_id, event_hash)
+        return cls._redis_key("qd", connected_integration_id, event_hash)
 
     @classmethod
     def _resolve_stream_ttl(cls) -> int:
@@ -690,11 +691,23 @@ class BillingConnectorIntegration(ClientBase):
             raise BillingConnectorError("connected_integration_id is required")
         return ci
 
+    def _lifecycle_ci(self, payload: Dict[str, Any]) -> str:
+        """Use the new connected integration id; the old one may already be deleted."""
+        old_ci = _text(payload.get("old_connected_integration_id"))
+        candidates = (
+            _text(payload.get("new_connected_integration_id")),
+            _text(payload.get("connected_integration_id")),
+            _text(self.connected_integration_id),
+        )
+        for ci in candidates:
+            if ci and ci != old_ci:
+                self.connected_integration_id = ci
+                return ci
+        raise BillingConnectorError("connected_integration_id is required")
+
     async def connect(self, **kwargs: Any) -> Dict[str, Any]:
         """Validate billing settings; webhook subscription is configured manually."""
-        runtime = await self._load_runtime(
-            connected_integration_id=_optional_text(kwargs.get("connected_integration_id"))
-        )
+        runtime = await self._load_runtime(connected_integration_id=self._lifecycle_ci(kwargs))
         self._require_redis()
         await self._ensure_stream_workers()
         return {
@@ -703,6 +716,7 @@ class BillingConnectorIntegration(ClientBase):
             "billing_client_info_url": runtime.billing_client_info_url,
             "webhooks": sorted(SUPPORTED_WEBHOOKS),
             "queue_enabled": True,
+            "stream_key": self._stream_key(),
         }
 
     async def reconnect(self, **kwargs: Any) -> Dict[str, Any]:
@@ -926,9 +940,8 @@ class BillingConnectorIntegration(ClientBase):
                 "message_text": message_text,
             }
         )
-        dedupe_key = redis_make_key(
-            "billing_connector",
-            "sync",
+        dedupe_key = self._redis_key(
+            "sy",
             runtime.connected_integration_id,
             ticket_id,
             client_id,
