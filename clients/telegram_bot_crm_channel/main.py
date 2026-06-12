@@ -151,7 +151,6 @@ class TelegramBotCrmChannelConfig:
     }
 
     CHAT_MESSAGE_ADD_CLOSED_ENTITY_ERROR = 1220
-    PHONE_PROMPT_COOLDOWN_SEC = 24 * 60 * 60
     TELEGRAM_FIELD_RAW_KEY = "telegram_id"
     TELEGRAM_FIELD_FULL_KEY = "field_telegram_id"
     TELEGRAM_FIELD_NAME = "Telegram ID"
@@ -413,53 +412,7 @@ def _normalize_phone(value: Any) -> Optional[str]:
     return digits or None
 
 
-_PHONE_IN_TEXT_RE = re.compile(r"(?:\+?\d[\d\s\-()]{7,}\d)")
 _EMAIL_IN_TEXT_RE = re.compile(r"(?i)[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}")
-
-
-def _is_phone_candidate(
-    digits: Optional[str],
-    *,
-    raw_chunk: str,
-    allow_plain_nine_digit: bool,
-) -> bool:
-    value = str(digits or "").strip()
-    if not value:
-        return False
-    if len(value) == 14:
-        # PINFL length, never treat as phone.
-        return False
-    if len(value) not in {9, 12}:
-        return False
-    if len(value) == 12:
-        return True
-
-    # 9 digits are ambiguous (phone vs INN). Accept plain 9 only in explicit flow.
-    if allow_plain_nine_digit:
-        return True
-    raw = str(raw_chunk or "")
-    has_formatting = any(char in raw for char in "+-() ") and raw != value
-    if has_formatting:
-        return True
-    # Keep a lightweight numeric heuristic for local numbers that start like country code.
-    return value.startswith("998")
-
-
-def _extract_phone_from_text(value: Any, *, allow_plain_nine_digit: bool = False) -> Optional[str]:
-    text = str(value or "").strip()
-    if not text:
-        return None
-
-    for match in _PHONE_IN_TEXT_RE.finditer(text):
-        raw_chunk = str(match.group(0) or "").strip()
-        candidate = _normalize_phone(raw_chunk)
-        if _is_phone_candidate(
-            candidate,
-            raw_chunk=raw_chunk,
-            allow_plain_nine_digit=allow_plain_nine_digit,
-        ):
-            return candidate
-    return None
 
 
 def _normalize_email(value: Any) -> Optional[str]:
@@ -1572,6 +1525,15 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         phone_state = cls._parse_phone_state(
             current_payload.get(TelegramBotCrmChannelConfig.PHONE_STATE_FIELD)
         )
+        current_ticket_id = _parse_int(str(current_payload.get("ticket_id") or ""), None)
+        new_ticket_id = _parse_int(str(ticket_id or ""), None)
+        if (
+            phone_state
+            and current_ticket_id
+            and new_ticket_id
+            and int(current_ticket_id) != int(new_ticket_id)
+        ):
+            phone_state["prompted_at_ts"] = 0
         payload_obj: Dict[str, Any] = {
             "bot_hash": str(bot_hash),
             "tg_chat_id": str(tg_chat_id),
@@ -3115,24 +3077,8 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         return normalized_phone
 
     @classmethod
-    def _extract_client_phone(
-        cls,
-        message: Dict[str, Any],
-        *,
-        allow_plain_nine_digit: bool = False,
-    ) -> Optional[str]:
-        contact_phone = cls._extract_own_contact_phone(message)
-        if contact_phone:
-            return contact_phone
-
-        for field_name in ("text", "caption"):
-            extracted = _extract_phone_from_text(
-                message.get(field_name),
-                allow_plain_nine_digit=allow_plain_nine_digit,
-            )
-            if extracted:
-                return extracted
-        return None
+    def _extract_client_phone(cls, message: Dict[str, Any]) -> Optional[str]:
+        return cls._extract_own_contact_phone(message)
 
     @staticmethod
     def _extract_client_email(message: Dict[str, Any]) -> Optional[str]:
@@ -3301,7 +3247,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 )
             if not response.ok:
                 logger.warning(
-                    "Client/Edit rejected while saving phone from text: ci=%s client_id=%s payload=%s",
+                    "Client/Edit rejected while saving phone from Telegram contact: ci=%s client_id=%s payload=%s",
                     connected_integration_id,
                     lead_id,
                     response.result,
@@ -3310,7 +3256,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             return True
         except Exception as error:
             logger.warning(
-                "Failed to save client phone from text: ci=%s client_id=%s error=%s",
+                "Failed to save client phone from Telegram contact: ci=%s client_id=%s error=%s",
                 connected_integration_id,
                 lead_id,
                 error,
@@ -3374,7 +3320,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 )
             if not response.ok:
                 logger.warning(
-                    "RetailCustomer/Edit rejected while saving phone from text: "
+                    "RetailCustomer/Edit rejected while saving phone from Telegram contact: "
                     "ci=%s customer_id=%s payload=%s",
                     connected_integration_id,
                     resolved_customer_id,
@@ -3384,7 +3330,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             return True
         except Exception as error:
             logger.warning(
-                "Failed to save retail customer phone from text: ci=%s tg_chat_id=%s customer_id=%s error=%s",
+                "Failed to save retail customer phone from Telegram contact: ci=%s tg_chat_id=%s customer_id=%s error=%s",
                 connected_integration_id,
                 tg_chat_id,
                 customer_id,
@@ -3402,6 +3348,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         chat_id: str,
         tg_chat_id: str,
         message: Dict[str, Any],
+        send_customer_prompt: bool = True,
     ) -> None:
         request_text = cls._normalize_text_value(runtime.phone_request_text)
         if not request_text or not cls._is_private_chat_message(message):
@@ -3418,19 +3365,10 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             mapping_payload.get(TelegramBotCrmChannelConfig.PHONE_STATE_FIELD)
         )
         prompted_at_ts = int(state.get("prompted_at_ts") or 0) if state else 0
-        allow_plain_nine_digit = prompted_at_ts > 0
-        client_phone = cls._extract_client_phone(
-            message,
-            allow_plain_nine_digit=allow_plain_nine_digit,
-        )
+        client_phone = cls._extract_client_phone(message)
         client_has_phone = bool(_normalize_phone(client_phone))
 
-        state_has_phone = bool(
-            state
-            and bool(state.get("lead_has_phone"))
-            and not prompted_at_ts
-        )
-        if client_has_phone and not state_has_phone:
+        if client_has_phone:
             await cls._set_lead_phone_if_missing_best_effort(
                 connected_integration_id=connected_integration_id,
                 lead_id=lead_id,
@@ -3465,61 +3403,56 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                 prompted_at_ts=0 if bool(refreshed_lead_has_phone) else prompted_at_ts,
                 ttl_sec=runtime.state_ttl_sec,
             )
-            if prompted_at_ts > 0 or bool(cls._extract_own_contact_phone(message)):
-                try:
-                    bot = await cls._get_bot(bot_cfg.token)
-                    await bot.send_message(
-                        chat_id=_tg_chat_id_cast(tg_chat_id),
-                        text=TelegramBotCrmChannelConfig.PHONE_RECEIVED_TELEGRAM_TEXT,
-                        reply_markup=ReplyKeyboardRemove(),
-                    )
-                    message_id = _parse_int(str(message.get("message_id") or ""), None) or _now_ts()
-                    await cls._send_phone_system_message_best_effort(
-                        connected_integration_id=connected_integration_id,
-                        chat_id=chat_id,
-                        external_message_id=(
-                            f"tgsys:phone_received_confirm:{bot_cfg.bot_hash}:{tg_chat_id}:{message_id}"
-                        ),
-                        text=TelegramBotCrmChannelConfig.PHONE_RECEIVED_TELEGRAM_TEXT,
-                    )
-                except Exception as error:
-                    logger.warning(
-                        "Failed to remove phone request keyboard: ci=%s bot_hash=%s tg_chat_id=%s error=%s",
-                        connected_integration_id,
-                        bot_cfg.bot_hash,
-                        tg_chat_id,
-                        error,
-                    )
+            try:
+                bot = await cls._get_bot(bot_cfg.token)
+                await bot.send_message(
+                    chat_id=_tg_chat_id_cast(tg_chat_id),
+                    text=TelegramBotCrmChannelConfig.PHONE_RECEIVED_TELEGRAM_TEXT,
+                    reply_markup=ReplyKeyboardRemove(),
+                )
+                message_id = _parse_int(str(message.get("message_id") or ""), None) or _now_ts()
+                await cls._send_phone_system_message_best_effort(
+                    connected_integration_id=connected_integration_id,
+                    chat_id=chat_id,
+                    external_message_id=(
+                        f"tgsys:phone_received_confirm:{bot_cfg.bot_hash}:{tg_chat_id}:{message_id}"
+                    ),
+                    text=TelegramBotCrmChannelConfig.PHONE_RECEIVED_TELEGRAM_TEXT,
+                )
+            except Exception as error:
+                logger.warning(
+                    "Failed to remove phone request keyboard: ci=%s bot_hash=%s tg_chat_id=%s error=%s",
+                    connected_integration_id,
+                    bot_cfg.bot_hash,
+                    tg_chat_id,
+                    error,
+                )
             return
 
-        lead_has_phone: Optional[bool] = None
-        if state:
-            lead_has_phone = bool(state.get("lead_has_phone"))
-
-        if lead_has_phone is None or not state:
-            lead_has_phone = await cls._resolve_lead_has_phone_best_effort(
-                connected_integration_id=connected_integration_id,
-                lead_id=lead_id,
-            )
+        lead_has_phone = await cls._resolve_lead_has_phone_best_effort(
+            connected_integration_id=connected_integration_id,
+            lead_id=lead_id,
+        )
 
         if lead_has_phone is None:
+            lead_has_phone = bool(state.get("lead_has_phone")) if state else False
+
+        if lead_has_phone:
+            await cls._save_phone_state(
+                connected_integration_id=connected_integration_id,
+                bot_hash=bot_cfg.bot_hash,
+                tg_chat_id=tg_chat_id,
+                lead_has_phone=True,
+                retail_has_phone=True,
+                prompted_at_ts=0,
+                ttl_sec=runtime.state_ttl_sec,
+            )
             return
 
-        cooldown_sec = max(TelegramBotCrmChannelConfig.PHONE_PROMPT_COOLDOWN_SEC, 60)
         now_ts = _now_ts()
-        need_prompt = not lead_has_phone
-
-        # Before sending a repeated prompt, re-check CRM once to avoid stale cache.
-        if need_prompt and prompted_at_ts and now_ts - prompted_at_ts >= cooldown_sec:
-            refreshed_lead = await cls._resolve_lead_has_phone_best_effort(
-                connected_integration_id=connected_integration_id,
-                lead_id=lead_id,
-            )
-            if refreshed_lead is not None:
-                lead_has_phone = refreshed_lead
-            need_prompt = not lead_has_phone
-
-        if need_prompt and (not prompted_at_ts or now_ts - prompted_at_ts >= cooldown_sec):
+        system_prompt_already_sent = prompted_at_ts > 0
+        prompt_sent = False
+        if send_customer_prompt:
             try:
                 bot = await cls._get_bot(bot_cfg.token)
                 await bot.send_message(
@@ -3538,16 +3471,7 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                         one_time_keyboard=True,
                     ),
                 )
-                prompted_at_ts = now_ts
-                message_id = _parse_int(str(message.get("message_id") or ""), None) or now_ts
-                await cls._send_phone_system_message_best_effort(
-                    connected_integration_id=connected_integration_id,
-                    chat_id=chat_id,
-                    external_message_id=(
-                        f"tgsys:phone_request_prompt:{bot_cfg.bot_hash}:{tg_chat_id}:{message_id}"
-                    ),
-                    text=request_text,
-                )
+                prompt_sent = True
             except Exception as error:
                 logger.warning(
                     "Failed to send phone request prompt: ci=%s bot_hash=%s tg_chat_id=%s error=%s",
@@ -3557,13 +3481,24 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                     error,
                 )
 
+        if not system_prompt_already_sent and (prompt_sent or not send_customer_prompt):
+            await cls._send_phone_system_message_best_effort(
+                connected_integration_id=connected_integration_id,
+                chat_id=chat_id,
+                external_message_id=(
+                    f"tgsys:phone_request_prompt:{bot_cfg.bot_hash}:{tg_chat_id}:{chat_id}"
+                ),
+                text=TelegramBotCrmChannelConfig.PHONE_REQUEST_SENT_SYSTEM_TEXT,
+            )
+            prompted_at_ts = now_ts
+
         await cls._save_phone_state(
             connected_integration_id=connected_integration_id,
             bot_hash=bot_cfg.bot_hash,
             tg_chat_id=tg_chat_id,
-            lead_has_phone=bool(lead_has_phone),
+            lead_has_phone=False,
             retail_has_phone=True,
-            prompted_at_ts=prompted_at_ts if need_prompt else 0,
+            prompted_at_ts=prompted_at_ts if (prompted_at_ts or prompt_sent) else 0,
             ttl_sec=runtime.state_ttl_sec,
         )
 
@@ -5512,6 +5447,26 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
             tg_chat_id=tg_chat_id,
             message=message,
         )
+        try:
+            await cls._maybe_request_phone_best_effort(
+                connected_integration_id=connected_integration_id,
+                runtime=runtime,
+                bot_cfg=bot_cfg,
+                lead_id=fresh_lead_id,
+                chat_id=fresh_chat_id,
+                tg_chat_id=tg_chat_id,
+                message=message,
+                send_customer_prompt=False,
+            )
+        except Exception as retry_phone_error:
+            logger.warning(
+                "Phone request flow after reopen failed (ignored): ci=%s bot_hash=%s tg_chat_id=%s lead_id=%s error=%s",
+                connected_integration_id,
+                bot_hash,
+                tg_chat_id,
+                fresh_lead_id,
+                retry_phone_error,
+            )
         await cls._mark_chat_read_best_effort(
             connected_integration_id=connected_integration_id,
             chat_id=fresh_chat_id,
@@ -6503,13 +6458,6 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
         normalized_email = _normalize_email(client_email)
 
         lookup_requests: List[Tuple[str, ClientGetRequest]] = []
-        if client_external_id:
-            lookup_requests.append(
-                (
-                    "external_id",
-                    ClientGetRequest(external_ids=[client_external_id], limit=20, offset=0),
-                )
-            )
         if telegram_field_id:
             lookup_requests.append(
                 (
@@ -6525,6 +6473,13 @@ class TelegramBotCrmChannelIntegration(IntegrationTelegramBase, ClientBase):
                         limit=20,
                         offset=0,
                     ),
+                )
+            )
+        if client_external_id:
+            lookup_requests.append(
+                (
+                    "external_id",
+                    ClientGetRequest(external_ids=[client_external_id], limit=20, offset=0),
                 )
             )
         if normalized_phone:
