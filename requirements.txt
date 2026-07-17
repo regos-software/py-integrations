@@ -1,0 +1,17 @@
+fastapi
+httpx
+PyJWT[crypto]
+aiohttp
+requests
+uvicorn
+python-dotenv
+redis
+asyncmy
+pydantic-settings
+aiogram
+tenacity
+aiosmtplib
+pydantic[email]
+qrcode
+pillow
+openpyxl

@@ -1,0 +1,138 @@
+import asyncio
+from typing import Any, Awaitable, Callable, Dict, List, Optional
+
+
+MessageSender = Callable[[str, str, Optional[str]], Awaitable[Any]]
+
+
+def _telegram_permanent_error_reason(error: object) -> Optional[str]:
+    text = str(error or "").lower()
+    if "bot was blocked by the user" in text:
+        return "bot was blocked"
+    if "bot was kicked from" in text and "chat" in text:
+        return "bot was kicked from the chat"
+    if "chat not found" in text or "bot is not a member of the chat" in text:
+        return "chat is unavailable"
+    if "not enough rights to send text messages to the chat" in text:
+        return "bot lacks rights"
+    if "not enough rights to send messages" in text:
+        return "bot lacks rights"
+    if "forbidden: user is deactivated" in text:
+        return "user is deactivated"
+    if "marked unavailable" in text:
+        return "chat is marked unavailable"
+    return None
+
+
+async def send_messages(
+    *,
+    bot=None,
+    messages: List[Dict[str, str]],
+    sleep_between: float,
+    logger,
+    concurrency: int = 10,
+    sender: Optional[MessageSender] = None,
+) -> Dict:
+    """
+    Send Telegram messages. If sleep_between is zero, messages are sent concurrently
+    with a bounded semaphore; otherwise order and delay are preserved.
+    """
+
+    async def send_one(msg: Dict[str, str]) -> Dict:
+        if "recipient" not in msg or not msg["recipient"]:
+            return {"status": "error", "error": "Missing recipient", "message": msg}
+
+        chat_id = str(msg["recipient"])
+        text = str(msg.get("message") or "")
+        image_url = str(msg.get("image_url") or "").strip() or None
+        if not text and not image_url:
+            return {
+                "status": "error",
+                "error": "Empty message text/image_url",
+                "message": msg,
+            }
+
+        try:
+            if sender:
+                await sender(chat_id, text, image_url)
+            else:
+                if bot is None:
+                    raise RuntimeError("Telegram bot or sender is required")
+                try:
+                    if image_url:
+                        await bot.send_photo(
+                            chat_id=chat_id,
+                            photo=image_url,
+                            caption=text or None,
+                        )
+                    else:
+                        await bot.send_message(chat_id=chat_id, text=text)
+                except Exception as error:
+                    error_text = str(error or "").lower()
+                    if not (
+                        "can't parse entities" in error_text
+                        or "can't find end of the entity" in error_text
+                        or "unsupported start tag" in error_text
+                        or "parse entities" in error_text
+                    ):
+                        raise
+                    logger.warning(
+                        "Telegram markdown send rejected, retrying as plain text: chat=%s error=%s",
+                        chat_id,
+                        error,
+                    )
+                    if image_url:
+                        await bot.send_photo(
+                            chat_id=chat_id,
+                            photo=image_url,
+                            caption=text or None,
+                            parse_mode=None,
+                        )
+                    else:
+                        await bot.send_message(chat_id=chat_id, text=text, parse_mode=None)
+            logger.debug("Sent Telegram message to chat %s", chat_id)
+            return {
+                "status": "sent",
+                "chat_id": chat_id,
+                "message": text,
+                "image_url": image_url,
+            }
+        except Exception as error:
+            permanent_reason = _telegram_permanent_error_reason(error)
+            if permanent_reason:
+                logger.info(
+                    "Telegram send skipped for chat %s because %s: %s",
+                    chat_id,
+                    permanent_reason,
+                    error,
+                )
+            else:
+                logger.error("Telegram send error for chat %s: %s", chat_id, error)
+            result = {
+                "status": "error",
+                "chat_id": chat_id,
+                "message": text,
+                "image_url": image_url,
+                "error": str(error),
+            }
+            migrate_to_chat_id = getattr(error, "migrate_to_chat_id", None)
+            if migrate_to_chat_id:
+                result["migrate_to_chat_id"] = str(migrate_to_chat_id)
+            return result
+
+    if sleep_between and sleep_between > 0:
+        results: List[Dict] = []
+        for msg in messages:
+            results.append(await send_one(msg))
+            await asyncio.sleep(sleep_between)
+    else:
+        semaphore = asyncio.Semaphore(max(int(concurrency or 1), 1))
+
+        async def guarded_send(msg: Dict[str, str]) -> Dict:
+            async with semaphore:
+                return await send_one(msg)
+
+        results = await asyncio.gather(*(guarded_send(msg) for msg in messages))
+
+    sent_count = sum(1 for item in results if item["status"] == "sent")
+    return {"sent_messages": sent_count, "details": results}

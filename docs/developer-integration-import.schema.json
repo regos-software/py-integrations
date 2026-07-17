@@ -1,0 +1,347 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "/docs/developer-integration-import.schema.json",
+  "title": "Regos Developer Integration Import",
+  "description": "Canonical machine-readable contract for importing integration data in the developer cabinet. Media fields are intentionally excluded.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "integration"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "const": "developer.integration.import.v1",
+      "description": "Contract version. Agents must set this exact value."
+    },
+    "integration": {
+      "$ref": "#/$defs/integration"
+    },
+    "settings": {
+      "type": "array",
+      "description": "Integration settings. If provided, the current settings list in the form is replaced by this array.",
+      "maxItems": 50,
+      "items": {
+        "$ref": "#/$defs/setting"
+      },
+      "default": []
+    }
+  },
+  "$defs": {
+    "integration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "handler",
+        "endpoint",
+        "group_id",
+        "version",
+        "docs_url",
+        "has_web_ui",
+        "has_iap",
+        "proxy_enabled",
+        "name_rus",
+        "name_uzb",
+        "name_eng",
+        "description_rus",
+        "description_uzb",
+        "description_eng",
+        "full_description_rus",
+        "full_description_uzb",
+        "full_description_eng"
+      ],
+      "properties": {
+        "key": {
+          "type": "string",
+          "description": "Integration key. Applied only when creating a new integration; ignored on edit.",
+          "minLength": 1,
+          "maxLength": 100,
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "handler": {
+          "$ref": "#/$defs/handler",
+          "description": "Integration handler. Applied only when creating a new integration; ignored on edit."
+        },
+        "endpoint": {
+          "type": "string",
+          "description": "Integration endpoint URL.",
+          "format": "uri",
+          "maxLength": 255
+        },
+        "group_id": {
+          "type": "integer",
+          "description": "Integration group identifier.",
+          "minimum": 1
+        },
+        "version": {
+          "type": "string",
+          "description": "Semantic version used by the integration card.",
+          "maxLength": 50,
+          "pattern": "^\\d+\\.\\d+\\.\\d+$"
+        },
+        "docs_url": {
+          "type": "string",
+          "description": "Public documentation URL.",
+          "format": "uri",
+          "maxLength": 500
+        },
+        "webhooks": {
+          "type": "array",
+          "description": "Webhook event names supported by the integration.",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true,
+          "default": []
+        },
+        "has_web_ui": {
+          "type": "boolean",
+          "description": "Whether the integration has a web UI."
+        },
+        "has_iap": {
+          "type": "boolean",
+          "description": "Whether the integration has in-app purchases."
+        },
+        "proxy_enabled": {
+          "type": "boolean",
+          "description": "Whether requests to the handler should be proxied through Regos."
+        },
+        "name_rus": {
+          "$ref": "#/$defs/localizedShortText"
+        },
+        "name_uzb": {
+          "$ref": "#/$defs/localizedShortText"
+        },
+        "name_eng": {
+          "$ref": "#/$defs/localizedShortText"
+        },
+        "description_rus": {
+          "$ref": "#/$defs/localizedDescription"
+        },
+        "description_uzb": {
+          "$ref": "#/$defs/localizedDescription"
+        },
+        "description_eng": {
+          "$ref": "#/$defs/localizedDescription"
+        },
+        "full_description_rus": {
+          "$ref": "#/$defs/localizedFullDescription"
+        },
+        "full_description_uzb": {
+          "$ref": "#/$defs/localizedFullDescription"
+        },
+        "full_description_eng": {
+          "$ref": "#/$defs/localizedFullDescription"
+        }
+      }
+    },
+    "setting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "setting_key",
+        "data_type",
+        "name_rus",
+        "name_uzb",
+        "name_eng",
+        "description_rus",
+        "description_uzb",
+        "description_eng",
+        "placeholder_rus",
+        "placeholder_uzb",
+        "placeholder_eng"
+      ],
+      "properties": {
+        "setting_key": {
+          "type": "string",
+          "description": "Setting key, unique within the integration.",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "order_index": {
+          "type": "integer",
+          "description": "Display order. If omitted, the importer uses the array index.",
+          "minimum": 0
+        },
+        "data_type": {
+          "$ref": "#/$defs/dataType"
+        },
+        "catalog": {
+          "$ref": "#/$defs/catalog"
+        },
+        "reference_key": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Key of another Catalog setting this setting depends on.",
+          "maxLength": 100
+        },
+        "enum_values": {
+          "type": "array",
+          "description": "Allowed values for Enum settings.",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "default_value": {
+          "type": "string",
+          "description": "Default setting value.",
+          "maxLength": 500
+        },
+        "hidden": {
+          "type": "boolean",
+          "description": "Whether the setting is hidden.",
+          "default": false
+        },
+        "secret": {
+          "type": "boolean",
+          "description": "Whether the setting value is secret and must be masked in UI.",
+          "default": false
+        },
+        "required": {
+          "type": "boolean",
+          "description": "Whether the setting is required.",
+          "default": false
+        },
+        "multiple_select": {
+          "type": "boolean",
+          "description": "Whether multiple values can be selected for Catalog settings.",
+          "default": false
+        },
+        "name_rus": {
+          "$ref": "#/$defs/localizedShortText"
+        },
+        "name_uzb": {
+          "$ref": "#/$defs/localizedShortText"
+        },
+        "name_eng": {
+          "$ref": "#/$defs/localizedShortText"
+        },
+        "description_rus": {
+          "$ref": "#/$defs/localizedDescription"
+        },
+        "description_uzb": {
+          "$ref": "#/$defs/localizedDescription"
+        },
+        "description_eng": {
+          "$ref": "#/$defs/localizedDescription"
+        },
+        "placeholder_rus": {
+          "$ref": "#/$defs/localizedShortText"
+        },
+        "placeholder_uzb": {
+          "$ref": "#/$defs/localizedShortText"
+        },
+        "placeholder_eng": {
+          "$ref": "#/$defs/localizedShortText"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "data_type": {
+                "const": "Catalog"
+              }
+            },
+            "required": [
+              "data_type"
+            ]
+          },
+          "then": {
+            "required": [
+              "catalog"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "data_type": {
+                "const": "Enum"
+              }
+            },
+            "required": [
+              "data_type"
+            ]
+          },
+          "then": {
+            "required": [
+              "enum_values"
+            ]
+          }
+        }
+      ]
+    },
+    "handler": {
+      "type": "string",
+      "enum": [
+        "Marketplace",
+        "EPS",
+        "EDO",
+        "SMS",
+        "TG_BOT",
+        "Custom",
+        "Email",
+        "ChatBot"
+      ]
+    },
+    "dataType": {
+      "type": "string",
+      "enum": [
+        "Integer",
+        "Float",
+        "String",
+        "DateTime",
+        "Catalog",
+        "Enum",
+        "Boolean",
+        "Date",
+        "Time",
+        "Text"
+      ]
+    },
+    "catalog": {
+      "type": "string",
+      "enum": [
+        "Firms",
+        "Stocks",
+        "PriceTypes",
+        "DeliveryTypes",
+        "OrderFroms",
+        "ItemImageSizes",
+        "ItemGroup",
+        "RetailCustomerGroup",
+        "Users",
+        "CrmPipelines",
+        "CrmChannels",
+        "CrmPipelineStages",
+        "PaymentTypes",
+        "PartnerGroups",
+        "AccountOperationIncomeCategories",
+        "AccountOperationExpenseCategories"
+      ]
+    },
+    "localizedShortText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255
+    },
+    "localizedDescription": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "localizedFullDescription": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
+    }
+  }
+}

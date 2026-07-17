@@ -1,0 +1,815 @@
+import asyncio
+import re
+import time
+from typing import Optional, Union, Any, Dict, Tuple
+
+import httpx
+from fastapi import APIRouter, Header, Request, Path, Response
+from fastapi.responses import HTMLResponse, RedirectResponse
+from starlette.responses import JSONResponse
+
+from core.api.regos_api import RegosAPI
+from schemas.integration.base import (
+    IntegrationRequest,
+    IntegrationSuccessResponse,
+    IntegrationErrorResponse,
+    IntegrationErrorModel,
+)
+from schemas.api.integrations.connected_integration import ConnectedIntegrationGetRequest
+from core.logger import setup_logger
+
+# Импорт доступных интеграций (класс, не модуль)
+from clients.getsms.main import GetSmsIntegration
+from clients.eskiz_sms.main import EskizSmsIntegration
+from clients.email_sender.main import EmailSenderIntegration
+from clients.telegram_bot_notification.main import TelegramBotNotificationIntegration
+from clients.telegram_bot_quantity.main import TelegramBotMinQuantityIntegration
+from clients.telegram_bot_orders.main import TelegramBotOrdersIntegration
+from clients.telegram_bot_crm_channel.main import TelegramBotCrmChannelIntegration
+from clients.telegram_business_crm_channel.main import TelegramBusinessCrmChannelIntegration
+from clients.asterisk_crm_channel.main import AsteriskCrmChannelIntegration
+from clients.instagram_crm_channel.main import InstagramCrmChannelIntegration
+from clients.meta_leadgen_crm_channel.main import MetaLeadgenCrmChannelIntegration
+from clients.external_chat_crm_channel.main import ExternalChatCrmChannelIntegration
+from clients.gpt_crm_chat_assistant.main import GptCrmChatAssistantIntegration
+from clients.chatgpt_regos_assistant.main import ChatGptRegosAssistantIntegration
+from clients.tsd.main import TsdIntegration
+from clients.marketplace_yandex_eats.main import YandexEatsIntegration
+from clients.marketplace_uzum_tezkor.main import UzumTezkorIntegration
+from clients.marketplace_toserver.main import MarketplaceToServerIntegration
+from clients.edo_fakturauz.main import EdoFakturaUzIntegration
+from clients.edo_didox.main import EdoDidoxIntegration
+from clients.regos_pay_deals.main import RegosPayDealsIntegration
+from clients.billing_connector.main import BillingConnectorIntegration
+from clients.bank_ipak_yuli.main import BankIpakYuliIntegration
+
+router = APIRouter()
+logger = setup_logger("clients_route")
+
+# Маппинг доступных интеграций
+INTEGRATION_CLASSES = {
+    "getsms": GetSmsIntegration,
+    "eskiz_sms": EskizSmsIntegration,
+    "email_sender": EmailSenderIntegration,
+    "regos_telegram_notifier": TelegramBotNotificationIntegration,
+    "regos_telegram_minquantity": TelegramBotMinQuantityIntegration,
+    "telegram_bot_min_quantity": TelegramBotMinQuantityIntegration,
+    "telegram_bot_quantity": TelegramBotMinQuantityIntegration,
+    "telegram_bot_orders": TelegramBotOrdersIntegration,
+    "telegram_bot_crm_channel": TelegramBotCrmChannelIntegration,
+    "telegram_business_crm_channel": TelegramBusinessCrmChannelIntegration,
+    "asterisk_crm_channel": AsteriskCrmChannelIntegration,
+    "instagram_crm_channel": InstagramCrmChannelIntegration,
+    "meta_leadgen_crm_channel": MetaLeadgenCrmChannelIntegration,
+    "external_chat_crm_channel": ExternalChatCrmChannelIntegration,
+    "gpt_crm_chat_assistant": GptCrmChatAssistantIntegration,
+    "chatgpt_regos_assistant": ChatGptRegosAssistantIntegration,
+    "tsd": TsdIntegration,
+    "marketplace_yandex_eats": YandexEatsIntegration,
+    "marketplace_uzum_tezkor": UzumTezkorIntegration,
+    "marketplace_toserver": MarketplaceToServerIntegration,
+    "edo_fakturauz": EdoFakturaUzIntegration,
+    "edo_didox": EdoDidoxIntegration,
+    "regos_pay_deals": RegosPayDealsIntegration,
+    "billing_connector": BillingConnectorIntegration,
+    "bank_ipak_yuli": BankIpakYuliIntegration,
+}
+
+GLOBAL_EXTERNAL_CALLBACK_PATHS = {
+    ("chatgpt_regos_assistant", "regos-pay/callback"),
+}
+GLOBAL_EXTERNAL_PATH_PREFIXES = {
+    ("chatgpt_regos_assistant", "debug/"),
+}
+
+# Служебные заголовки, которые не нужно прокидывать обработчикам
+EXCLUDED_SERVICE_HEADERS = {
+    "host",
+    "connection",
+    "content-length",
+    "accept-encoding",
+}
+
+CONNECTED_INTEGRATION_ACTIVE_CACHE_TTL_SEC = 60
+_CONNECTED_INTEGRATION_ACTIVE_CACHE: Dict[str, Tuple[bool, float]] = {}
+_CONNECTED_INTEGRATION_ACTIVE_CACHE_LOCK = asyncio.Lock()
+BILLING_CONNECTOR_LIFECYCLE_ACTIONS = {"connect", "reconnect"}
+
+
+async def _is_connected_integration_active(
+    connected_integration_id: Optional[str],
+    *,
+    force_refresh: bool = False,
+) -> bool:
+    ci = str(connected_integration_id or "").strip()
+    if not ci:
+        return True
+
+    now = time.monotonic()
+    if not force_refresh:
+        async with _CONNECTED_INTEGRATION_ACTIVE_CACHE_LOCK:
+            cached = _CONNECTED_INTEGRATION_ACTIVE_CACHE.get(ci)
+        if cached and cached[1] > now:
+            return cached[0]
+
+    detected: Optional[bool] = None
+    last_error: Optional[Exception] = None
+    try:
+        async with RegosAPI(connected_integration_id=ci) as api:
+            response = await api.integrations.connected_integration.get(
+                ConnectedIntegrationGetRequest(
+                    connected_integration_ids=[ci],
+                    include_name=False,
+                    include_schedule=False,
+                )
+            )
+        if response.ok and isinstance(response.result, list):
+            for row in response.result:
+                row_ci = str(getattr(row, "connected_integration_id", "") or "").strip()
+                if row_ci and row_ci != ci:
+                    continue
+                row_active = getattr(row, "is_active", None)
+                if row_active is None:
+                    continue
+                detected = bool(row_active)
+                break
+    except httpx.HTTPStatusError as error:
+        last_error = error
+        status_code = (
+            int(error.response.status_code)
+            if error.response is not None
+            else None
+        )
+        if status_code in {401, 403, 404}:
+            detected = False
+    except Exception as error:
+        last_error = error
+
+    if detected is None:
+        if last_error is not None:
+            logger.warning(
+                "ConnectedIntegration/Get failed for active check: ci=%s error=%s",
+                ci,
+                last_error,
+            )
+        detected = False
+
+    active = bool(detected)
+    async with _CONNECTED_INTEGRATION_ACTIVE_CACHE_LOCK:
+        _CONNECTED_INTEGRATION_ACTIVE_CACHE[ci] = (
+            active,
+            now + CONNECTED_INTEGRATION_ACTIVE_CACHE_TTL_SEC,
+        )
+    return active
+
+
+def _inactive_integration_error(connected_integration_id: Optional[str]) -> IntegrationErrorResponse:
+    ci = str(connected_integration_id or "").strip()
+    description = (
+        f"ConnectedIntegration '{ci}' is inactive"
+        if ci
+        else "ConnectedIntegration is inactive"
+    )
+    return IntegrationErrorResponse(
+        result=IntegrationErrorModel(error=403, description=description)
+    )
+
+
+async def _cleanup_integration(
+    integration_instance: Any,
+    action_name: Optional[str] = None,
+    result: Optional[Any] = None,
+) -> None:
+    if not integration_instance:
+        return
+
+    if action_name in {"reconnect", "update_settings"}:
+        is_longpolling = False
+        is_longpolling_mode = getattr(integration_instance, "_is_longpolling_mode", None)
+        if callable(is_longpolling_mode):
+            try:
+                is_longpolling = bool(is_longpolling_mode())
+            except Exception as error:
+                logger.warning("Failed to detect longpolling mode: %s", error)
+        if is_longpolling:
+            return
+
+    if action_name == "connect":
+        payload = getattr(result, "result", result)
+        if isinstance(payload, dict) and payload.get("mode") == "longpolling":
+            return
+
+    aexit = getattr(integration_instance, "__aexit__", None)
+    if callable(aexit):
+        try:
+            await aexit(None, None, None)
+            return
+        except Exception as error:
+            logger.warning("Cleanup via __aexit__ failed: %s", error)
+
+    bot = getattr(integration_instance, "bot", None)
+    if bot and getattr(integration_instance, "_owns_bot_session", True):
+        session = getattr(bot, "session", None)
+        if session:
+            try:
+                await session.close()
+            except Exception as error:
+                logger.warning("Failed to close bot session: %s", error)
+        else:
+            try:
+                await bot.close()
+            except Exception as error:
+                logger.warning("Failed to close bot: %s", error)
+
+    http_client = getattr(integration_instance, "http_client", None)
+    if http_client:
+        try:
+            await http_client.aclose()
+        except Exception as error:
+            logger.warning("Failed to close http client: %s", error)
+
+
+def camel_to_snake(name: str) -> str:
+    """Преобразует CamelCase → snake_case."""
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+
+
+def _resolve_action_method(integration_instance: Any, action: str):
+    """
+    Resolve action method tolerant to variants:
+    Reconnect / ReConnect / re_connect / reconnect.
+    """
+    primary_name = camel_to_snake(action)
+    method = getattr(integration_instance, primary_name, None)
+    if callable(method):
+        return primary_name, method
+
+    compact_action = re.sub(r"[^a-z0-9]", "", str(action).lower())
+    for attr_name in dir(integration_instance):
+        candidate = getattr(integration_instance, attr_name, None)
+        if not callable(candidate):
+            continue
+        compact_attr = re.sub(r"[^a-z0-9]", "", str(attr_name).lower())
+        if compact_attr == compact_action:
+            return attr_name, candidate
+
+    return primary_name, None
+
+
+def _sanitize_headers(headers) -> Dict[str, str]:
+    """Удаляем служебные заголовки, остальные оставляем как есть."""
+    return {
+        k: v for k, v in headers.items() if k.lower() not in EXCLUDED_SERVICE_HEADERS
+    }
+
+
+def _connected_integration_id_from_external_path(external_path: Optional[str]) -> Optional[str]:
+    first_segment = str(external_path or "").strip("/").split("/", 1)[0].strip()
+    if re.fullmatch(r"[0-9a-fA-F]{32}", first_segment):
+        return first_segment
+    return None
+
+
+def _normalized_external_path(external_path: Optional[str]) -> str:
+    path = str(external_path or "").strip("/").lower()
+    if path.startswith("external/"):
+        return path.split("/", 1)[1].strip("/")
+    return path
+
+
+def _is_global_external_callback(client: str, external_path: Optional[str]) -> bool:
+    key = str(client or "").strip().lower()
+    path = _normalized_external_path(external_path)
+    if (key, path) in GLOBAL_EXTERNAL_CALLBACK_PATHS:
+        return True
+    for prefix_key, prefix in GLOBAL_EXTERNAL_PATH_PREFIXES:
+        if key == prefix_key and path.startswith(prefix):
+            return True
+    return False
+
+
+async def _read_body_safely(request: Request, raw: Optional[bytes] = None) -> Any:
+    """Считываем тело: пробуем JSON, затем текст, иначе bytes/None."""
+    if raw is None:
+        raw = await request.body()
+    if not raw:
+        return None
+    try:
+        return await request.json()
+    except Exception:
+        pass
+    try:
+        return raw.decode("utf-8", errors="ignore")
+    except Exception:
+        return raw  # bytes
+
+
+async def _connected_integration_key_from_id(
+    connected_integration_id: str,
+) -> Tuple[Optional[str], Optional[bool]]:
+    ci = str(connected_integration_id or "").strip()
+    if not ci:
+        return None, None
+    async with RegosAPI(connected_integration_id=ci) as api:
+        response = await api.integrations.connected_integration.get(
+            ConnectedIntegrationGetRequest(
+                connected_integration_ids=[ci],
+                include_name=False,
+                include_schedule=False,
+            )
+        )
+    if not response.ok or not isinstance(response.result, list):
+        return None, None
+    for row in response.result:
+        row_ci = str(getattr(row, "connected_integration_id", "") or "").strip()
+        if row_ci and row_ci != ci:
+            continue
+        key = str(getattr(row, "key", "") or "").strip()
+        if not key:
+            continue
+        is_active = getattr(row, "is_active", None)
+        if isinstance(is_active, bool):
+            async with _CONNECTED_INTEGRATION_ACTIVE_CACHE_LOCK:
+                _CONNECTED_INTEGRATION_ACTIVE_CACHE[ci] = (
+                    is_active,
+                    time.monotonic() + CONNECTED_INTEGRATION_ACTIVE_CACHE_TTL_SEC,
+                )
+        return key, is_active if isinstance(is_active, bool) else None
+    return None, None
+
+
+# ------------------------------- #
+#          REGOS endpoint         #
+# ------------------------------- #
+
+
+@router.post(
+    "/clients/{client}/",
+    response_model=Union[IntegrationSuccessResponse, IntegrationErrorResponse],
+    include_in_schema=False,
+)
+@router.post(
+    "/clients/{client}",
+    response_model=Union[IntegrationSuccessResponse, IntegrationErrorResponse],
+    tags=["Integration"],
+    summary="Обработка запроса от интеграции",
+)
+async def handle_integration(
+    client: str = Path(..., description="Название интеграции"),
+    request_body: IntegrationRequest = ...,
+    request: Request = ...,
+    connected_integration_id: Optional[str] = Header(
+        None, alias="connected-integration-id"
+    ),
+):
+    logger.info(f"--- Обработка запроса от клиента: {client} ---")
+    logger.info(f"Заголовок 'connected-integration-id': {connected_integration_id}")
+    logger.debug(f"Содержимое запроса: {request_body.dict()}")
+
+    request_json: Dict[str, Any] = {}
+    try:
+        raw_request_json = await request.json()
+        if isinstance(raw_request_json, dict):
+            request_json = raw_request_json
+    except Exception:
+        request_json = {}
+
+    integration_instance = None
+    result = None
+    integration_class = INTEGRATION_CLASSES.get(client)
+    if not integration_class:
+        logger.warning(f"Интеграция '{client}' не зарегистрирована.")
+        return IntegrationErrorResponse(
+            result=IntegrationErrorModel(
+                error=404, description=f"Интеграция '{client}' не найдена"
+            )
+        )
+
+    try:
+        integration_instance = integration_class()
+        resolved_connected_integration_id = (
+            connected_integration_id
+            or str(request_body.connected_integration_id or "").strip()
+            or None
+        )
+        if resolved_connected_integration_id:
+            integration_instance.connected_integration_id = resolved_connected_integration_id
+        logger.debug(f"Инстанс интеграции '{client}' успешно создан.")
+    except Exception as e:
+        logger.exception(f"Ошибка при инициализации интеграции '{client}': {e}")
+        return IntegrationErrorResponse(
+            result=IntegrationErrorModel(
+                error=500, description="Ошибка инициализации интеграции"
+            )
+        )
+
+    action_name, action_method = _resolve_action_method(
+        integration_instance, request_body.action
+    )
+    logger.debug(f"Action '{request_body.action}' → метод '{action_name}'")
+    if not callable(action_method):
+        await _cleanup_integration(integration_instance)
+        logger.warning(f"Метод '{action_name}' не найден в интеграции '{client}'")
+        return IntegrationErrorResponse(
+            result=IntegrationErrorModel(
+                error=400,
+                description=f"Метод '{request_body.action}' не реализован в '{client}'",
+            )
+        )
+
+    action_key = camel_to_snake(request_body.action)
+    # Billing Connector resolves the new connected integration id from lifecycle data.
+    # During reconnect the old id may already be deleted, so preflight would fail early.
+    skip_active_check = action_key in {"disconnect", "update_settings"} or (
+        client == "billing_connector" and action_key in BILLING_CONNECTOR_LIFECYCLE_ACTIONS
+    )
+    if resolved_connected_integration_id and not skip_active_check:
+        is_active = await _is_connected_integration_active(
+            resolved_connected_integration_id,
+            force_refresh=action_key in {"connect", "reconnect"},
+        )
+        if not is_active:
+            await _cleanup_integration(integration_instance)
+            return _inactive_integration_error(resolved_connected_integration_id)
+
+    try:
+        logger.info(
+            f"Вызов метода '{action_name}' с данными: {type(request_body.data)}"
+        )
+
+        if isinstance(request_body.data, dict):
+            call_data = dict(request_body.data)
+            if action_key == "handle_webhook":
+                for key in ("event_id", "occurred_at", "connected_integration_id"):
+                    if key in request_json and key not in call_data:
+                        call_data[key] = request_json[key]
+            result = await action_method(**call_data)
+        elif isinstance(request_body.data, list):
+            result = await action_method(messages=request_body.data)
+        else:
+            logger.error(f"Тип 'data' не поддерживается: {type(request_body.data)}")
+            return IntegrationErrorResponse(
+                result=IntegrationErrorModel(
+                    error=400, description="Неподдерживаемый тип данных в поле 'data'"
+                )
+            )
+
+        logger.info(f"Метод '{action_name}' завершён успешно")
+        logger.debug(f"Результат: {result}")
+        if isinstance(result, Response):
+            return result
+        return IntegrationSuccessResponse(result=result)
+
+    except Exception as e:
+        logger.exception(
+            f"Ошибка при выполнении метода '{action_name}' в '{client}': {e}"
+        )
+        return IntegrationErrorResponse(
+            result=IntegrationErrorModel(
+                error=500, description=f"Ошибка во время вызова метода '{action_name}'"
+            )
+        )
+
+
+    finally:
+        await _cleanup_integration(integration_instance, action_name, result)
+
+
+@router.get("/clients/{client}/", include_in_schema=False)
+@router.get(
+    "/clients/{client}",
+    tags=["Integration"],
+    summary="UI (GET) для интеграции: строго вызывает integration.handle_ui",
+)
+async def handel_ui(
+    client: str = Path(..., description="Название интеграции"),
+    request: Request = ...,
+    connected_integration_id: Optional[str] = Header(
+        None, alias="connected-integration-id"
+    ),
+) -> Any:
+    logger.info(f"[ui] GET UI для '{client}' {request.url}")
+    logger.info(f"[ui] Connected-Integration-Id: {connected_integration_id}")
+
+    # 1) Класс интеграции
+    integration_class = INTEGRATION_CLASSES.get(client)
+    if not integration_class:
+        return JSONResponse(
+            status_code=404,
+            content={"error": 404, "description": f"Интеграция '{client}' не найдена"},
+        )
+
+    # 2) Инстанс интеграции
+    try:
+        integration_instance = integration_class()
+        if connected_integration_id:
+            integration_instance.connected_integration_id = connected_integration_id
+    except Exception as e:
+        logger.exception(f"[ui] Ошибка инициализации интеграции '{client}': {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": 500, "description": "Ошибка инициализации интеграции"},
+        )
+
+    if connected_integration_id:
+        is_active = await _is_connected_integration_active(connected_integration_id)
+        if not is_active:
+            await _cleanup_integration(integration_instance)
+            inactive = _inactive_integration_error(connected_integration_id)
+            payload = inactive.model_dump(mode="json", exclude_none=True)
+            return JSONResponse(status_code=403, content=payload)
+
+    # 3) Envelope (GET без тела)
+    headers = _sanitize_headers(request.headers)
+    if connected_integration_id:
+        headers["Connected-Integration-Id"] = str(connected_integration_id)
+
+    envelope: Dict[str, Any] = {
+        "method": request.method,
+        "url": str(request.url),
+        "path": request.url.path,
+        "query": dict(request.query_params),
+        "headers": headers,
+        "body": None,
+        "client": request.client.host if request.client else None,
+    }
+
+    # 4) Строго требуем handle_ui у интеграции
+    handler = getattr(integration_instance, "handle_ui", None)
+    if not callable(handler):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": 400,
+                "description": f"У интеграции '{client}' нет метода handle_ui",
+            },
+        )
+
+    try:
+        result = await asyncio.wait_for(handler(envelope), timeout=180.0)
+
+        # 5) Проксируем ответ «как есть», с поддержкой редиректов и HTML
+        if isinstance(result, RedirectResponse):
+            return result
+
+        def _looks_like_url(s: str) -> bool:
+            return isinstance(s, str) and (
+                s.startswith("http://") or s.startswith("https://") or "://" in s
+            )
+
+        payload = getattr(result, "result", result)
+        if isinstance(payload, str) and _looks_like_url(payload):
+            return RedirectResponse(url=payload, status_code=302)
+        if isinstance(payload, dict):
+            for key in ("redirect_url", "url", "deeplink", "link"):
+                val = payload.get(key)
+                if isinstance(val, str) and _looks_like_url(val):
+                    return RedirectResponse(url=val, status_code=302)
+
+        accept = request.headers.get("accept", "")
+        if isinstance(result, (dict, list)):
+            return JSONResponse(status_code=200, content=result)
+        if isinstance(result, str):
+            if (
+                result.lstrip().lower().startswith("<!doctype")
+                or result.lstrip().lower().startswith("<html")
+                or "text/html" in accept
+            ):
+                return HTMLResponse(result, status_code=200)
+            return Response(status_code=200, content=result)
+        if isinstance(result, bytes):
+            return Response(status_code=200, content=result)
+        if isinstance(result, Response):
+            return result
+
+        return JSONResponse(status_code=200, content={"result": str(result)})
+
+    except asyncio.TimeoutError:
+        logger.error(f"[ui] Таймаут обработки UI для '{client}' (180 сек)")
+        return JSONResponse(
+            status_code=504,
+            content={"error": 504, "description": "Таймаут обработки UI (180 сек)"},
+        )
+    except Exception as e:
+        logger.exception(f"[ui] Ошибка при выполнении handle_ui для '{client}': {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": 500, "description": "Ошибка во время вызова handle_ui"},
+        )
+
+
+# ---------------------------------------- #
+#        EXTERNAL → handle_external        #
+# ---------------------------------------- #
+
+
+@router.api_route(
+    "/external/{connected_integration_id}",
+    methods=["GET", "POST", "PUT", "DELETE"],
+    include_in_schema=False,
+)
+@router.api_route(
+    "/external/{connected_integration_id}/",
+    methods=["GET", "POST", "PUT", "DELETE"],
+    include_in_schema=False,
+)
+@router.api_route(
+    "/external/{connected_integration_id}/{external_path:path}",
+    methods=["GET", "POST", "PUT", "DELETE"],
+    include_in_schema=False,
+)
+async def handle_external_by_connected_integration(
+    connected_integration_id: str,
+    external_path: Optional[str] = None,
+    request: Request = ...,
+) -> Any:
+    ci = str(connected_integration_id or "").strip()
+    if not re.fullmatch(r"[0-9a-fA-F]{32}", ci):
+        return JSONResponse(
+            status_code=400,
+            content={"error": 400, "description": "Invalid connected integration id"},
+        )
+    try:
+        client, is_active = await _connected_integration_key_from_id(ci)
+    except Exception as error:
+        logger.exception("[external] Failed to resolve connected integration %s: %s", ci, error)
+        return JSONResponse(
+            status_code=500,
+            content={"error": 500, "description": "Failed to resolve connected integration"},
+        )
+    if not client:
+        return JSONResponse(
+            status_code=404,
+            content={"error": 404, "description": "Connected integration not found"},
+        )
+    if is_active is False:
+        return JSONResponse(
+            status_code=200,
+            content={"status": "ignored", "reason": "connected_integration_inactive"},
+        )
+    return await handle_external(
+        client=client,
+        external_path=external_path,
+        request=request,
+        connected_integration_id=ci,
+    )
+
+
+@router.api_route(
+    "/clients/{client}/{external_path:path}",
+    methods=["GET", "POST", "PUT", "DELETE"],
+    include_in_schema=False,
+)
+@router.api_route(
+    "/clients/{client}/external",
+    methods=["GET", "POST", "PUT", "DELETE"],
+    tags=["Integration"],
+    summary="Обработка запроса от внешней системы",
+)
+@router.api_route(
+    "/clients/{client}/external/",
+    methods=["GET", "POST", "PUT", "DELETE"],
+    include_in_schema=False,
+)
+@router.api_route(
+    "/clients/{client}/external/{external_path:path}",
+    methods=["GET", "POST", "PUT", "DELETE"],
+    include_in_schema=False,
+)
+async def handle_external(
+    client: str = Path(..., description="Название интеграции"),
+    external_path: Optional[str] = None,
+    request: Request = ...,
+    connected_integration_id: Optional[str] = Header(
+        None, alias="connected-integration-id"
+    ),
+) -> Any:
+    logger.info(
+        f"[external] Обработка внешнего запроса для '{client}' {request.method} {request.url}"
+    )
+    global_external_callback = _is_global_external_callback(client, external_path)
+    resolved_connected_integration_id = None
+    if not global_external_callback:
+        resolved_connected_integration_id = (
+            connected_integration_id
+            or _connected_integration_id_from_external_path(external_path)
+        )
+    logger.info(f"[external] Connected-Integration-Id: {resolved_connected_integration_id}")
+
+    integration_instance = None
+    result = None
+
+    # 1) Класс интеграции
+    integration_class = INTEGRATION_CLASSES.get(client)
+    if not integration_class:
+        return JSONResponse(
+            status_code=404,
+            content={"error": 404, "description": f"Интеграция '{client}' не найдена"},
+        )
+
+    # 2) Инстанс интеграции
+    try:
+        integration_instance = integration_class()
+        if resolved_connected_integration_id:
+            integration_instance.connected_integration_id = resolved_connected_integration_id
+    except Exception as e:
+        logger.exception(f"[external] Ошибка инициализации интеграции '{client}': {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": 500, "description": "Ошибка инициализации интеграции"},
+        )
+
+    if resolved_connected_integration_id:
+        is_active = await _is_connected_integration_active(resolved_connected_integration_id)
+        if not is_active:
+            await _cleanup_integration(integration_instance)
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "status": "ignored",
+                    "reason": "connected_integration_inactive",
+                },
+            )
+
+    # 3) Envelope: заголовки (без служебных) + Connected-Integration-Id, тело, query, и т.п.
+    headers = _sanitize_headers(request.headers)
+    if resolved_connected_integration_id:
+        headers["Connected-Integration-Id"] = str(resolved_connected_integration_id)
+
+    raw_body = await request.body()
+    body_data = await _read_body_safely(request, raw_body)
+
+    envelope: Dict[str, Any] = {
+        "method": request.method,
+        "url": str(request.url),
+        "path": request.url.path,
+        "external_path": str(external_path or "").strip("/"),
+        "connected_integration_id": resolved_connected_integration_id,
+        "query": dict(request.query_params),
+        "headers": headers,
+        "body": body_data,
+        "raw_body": raw_body,
+        "client": request.client.host if request.client else None,
+    }
+
+    # 4) Вызов handle_external (обязательный для внешних вызовов)
+    handler = getattr(integration_instance, "handle_external", None)
+    if not callable(handler):
+        await _cleanup_integration(integration_instance)
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": 400,
+                "description": f"У интеграции '{client}' нет метода handle_external",
+            },
+        )
+
+    try:
+        result = await asyncio.wait_for(handler(envelope), timeout=180.0)
+
+        if isinstance(result, Response):
+            return result
+
+        # Проксируем ответ «как есть»:
+        if isinstance(result, (dict, list)):
+            return JSONResponse(status_code=200, content=result)
+        if isinstance(result, (str, bytes)):
+            return Response(status_code=200, content=result)
+
+        logger.error(
+            "[external] Unsupported handle_external result type for '%s': %s",
+            client,
+            type(result).__name__,
+        )
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": 500,
+                "description": "Unsupported handle_external result type",
+            },
+        )
+
+    except asyncio.TimeoutError:
+        logger.error(
+            f"[external] Таймаут обработки внешнего запроса для '{client}' (180 сек)"
+        )
+        return JSONResponse(
+            status_code=504,
+            content={
+                "error": 504,
+                "description": "Таймаут обработки внешнего запроса (180 сек)",
+            },
+        )
+    except Exception as e:
+        logger.exception(
+            f"[external] Ошибка при выполнении handle_external в '{client}': {e}"
+        )
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": 500,
+                "description": "Ошибка во время вызова handle_external",
+            },
+        )
+    finally:
+        await _cleanup_integration(integration_instance, "handle_external", result)

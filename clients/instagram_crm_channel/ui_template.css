@@ -1,0 +1,257 @@
+:root {
+  --bg: #f4f6f8;
+  --panel: #ffffff;
+  --text: #172033;
+  --muted: #5d6878;
+  --line: #dce3ee;
+  --soft: #f8fafc;
+  --accent: #1769e0;
+  --accent-hover: #0f57c4;
+  --success-bg: #e7f7ee;
+  --success-text: #0d6b3f;
+  --warning-bg: #fff4d8;
+  --warning-text: #7a5200;
+  --danger: #c93535;
+  --danger-hover: #a82727;
+}
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  color: var(--text);
+  background: var(--bg);
+  font: 14px/1.55 Arial, "Helvetica Neue", sans-serif;
+}
+
+.page-shell {
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.panel {
+  width: 100%;
+  max-width: 760px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(23, 32, 51, 0.08);
+  overflow: hidden;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--line);
+  background: var(--soft);
+}
+
+.service-pill {
+  font-weight: 700;
+  color: var(--text);
+}
+
+.language-switch {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.language-link {
+  min-width: 36px;
+  text-align: center;
+  padding: 5px 8px;
+  border-radius: 6px;
+  color: var(--muted);
+  text-decoration: none;
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.language-link.is-active {
+  background: #e7edf5;
+  color: var(--text);
+}
+
+.content {
+  padding: 28px;
+}
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: #edf2f7;
+  color: #334155;
+  font-weight: 700;
+  margin-bottom: 16px;
+}
+
+.panel[data-tone="success"] .status-badge {
+  background: var(--success-bg);
+  color: var(--success-text);
+}
+
+.panel[data-tone="warning"] .status-badge {
+  background: var(--warning-bg);
+  color: var(--warning-text);
+}
+
+.panel[data-tone="danger"] .status-badge {
+  background: #fde8e8;
+  color: var(--danger);
+}
+
+h1 {
+  font-size: 26px;
+  line-height: 1.2;
+  letter-spacing: 0;
+  margin: 0 0 10px;
+}
+
+.lead {
+  max-width: 620px;
+  margin: 0;
+  color: var(--muted);
+}
+
+.account-row {
+  margin-top: 22px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--soft);
+}
+
+.account-caption {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.account-name {
+  margin-top: 3px;
+  font-size: 18px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.notice {
+  margin-top: 18px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fffdf5;
+  color: #493900;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 22px;
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  padding: 10px 14px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #ffffff;
+  text-decoration: none;
+  border: 1px solid transparent;
+  font-weight: 700;
+}
+
+.button:hover {
+  background: var(--accent-hover);
+}
+
+.button.secondary {
+  background: #ffffff;
+  color: var(--text);
+  border-color: var(--line);
+}
+
+.button.secondary:hover {
+  background: var(--soft);
+}
+
+.button.danger {
+  background: var(--danger);
+}
+
+.button.danger:hover {
+  background: var(--danger-hover);
+}
+
+.button.danger-secondary {
+  background: #ffffff;
+  color: var(--danger);
+  border-color: #f1b7b7;
+}
+
+.button.danger-secondary:hover {
+  background: #fff5f5;
+}
+
+.button.disabled {
+  background: #e7edf5;
+  color: var(--muted);
+  cursor: default;
+}
+
+.steps-wrap {
+  margin-top: 24px;
+}
+
+.steps {
+  margin: 0;
+  padding-left: 20px;
+  color: var(--muted);
+}
+
+.steps li + li {
+  margin-top: 6px;
+}
+
+@media (max-width: 640px) {
+  .page-shell {
+    align-items: stretch;
+    padding: 10px;
+  }
+
+  .panel {
+    min-height: calc(100dvh - 20px);
+  }
+
+  .topbar {
+    padding: 12px 14px;
+  }
+
+  .content {
+    padding: 20px 16px;
+  }
+
+  h1 {
+    font-size: 22px;
+  }
+
+  .actions,
+  .button {
+    width: 100%;
+  }
+}

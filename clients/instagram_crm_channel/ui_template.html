@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="{safe_lang}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>{safe_title}</title>
+  {style_block}
+</head>
+<body>
+  <main class="page-shell">
+    <section class="panel" data-mode="{safe_mode}" data-tone="{safe_tone}">
+      <header class="topbar">
+        <div class="service-pill">Instagram</div>
+        <nav class="language-switch" aria-label="Language">
+          {language_links}
+        </nav>
+      </header>
+
+      <div class="content">
+        <span class="status-badge">{safe_badge}</span>
+        <h1>{safe_heading}</h1>
+        <p class="lead">{safe_lead}</p>
+
+        <div class="account-row">
+          <div>
+            <div class="account-caption">{safe_account_caption}</div>
+            <div class="account-name">{safe_account_label}</div>
+          </div>
+        </div>
+
+        {notice_html}
+
+        <div class="actions">
+          {actions_html}
+        </div>
+
+        <div class="steps-wrap">
+          {steps_html}
+        </div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

@@ -1,0 +1,1128 @@
+"""Sync REGOS API contract wrappers next to the handwritten API modules."""
+
+from __future__ import annotations
+
+import json
+import keyword
+import os
+import re
+import urllib.request
+from collections import Counter, defaultdict
+from pathlib import Path
+from typing import Any
+
+
+DEFAULT_SWAGGER_URL = "https://api.regos.uz/v1/swagger/public-v1/swagger.json"
+SWAGGER_URL = os.getenv("REGOS_SWAGGER_URL", DEFAULT_SWAGGER_URL)
+DOCS_ROOT = Path(r"D:\regos\git\api\api\Regos_API\docs")
+ROOT = Path(__file__).resolve().parents[1]
+
+SCHEMA_ROOT = ROOT / "schemas" / "api"
+SERVICE_ROOT = ROOT / "core" / "api"
+SCHEMA_MODELS_OUT = SCHEMA_ROOT / "models.py"
+SERVICE_BASE_OUT = SERVICE_ROOT / "service.py"
+SERVICE_REGISTRY_OUT = SERVICE_ROOT / "registry.py"
+GENERATED_MARKER = "Generated from REGOS public Swagger by tools/generate_regos_public_api.py."
+
+PYDANTIC_RESERVED_FIELDS = {
+    "construct",
+    "copy",
+    "dict",
+    "json",
+    "model_config",
+    "model_dump",
+    "model_fields",
+    "model_validate",
+    "schema",
+}
+
+COMMON_MODULE = ("common", "base")
+
+SECTION_PACKAGES: dict[str, tuple[str, ...]] = {
+    "chat": ("chat",),
+    "crm": ("crm",),
+    "documents": ("docs",),
+    "event": ("event",),
+    "files_and_folders": ("files",),
+    "finance": ("docs",),
+    "firm": ("references",),
+    "integrations": ("integrations",),
+    "intro": tuple(),
+    "other": ("common",),
+    "production": ("docs",),
+    "projects": ("crm",),
+    "references": ("references",),
+    "reports": ("reports",),
+    "retail": ("docs",),
+    "settings_and_security": ("rbac",),
+    "store": ("docs",),
+    "webhooks": ("webhooks",),
+    "widgets": ("widgets",),
+    "worktime": ("rbac",),
+}
+
+STATIC_SCHEMA_ALIASES: dict[tuple[str, ...], dict[str, str]] = {
+    ("crm", "pipeline"): {
+        "CrmEntityTypeEnum": "CrmEntityTypeEnum",
+    },
+    ("docs", "cheque_operation"): {
+        "DocChequeOperation": "ChequePosition",
+        "DocChequeOperationGetRequest": "ChequePositionGet",
+        "DocChequeOperationGetResponse": "ChequePositionArrayRegosObjectResult",
+    },
+    ("docs", "doc_contract"): {
+        "ContractDirection": "ContractDirection",
+    },
+    ("docs", "doc_invoice"): {
+        "DocInvoiceActionResponse": "SingleObjectResult",
+        "DocInvoiceStatus": "DocInvoiceStatusEnum",
+        "DocInvoiceType": "DocInvoiceTypeEnum",
+    },
+    ("integrations", "connected_integration_setting"): {
+        "ConnectedIntegrationSettingEditItem": "ConnectedIntegrationSettingEdit",
+        "ConnectedIntegrationSettingRequest": "ConnectedIntegrationSettingGet",
+    },
+    ("references", "item"): {
+        "ItemGetExtImageSize": "ImageSize",
+        "ItemMatchingData": "ItemMatchingRequestData",
+        "ItemMatchingType": "MatchingType",
+    },
+    ("references", "partner"): {
+        "LegalStatus": "LegalStatus",
+    },
+}
+
+CUSTOM_SCHEMA_SNIPPETS: dict[tuple[str, ...], list[str]] = {
+    ("chat", "chat_message"): [
+        "",
+        "",
+        "class ChatMessageAddFileRequest(RegosModel):",
+        "    \"\"\"Compatibility request for ChatMessage/AddFile JSON payloads.\"\"\"",
+        "",
+        "    model_config = ConfigDict(extra=\"forbid\", populate_by_name=True)",
+        "    chat_id: str | None = PydField(default=None)",
+        "    name: str | None = PydField(default=None)",
+        "    extension: str | None = PydField(default=None)",
+        "    data: str | None = PydField(default=None)",
+    ],
+    ("integrations", "connected_integration_setting"): [
+        "",
+        "",
+        "class ConnectedIntegrationSettingEditRequest(RootModel[list[ConnectedIntegrationSettingEdit]]):",
+        "    \"\"\"Compatibility root model for ConnectedIntegrationSetting/Edit.\"\"\"",
+        "",
+        "    pass",
+    ],
+}
+
+STATIC_SERVICE_ALIASES: dict[tuple[str, ...], dict[str, str]] = {
+    ("docs", "cheque_operation"): {
+        "DocChequeOperationService": "ChequeOperationService",
+    },
+}
+
+
+def fetch_swagger() -> dict[str, Any]:
+    with urllib.request.urlopen(SWAGGER_URL) as response:
+        return json.load(response)
+
+
+def ensure_under_root(path: Path) -> None:
+    resolved_root = ROOT.resolve()
+    resolved_path = path.resolve()
+    if resolved_path == resolved_root:
+        raise ValueError(f"Refusing to operate on repository root: {resolved_path}")
+    if resolved_root not in resolved_path.parents:
+        raise ValueError(f"Refusing to operate outside repository: {resolved_path}")
+
+
+def write_file(path: Path, content: str, *, replace_handwritten: bool = False) -> None:
+    ensure_under_root(path)
+    if path.exists():
+        existing = path.read_text(encoding="utf-8", errors="ignore")
+        if GENERATED_MARKER not in existing and not replace_handwritten:
+            raise FileExistsError(f"Refusing to overwrite hand-written file: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def cleanup_previous_generated_files() -> None:
+    """Remove only files generated by this script, never hand-written modules."""
+
+    for root in (SCHEMA_ROOT, SERVICE_ROOT):
+        if not root.exists():
+            continue
+        for path in root.rglob("*.py"):
+            try:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            if GENERATED_MARKER in text:
+                path.unlink()
+
+
+def schema_name_from_ref(ref: str) -> str:
+    return ref.rsplit("/", 1)[-1]
+
+
+def normalize_key(value: str) -> str:
+    return re.sub(r"[^0-9a-z]+", "", value.lower())
+
+
+def snake_case(value: str) -> str:
+    value = re.sub(r"[^0-9A-Za-z]+", "_", value)
+    value = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", value)
+    value = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value)
+    value = value.strip("_").lower()
+    if not value:
+        value = "value"
+    if value[0].isdigit():
+        value = f"_{value}"
+    if keyword.iskeyword(value):
+        value = f"{value}_"
+    return value
+
+
+def pascal_case(value: str) -> str:
+    return "".join(part.capitalize() for part in snake_case(value).split("_") if part)
+
+
+def field_name(value: str) -> tuple[str, str | None]:
+    name = value
+    if name.startswith("_"):
+        stripped = name.lstrip("_")
+        name = f"{stripped or 'field'}_"
+    if keyword.iskeyword(name) or name in PYDANTIC_RESERVED_FIELDS or name.startswith("model_"):
+        name = f"{name}_"
+    if name != value:
+        return name, value
+    return name, None
+
+
+def enum_member_name(value: Any) -> str:
+    if isinstance(value, int) and not isinstance(value, bool):
+        if value < 0:
+            return f"NEGATIVE_{abs(value)}"
+        return f"VALUE_{value}"
+
+    text = str(value or "").strip()
+    if re.fullmatch(r"-?\d+", text):
+        int_value = int(text)
+        if int_value < 0:
+            return f"NEGATIVE_{abs(int_value)}"
+        return f"VALUE_{int_value}"
+
+    name = re.sub(r"[^0-9A-Za-z_]+", "_", text).strip("_")
+    if not name:
+        name = "Value"
+    if name[0].isdigit():
+        name = f"VALUE_{name}"
+    if keyword.iskeyword(name):
+        name = f"{name}_"
+    return name
+
+
+def enum_member_names(values: list[Any]) -> list[str]:
+    names: list[str] = []
+    used: set[str] = set()
+    for value in values:
+        name = enum_member_name(value)
+        candidate = name
+        suffix = 2
+        while candidate in used:
+            candidate = f"{name}_{suffix}"
+            suffix += 1
+        used.add(candidate)
+        names.append(candidate)
+    return names
+
+
+def is_string_enum_schema(schema: dict[str, Any]) -> bool:
+    enum_values = schema.get("enum") or []
+    return schema.get("type") == "string" or any(isinstance(value, str) for value in enum_values)
+
+
+def description_literal(schema: dict[str, Any]) -> str | None:
+    description = schema.get("description")
+    if not isinstance(description, str):
+        return None
+    description = description.strip()
+    if not description:
+        return None
+    return json.dumps(description, ensure_ascii=False)
+
+
+def section_slug(docs_section: str) -> str:
+    value = re.sub(r"^\d+\.", "", docs_section.strip())
+    return snake_case(value)
+
+
+def endpoint_key(path: str) -> str:
+    return path.strip("/").lower()
+
+
+def read_docs_endpoint_sections() -> dict[str, str]:
+    if not DOCS_ROOT.exists():
+        return {}
+
+    endpoint_sections: dict[str, str] = {}
+    endpoint_pattern = re.compile(r"v1/([A-Za-z0-9_./-]+)", re.IGNORECASE)
+    for md_path in DOCS_ROOT.rglob("*.md"):
+        try:
+            text = md_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        relative_parts = md_path.relative_to(DOCS_ROOT).parts
+        if not relative_parts:
+            continue
+        section = section_slug(relative_parts[0])
+        for match in endpoint_pattern.finditer(text):
+            raw = match.group(1)
+            raw = raw.split("?", 1)[0]
+            raw = raw.strip().strip("`*.)],")
+            raw = re.sub(r"[^A-Za-z0-9_./-].*$", "", raw)
+            if raw:
+                endpoint_sections[endpoint_key(raw)] = section
+    return endpoint_sections
+
+
+def iter_refs(schema: dict[str, Any]) -> set[str]:
+    refs: set[str] = set()
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str):
+                refs.add(schema_name_from_ref(ref))
+            for child in node.values():
+                walk(child)
+        elif isinstance(node, list):
+            for child in node:
+                walk(child)
+
+    walk(schema)
+    return refs
+
+
+def request_body_schema(operation: dict[str, Any]) -> dict[str, Any] | None:
+    body = operation.get("requestBody")
+    if not body:
+        return None
+    content = body.get("content") or {}
+    return (content.get("application/json") or {}).get("schema")
+
+
+def request_root_refs(swagger: dict[str, Any]) -> set[str]:
+    refs: set[str] = set()
+    for methods in swagger["paths"].values():
+        for operation in methods.values():
+            schema = request_body_schema(operation)
+            if not schema:
+                continue
+            if "$ref" in schema:
+                refs.add(schema_name_from_ref(schema["$ref"]))
+            elif schema.get("type") == "array":
+                item_schema = schema.get("items") or {}
+                if "$ref" in item_schema:
+                    refs.add(schema_name_from_ref(item_schema["$ref"]))
+    return refs
+
+
+def request_schema_names(swagger: dict[str, Any]) -> set[str]:
+    schemas = swagger["components"]["schemas"]
+    result = request_root_refs(swagger)
+    pending = list(result)
+    while pending:
+        name = pending.pop()
+        schema = schemas.get(name) or {}
+        for ref_name in iter_refs(schema):
+            if ref_name not in result and ref_name in schemas:
+                result.add(ref_name)
+                pending.append(ref_name)
+    return result
+
+
+def response_model_name(operation: dict[str, Any]) -> str:
+    schema = operation["responses"]["200"]["content"]["application/json"]["schema"]
+    for candidate in schema.get("oneOf") or []:
+        ref = candidate.get("$ref")
+        if not ref:
+            continue
+        name = schema_name_from_ref(ref)
+        if name != "ErrorResult":
+            return name
+    return "ErrorResult"
+
+
+def operation_root_refs(operation: dict[str, Any]) -> set[str]:
+    refs: set[str] = set()
+    body_schema = request_body_schema(operation)
+    if body_schema:
+        if "$ref" in body_schema:
+            refs.add(schema_name_from_ref(body_schema["$ref"]))
+        elif body_schema.get("type") == "array":
+            item_schema = body_schema.get("items") or {}
+            if "$ref" in item_schema:
+                refs.add(schema_name_from_ref(item_schema["$ref"]))
+    refs.add(response_model_name(operation))
+    return refs
+
+
+def closure_refs(root_refs: set[str], schemas: dict[str, Any]) -> set[str]:
+    result = set(root_refs)
+    pending = list(root_refs)
+    while pending:
+        name = pending.pop()
+        for ref_name in iter_refs(schemas.get(name) or {}):
+            if ref_name in schemas and ref_name not in result:
+                result.add(ref_name)
+                pending.append(ref_name)
+    return result
+
+
+def paths_by_tag(swagger: dict[str, Any]) -> dict[str, list[tuple[str, dict[str, Any]]]]:
+    result: dict[str, list[tuple[str, dict[str, Any]]]] = defaultdict(list)
+    for path, methods in swagger["paths"].items():
+        for operation in methods.values():
+            tag = operation.get("tags", ["Other"])[0]
+            result[tag].append((path, operation))
+    return dict(result)
+
+
+def tag_sections(
+    swagger: dict[str, Any],
+    endpoint_sections: dict[str, str],
+) -> dict[str, str]:
+    by_tag = paths_by_tag(swagger)
+    result: dict[str, str] = {}
+    for tag, operations in by_tag.items():
+        counts: Counter[str] = Counter()
+        for path, _operation in operations:
+            section = endpoint_sections.get(endpoint_key(path))
+            if section:
+                counts[section] += 1
+        result[tag] = counts.most_common(1)[0][0] if counts else "other"
+    return result
+
+
+def tag_module(tag: str, sections: dict[str, str]) -> tuple[str, ...]:
+    section = sections.get(tag, "other")
+    package = SECTION_PACKAGES.get(section, (section,))
+    return (*package, snake_case(tag))
+
+
+def schema_usage_by_tag(swagger: dict[str, Any]) -> dict[str, set[str]]:
+    schemas = swagger["components"]["schemas"]
+    usage: dict[str, set[str]] = defaultdict(set)
+    for tag, operations in paths_by_tag(swagger).items():
+        roots: set[str] = set()
+        for _path, operation in operations:
+            roots.update(operation_root_refs(operation))
+        for schema_name in closure_refs(roots, schemas):
+            usage[schema_name].add(tag)
+    return usage
+
+
+def assign_schema_modules(
+    swagger: dict[str, Any],
+    sections: dict[str, str],
+) -> dict[str, tuple[str, ...]]:
+    schemas = swagger["components"]["schemas"]
+    usage = schema_usage_by_tag(swagger)
+    tag_keys = sorted(
+        ((normalize_key(tag), tag) for tag in sections),
+        key=lambda item: len(item[0]),
+        reverse=True,
+    )
+
+    assignments: dict[str, tuple[str, ...]] = {}
+    for name in schemas:
+        if name == "JToken":
+            assignments[name] = COMMON_MODULE
+            continue
+
+        normalized_name = normalize_key(name)
+        matched_tag = None
+        for tag_key, tag in tag_keys:
+            if normalized_name == tag_key or normalized_name.startswith(tag_key):
+                matched_tag = tag
+                break
+
+        if matched_tag:
+            assignments[name] = tag_module(matched_tag, sections)
+            continue
+
+        used_by = usage.get(name) or set()
+        if len(used_by) == 1:
+            assignments[name] = tag_module(next(iter(used_by)), sections)
+        else:
+            assignments[name] = COMMON_MODULE
+    return assignments
+
+
+def type_for_schema(schema: dict[str, Any]) -> str:
+    if "$ref" in schema:
+        ref_name = schema_name_from_ref(schema["$ref"])
+        if ref_name == "JToken":
+            return "Any"
+        return ref_name
+
+    schema_type = schema.get("type")
+    if isinstance(schema_type, list):
+        non_null = [item for item in schema_type if item != "null"]
+        if not non_null:
+            return "Any"
+        schema_type = non_null[0]
+
+    if schema_type == "array":
+        return f"list[{type_for_schema(schema.get('items') or {})}]"
+    if schema_type == "integer":
+        return "int"
+    if schema_type == "number":
+        return "_Decimal"
+    if schema_type == "boolean":
+        return "bool"
+    if schema_type == "string":
+        if schema.get("format") == "date-time":
+            return "_DateTime"
+        return "str"
+    if schema_type == "object":
+        return "dict[str, Any]"
+    return "Any"
+
+
+def optional_type(type_name: str) -> str:
+    if type_name == "Any":
+        return "Any"
+    if " | None" in type_name:
+        return type_name
+    return f"{type_name} | None"
+
+
+def result_type_for_property(
+    schema_name: str,
+    properties: dict[str, Any],
+    property_name: str,
+    property_schema: dict[str, Any],
+) -> str:
+    base_type = type_for_schema(property_schema)
+    if (
+        property_name == "result"
+        and schema_name != "ErrorResult"
+        and "ok" in properties
+        and base_type != "Error"
+    ):
+        base_type = f"{base_type} | Error"
+    return optional_type(base_type)
+
+
+def render_schema_module(
+    module: tuple[str, ...],
+    schema_names: list[str],
+    swagger: dict[str, Any],
+    strict_schema_names: set[str],
+    dependencies: dict[tuple[str, ...], set[str]],
+    aliases: dict[str, str],
+) -> str:
+    schemas = swagger["components"]["schemas"]
+    is_common = module == COMMON_MODULE
+    has_string_enum = any(
+        is_string_enum_schema(schemas[name])
+        for name in schema_names
+        if "enum" in schemas[name]
+    )
+    enum_import = "from enum import Enum, IntEnum" if has_string_enum else "from enum import IntEnum"
+
+    lines: list[str] = [
+        '"""REGOS API schemas."""',
+        f"# {GENERATED_MARKER}",
+        "",
+        "from __future__ import annotations",
+        "",
+        "from datetime import datetime as _DateTime",
+        "from decimal import Decimal as _Decimal",
+        enum_import,
+        "from typing import Any, TypeAlias",
+        "",
+        "from pydantic import ConfigDict, Field as PydField, RootModel",
+        "",
+    ]
+
+    if is_common:
+        lines.extend(
+            [
+                "from schemas.api.base import BaseSchema",
+                "",
+                "",
+                "JToken: TypeAlias = Any",
+                "",
+                "",
+                "class RegosModel(BaseSchema):",
+                "    \"\"\"Base class for REGOS API Swagger schemas.\"\"\"",
+                "",
+                '    model_config = ConfigDict(extra="ignore", populate_by_name=True)',
+                "",
+                "",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "from schemas.api.common.base import RegosModel",
+                "",
+                "",
+            ]
+        )
+
+    for name in schema_names:
+        schema = schemas[name]
+        if "enum" in schema:
+            enum_values = schema.get("enum") or []
+            if is_string_enum_schema(schema):
+                lines.append(f"class {name}(str, Enum):")
+                description = description_literal(schema)
+                if description:
+                    lines.append(f"    {description}")
+                for member_name, value in zip(enum_member_names(enum_values), enum_values):
+                    lines.append(f"    {member_name} = {json.dumps(str(value), ensure_ascii=False)}")
+            else:
+                lines.append(f"class {name}(IntEnum):")
+                description = description_literal(schema)
+                if description:
+                    lines.append(f"    {description}")
+                for member_name, value in zip(enum_member_names(enum_values), enum_values):
+                    lines.append(f"    {member_name} = {int(value)}")
+            if not enum_values:
+                lines.append("    pass")
+            lines.append("")
+            lines.append("")
+            continue
+
+        if schema.get("type") != "object":
+            continue
+
+        extra_mode = "forbid" if name in strict_schema_names else "ignore"
+        lines.append(f"class {name}(RegosModel):")
+        description = description_literal(schema)
+        if description:
+            lines.append(f"    {description}")
+        lines.append(f'    model_config = ConfigDict(extra="{extra_mode}", populate_by_name=True)')
+        properties = schema.get("properties") or {}
+        if not properties:
+            lines.append("    pass")
+        for original_name, property_schema in properties.items():
+            py_name, alias = field_name(original_name)
+            annotation = result_type_for_property(name, properties, original_name, property_schema)
+            field_args = ["default=None"]
+            if alias:
+                field_args.append(f'alias="{alias}"')
+            description = description_literal(property_schema)
+            if description:
+                field_args.append(f"description={description}")
+            lines.append(f"    {py_name}: {annotation} = PydField({', '.join(field_args)})")
+        lines.append("")
+        lines.append("")
+
+    if dependencies:
+        lines.append("# Imports are intentionally placed after model definitions to avoid circular imports.")
+        for dep_module, dep_names in sorted(dependencies.items()):
+            import_path = module_import("schemas.api", dep_module)
+            names_literal = ", ".join(sorted(dep_names))
+            lines.append(f"from {import_path} import {names_literal}")
+        lines.append("")
+        lines.append("")
+
+    custom_lines = CUSTOM_SCHEMA_SNIPPETS.get(module) or []
+    if custom_lines:
+        lines.extend(custom_lines)
+        lines.append("")
+        lines.append("")
+
+    custom_names = custom_schema_names(module)
+    for alias, target in sorted(aliases.items()):
+        if alias in schema_names or alias in custom_names:
+            continue
+        lines.append(f"{alias}: TypeAlias = {target}")
+    if aliases:
+        lines.append("")
+        lines.append("")
+
+    model_names = [
+        name
+        for name in schema_names
+        if (schemas.get(name) or {}).get("type") == "object" and "enum" not in (schemas.get(name) or {})
+    ]
+    model_names.extend(sorted(custom_names))
+    model_literal = ", ".join(repr(name) for name in model_names)
+    lines.extend(
+        [
+            f"_MODEL_NAMES = [{model_literal}]",
+            "",
+            "",
+        ]
+    )
+
+    exports = ["JToken", "RegosModel"] if is_common else []
+    exports.extend(schema_names)
+    exports.extend(custom_names)
+    exports.extend(alias for alias in aliases if alias not in schema_names)
+    all_literal = ",\n    ".join(repr(name) for name in exports)
+    lines.extend(["__all__ = [", f"    {all_literal}", "]", ""])
+    return "\n".join(lines)
+
+
+def request_annotation(operation: dict[str, Any]) -> tuple[str | None, str]:
+    schema = request_body_schema(operation)
+    if not schema:
+        return None, "body"
+
+    if "$ref" in schema:
+        name = schema_name_from_ref(schema["$ref"])
+        return f"models.{name} | dict[str, Any]", "req"
+    if schema.get("type") == "array":
+        item_schema = schema.get("items") or {}
+        if "$ref" in item_schema:
+            name = schema_name_from_ref(item_schema["$ref"])
+            return f"list[models.{name}] | list[dict[str, Any]]", "req"
+        return "list[Any]", "req"
+    return "dict[str, Any]", "req"
+
+
+def relative_method_name(path: str, tag: str) -> str:
+    tag_key = normalize_key(tag)
+    segments = [segment for segment in path.strip("/").split("/") if segment]
+    kept: list[str] = []
+    for segment in segments:
+        if normalize_key(segment) == tag_key:
+            continue
+        kept.append(segment)
+    return snake_case("_".join(kept or segments))
+
+
+def method_names_for_tag(tag: str, paths: list[str]) -> dict[str, str]:
+    initial = {path: snake_case(path.strip("/").split("/")[-1]) for path in paths}
+    counts = Counter(initial.values())
+    result: dict[str, str] = {}
+    used: set[str] = set()
+    for path in paths:
+        name = initial[path]
+        if counts[name] > 1:
+            name = relative_method_name(path, tag)
+        base = name
+        index = 2
+        while name in used:
+            name = f"{base}_{index}"
+            index += 1
+        result[path] = name
+        used.add(name)
+    return result
+
+
+def path_constant_name(method_name: str) -> str:
+    return f"PATH_{method_name.upper()}"
+
+
+def render_service_module(
+    tag: str,
+    operations: list[tuple[str, dict[str, Any]]],
+    module: tuple[str, ...],
+) -> str:
+    service_name = f"{tag}Service"
+    method_names = method_names_for_tag(tag, [path for path, _operation in operations])
+    request_models: dict[str, str] = {}
+    for path, operation in operations:
+        method_name = method_names[path]
+        request_name, is_array_request = request_model_name(operation)
+        if request_name and not is_array_request:
+            request_models[method_name] = request_name
+    lines: list[str] = [
+        f'"""REGOS API service for {tag}."""',
+        f"# {GENERATED_MARKER}",
+        "",
+        "from __future__ import annotations",
+        "",
+        "from typing import Any",
+        "",
+        "from core.api.service import RegosAPIService",
+        "from schemas.api import models",
+        "",
+        "",
+        f"class {service_name}(RegosAPIService):",
+    ]
+
+    for path, _operation in operations:
+        method_name = method_names[path]
+        lines.append(f'    {path_constant_name(method_name)} = "{path.strip("/")}"')
+    if request_models:
+        lines.append("    REQUEST_MODELS = {")
+        for method_name, request_name in sorted(request_models.items()):
+            lines.append(f"        {method_name!r}: models.{request_name},")
+        lines.append("    }")
+    lines.append("")
+
+    for path, operation in operations:
+        method_name = method_names[path]
+        response_name = response_model_name(operation)
+        annotation, arg_name = request_annotation(operation)
+        path_const = path_constant_name(method_name)
+        if annotation is None:
+            lines.append(
+                f"    async def {method_name}(self, body: dict[str, Any] | None = None) -> models.{response_name}:"
+            )
+            lines.append(f'        """POST {path.strip("/")}."""')
+            lines.append(f"        return await self._call(self.{path_const}, body or {{}}, models.{response_name})")
+        else:
+            lines.append(
+                f"    async def {method_name}(self, {arg_name}: {annotation}) -> models.{response_name}:"
+            )
+            lines.append(f'        """POST {path.strip("/")}."""')
+            lines.append(f"        return await self._call(self.{path_const}, {arg_name}, models.{response_name})")
+        lines.append("")
+
+    if "import_" in method_names.values():
+        lines.append("    async def import_items(self, req: Any):")
+        lines.append("        \"\"\"Compatibility alias for Item/Import.\"\"\"")
+        lines.append("        return await self.import_(req)")
+        lines.append("")
+
+    service_exports = [service_name]
+    for alias, target in sorted(STATIC_SERVICE_ALIASES.get(module, {}).items()):
+        lines.append(f"{alias} = {target}")
+        service_exports.append(alias)
+    if len(service_exports) > 1:
+        lines.append("")
+
+    all_literal = ", ".join(repr(name) for name in service_exports)
+    lines.extend([f"__all__ = [{all_literal}]", ""])
+    return "\n".join(lines)
+
+
+def module_path(root: Path, module: tuple[str, ...]) -> Path:
+    return root.joinpath(*module).with_suffix(".py")
+
+
+def module_import(prefix: str, module: tuple[str, ...]) -> str:
+    return ".".join([prefix, *module])
+
+
+def request_model_name(operation: dict[str, Any]) -> tuple[str | None, bool]:
+    schema = request_body_schema(operation)
+    if not schema:
+        return None, False
+    if "$ref" in schema:
+        return schema_name_from_ref(schema["$ref"]), False
+    if schema.get("type") == "array":
+        item_schema = schema.get("items") or {}
+        if "$ref" in item_schema:
+            return schema_name_from_ref(item_schema["$ref"]), True
+    return None, False
+
+
+def alias_target_names(target: str) -> set[str]:
+    return {
+        name
+        for name in re.findall(r"\b[A-Z][A-Za-z0-9_]*\b", target)
+        if name not in {"Any", "None"}
+    }
+
+
+def compatibility_aliases_by_module(
+    by_tag: dict[str, list[tuple[str, dict[str, Any]]]],
+    sections: dict[str, str],
+) -> dict[tuple[str, ...], dict[str, str]]:
+    aliases: dict[tuple[str, ...], dict[str, str]] = defaultdict(dict)
+    for tag, operations in by_tag.items():
+        module = tag_module(tag, sections)
+        method_names = method_names_for_tag(tag, [path for path, _operation in operations])
+        for path, operation in operations:
+            method_name = method_names[path]
+            legacy_base = f"{tag}{pascal_case(method_name)}"
+            request_name, is_array_request = request_model_name(operation)
+            if request_name:
+                target = f"list[{request_name}]" if is_array_request else request_name
+                aliases[module][f"{legacy_base}Request"] = target
+            aliases[module][f"{legacy_base}Response"] = response_model_name(operation)
+
+    for module, static_aliases in STATIC_SCHEMA_ALIASES.items():
+        aliases[module].update(static_aliases)
+    return aliases
+
+
+def custom_schema_names(module: tuple[str, ...]) -> set[str]:
+    names: set[str] = set()
+    for line in CUSTOM_SCHEMA_SNIPPETS.get(module, []):
+        match = re.match(r"class\s+([A-Za-z_][A-Za-z0-9_]*)", line)
+        if match:
+            names.add(match.group(1))
+    return names
+
+
+def schema_dependencies_by_module(
+    modules: dict[tuple[str, ...], list[str]],
+    swagger: dict[str, Any],
+    assignments: dict[str, tuple[str, ...]],
+    aliases: dict[tuple[str, ...], dict[str, str]],
+) -> dict[tuple[str, ...], dict[tuple[str, ...], set[str]]]:
+    schemas = swagger["components"]["schemas"]
+    dependencies: dict[tuple[str, ...], dict[tuple[str, ...], set[str]]] = defaultdict(lambda: defaultdict(set))
+    for module, schema_names in modules.items():
+        referenced_names: set[str] = set()
+        for schema_name in schema_names:
+            schema = schemas.get(schema_name) or {}
+            referenced_names.update(iter_refs(schema))
+            properties = schema.get("properties") or {}
+            if schema_name != "ErrorResult" and "ok" in properties and "result" in properties:
+                referenced_names.add("Error")
+        for target in aliases.get(module, {}).values():
+            referenced_names.update(alias_target_names(target))
+
+        for ref_name in referenced_names:
+            if ref_name == "JToken":
+                continue
+            ref_module = assignments.get(ref_name)
+            if not ref_module or ref_module == module:
+                continue
+            dependencies[module][ref_module].add(ref_name)
+    return dependencies
+
+
+def render_models_aggregator(
+    modules: dict[tuple[str, ...], list[str]],
+    swagger: dict[str, Any],
+    aliases: dict[tuple[str, ...], dict[str, str]],
+) -> str:
+    lines: list[str] = [
+        '"""Aggregate imports for REGOS API schemas."""',
+        f"# {GENERATED_MARKER}",
+        "",
+        "from __future__ import annotations",
+        "",
+        "from datetime import datetime as _DateTime",
+        "from decimal import Decimal as _Decimal",
+        "from typing import Any",
+        "",
+    ]
+
+    ordered_modules = [COMMON_MODULE] + sorted(module for module in modules if module != COMMON_MODULE)
+    for module in ordered_modules:
+        import_path = module_import("schemas.api", module)
+        lines.append(f"from {import_path} import *")
+    lines.append("")
+
+    model_names: list[str] = []
+    all_names: list[str] = ["Any", "JToken", "RegosModel"]
+    for module in ordered_modules:
+        all_names.extend(modules[module])
+        all_names.extend(custom_schema_names(module))
+        all_names.extend(aliases.get(module, {}))
+        for name in modules[module]:
+            schema = swagger["components"]["schemas"].get(name) or {}
+            if schema.get("type") == "object" and "enum" not in schema:
+                model_names.append(name)
+
+    model_literal = ", ".join(repr(name) for name in model_names)
+    all_literal = ",\n    ".join(repr(name) for name in sorted(set(all_names)))
+    lines.extend(
+        [
+            f"_MODEL_NAMES = [{model_literal}]",
+            "",
+            "for _model_name in _MODEL_NAMES:",
+            "    _model = globals().get(_model_name)",
+            "    if hasattr(_model, 'model_rebuild'):",
+            "        _model.model_rebuild(force=True, _types_namespace=globals())",
+            "",
+            "__all__ = [",
+            f"    {all_literal}",
+            "]",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def render_service_base() -> str:
+    return "\n".join(
+        [
+            '"""Shared base service for REGOS API wrappers."""',
+            f"# {GENERATED_MARKER}",
+            "",
+            "from __future__ import annotations",
+            "",
+            "from typing import Any",
+            "",
+            "from pydantic import BaseModel",
+            "",
+            "",
+            "class RegosAPIService:",
+            "    REQUEST_MODELS: dict[str, type[BaseModel]] = {}",
+            "",
+            "    def __init__(self, api):",
+            "        self.api = api",
+            "",
+            "    @classmethod",
+            "    def _payload(cls, data: Any) -> Any:",
+            "        if isinstance(data, BaseModel):",
+            "            return data.model_dump(mode='json', exclude_none=True, by_alias=True)",
+            "        if isinstance(data, list):",
+            "            return [cls._payload(item) for item in data]",
+            "        if isinstance(data, dict):",
+            "            return {key: cls._payload(value) for key, value in data.items()}",
+            "        return data",
+            "",
+            "    async def _call(self, path: str, body: Any, response_model):",
+            "        return await self.api.call(path, self._payload(body), response_model)",
+            "",
+            "    def _request_model(self, method_name: str):",
+            "        model = self.REQUEST_MODELS.get(method_name)",
+            "        if model is None:",
+            "            raise AttributeError(f'Request model is not registered for {method_name!r}')",
+            "        return model",
+            "",
+            "    async def get_by_id(self, id_: int):",
+            "        req_model = self._request_model('get')",
+            "        response = await self.get(req_model(ids=[id_], limit=1))",
+            "        result = getattr(response, 'result', None) or []",
+            "        return result[0] if result else None",
+            "",
+            "    async def get_short_by_id(self, id_: int):",
+            "        req_model = self._request_model('get_short')",
+            "        response = await self.get_short(req_model(ids=[id_], limit=1))",
+            "        result = getattr(response, 'result', None) or []",
+            "        return result[0] if result else None",
+            "",
+            "",
+            "__all__ = ['RegosAPIService']",
+            "",
+        ]
+    )
+
+
+def render_service_registry(
+    by_tag: dict[str, list[tuple[str, dict[str, Any]]]],
+    sections: dict[str, str],
+) -> str:
+    tag_modules = {tag: tag_module(tag, sections) for tag in by_tag}
+    lines: list[str] = [
+        '"""Generated REGOS API service registry."""',
+        f"# {GENERATED_MARKER}",
+        "",
+        "from __future__ import annotations",
+        "",
+        "from types import SimpleNamespace",
+        "",
+    ]
+
+    for tag in sorted(by_tag):
+        module = tag_modules[tag]
+        import_path = module_import("core.api", module)
+        lines.append(f"from {import_path} import {tag}Service")
+    lines.append("")
+    lines.append("")
+    lines.append("def _ensure_namespace(api, name: str) -> SimpleNamespace:")
+    lines.append("    namespace = getattr(api, name, None)")
+    lines.append("    if namespace is None:")
+    lines.append("        namespace = SimpleNamespace()")
+    lines.append("        setattr(api, name, namespace)")
+    lines.append("    return namespace")
+    lines.append("")
+    lines.append("")
+    lines.append("def attach_generated_services(api) -> None:")
+    lines.append("    api.by_tag = getattr(api, 'by_tag', SimpleNamespace())")
+
+    namespace_names = sorted(
+        {
+            module[0] if len(module) > 1 else "root"
+            for module in tag_modules.values()
+        }
+    )
+    for namespace in namespace_names:
+        lines.append(f"    _ensure_namespace(api, {namespace!r})")
+    lines.append("")
+
+    used_flat_attrs = set(namespace_names) | {"by_tag"}
+    for tag in sorted(by_tag):
+        module = tag_modules[tag]
+        namespace = module[0] if len(module) > 1 else "root"
+        attr = snake_case(tag)
+        service_var = f"_{attr}_service"
+        service_name = f"{tag}Service"
+        flat_attr = attr
+        if flat_attr in used_flat_attrs:
+            flat_attr = f"{attr}_service"
+        used_flat_attrs.add(flat_attr)
+        lines.append(f"    {service_var} = {service_name}(api)")
+        lines.append(f"    setattr(api.{namespace}, {attr!r}, {service_var})")
+        lines.append(f"    setattr(api.by_tag, {attr!r}, {service_var})")
+        lines.append(f"    setattr(api, {flat_attr!r}, {service_var})")
+    lines.append("")
+    lines.append("")
+    lines.append("__all__ = ['attach_generated_services']")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def generate(swagger: dict[str, Any]) -> tuple[int, int, int]:
+    endpoint_sections = read_docs_endpoint_sections()
+    by_tag = paths_by_tag(swagger)
+    sections = tag_sections(swagger, endpoint_sections)
+    schema_assignments = assign_schema_modules(swagger, sections)
+    strict_schema_names = request_schema_names(swagger)
+    schemas = swagger["components"]["schemas"]
+    aliases = compatibility_aliases_by_module(by_tag, sections)
+
+    schema_modules: dict[tuple[str, ...], list[str]] = defaultdict(list)
+    for schema_name in schemas:
+        module = schema_assignments[schema_name]
+        if schema_name == "JToken":
+            continue
+        schema_modules[module].append(schema_name)
+    schema_modules.setdefault(COMMON_MODULE, [])
+    dependencies = schema_dependencies_by_module(
+        schema_modules,
+        swagger,
+        schema_assignments,
+        aliases,
+    )
+
+    cleanup_previous_generated_files()
+
+    for module, schema_names in sorted(schema_modules.items()):
+        write_file(
+            module_path(SCHEMA_ROOT, module),
+            render_schema_module(
+                module,
+                sorted(schema_names),
+                swagger,
+                strict_schema_names,
+                dependencies.get(module, {}),
+                aliases.get(module, {}),
+            ),
+            replace_handwritten=True,
+        )
+    write_file(SCHEMA_MODELS_OUT, render_models_aggregator(schema_modules, swagger, aliases))
+    write_file(SERVICE_BASE_OUT, render_service_base())
+    for tag, operations in sorted(by_tag.items()):
+        module = tag_module(tag, sections)
+        write_file(
+            module_path(SERVICE_ROOT, module),
+            render_service_module(tag, operations, module),
+            replace_handwritten=True,
+        )
+    write_file(SERVICE_REGISTRY_OUT, render_service_registry(by_tag, sections))
+
+    methods_count = sum(len(operations) for operations in by_tag.values())
+    return len(schema_modules), len(schemas), methods_count
+
+
+def main() -> None:
+    swagger = fetch_swagger()
+    module_count, schema_count, method_count = generate(swagger)
+    print(f"Schema modules: {module_count}")
+    print(f"Schemas: {schema_count}")
+    print(f"Methods: {method_count}")
+    print(f"Wrote schema modules under {SCHEMA_ROOT.relative_to(ROOT)}")
+    print(f"Wrote service modules under {SERVICE_ROOT.relative_to(ROOT)}")
+
+
+if __name__ == "__main__":
+    main()

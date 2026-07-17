@@ -1,0 +1,3102 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import re
+import time
+import uuid
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+
+import httpx
+
+from clients.base import ClientBase
+from config.settings import settings as app_settings
+from core.api.regos_api import RegosAPI
+from core.logger import setup_logger
+from core.redis import (
+    redis_ops,
+    redis_error_contains,
+    redis_expire_if_due,
+    redis_sadd_with_ttl,
+    redis_stream_add_with_ttl,
+    redis_stream_ack_delete,
+    redis_stream_group_create_with_ttl,
+    redis_ttl_seconds,
+)
+from schemas.api.chat.chat import ChatAddBotRequest, ChatEntityTypeEnum, ChatGetRequest
+from schemas.api.chat.chat_message import (
+    ChatMessage,
+    ChatMessageAddRequest,
+    ChatMessageGetRequest,
+    ChatMessageSuggestRequest,
+    ChatMessageTypeEnum,
+)
+from schemas.api.chat.quick_reply import QuickReplyGetRequest
+from schemas.api.crm.client import ClientEditRequest, ClientGetRequest
+from schemas.api.crm.deal import DealEditRequest, DealGetRequest
+from schemas.api.crm.lead import LeadEditRequest, LeadGetRequest
+from schemas.api.crm.project_task import ProjectTaskEditRequest, ProjectTaskGetRequest
+from schemas.api.crm.ticket import TicketEditRequest, TicketGetRequest
+from schemas.api.files.file import FileGetRequest
+from schemas.api.integrations.connected_integration import ConnectedIntegrationGetRequest
+from schemas.api.integrations.connected_integration_setting import (
+    ConnectedIntegrationSettingRequest,
+)
+from schemas.api.references.field import FieldAddRequest, FieldGetRequest
+from schemas.integration.base import IntegrationErrorModel, IntegrationErrorResponse
+
+logger = setup_logger("gpt_crm_chat_assistant")
+
+_CHAT_ENTITY_TYPE_USER = ChatEntityTypeEnum.User.value.lower()
+_CHAT_ENTITY_TYPE_CHATBOT = ChatEntityTypeEnum.ChatBot.value.lower()
+_CHAT_ENTITY_TYPE_CLIENT = ChatEntityTypeEnum.Client.value.lower()
+
+_INSTANCE_ID = uuid.uuid4().hex[:12]
+_MANAGER_LOCK = asyncio.Lock()
+_WORKER_TASKS: Dict[int, asyncio.Task] = {}
+_REDIS_TTL_TOUCH_TS: Dict[str, int] = {}
+_STREAM_CLAIM_TS: Dict[str, int] = {}
+
+
+def _now_ts() -> int:
+    return int(time.time())
+
+
+class GptCrmChatAssistantConfig:
+    INTEGRATION_KEY = "gpt_crm_chat_assistant"
+    REDIS_PREFIX = "gca:"
+    STREAM_REDIS_PREFIX = "gca"
+
+    SETTINGS_TTL_SEC = max(int(app_settings.redis_cache_ttl or 60), 60)
+    BOT_CACHE_TTL_SEC = 24 * 60 * 60
+    DEDUPE_TTL_SEC = 5 * 60
+    OPENAI_TIMEOUT_SEC = 12
+    OPENAI_RESPONSES_ENDPOINT = "https://api.openai.com/v1/responses"
+    OPENAI_CONVERSATIONS_ENDPOINT = "https://api.openai.com/v1/conversations"
+    MAX_CONTEXT_CHARS = 4000
+    MAX_CONTEXT_FILE_IDS = 20
+    MAX_FILES_PER_MESSAGE = 5
+    MAX_CONTEXT_IMAGE_URLS = 2
+    FILE_CACHE_TTL_SEC = 60 * 60
+    OPENAI_MAX_OUTPUT_TOKENS = 220
+
+    DEFAULT_SUGGESTIONS_COUNT = 3
+    DEFAULT_HISTORY_LIMIT = 15
+    DEFAULT_TEMPERATURE = 0.3
+    DEFAULT_CONTEXT_SOURCE = "crm"
+    ALLOWED_CONTEXT_SOURCES = {"crm", "conversation"}
+    DEFAULT_AUTO_JOIN_ENABLED = True
+    DEFAULT_AUTO_JOIN_ENTITY_TYPES = {"lead", "deal", "task", "ticket"}
+    ALLOWED_AUTO_JOIN_ENTITY_TYPES = {"lead", "deal", "task", "ticket"}
+    DEFAULT_AUTO_SEND_ENABLED = False
+    DEFAULT_AUTO_SEND_CONFIDENCE_THRESHOLD = 0.9
+    DEFAULT_AUTO_SEND_MAX_PER_CHAT_HOUR = 3
+    DEFAULT_AUTO_SEND_COOLDOWN_SEC = 60
+    FIELD_BOOTSTRAP_TTL_SEC = 10 * 60
+    QUICK_REPLY_CACHE_TTL_SEC = 5 * 60
+    MAX_QUICK_REPLIES_FETCH = 100
+    MAX_QUICK_REPLIES_IN_PROMPT = 10
+    MAX_QUICK_REPLY_TEXT_LEN = 200
+    STREAM_GROUP = "gcaw"
+    STREAM_TTL_SEC = 24 * 60 * 60
+    STREAM_MAXLEN = max(int(app_settings.gpt_crm_chat_assistant_stream_maxlen or 0), 10000)
+    STREAM_BATCH_SIZE = max(int(app_settings.gpt_crm_chat_assistant_stream_batch_size or 0), 1)
+    STREAM_WORKERS = max(int(app_settings.gpt_crm_chat_assistant_stream_workers or 0), 1)
+    STREAM_READ_BLOCK_MS = 5000
+    STREAM_MIN_IDLE_MS = 60_000
+    STREAM_CLAIM_INTERVAL_SEC = 30
+    STREAM_MAX_RETRIES = max(int(app_settings.gpt_crm_chat_assistant_stream_retry_limit or 0), 1)
+    STREAM_RETRY_BASE_DELAY_SEC = 5
+    EVENT_CONCURRENCY = max(int(app_settings.gpt_crm_chat_assistant_event_concurrency or 0), 1)
+    DEBOUNCE_SEC = 2
+    DEBOUNCE_TTL_SEC = 10 * 60
+    ACTIVE_CI_IDS_TTL_SEC = 7 * 24 * 60 * 60
+    WORKER_HEARTBEAT_TTL_SEC = 60
+    ACTIVE_CACHE_TTL_SEC = max(int(app_settings.redis_cache_ttl or 60), 60)
+    ACTIVE_LOCK_TTL_SEC = 10
+    ACTIVE_LOCK_WAIT_SEC = 0.5
+
+    THREAD_FIELD_ENTITY_TYPES = ("Lead", "Deal", "Task", "Client", "Ticket")
+    THREAD_FIELD_KEY = "gpt_thread_id"
+    THREAD_FIELD_FULL_KEY = "field_gpt_thread_id"
+    THREAD_FIELD_NAME = "GPT Thread ID"
+    THREAD_FIELD_DATA_TYPE = "string"
+
+    SUPPORTED_INBOUND_WEBHOOKS = {"ChatMessageAdded"}
+
+
+@dataclass
+class RuntimeConfig:
+    connected_integration_id: str
+    assistant_api_key: str
+    assistant_model: str
+    assistant_prompt: str
+    assistant_context_source: str
+    assistant_auto_join_enabled: bool
+    assistant_auto_join_entities: Set[str]
+    assistant_suggestions_count: int
+    assistant_history_limit: int
+    assistant_temperature: float
+    assistant_include_staff_private: bool
+    assistant_auto_send_enabled: bool
+    assistant_auto_send_confidence_threshold: float
+    assistant_auto_send_max_per_chat_hour: int
+    assistant_auto_send_cooldown_sec: int
+
+
+def _redis_enabled() -> bool:
+    return bool(app_settings.redis_enabled and redis_ops)
+
+
+def _require_redis() -> None:
+    if not _redis_enabled():
+        raise RuntimeError("Redis is required for gpt_crm_chat_assistant")
+
+
+def _parse_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _parse_int(value: Any, default: int) -> int:
+    if value is None:
+        return default
+    try:
+        return int(str(value).strip())
+    except Exception:
+        return default
+
+
+def _parse_float(value: Any, default: float) -> float:
+    if value is None:
+        return default
+    try:
+        return float(str(value).strip())
+    except Exception:
+        return default
+
+
+def _normalize_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip())
+
+
+def _normalize_entity_type(value: Any) -> str:
+    return str(getattr(value, "value", value) or "").strip().lower()
+
+
+def _extract_json_object(raw_text: str) -> Optional[Dict[str, Any]]:
+    text = str(raw_text or "").strip()
+    if not text:
+        return None
+
+    fenced = re.match(r"^```(?:json)?\s*(.*?)\s*```$", text, flags=re.S | re.I)
+    if fenced:
+        text = fenced.group(1).strip()
+
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+
+    match = re.search(r"\{.*\}", text, flags=re.S)
+    if not match:
+        return None
+    try:
+        parsed = json.loads(match.group(0))
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _extract_text_from_openai_content(raw_content: Any) -> str:
+    if isinstance(raw_content, str):
+        return raw_content
+    if isinstance(raw_content, list):
+        chunks: List[str] = []
+        for item in raw_content:
+            if isinstance(item, str):
+                chunks.append(item)
+                continue
+            if not isinstance(item, dict):
+                continue
+            text = item.get("text")
+            if isinstance(text, str):
+                chunks.append(text)
+                continue
+            value = item.get("value")
+            if isinstance(value, str):
+                chunks.append(value)
+                continue
+            content = item.get("content")
+            if isinstance(content, str):
+                chunks.append(content)
+        return "\n".join(chunks)
+    return ""
+
+
+def _extract_text_from_responses_output(output: Any) -> str:
+    if not isinstance(output, list):
+        return ""
+
+    chunks: List[str] = []
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+
+        direct_text = item.get("text")
+        if isinstance(direct_text, str) and direct_text.strip():
+            chunks.append(direct_text)
+
+        message = item.get("message")
+        if isinstance(message, dict):
+            message_content = message.get("content")
+            extracted = _extract_text_from_openai_content(message_content)
+            if extracted:
+                chunks.append(extracted)
+
+        content = item.get("content")
+        extracted = _extract_text_from_openai_content(content)
+        if extracted:
+            chunks.append(extracted)
+
+    return "\n".join(part for part in chunks if str(part).strip())
+
+
+def _parse_auto_join_entities(raw: Any) -> Set[str]:
+    default_entities = set(GptCrmChatAssistantConfig.DEFAULT_AUTO_JOIN_ENTITY_TYPES)
+    tokens: List[str] = []
+    if isinstance(raw, (list, tuple, set)):
+        tokens = [str(item).strip().lower() for item in raw if str(item or "").strip()]
+    else:
+        text = str(raw or "").strip()
+        if not text:
+            return default_entities
+        if text.startswith("[") and text.endswith("]"):
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, list):
+                    tokens = [
+                        str(item).strip().lower()
+                        for item in parsed
+                        if str(item or "").strip()
+                    ]
+            except Exception:
+                tokens = []
+        if not tokens:
+            tokens = [token.strip().lower() for token in re.split(r"[,\s;|]+", text) if token.strip()]
+
+    entities = {
+        token
+        for token in tokens
+        if token in GptCrmChatAssistantConfig.ALLOWED_AUTO_JOIN_ENTITY_TYPES
+    }
+    if not entities:
+        return default_entities
+    return entities
+
+
+class GptCrmChatAssistantIntegration(ClientBase):
+    _CHAT_ENTITY_TO_FIELD_ENTITY: Dict[str, str] = {
+        "lead": "Lead",
+        "deal": "Deal",
+        "task": "Task",
+        "client": "Client",
+        "ticket": "Ticket",
+    }
+
+    _ACTIVE_CACHE: Dict[str, Tuple[bool, float]] = {}
+    _ACTIVE_CACHE_LOCK = asyncio.Lock()
+
+    _LOCAL_BOT_CACHE: Dict[str, Tuple[int, float]] = {}
+    _LOCAL_BOT_CACHE_LOCK = asyncio.Lock()
+    _LOCAL_FILE_CACHE: Dict[str, Tuple[Dict[str, Any], float]] = {}
+    _LOCAL_FILE_CACHE_LOCK = asyncio.Lock()
+    _LOCAL_FIELDS_READY: Dict[str, float] = {}
+    _LOCAL_FIELDS_READY_LOCK = asyncio.Lock()
+    _LOCAL_QUICK_REPLIES_CACHE: Dict[str, Tuple[List[str], float]] = {}
+    _LOCAL_QUICK_REPLIES_LOCK = asyncio.Lock()
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.http_client = httpx.AsyncClient(timeout=GptCrmChatAssistantConfig.OPENAI_TIMEOUT_SEC)
+
+    async def __aenter__(self) -> "GptCrmChatAssistantIntegration":
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        await self.http_client.aclose()
+
+    @staticmethod
+    def _error_response(code: int, description: str) -> IntegrationErrorResponse:
+        return IntegrationErrorResponse(
+            result=IntegrationErrorModel(error=code, description=description)
+        )
+
+    @staticmethod
+    def _redis_key(*parts: Any) -> str:
+        tokens = [str(item).strip() for item in parts if str(item or "").strip()]
+        return f"{GptCrmChatAssistantConfig.REDIS_PREFIX}{':'.join(tokens)}"
+
+    @staticmethod
+    def _stream_redis_key(*parts: Any) -> str:
+        tokens = [str(item).strip(":") for item in parts if str(item or "").strip()]
+        prefix = GptCrmChatAssistantConfig.STREAM_REDIS_PREFIX
+        return f"{prefix}:{':'.join(tokens)}" if tokens else prefix
+
+    @classmethod
+    def _settings_cache_key(cls, connected_integration_id: str) -> str:
+        return cls._redis_key("settings", connected_integration_id)
+
+    @classmethod
+    def _ci_active_cache_key(cls, connected_integration_id: str) -> str:
+        return cls._redis_key("ci_active", connected_integration_id)
+
+    @classmethod
+    def _ci_active_lock_key(cls, connected_integration_id: str) -> str:
+        return cls._stream_redis_key("al", connected_integration_id)
+
+    @classmethod
+    def _bot_cache_key(cls, connected_integration_id: str, chat_id: str) -> str:
+        return cls._redis_key("bot_cache", connected_integration_id, chat_id)
+
+    @classmethod
+    def _dedupe_key(cls, connected_integration_id: str, event_key: str) -> str:
+        return cls._redis_key("dedupe", connected_integration_id, event_key)
+
+    @classmethod
+    def _fields_ready_key(cls, connected_integration_id: str) -> str:
+        return cls._redis_key("fields_ready", connected_integration_id)
+
+    @classmethod
+    def _quick_replies_cache_key(cls, connected_integration_id: str) -> str:
+        return cls._redis_key("quick_replies", connected_integration_id)
+
+    @classmethod
+    def _file_cache_key(cls, connected_integration_id: str, file_id: int) -> str:
+        return cls._redis_key("file", connected_integration_id, int(file_id))
+
+    @classmethod
+    def _stream_key(cls, connected_integration_id: Optional[str] = None) -> str:
+        _ = connected_integration_id
+        return cls._stream_redis_key("s", "j")
+
+    @classmethod
+    def _dlq_stream_key(cls, connected_integration_id: Optional[str] = None) -> str:
+        _ = connected_integration_id
+        return cls._stream_redis_key("s", "d")
+
+    @classmethod
+    def _worker_heartbeat_key(cls, worker_index: int) -> str:
+        return cls._stream_redis_key("w", int(worker_index), _INSTANCE_ID)
+
+    @classmethod
+    def _debounce_key(cls, connected_integration_id: str, chat_id: str) -> str:
+        return cls._redis_key("debounce", connected_integration_id, chat_id)
+
+    @classmethod
+    def _active_ci_ids_key(cls) -> str:
+        return cls._redis_key("active_ci_ids")
+
+    @staticmethod
+    def _active_ci_ids_ttl() -> int:
+        return redis_ttl_seconds(GptCrmChatAssistantConfig.ACTIVE_CI_IDS_TTL_SEC)
+
+    @staticmethod
+    async def _redis_get(key: str) -> Optional[str]:
+        _require_redis()
+        return await redis_ops.get(key)
+
+    @staticmethod
+    async def _redis_set(key: str, value: str, ttl_sec: int) -> None:
+        _require_redis()
+        await redis_ops.set(key, value, ex=max(int(ttl_sec), 1))
+
+    @staticmethod
+    async def _redis_set_nx(key: str, value: str, ttl_sec: int) -> bool:
+        _require_redis()
+        return bool(await redis_ops.set(key, value, ex=max(int(ttl_sec), 1), nx=True))
+
+    @staticmethod
+    async def _redis_delete(*keys: str) -> None:
+        _require_redis()
+        rows = [str(key).strip() for key in keys if str(key or "").strip()]
+        if rows:
+            await redis_ops.delete(*rows)
+
+    @classmethod
+    async def _acquire_redis_lock(
+        cls,
+        key: str,
+        ttl_sec: int,
+        *,
+        wait_seconds: float = 0.0,
+    ) -> Optional[str]:
+        _require_redis()
+        token = uuid.uuid4().hex
+        deadline = asyncio.get_running_loop().time() + max(float(wait_seconds or 0.0), 0.0)
+        while True:
+            if await cls._redis_set_nx(key, token, ttl_sec):
+                return token
+            if asyncio.get_running_loop().time() >= deadline:
+                return None
+            await asyncio.sleep(0.05)
+
+    @staticmethod
+    async def _release_redis_lock(key: str, token: Optional[str]) -> None:
+        if not token:
+            return
+        _require_redis()
+        script = (
+            "if redis.call('get', KEYS[1]) == ARGV[1] "
+            "then return redis.call('del', KEYS[1]) else return 0 end"
+        )
+        try:
+            await redis_ops.eval(script, 1, key, token)
+        except Exception as error:
+            logger.warning("Failed to release Redis lock %s: %s", key, error)
+
+    @classmethod
+    def _resolve_stream_ttl(cls, ttl_sec: Optional[int] = None) -> int:
+        return redis_ttl_seconds(
+            ttl_sec if ttl_sec is not None else GptCrmChatAssistantConfig.STREAM_TTL_SEC
+        )
+
+    @classmethod
+    async def _touch_stream_ttl(cls, stream_key: str, *, force: bool = False) -> None:
+        _require_redis()
+        await redis_expire_if_due(
+            stream_key,
+            cls._resolve_stream_ttl(),
+            _REDIS_TTL_TOUCH_TS,
+            _now_ts(),
+            min_refresh_sec=10,
+            force=force,
+        )
+
+    @classmethod
+    async def _ensure_consumer_group(cls, stream_key: str) -> None:
+        _require_redis()
+        await redis_stream_group_create_with_ttl(
+            stream_key,
+            GptCrmChatAssistantConfig.STREAM_GROUP,
+            ttl_sec=cls._resolve_stream_ttl(),
+            touch_ts_by_key=_REDIS_TTL_TOUCH_TS,
+            now_ts=_now_ts(),
+        )
+
+    @classmethod
+    async def _enqueue(cls, stream_key: str, fields: Dict[str, Any]) -> None:
+        _require_redis()
+
+        serialized: Dict[str, str] = {}
+        for key, value in fields.items():
+            if isinstance(value, (dict, list)):
+                serialized[str(key)] = json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            elif value is None:
+                serialized[str(key)] = ""
+            else:
+                serialized[str(key)] = str(value)
+
+        await redis_stream_add_with_ttl(
+            stream_key,
+            serialized,
+            maxlen=GptCrmChatAssistantConfig.STREAM_MAXLEN,
+            ttl_sec=cls._resolve_stream_ttl(),
+            touch_ts_by_key=_REDIS_TTL_TOUCH_TS,
+            now_ts=_now_ts(),
+        )
+
+    @classmethod
+    async def _mark_ci_active(cls, connected_integration_id: str) -> None:
+        _require_redis()
+        ci = str(connected_integration_id or "").strip()
+        if not ci:
+            return
+        await redis_sadd_with_ttl(cls._active_ci_ids_key(), ci, cls._active_ci_ids_ttl())
+        _REDIS_TTL_TOUCH_TS[cls._active_ci_ids_key()] = _now_ts()
+
+    @classmethod
+    async def _touch_active_ci_ids_ttl(cls, *, force: bool = False) -> None:
+        _require_redis()
+        await redis_expire_if_due(
+            cls._active_ci_ids_key(),
+            cls._active_ci_ids_ttl(),
+            _REDIS_TTL_TOUCH_TS,
+            _now_ts(),
+            min_refresh_sec=60,
+            force=force,
+        )
+
+    @classmethod
+    async def _mark_ci_inactive(cls, connected_integration_id: str) -> None:
+        _require_redis()
+        ci = str(connected_integration_id or "").strip()
+        if not ci:
+            return
+        await redis_ops.srem(cls._active_ci_ids_key(), ci)
+
+    @classmethod
+    async def _set_worker_heartbeat(cls, worker_index: int) -> None:
+        _require_redis()
+        await redis_ops.setex(
+            cls._worker_heartbeat_key(worker_index),
+            GptCrmChatAssistantConfig.WORKER_HEARTBEAT_TTL_SEC,
+            str(_now_ts()),
+        )
+        await cls._touch_active_ci_ids_ttl()
+
+    @classmethod
+    async def _set_debounce_latest(
+        cls,
+        connected_integration_id: str,
+        chat_id: str,
+        message_id: str,
+    ) -> None:
+        _require_redis()
+        key = cls._debounce_key(connected_integration_id, chat_id)
+        await redis_ops.setex(
+            key,
+            GptCrmChatAssistantConfig.DEBOUNCE_TTL_SEC,
+            str(message_id),
+        )
+
+    @classmethod
+    async def _is_latest_debounce_message(
+        cls,
+        connected_integration_id: str,
+        chat_id: str,
+        message_id: str,
+    ) -> bool:
+        _require_redis()
+        key = cls._debounce_key(connected_integration_id, chat_id)
+        latest = str(
+            await redis_ops.get(key)
+            or ""
+        ).strip()
+        return not latest or latest == str(message_id or "").strip()
+
+    @classmethod
+    async def _fetch_settings_map(
+        cls,
+        connected_integration_id: str,
+        force_refresh: bool = False,
+    ) -> Dict[str, str]:
+        cache_key = cls._settings_cache_key(connected_integration_id)
+        if not force_refresh:
+            cached = await cls._redis_get(cache_key)
+            if cached:
+                try:
+                    payload = json.loads(cached)
+                    if isinstance(payload, dict):
+                        return {str(k).lower(): str(v or "") for k, v in payload.items()}
+                except Exception:
+                    pass
+
+        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+            response = await api.integrations.connected_integration_setting.get(
+                ConnectedIntegrationSettingRequest(
+                    connected_integration_id=connected_integration_id
+                )
+            )
+
+        settings_map: Dict[str, str] = {}
+        for row in response.result or []:
+            key = str(getattr(row, "key", "") or "").strip().lower()
+            if key:
+                settings_map[key] = str(getattr(row, "value", "") or "").strip()
+
+        await cls._redis_set(
+            cache_key,
+            json.dumps(settings_map, ensure_ascii=False, separators=(",", ":")),
+            GptCrmChatAssistantConfig.SETTINGS_TTL_SEC,
+        )
+        return settings_map
+
+    @classmethod
+    async def _clear_settings_cache(cls, connected_integration_id: str) -> None:
+        await cls._redis_delete(
+            cls._settings_cache_key(connected_integration_id),
+            cls._ci_active_cache_key(connected_integration_id),
+        )
+
+    @classmethod
+    async def _is_connected_integration_active(
+        cls, connected_integration_id: str, force_refresh: bool = False
+    ) -> bool:
+        ci = str(connected_integration_id or "").strip()
+        if not ci:
+            return True
+
+        now = time.monotonic()
+        if not force_refresh:
+            async with cls._ACTIVE_CACHE_LOCK:
+                cached = cls._ACTIVE_CACHE.get(ci)
+            if cached and cached[1] > now:
+                return cached[0]
+
+            cached_raw = await cls._redis_get(cls._ci_active_cache_key(ci))
+            if cached_raw in {"0", "1"}:
+                cached_value = cached_raw == "1"
+                async with cls._ACTIVE_CACHE_LOCK:
+                    cls._ACTIVE_CACHE[ci] = (
+                        cached_value,
+                        now + GptCrmChatAssistantConfig.ACTIVE_CACHE_TTL_SEC,
+                    )
+                return cached_value
+
+        lock_token = await cls._acquire_redis_lock(
+            cls._ci_active_lock_key(ci),
+            GptCrmChatAssistantConfig.ACTIVE_LOCK_TTL_SEC,
+            wait_seconds=(
+                GptCrmChatAssistantConfig.ACTIVE_LOCK_WAIT_SEC
+                if not force_refresh
+                else GptCrmChatAssistantConfig.ACTIVE_LOCK_TTL_SEC
+            ),
+        )
+        if not lock_token:
+            cached_raw = await cls._redis_get(cls._ci_active_cache_key(ci))
+            if cached_raw in {"0", "1"}:
+                return cached_raw == "1"
+            raise TimeoutError(f"Timed out waiting for active check lock for ID {ci}")
+
+        detected: Optional[bool] = None
+        last_error: Optional[Exception] = None
+        try:
+            if not force_refresh:
+                cached_raw = await cls._redis_get(cls._ci_active_cache_key(ci))
+                if cached_raw in {"0", "1"}:
+                    cached_value = cached_raw == "1"
+                    async with cls._ACTIVE_CACHE_LOCK:
+                        cls._ACTIVE_CACHE[ci] = (
+                            cached_value,
+                            now + GptCrmChatAssistantConfig.ACTIVE_CACHE_TTL_SEC,
+                        )
+                    return cached_value
+
+            async with RegosAPI(connected_integration_id=ci) as api:
+                response = await api.integrations.connected_integration.get(
+                    ConnectedIntegrationGetRequest(
+                        connected_integration_ids=[ci],
+                        include_name=False,
+                        include_schedule=False,
+                    )
+                )
+            if response.ok and isinstance(response.result, list):
+                for row in response.result:
+                    row_ci = str(getattr(row, "connected_integration_id", "") or "").strip()
+                    if row_ci and row_ci != ci:
+                        continue
+                    row_active = getattr(row, "is_active", None)
+                    if row_active is None:
+                        continue
+                    detected = bool(row_active)
+                    break
+        except httpx.HTTPStatusError as error:
+            last_error = error
+            status_code = (
+                int(error.response.status_code)
+                if error.response is not None
+                else None
+            )
+            if status_code in {401, 403, 404}:
+                detected = False
+        except Exception as error:
+            last_error = error
+        finally:
+            await cls._release_redis_lock(cls._ci_active_lock_key(ci), lock_token)
+
+        if detected is None:
+            if last_error is not None:
+                raise RuntimeError(
+                    f"ConnectedIntegration/Get failed for active check: ci={ci} error={last_error}"
+                ) from last_error
+            detected = False
+
+        active = bool(detected)
+
+        async with cls._ACTIVE_CACHE_LOCK:
+            cls._ACTIVE_CACHE[ci] = (
+                active,
+                now + GptCrmChatAssistantConfig.ACTIVE_CACHE_TTL_SEC,
+            )
+        await cls._redis_set(
+            cls._ci_active_cache_key(ci),
+            "1" if active else "0",
+            GptCrmChatAssistantConfig.ACTIVE_CACHE_TTL_SEC,
+        )
+        return active
+
+    @classmethod
+    def _build_runtime(
+        cls, connected_integration_id: str, settings_map: Dict[str, str]
+    ) -> RuntimeConfig:
+        api_key = str(settings_map.get("assistant_api_key") or "").strip()
+        model = str(settings_map.get("assistant_model") or "").strip()
+        prompt = str(settings_map.get("assistant_prompt") or "").strip()
+
+        if not api_key:
+            raise ValueError("assistant_api_key is required")
+        if not model:
+            raise ValueError("assistant_model is required")
+        if not prompt:
+            raise ValueError("assistant_prompt is required")
+
+        context_source = str(settings_map.get("assistant_context_source") or "").strip().lower()
+        if context_source not in GptCrmChatAssistantConfig.ALLOWED_CONTEXT_SOURCES:
+            context_source = GptCrmChatAssistantConfig.DEFAULT_CONTEXT_SOURCE
+
+        suggestions_count = _parse_int(
+            settings_map.get("assistant_suggestions_count"),
+            GptCrmChatAssistantConfig.DEFAULT_SUGGESTIONS_COUNT,
+        )
+        suggestions_count = max(1, min(5, suggestions_count))
+
+        history_limit = _parse_int(
+            settings_map.get("assistant_history_limit"),
+            GptCrmChatAssistantConfig.DEFAULT_HISTORY_LIMIT,
+        )
+        history_limit = max(1, min(30, history_limit))
+
+        temperature = _parse_float(
+            settings_map.get("assistant_temperature"),
+            GptCrmChatAssistantConfig.DEFAULT_TEMPERATURE,
+        )
+        temperature = min(max(temperature, 0.0), 2.0)
+
+        auto_join_enabled = _parse_bool(
+            settings_map.get("assistant_auto_join_enabled"),
+            GptCrmChatAssistantConfig.DEFAULT_AUTO_JOIN_ENABLED,
+        )
+        auto_join_entities = _parse_auto_join_entities(
+            settings_map.get("assistant_auto_join_entities")
+        )
+
+        include_staff_private = _parse_bool(
+            settings_map.get("assistant_include_staff_private"),
+            False,
+        )
+
+        auto_send_enabled = _parse_bool(
+            settings_map.get("assistant_auto_send_enabled"),
+            GptCrmChatAssistantConfig.DEFAULT_AUTO_SEND_ENABLED,
+        )
+        auto_send_confidence_threshold = _parse_float(
+            settings_map.get("assistant_auto_send_confidence_threshold"),
+            GptCrmChatAssistantConfig.DEFAULT_AUTO_SEND_CONFIDENCE_THRESHOLD,
+        )
+        auto_send_confidence_threshold = min(max(auto_send_confidence_threshold, 0.0), 1.0)
+
+        auto_send_max_per_chat_hour = _parse_int(
+            settings_map.get("assistant_auto_send_max_per_chat_hour"),
+            GptCrmChatAssistantConfig.DEFAULT_AUTO_SEND_MAX_PER_CHAT_HOUR,
+        )
+        auto_send_max_per_chat_hour = max(1, min(100, auto_send_max_per_chat_hour))
+
+        auto_send_cooldown_sec = _parse_int(
+            settings_map.get("assistant_auto_send_cooldown_sec"),
+            GptCrmChatAssistantConfig.DEFAULT_AUTO_SEND_COOLDOWN_SEC,
+        )
+        auto_send_cooldown_sec = max(0, min(3600, auto_send_cooldown_sec))
+
+        return RuntimeConfig(
+            connected_integration_id=connected_integration_id,
+            assistant_api_key=api_key,
+            assistant_model=model,
+            assistant_prompt=prompt,
+            assistant_context_source=context_source,
+            assistant_auto_join_enabled=auto_join_enabled,
+            assistant_auto_join_entities=auto_join_entities,
+            assistant_suggestions_count=suggestions_count,
+            assistant_history_limit=history_limit,
+            assistant_temperature=temperature,
+            assistant_include_staff_private=include_staff_private,
+            assistant_auto_send_enabled=auto_send_enabled,
+            assistant_auto_send_confidence_threshold=auto_send_confidence_threshold,
+            assistant_auto_send_max_per_chat_hour=auto_send_max_per_chat_hour,
+            assistant_auto_send_cooldown_sec=auto_send_cooldown_sec,
+        )
+
+    @classmethod
+    async def _load_runtime(
+        cls, connected_integration_id: str, force_refresh_settings: bool = False
+    ) -> RuntimeConfig:
+        settings_map = await cls._fetch_settings_map(
+            connected_integration_id,
+            force_refresh=force_refresh_settings,
+        )
+        return cls._build_runtime(connected_integration_id, settings_map)
+
+    @classmethod
+    async def _subscribe_required_webhooks(
+        cls,
+        connected_integration_id: str,
+    ) -> Dict[str, Any]:
+        return {
+            "status": "manual",
+            "webhooks": sorted(GptCrmChatAssistantConfig.SUPPORTED_INBOUND_WEBHOOKS),
+        }
+
+    @classmethod
+    async def _field_exists(
+        cls,
+        connected_integration_id: str,
+        entity_type: str,
+        full_key: str,
+    ) -> bool:
+        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+            response = await api.references.field.get(
+                FieldGetRequest(
+                    entity_type=entity_type,
+                    keys=[full_key],
+                )
+            )
+
+        if not response.ok:
+            raise RuntimeError(
+                f"Field/Get rejected: entity_type={entity_type} payload={response.result}"
+            )
+        rows = response.result if isinstance(response.result, list) else []
+        expected_key = full_key.strip().lower()
+        for row in rows:
+            row_key = str(getattr(row, "key", "") or "").strip().lower()
+            if row_key == expected_key:
+                return True
+        return False
+
+    @classmethod
+    async def _ensure_thread_custom_field(
+        cls,
+        connected_integration_id: str,
+        entity_type: str,
+    ) -> Dict[str, Any]:
+        raw_key = GptCrmChatAssistantConfig.THREAD_FIELD_KEY
+        full_key = GptCrmChatAssistantConfig.THREAD_FIELD_FULL_KEY
+
+        if await cls._field_exists(
+            connected_integration_id=connected_integration_id,
+            entity_type=entity_type,
+            full_key=full_key,
+        ):
+            return {
+                "entity_type": entity_type,
+                "key": full_key,
+                "status": "exists",
+            }
+
+        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+            response = await api.references.field.add(
+                FieldAddRequest(
+                    key=raw_key,
+                    name=GptCrmChatAssistantConfig.THREAD_FIELD_NAME,
+                    entity_type=entity_type,
+                    data_type=GptCrmChatAssistantConfig.THREAD_FIELD_DATA_TYPE,
+                    required=False,
+                )
+            )
+
+        if response.ok:
+            result_payload = (
+                response.result if isinstance(response.result, dict) else {}
+            )
+            created_new_id = _parse_int(
+                result_payload.get("new_id")
+                if isinstance(response.result, dict)
+                else getattr(response.result, "new_id", 0),
+                0,
+            )
+            for attempt in range(3):
+                if await cls._field_exists(
+                    connected_integration_id=connected_integration_id,
+                    entity_type=entity_type,
+                    full_key=full_key,
+                ):
+                    return {
+                        "entity_type": entity_type,
+                        "key": full_key,
+                        "status": "created",
+                        "new_id": created_new_id,
+                    }
+                if attempt < 2:
+                    await asyncio.sleep(0.2)
+            raise RuntimeError(
+                f"Field/Add returned ok but field is not visible yet for key={full_key} entity_type={entity_type}"
+            )
+
+        logger.warning(
+            "Field/Add rejected while ensuring thread field: ci=%s entity_type=%s payload=%s",
+            connected_integration_id,
+            entity_type,
+            response.result,
+        )
+
+        raise RuntimeError(
+            f"Field/Add rejected for required key={raw_key} entity_type={entity_type}: {response.result}"
+        )
+
+    @classmethod
+    async def _ensure_thread_custom_fields(
+        cls,
+        connected_integration_id: str,
+    ) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        for entity_type in GptCrmChatAssistantConfig.THREAD_FIELD_ENTITY_TYPES:
+            result = await cls._ensure_thread_custom_field(
+                connected_integration_id=connected_integration_id,
+                entity_type=entity_type,
+            )
+            rows.append(result)
+        return rows
+
+    @classmethod
+    async def _is_fields_bootstrapped(cls, connected_integration_id: str) -> bool:
+        ci = str(connected_integration_id or "").strip()
+        if not ci:
+            return False
+
+        now = time.monotonic()
+        async with cls._LOCAL_FIELDS_READY_LOCK:
+            expires_at = cls._LOCAL_FIELDS_READY.get(ci)
+            if expires_at and expires_at > now:
+                return True
+            if expires_at:
+                cls._LOCAL_FIELDS_READY.pop(ci, None)
+
+        cached = await cls._redis_get(cls._fields_ready_key(ci))
+        if cached == "1":
+            async with cls._LOCAL_FIELDS_READY_LOCK:
+                cls._LOCAL_FIELDS_READY[ci] = now + GptCrmChatAssistantConfig.FIELD_BOOTSTRAP_TTL_SEC
+            return True
+        return False
+
+    @classmethod
+    async def _mark_fields_bootstrapped(cls, connected_integration_id: str) -> None:
+        ci = str(connected_integration_id or "").strip()
+        if not ci:
+            return
+        ttl = GptCrmChatAssistantConfig.FIELD_BOOTSTRAP_TTL_SEC
+        await cls._redis_set(cls._fields_ready_key(ci), "1", ttl)
+        async with cls._LOCAL_FIELDS_READY_LOCK:
+            cls._LOCAL_FIELDS_READY[ci] = time.monotonic() + ttl
+
+    @classmethod
+    async def _clear_fields_bootstrap_cache(cls, connected_integration_id: str) -> None:
+        ci = str(connected_integration_id or "").strip()
+        if not ci:
+            return
+        await cls._redis_delete(cls._fields_ready_key(ci))
+        async with cls._LOCAL_FIELDS_READY_LOCK:
+            cls._LOCAL_FIELDS_READY.pop(ci, None)
+
+    @classmethod
+    async def _clear_quick_replies_cache(cls, connected_integration_id: str) -> None:
+        ci = str(connected_integration_id or "").strip()
+        if not ci:
+            return
+        await cls._redis_delete(cls._quick_replies_cache_key(ci))
+        async with cls._LOCAL_QUICK_REPLIES_LOCK:
+            cls._LOCAL_QUICK_REPLIES_CACHE.pop(ci, None)
+
+    @classmethod
+    async def _ensure_thread_fields_ready(
+        cls,
+        connected_integration_id: str,
+        force: bool = False,
+    ) -> List[Dict[str, Any]]:
+        if not force and await cls._is_fields_bootstrapped(connected_integration_id):
+            return []
+        rows = await cls._ensure_thread_custom_fields(connected_integration_id)
+        await cls._mark_fields_bootstrapped(connected_integration_id)
+        return rows
+
+    @staticmethod
+    def _normalize_quick_reply_texts(raw_rows: Any) -> List[str]:
+        if not isinstance(raw_rows, list):
+            return []
+
+        rows: List[str] = []
+        seen: Set[str] = set()
+        for row in raw_rows:
+            if isinstance(row, dict):
+                text_raw = row.get("text")
+            else:
+                text_raw = getattr(row, "text", None)
+            text = _normalize_text(text_raw)
+            if not text:
+                continue
+            if len(text) > GptCrmChatAssistantConfig.MAX_QUICK_REPLY_TEXT_LEN:
+                text = text[: GptCrmChatAssistantConfig.MAX_QUICK_REPLY_TEXT_LEN].rstrip()
+            key = text.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(text)
+            if len(rows) >= GptCrmChatAssistantConfig.MAX_QUICK_REPLIES_FETCH:
+                break
+        return rows
+
+    @classmethod
+    async def _set_quick_replies_cache(
+        cls,
+        connected_integration_id: str,
+        quick_replies: List[str],
+    ) -> None:
+        ci = str(connected_integration_id or "").strip()
+        if not ci:
+            return
+        normalized = cls._normalize_quick_reply_texts(
+            [{"text": text} for text in (quick_replies or [])]
+        )
+        ttl = GptCrmChatAssistantConfig.QUICK_REPLY_CACHE_TTL_SEC
+        await cls._redis_set(
+            cls._quick_replies_cache_key(ci),
+            json.dumps(normalized, ensure_ascii=False, separators=(",", ":")),
+            ttl,
+        )
+        async with cls._LOCAL_QUICK_REPLIES_LOCK:
+            cls._LOCAL_QUICK_REPLIES_CACHE[ci] = (normalized, time.monotonic() + ttl)
+
+    @classmethod
+    async def _get_quick_replies_cached(
+        cls,
+        connected_integration_id: str,
+    ) -> Optional[List[str]]:
+        ci = str(connected_integration_id or "").strip()
+        if not ci:
+            return None
+
+        now = time.monotonic()
+        async with cls._LOCAL_QUICK_REPLIES_LOCK:
+            row = cls._LOCAL_QUICK_REPLIES_CACHE.get(ci)
+            if row and row[1] > now:
+                return list(row[0])
+            if row:
+                cls._LOCAL_QUICK_REPLIES_CACHE.pop(ci, None)
+
+        cached = await cls._redis_get(cls._quick_replies_cache_key(ci))
+        if not cached:
+            return None
+        try:
+            parsed = json.loads(cached)
+        except Exception:
+            return None
+        normalized = cls._normalize_quick_reply_texts(
+            [{"text": item} for item in parsed] if isinstance(parsed, list) else []
+        )
+        ttl = GptCrmChatAssistantConfig.QUICK_REPLY_CACHE_TTL_SEC
+        async with cls._LOCAL_QUICK_REPLIES_LOCK:
+            cls._LOCAL_QUICK_REPLIES_CACHE[ci] = (normalized, time.monotonic() + ttl)
+        return normalized
+
+    async def _fetch_quick_replies_from_api(
+        self,
+        connected_integration_id: str,
+    ) -> List[str]:
+        request = QuickReplyGetRequest(
+            limit=GptCrmChatAssistantConfig.MAX_QUICK_REPLIES_FETCH,
+            offset=0,
+        )
+        try:
+            async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+                response = await api.chat.quick_reply.get(request)
+        except Exception as error:
+            logger.warning(
+                "QuickReply/Get failed: ci=%s error=%s",
+                connected_integration_id,
+                error,
+            )
+
+            return []
+
+        if response.ok:
+            return self._normalize_quick_reply_texts(response.result)
+
+        description = self._api_error_description(response.result)
+        logger.warning(
+            "QuickReply/Get failed: ci=%s error=%s",
+            connected_integration_id,
+            description or response.result,
+        )
+        return []
+
+    async def _get_quick_replies(
+        self,
+        connected_integration_id: str,
+        force_refresh: bool = False,
+    ) -> List[str]:
+        if not force_refresh:
+            cached = await self._get_quick_replies_cached(connected_integration_id)
+            if cached is not None:
+                return cached
+
+        rows = await self._fetch_quick_replies_from_api(connected_integration_id)
+        await self._set_quick_replies_cache(connected_integration_id, rows)
+        return rows
+
+    @classmethod
+    async def _enqueue_chat_message_job(
+        cls,
+        connected_integration_id: str,
+        chat_id: str,
+        message_id: str,
+        event_id: Optional[str],
+        *,
+        attempt: int = 0,
+        defer_sec: Optional[int] = None,
+        update_debounce: bool = True,
+    ) -> None:
+        ci = str(connected_integration_id or "").strip()
+        if not ci:
+            raise ValueError("connected_integration_id is required")
+        stream_key = cls._stream_key()
+        await cls._ensure_stream_workers()
+        await cls._mark_ci_active(ci)
+        if update_debounce:
+            await cls._set_debounce_latest(ci, chat_id, message_id)
+        now_ts = _now_ts()
+        delay = (
+            GptCrmChatAssistantConfig.DEBOUNCE_SEC
+            if defer_sec is None
+            else max(int(defer_sec), 0)
+        )
+        await cls._enqueue(
+            stream_key,
+            {
+                "connected_integration_id": ci,
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "event_id": event_id or "",
+                "attempt": str(max(int(attempt), 0)),
+                "enqueued_at": str(now_ts),
+                "defer_until_ts": str(now_ts + delay),
+            },
+        )
+
+    @classmethod
+    async def _ensure_stream_worker(cls, connected_integration_id: str = "") -> None:
+        _ = connected_integration_id
+        await cls._ensure_stream_workers()
+
+    @classmethod
+    async def _ensure_stream_workers(cls) -> None:
+        _require_redis()
+        stream_key = cls._stream_key()
+        await cls._ensure_consumer_group(stream_key)
+        async with _MANAGER_LOCK:
+            for index in range(GptCrmChatAssistantConfig.STREAM_WORKERS):
+                task = _WORKER_TASKS.get(index)
+                if task and not task.done():
+                    continue
+                _WORKER_TASKS[index] = asyncio.create_task(
+                    cls._stream_worker_loop(index),
+                    name=f"gca_stream_{index}",
+                )
+
+    @classmethod
+    async def _stop_stream_worker(cls, connected_integration_id: str) -> None:
+        _ = connected_integration_id
+        return
+
+    @classmethod
+    async def shutdown_all(cls) -> None:
+        async with _MANAGER_LOCK:
+            worker_tasks = list(_WORKER_TASKS.values())
+            _WORKER_TASKS.clear()
+
+        for task in worker_tasks:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("Error while stopping GPT assistant background task")
+
+    @classmethod
+    async def restore_active_connections(cls) -> Dict[str, int]:
+        _require_redis()
+        await cls._ensure_stream_workers()
+
+        try:
+            raw_ids = await redis_ops.smembers(cls._active_ci_ids_key())
+        except Exception as error:
+            logger.warning("Failed to read active GPT assistant integrations set: %s", error)
+            return {"total": 0, "workers": len(_WORKER_TASKS)}
+
+        ci_ids = sorted(
+            str(value or "").strip()
+            for value in (raw_ids or set())
+            if str(value or "").strip()
+        )
+        if ci_ids:
+            await cls._touch_active_ci_ids_ttl(force=True)
+
+        logger.info(
+            "GPT assistant shared stream restored: active_ci=%s workers=%s",
+            len(ci_ids),
+            len(_WORKER_TASKS),
+        )
+        return {"total": len(ci_ids), "workers": len(_WORKER_TASKS)}
+
+    @classmethod
+    def _stream_entry_attempt(cls, fields: Dict[str, Any]) -> int:
+        return max(_parse_int(fields.get("attempt"), 0), 0)
+
+    @classmethod
+    def _stream_entry_defer_until_ts(cls, fields: Dict[str, Any]) -> int:
+        return max(_parse_int(fields.get("defer_until_ts"), 0), 0)
+
+    @classmethod
+    def _select_ready_stream_entries(
+        cls,
+        entries: Sequence[Tuple[str, Dict[str, Any]]],
+    ) -> Tuple[List[Tuple[str, Dict[str, Any]]], List[Tuple[str, Dict[str, Any]]]]:
+        now_ts = _now_ts()
+        ready: List[Tuple[str, Dict[str, Any]]] = []
+        deferred: List[Tuple[str, Dict[str, Any]]] = []
+        for entry_id, fields in entries:
+            if cls._stream_entry_defer_until_ts(fields) <= now_ts:
+                ready.append((entry_id, fields))
+            else:
+                deferred.append((entry_id, fields))
+        return ready, deferred
+
+    @classmethod
+    async def _ack_stream_entry(cls, stream_key: str, entry_id: str) -> None:
+        await redis_stream_ack_delete(stream_key, GptCrmChatAssistantConfig.STREAM_GROUP, entry_id)
+
+    @classmethod
+    async def _process_claimed_entries(
+        cls,
+        stream_key: str,
+        consumer: str,
+    ) -> List[Tuple[str, Dict[str, Any]]]:
+        try:
+            claimed_raw = await redis_ops.xautoclaim(
+                stream_key,
+                GptCrmChatAssistantConfig.STREAM_GROUP,
+                consumer,
+                min_idle_time=GptCrmChatAssistantConfig.STREAM_MIN_IDLE_MS,
+                start_id="0-0",
+                count=GptCrmChatAssistantConfig.STREAM_BATCH_SIZE,
+            )
+        except Exception as error:
+            if redis_error_contains(error, "NOGROUP"):
+                await cls._ensure_consumer_group(stream_key)
+                return []
+            logger.warning(
+                "GPT assistant stream xautoclaim failed: stream=%s error=%s",
+                stream_key,
+                error,
+            )
+            return []
+
+        entries: List[Tuple[str, Dict[str, Any]]] = []
+        if isinstance(claimed_raw, (list, tuple)) and len(claimed_raw) >= 2:
+            entries = claimed_raw[1] or []
+        return [
+            (str(entry_id), fields if isinstance(fields, dict) else {})
+            for entry_id, fields in entries
+        ]
+
+    @classmethod
+    async def _stream_worker_loop(cls, worker_index: int) -> None:
+        stream_key = cls._stream_key()
+        consumer = f"{_INSTANCE_ID}:{int(worker_index)}"
+        worker = cls()
+        logger.info("GPT assistant stream worker started: index=%s", worker_index)
+        pending_entries: List[Tuple[str, Dict[str, Any]]] = []
+        try:
+            await cls._ensure_consumer_group(stream_key)
+            semaphore = asyncio.Semaphore(GptCrmChatAssistantConfig.EVENT_CONCURRENCY)
+            while True:
+                try:
+                    await cls._set_worker_heartbeat(worker_index)
+                    await cls._touch_stream_ttl(stream_key)
+                    last_claim_ts = int(_STREAM_CLAIM_TS.get(stream_key) or 0)
+                    now_ts = _now_ts()
+                    if now_ts - last_claim_ts >= GptCrmChatAssistantConfig.STREAM_CLAIM_INTERVAL_SEC:
+                        _STREAM_CLAIM_TS[stream_key] = now_ts
+                        claimed_entries = await cls._process_claimed_entries(
+                            stream_key,
+                            consumer,
+                        )
+                        if claimed_entries:
+                            pending_entries.extend(claimed_entries)
+
+                    try:
+                        block_ms = GptCrmChatAssistantConfig.STREAM_READ_BLOCK_MS
+                        if pending_entries:
+                            block_ms = min(block_ms, 500)
+                        records = await redis_ops.xreadgroup(
+                            groupname=GptCrmChatAssistantConfig.STREAM_GROUP,
+                            consumername=consumer,
+                            streams={stream_key: ">"},
+                            count=GptCrmChatAssistantConfig.STREAM_BATCH_SIZE,
+                            block=block_ms,
+                        )
+                    except Exception as error:
+                        if redis_error_contains(error, "NOGROUP"):
+                            await cls._ensure_consumer_group(stream_key)
+                            continue
+                        raise
+
+                    for _, entries in records or []:
+                        for entry_id, fields in entries or []:
+                            pending_entries.append(
+                                (str(entry_id), fields if isinstance(fields, dict) else {})
+                            )
+
+                    if not pending_entries:
+                        continue
+
+                    ready_entries, pending_entries = cls._select_ready_stream_entries(
+                        pending_entries
+                    )
+                    if not ready_entries:
+                        continue
+
+                    async def _process_ready(entry_id: str, fields: Dict[str, Any]) -> None:
+                        async with semaphore:
+                            await cls._process_stream_entry(
+                                worker=worker,
+                                stream_key=stream_key,
+                                entry_id=entry_id,
+                                fields=fields,
+                            )
+
+                    await asyncio.gather(
+                        *(_process_ready(entry_id, fields) for entry_id, fields in ready_entries)
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    logger.exception("GPT assistant stream worker error: index=%s error=%s", worker_index, error)
+                    await asyncio.sleep(2)
+        finally:
+            try:
+                await worker.http_client.aclose()
+            except Exception:
+                logger.exception("Error while closing GPT assistant worker HTTP client")
+            async with _MANAGER_LOCK:
+                current = _WORKER_TASKS.get(int(worker_index))
+                if current is asyncio.current_task():
+                    _WORKER_TASKS.pop(int(worker_index), None)
+
+    @classmethod
+    async def _process_stream_entry(
+        cls,
+        *,
+        worker: "GptCrmChatAssistantIntegration",
+        stream_key: str,
+        entry_id: str,
+        fields: Dict[str, Any],
+    ) -> None:
+        ci = str(fields.get("connected_integration_id") or "").strip()
+        chat_id = str(fields.get("chat_id") or "").strip()
+        message_id = str(fields.get("message_id") or "").strip()
+        event_id = str(fields.get("event_id") or "").strip() or None
+        if not ci or not chat_id or not message_id:
+            logger.warning("GPT assistant stream entry has invalid payload: entry_id=%s fields=%s", entry_id, fields)
+            await cls._ack_stream_entry(stream_key, entry_id)
+            return
+
+        if not await cls._is_connected_integration_active(ci):
+            await cls._mark_ci_inactive(ci)
+            logger.info(
+                "GPT assistant stream job skipped for inactive integration: ci=%s entry_id=%s",
+                ci,
+                entry_id,
+            )
+            await cls._ack_stream_entry(stream_key, entry_id)
+            return
+
+        if not await cls._is_latest_debounce_message(ci, chat_id, message_id):
+            await cls._ack_stream_entry(stream_key, entry_id)
+            return
+
+        attempt = cls._stream_entry_attempt(fields)
+        try:
+            runtime = await cls._load_runtime(ci)
+            if runtime.assistant_context_source == "conversation":
+                await cls._ensure_thread_fields_ready(ci, force=False)
+            result = await worker._process_chat_message_added(
+                runtime=runtime,
+                chat_id=chat_id,
+                message_id=message_id,
+            )
+            logger.info(
+                "GPT assistant stream job processed: ci=%s chat_id=%s message_id=%s status=%s reason=%s",
+                ci,
+                chat_id,
+                message_id,
+                result.get("status"),
+                result.get("reason"),
+            )
+            await cls._ack_stream_entry(stream_key, entry_id)
+        except Exception as error:
+            if not await cls._is_latest_debounce_message(ci, chat_id, message_id):
+                await cls._ack_stream_entry(stream_key, entry_id)
+                return
+            if attempt >= GptCrmChatAssistantConfig.STREAM_MAX_RETRIES:
+                await cls._send_stream_entry_to_dlq(
+                    stream_key=stream_key,
+                    connected_integration_id=ci,
+                    fields=fields,
+                    error=error,
+                )
+                await cls._ack_stream_entry(stream_key, entry_id)
+                return
+
+            delay = min(
+                60,
+                GptCrmChatAssistantConfig.STREAM_RETRY_BASE_DELAY_SEC * (2 ** attempt),
+            )
+            logger.warning(
+                "GPT assistant stream job failed, requeueing: ci=%s chat_id=%s message_id=%s attempt=%s error=%s",
+                ci,
+                chat_id,
+                message_id,
+                attempt,
+                error,
+            )
+            await cls._enqueue_chat_message_job(
+                connected_integration_id=ci,
+                chat_id=chat_id,
+                message_id=message_id,
+                event_id=event_id,
+                attempt=attempt + 1,
+                defer_sec=delay,
+                update_debounce=False,
+            )
+            await cls._ack_stream_entry(stream_key, entry_id)
+
+    @classmethod
+    async def _send_stream_entry_to_dlq(
+        cls,
+        *,
+        stream_key: str,
+        connected_integration_id: str,
+        fields: Dict[str, Any],
+        error: Exception,
+    ) -> None:
+        dlq_payload = dict(fields)
+        dlq_payload["source_stream"] = stream_key
+        dlq_payload["failed_at"] = str(_now_ts())
+        dlq_payload["error"] = str(error)
+        await cls._enqueue(cls._dlq_stream_key(connected_integration_id), dlq_payload)
+        logger.warning(
+            "GPT assistant stream job moved to DLQ: ci=%s chat_id=%s message_id=%s error=%s",
+            connected_integration_id,
+            fields.get("chat_id"),
+            fields.get("message_id"),
+            error,
+        )
+
+    async def connect(self, **_: Any) -> Dict[str, Any]:
+        if not self.connected_integration_id:
+            return self._error_response(1000, "connected_integration_id is required").dict()
+
+        ci = str(self.connected_integration_id).strip()
+        if not await self._is_connected_integration_active(ci, force_refresh=True):
+            return {
+                "status": "ignored",
+                "reason": "connected_integration_inactive",
+            }
+
+        try:
+            runtime = await self._load_runtime(ci, force_refresh_settings=True)
+        except Exception as error:
+            return self._error_response(1001, str(error)).dict()
+
+        field_ensure_result: List[Dict[str, Any]] = []
+        if runtime.assistant_context_source == "conversation":
+            try:
+                field_ensure_result = await self._ensure_thread_fields_ready(ci, force=True)
+            except Exception as error:
+                logger.warning("Required CRM field ensure failed: ci=%s error=%s", ci, error)
+                return self._error_response(1003, str(error)).dict()
+
+        subscribe_result = await self._subscribe_required_webhooks(ci)
+        _require_redis()
+        await self._mark_ci_active(ci)
+        try:
+            await self._ensure_stream_workers()
+        except Exception:
+            await self._mark_ci_inactive(ci)
+            raise
+        return {
+            "status": "connected",
+            "integration_key": GptCrmChatAssistantConfig.INTEGRATION_KEY,
+            "model": runtime.assistant_model,
+            "context_source": runtime.assistant_context_source,
+            "webhooks_subscription": subscribe_result,
+            "queue_enabled": True,
+            "required_fields": field_ensure_result,
+            "auto_join_enabled": runtime.assistant_auto_join_enabled,
+            "auto_join_entities": sorted(runtime.assistant_auto_join_entities),
+            "auto_send_enabled": runtime.assistant_auto_send_enabled,
+            "auto_send_confidence_threshold": runtime.assistant_auto_send_confidence_threshold,
+        }
+
+    async def disconnect(self, **_: Any) -> Dict[str, Any]:
+        if not self.connected_integration_id:
+            return self._error_response(1000, "connected_integration_id is required").dict()
+        ci = str(self.connected_integration_id)
+        await self._clear_settings_cache(ci)
+        await self._clear_fields_bootstrap_cache(ci)
+        await self._clear_quick_replies_cache(ci)
+        await self._mark_ci_inactive(ci)
+        await self._stop_stream_worker(ci)
+        return {"status": "disconnected"}
+
+    async def reconnect(self, **_: Any) -> Dict[str, Any]:
+        if not self.connected_integration_id:
+            return self._error_response(1000, "connected_integration_id is required").dict()
+        await self.disconnect()
+        return await self.connect()
+
+    async def update_settings(self, settings: Optional[dict] = None, **_: Any) -> Dict[str, Any]:
+        _ = settings
+        if not self.connected_integration_id:
+            return self._error_response(1000, "connected_integration_id is required").dict()
+        await self._clear_settings_cache(str(self.connected_integration_id))
+        return {"status": "settings updated"}
+
+    async def handle_external(self, data: dict) -> Any:
+        _ = data
+        return {"status": "ignored"}
+
+    @staticmethod
+    def _normalize_regos_webhook_payload(
+        action: Optional[str],
+        data: Optional[Dict[str, Any]],
+        kwargs: Dict[str, Any],
+    ) -> Tuple[Optional[str], Dict[str, Any], Optional[str]]:
+        event_id = str(kwargs.get("event_id") or "").strip() or None
+
+        if isinstance(action, str) and action in GptCrmChatAssistantConfig.SUPPORTED_INBOUND_WEBHOOKS:
+            return action, data or {}, event_id
+
+        if action == "HandleWebhook":
+            payload = data if isinstance(data, dict) else {}
+            nested = payload.get("data")
+            wrapped_event_id = str(payload.get("event_id") or event_id or "").strip() or None
+            if not isinstance(nested, dict):
+                return None, {}, wrapped_event_id
+            nested_action = nested.get("action")
+            nested_data = nested.get("data")
+            if not isinstance(nested_action, str) or not isinstance(nested_data, dict):
+                return None, {}, wrapped_event_id
+            return nested_action, nested_data, wrapped_event_id
+
+        return None, {}, event_id
+
+    @staticmethod
+    def _event_key(
+        chat_id: str,
+        message_id: str,
+        event_id: Optional[str],
+    ) -> str:
+        eid = str(event_id or "").strip()
+        if eid:
+            return f"event:{eid}"
+        return f"chat:{chat_id}:message:{message_id}"
+
+    async def _is_duplicate_event(
+        self,
+        connected_integration_id: str,
+        event_key: str,
+    ) -> bool:
+        dedupe_key = self._dedupe_key(connected_integration_id, event_key)
+        inserted = await self._redis_set_nx(
+            dedupe_key,
+            "1",
+            GptCrmChatAssistantConfig.DEDUPE_TTL_SEC,
+        )
+        return not inserted
+
+    async def _release_duplicate_event(
+        self,
+        connected_integration_id: str,
+        event_key: str,
+    ) -> None:
+        await self._redis_delete(self._dedupe_key(connected_integration_id, event_key))
+
+    async def _dispatch_chat_message_added(
+        self,
+        *,
+        connected_integration_id: str,
+        chat_id: str,
+        message_id: str,
+        event_id: Optional[str],
+    ) -> Dict[str, Any]:
+        await self._enqueue_chat_message_job(
+            connected_integration_id=connected_integration_id,
+            chat_id=chat_id,
+            message_id=message_id,
+            event_id=event_id,
+        )
+        return {
+            "status": "queued",
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "debounce_sec": GptCrmChatAssistantConfig.DEBOUNCE_SEC,
+        }
+
+    async def handle_webhook(
+        self, action: Optional[str] = None, data: Optional[Dict[str, Any]] = None, **kwargs: Any
+    ) -> Dict[str, Any]:
+        if not self.connected_integration_id:
+            return self._error_response(1000, "connected_integration_id is required").dict()
+
+        ci = str(self.connected_integration_id).strip()
+        normalized_action, payload, event_id = self._normalize_regos_webhook_payload(
+            action=action,
+            data=data,
+            kwargs=kwargs,
+        )
+        if normalized_action not in GptCrmChatAssistantConfig.SUPPORTED_INBOUND_WEBHOOKS:
+            return {"status": "ignored", "reason": f"unsupported_action:{normalized_action}"}
+
+        chat_id = str(payload.get("chat_id") or "").strip()
+        message_id = str(payload.get("id") or "").strip()
+        if not chat_id or not message_id:
+            return {"status": "ignored", "reason": "invalid_payload"}
+
+        event_key = self._event_key(chat_id, message_id, event_id)
+        if await self._is_duplicate_event(ci, event_key):
+            return {"status": "ignored", "reason": "duplicate_event"}
+
+        try:
+            return await self._dispatch_chat_message_added(
+                connected_integration_id=ci,
+                chat_id=chat_id,
+                message_id=message_id,
+                event_id=event_id,
+            )
+        except Exception as error:
+            await self._release_duplicate_event(ci, event_key)
+            logger.exception(
+                "ChatMessageAdded processing failed: ci=%s chat_id=%s message_id=%s",
+                ci,
+                chat_id,
+                message_id,
+            )
+            return self._error_response(1002, str(error)).dict()
+
+    async def _process_chat_message_added(
+        self,
+        runtime: RuntimeConfig,
+        chat_id: str,
+        message_id: str,
+    ) -> Dict[str, Any]:
+        message, history_rows = await self._load_source_message_and_history(
+            runtime=runtime,
+            chat_id=chat_id,
+            message_id=message_id,
+        )
+        if not message:
+            return {"status": "ignored", "reason": "message_not_found"}
+
+        if not self._should_generate_for_message(message):
+            return {"status": "ignored", "reason": "message_filtered"}
+
+        use_conversation_context = runtime.assistant_context_source == "conversation"
+        conversation_state: Dict[str, Any] = {}
+        conversation_status = "disabled"
+        conversation_id: Optional[str] = None
+        if use_conversation_context:
+            conversation_state = await self._resolve_or_create_chat_conversation(
+                runtime=runtime,
+                chat_id=chat_id,
+            )
+            conversation_status = str(conversation_state.get("status") or "")
+            if conversation_status != "ok":
+                reason = conversation_status or "conversation_unavailable"
+                return {"status": "ignored", "reason": reason}
+            conversation_id = (
+                str(conversation_state.get("conversation_id") or "").strip()
+                if conversation_status == "ok"
+                else ""
+            ) or None
+            if not conversation_id:
+                return {"status": "ignored", "reason": "conversation_id_missing"}
+
+        bot_task = asyncio.create_task(
+            self._resolve_or_join_chatbot(
+                runtime=runtime,
+                chat_id=chat_id,
+            )
+        )
+        context_task = asyncio.create_task(
+            self._build_chat_context(
+                runtime=runtime,
+                source_message=message,
+                history_rows=history_rows,
+            )
+        )
+        quick_replies_task = asyncio.create_task(
+            self._get_quick_replies(runtime.connected_integration_id)
+        )
+        bot_id, context_result, quick_replies = await asyncio.gather(
+            bot_task,
+            context_task,
+            quick_replies_task,
+        )
+        if not bot_id:
+            return {"status": "ignored", "reason": "chatbot_not_available"}
+
+        context, context_image_urls = context_result
+        generation_result = await self._generate_suggestions(
+            runtime=runtime,
+            source_message=message,
+            context=context,
+            context_image_urls=context_image_urls,
+            conversation_id=conversation_id,
+            quick_replies=quick_replies,
+        )
+        suggestions = generation_result.get("suggestions") or []
+        best_reply = _normalize_text(generation_result.get("best_reply"))
+        confidence = _parse_float(generation_result.get("confidence"), 0.0)
+        confidence = min(max(confidence, 0.0), 1.0)
+        if not suggestions:
+            return {"status": "ignored", "reason": "empty_suggestions"}
+
+        auto_sent = False
+        if self._can_auto_send_reply(
+            runtime=runtime,
+            confidence=confidence,
+            best_reply=best_reply,
+        ):
+            allowed_by_limits = await self._acquire_auto_send_slot(
+                runtime=runtime,
+                chat_id=chat_id,
+            )
+            if allowed_by_limits:
+                auto_sent = await self._publish_auto_reply(
+                    runtime=runtime,
+                    chat_id=chat_id,
+                    source_message_id=message_id,
+                    bot_entity_id=bot_id,
+                    text=best_reply,
+                )
+                if not auto_sent:
+                    refreshed_bot_id = await self._refresh_chatbot_id(
+                        runtime=runtime,
+                        chat_id=chat_id,
+                    )
+                    if refreshed_bot_id:
+                        bot_id = refreshed_bot_id
+                        auto_sent = await self._publish_auto_reply(
+                            runtime=runtime,
+                            chat_id=chat_id,
+                            source_message_id=message_id,
+                            bot_entity_id=bot_id,
+                            text=best_reply,
+                        )
+
+        if not auto_sent:
+            suggestions_published = await self._publish_suggestions(
+                runtime=runtime,
+                chat_id=chat_id,
+                source_message_id=message_id,
+                bot_entity_id=bot_id,
+                suggestions=suggestions,
+            )
+            if not suggestions_published:
+                refreshed_bot_id = await self._refresh_chatbot_id(
+                    runtime=runtime,
+                    chat_id=chat_id,
+                )
+                if refreshed_bot_id:
+                    bot_id = refreshed_bot_id
+                    await self._publish_suggestions(
+                        runtime=runtime,
+                        chat_id=chat_id,
+                        source_message_id=message_id,
+                        bot_entity_id=bot_id,
+                        suggestions=suggestions,
+                    )
+
+        return {
+            "status": "accepted",
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "suggestions_count": len(suggestions),
+            "auto_sent": auto_sent,
+            "confidence": confidence,
+            "entity_type": conversation_state.get("entity_type"),
+            "entity_id": conversation_state.get("entity_id"),
+            "thread_id": conversation_id or "",
+            "thread_status": conversation_status or "unavailable",
+            "thread_created": bool(conversation_state.get("created")),
+            "thread_persisted": bool(conversation_state.get("persisted")),
+        }
+
+    @staticmethod
+    def _should_generate_for_message(message: ChatMessage) -> bool:
+        if message.message_type != ChatMessageTypeEnum.Regular:
+            return False
+        author_entity_type = _normalize_entity_type(message.author_entity_type)
+        if author_entity_type != _CHAT_ENTITY_TYPE_CLIENT:
+            return False
+        if _normalize_text(message.text):
+            return True
+        return bool(GptCrmChatAssistantIntegration._extract_message_file_ids(message))
+
+    async def _get_chat_message(
+        self,
+        connected_integration_id: str,
+        chat_id: str,
+        message_id: str,
+    ) -> Optional[ChatMessage]:
+        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+            response = await api.chat.chat_message.get(
+                ChatMessageGetRequest(
+                    chat_id=chat_id,
+                    ids=[message_id],
+                    limit=1,
+                    offset=0,
+                    include_staff_private=True,
+                )
+            )
+        if not response.ok or not response.result:
+            return None
+        return response.result[0] if response.result else None
+
+    async def _get_recent_chat_messages(
+        self,
+        connected_integration_id: str,
+        chat_id: str,
+        limit: int,
+        include_staff_private: bool,
+    ) -> List[ChatMessage]:
+        try:
+            async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+                response = await api.chat.chat_message.get(
+                    ChatMessageGetRequest(
+                        chat_id=chat_id,
+                        limit=limit,
+                        offset=0,
+                        include_staff_private=include_staff_private,
+                    )
+                )
+            if response.ok and isinstance(response.result, list):
+                return response.result
+        except Exception as error:
+            logger.warning(
+                "ChatMessage/Get failed while loading recent messages: ci=%s chat_id=%s error=%s",
+                connected_integration_id,
+                chat_id,
+                error,
+            )
+        return []
+
+    @staticmethod
+    def _find_message_in_rows(
+        rows: Sequence[ChatMessage],
+        message_id: str,
+    ) -> Optional[ChatMessage]:
+        expected_id = str(message_id or "").strip()
+        if not expected_id:
+            return None
+        for row in rows:
+            row_id = str(getattr(row, "id", "") or "").strip()
+            if row_id == expected_id:
+                return row
+        return None
+
+    @staticmethod
+    def _merge_source_message(
+        rows: Sequence[ChatMessage],
+        source_message: ChatMessage,
+    ) -> List[ChatMessage]:
+        merged = list(rows or [])
+        source_id = str(getattr(source_message, "id", "") or "").strip()
+        if source_id and any(str(getattr(row, "id", "") or "").strip() == source_id for row in merged):
+            return merged
+        merged.append(source_message)
+        return merged
+
+    async def _load_source_message_and_history(
+        self,
+        runtime: RuntimeConfig,
+        chat_id: str,
+        message_id: str,
+    ) -> Tuple[Optional[ChatMessage], List[ChatMessage]]:
+        history_rows: List[ChatMessage] = []
+        if runtime.assistant_context_source == "crm":
+            history_rows = await self._get_recent_chat_messages(
+                connected_integration_id=runtime.connected_integration_id,
+                chat_id=chat_id,
+                limit=runtime.assistant_history_limit,
+                include_staff_private=runtime.assistant_include_staff_private,
+            )
+            message = self._find_message_in_rows(history_rows, message_id)
+            if message:
+                return message, history_rows
+
+        message = await self._get_chat_message(
+            connected_integration_id=runtime.connected_integration_id,
+            chat_id=chat_id,
+            message_id=message_id,
+        )
+        if message and runtime.assistant_context_source == "crm":
+            history_rows = self._merge_source_message(history_rows, message)
+        return message, history_rows
+
+    @staticmethod
+    def _author_role(author_entity_type: Optional[str], message_type: Optional[ChatMessageTypeEnum]) -> str:
+        normalized = _normalize_entity_type(author_entity_type)
+        if message_type == ChatMessageTypeEnum.System:
+            return "system"
+        if message_type == ChatMessageTypeEnum.Private:
+            return "staff_note"
+        if normalized == _CHAT_ENTITY_TYPE_USER:
+            return "operator"
+        if normalized == _CHAT_ENTITY_TYPE_CHATBOT:
+            return "assistant"
+        return "client"
+
+    @staticmethod
+    def _extract_message_file_ids(message: ChatMessage) -> List[int]:
+        file_ids_raw = getattr(message, "file_ids", None)
+        if not isinstance(file_ids_raw, list):
+            return []
+        resolved: List[int] = []
+        for item in file_ids_raw:
+            value = _parse_int(item, 0)
+            if value > 0:
+                resolved.append(int(value))
+        return resolved[: GptCrmChatAssistantConfig.MAX_FILES_PER_MESSAGE]
+
+    @staticmethod
+    def _format_file_size(size_bytes: Any) -> str:
+        size = _parse_int(size_bytes, 0)
+        if size <= 0:
+            return ""
+        units = ["B", "KB", "MB", "GB"]
+        value = float(size)
+        for unit in units:
+            if value < 1024 or unit == units[-1]:
+                if unit == "B":
+                    return f"{int(value)}{unit}"
+                return f"{value:.1f}{unit}"
+            value /= 1024
+        return ""
+
+    @staticmethod
+    def _normalize_public_url(value: Any) -> Optional[str]:
+        url = str(value or "").strip()
+        if not url:
+            return None
+        if url.startswith("http://") or url.startswith("https://"):
+            return url
+        return None
+
+    @staticmethod
+    def _is_image_file(file_row: Dict[str, Any]) -> bool:
+        mime = str(file_row.get("mime_type") or "").strip().lower()
+        if mime.startswith("image/"):
+            return True
+        ext = str(file_row.get("extension") or "").strip().lower()
+        return ext in {"jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff", "heic", "heif"}
+
+    @staticmethod
+    def _normalize_file_meta_row(file_row: Any) -> Optional[Dict[str, Any]]:
+        if isinstance(file_row, dict):
+            file_id = _parse_int(file_row.get("id"), 0)
+            if file_id <= 0:
+                return None
+            return {
+                "id": int(file_id),
+                "name": str(file_row.get("name", "") or "").strip(),
+                "extension": str(file_row.get("extension", "") or "").strip().lower(),
+                "mime_type": str(file_row.get("mime_type", "") or "").strip().lower(),
+                "size": _parse_int(file_row.get("size"), 0),
+                "url": str(file_row.get("url", "") or "").strip(),
+            }
+
+        file_id = _parse_int(getattr(file_row, "id", 0), 0)
+        if file_id <= 0:
+            return None
+        return {
+            "id": int(file_id),
+            "name": str(getattr(file_row, "name", "") or "").strip(),
+            "extension": str(getattr(file_row, "extension", "") or "").strip().lower(),
+            "mime_type": str(getattr(file_row, "mime_type", "") or "").strip().lower(),
+            "size": _parse_int(getattr(file_row, "size", 0), 0),
+            "url": str(getattr(file_row, "url", "") or "").strip(),
+        }
+
+    async def _fetch_files_map(
+        self,
+        connected_integration_id: str,
+        file_ids: Sequence[int],
+    ) -> Dict[int, Dict[str, Any]]:
+        unique_ids = sorted({int(fid) for fid in file_ids if int(fid) > 0})
+        if not unique_ids:
+            return {}
+        unique_ids = unique_ids[: GptCrmChatAssistantConfig.MAX_CONTEXT_FILE_IDS]
+
+        files_map: Dict[int, Dict[str, Any]] = {}
+        ttl = GptCrmChatAssistantConfig.FILE_CACHE_TTL_SEC
+        now = time.monotonic()
+
+        # 1) Resolve from local in-memory cache.
+        async with self._LOCAL_FILE_CACHE_LOCK:
+            for file_id in unique_ids:
+                cache_key = self._file_cache_key(connected_integration_id, file_id)
+                cached = self._LOCAL_FILE_CACHE.get(cache_key)
+                if cached and cached[1] > now:
+                    files_map[int(file_id)] = dict(cached[0])
+                    continue
+                if cached:
+                    self._LOCAL_FILE_CACHE.pop(cache_key, None)
+
+        # 2) Resolve remaining ids from Redis cache.
+        missing_ids = [int(file_id) for file_id in unique_ids if int(file_id) not in files_map]
+        if missing_ids:
+            local_promote: Dict[str, Dict[str, Any]] = {}
+            for file_id in missing_ids:
+                cache_key = self._file_cache_key(connected_integration_id, file_id)
+                cached_raw = await self._redis_get(cache_key)
+                if not cached_raw:
+                    continue
+                try:
+                    parsed = json.loads(cached_raw)
+                except Exception:
+                    continue
+                normalized = self._normalize_file_meta_row(parsed)
+                if not normalized:
+                    continue
+                normalized_id = _parse_int(normalized.get("id"), 0)
+                if normalized_id != int(file_id):
+                    continue
+                files_map[int(file_id)] = normalized
+                local_promote[cache_key] = normalized
+
+            if local_promote:
+                expires_at = time.monotonic() + ttl
+                async with self._LOCAL_FILE_CACHE_LOCK:
+                    for cache_key, file_row in local_promote.items():
+                        self._LOCAL_FILE_CACHE[cache_key] = (file_row, expires_at)
+
+        # 3) Fetch only cache misses from CRM API.
+        missing_ids = [int(file_id) for file_id in unique_ids if int(file_id) not in files_map]
+        if not missing_ids:
+            return files_map
+
+        try:
+            async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+                response = await api.files.file.get(
+                    FileGetRequest(
+                        ids=missing_ids,
+                        limit=len(missing_ids),
+                        offset=0,
+                    )
+                )
+        except Exception as error:
+            logger.warning(
+                "File/Get failed while building context: ci=%s ids=%s error=%s",
+                connected_integration_id,
+                missing_ids,
+                error,
+            )
+            return files_map
+
+        if not response.ok or not isinstance(response.result, list):
+            return files_map
+
+        fetched_rows: Dict[int, Dict[str, Any]] = {}
+        for row in response.result:
+            normalized = self._normalize_file_meta_row(row)
+            if not normalized:
+                continue
+            file_id = _parse_int(normalized.get("id"), 0)
+            if file_id <= 0:
+                continue
+            files_map[int(file_id)] = normalized
+            fetched_rows[int(file_id)] = normalized
+
+        if fetched_rows:
+            expires_at = time.monotonic() + ttl
+            async with self._LOCAL_FILE_CACHE_LOCK:
+                for file_id, file_row in fetched_rows.items():
+                    cache_key = self._file_cache_key(connected_integration_id, file_id)
+                    self._LOCAL_FILE_CACHE[cache_key] = (file_row, expires_at)
+            for file_id, file_row in fetched_rows.items():
+                await self._redis_set(
+                    self._file_cache_key(connected_integration_id, file_id),
+                    json.dumps(file_row, ensure_ascii=False, separators=(",", ":")),
+                    ttl,
+                )
+        return files_map
+
+    def _render_message_context_line(
+        self,
+        role: str,
+        text: str,
+        file_ids: Sequence[int],
+        files_map: Dict[int, Dict[str, Any]],
+    ) -> Tuple[str, List[str]]:
+        normalized_text = _normalize_text(text)
+        file_descriptors: List[str] = []
+        image_urls: List[str] = []
+
+        for file_id in list(file_ids)[: GptCrmChatAssistantConfig.MAX_FILES_PER_MESSAGE]:
+            file_row = files_map.get(int(file_id))
+            if not file_row:
+                file_descriptors.append(f"file_id={int(file_id)}")
+                continue
+
+            file_name = str(file_row.get("name") or "").strip() or f"file_{int(file_id)}"
+            mime = str(file_row.get("mime_type") or "").strip().lower()
+            size_text = self._format_file_size(file_row.get("size"))
+
+            details: List[str] = []
+            if mime:
+                details.append(mime)
+            if size_text:
+                details.append(size_text)
+
+            if details:
+                file_descriptors.append(f"{file_name} ({', '.join(details)})")
+            else:
+                file_descriptors.append(file_name)
+
+            public_url = self._normalize_public_url(file_row.get("url"))
+            if public_url and self._is_image_file(file_row):
+                image_urls.append(public_url)
+
+        body = normalized_text or ("[сообщение без текста]" if file_descriptors else "")
+        if file_descriptors:
+            body = (
+                f"{body} [files: {', '.join(file_descriptors)}]"
+                if body
+                else f"[files: {', '.join(file_descriptors)}]"
+            )
+        body = body or "[empty]"
+        return f"{role}: {body}", image_urls
+
+    async def _build_chat_context(
+        self,
+        runtime: RuntimeConfig,
+        source_message: ChatMessage,
+        history_rows: Sequence[ChatMessage],
+    ) -> Tuple[str, List[str]]:
+        rows = self._merge_source_message(history_rows, source_message)
+
+        all_file_ids: List[int] = []
+        for row in rows:
+            all_file_ids.extend(self._extract_message_file_ids(row))
+        if not rows:
+            all_file_ids.extend(self._extract_message_file_ids(source_message))
+        files_map = await self._fetch_files_map(
+            connected_integration_id=runtime.connected_integration_id,
+            file_ids=all_file_ids,
+        )
+
+        lines: List[Tuple[int, str]] = []
+        collected_image_urls: List[str] = []
+        seen_image_urls: Set[str] = set()
+        for row in rows:
+            text = str(getattr(row, "text", None) or "")
+            message_file_ids = self._extract_message_file_ids(row)
+            if not _normalize_text(text) and not message_file_ids:
+                continue
+            role = self._author_role(
+                getattr(row, "author_entity_type", None),
+                getattr(row, "message_type", None),
+            )
+            created_date = _parse_int(getattr(row, "created_date", 0), 0)
+            rendered_line, image_urls = self._render_message_context_line(
+                role=role,
+                text=text,
+                file_ids=message_file_ids,
+                files_map=files_map,
+            )
+            lines.append((created_date, rendered_line))
+
+            for url in image_urls:
+                if url in seen_image_urls:
+                    continue
+                seen_image_urls.add(url)
+                collected_image_urls.append(url)
+                if len(collected_image_urls) >= GptCrmChatAssistantConfig.MAX_CONTEXT_IMAGE_URLS:
+                    break
+            if len(collected_image_urls) >= GptCrmChatAssistantConfig.MAX_CONTEXT_IMAGE_URLS:
+                continue
+
+        if not lines:
+            source_line, source_images = self._render_message_context_line(
+                role="client",
+                text=str(source_message.text or ""),
+                file_ids=self._extract_message_file_ids(source_message),
+                files_map=files_map,
+            )
+            return source_line, source_images[: GptCrmChatAssistantConfig.MAX_CONTEXT_IMAGE_URLS]
+
+        lines.sort(key=lambda item: item[0])
+        raw_lines = [item[1] for item in lines]
+        context = self._trim_context_lines(
+            raw_lines,
+            GptCrmChatAssistantConfig.MAX_CONTEXT_CHARS,
+        )
+        return context, collected_image_urls[: GptCrmChatAssistantConfig.MAX_CONTEXT_IMAGE_URLS]
+
+    @staticmethod
+    def _trim_context_lines(lines: Sequence[str], max_chars: int) -> str:
+        selected: List[str] = []
+        total = 0
+        for line in reversed(list(lines)):
+            line_len = len(line) + 1
+            if selected and total + line_len > max_chars:
+                break
+            selected.append(line)
+            total += line_len
+        selected.reverse()
+        return "\n".join(selected)
+
+    @classmethod
+    def _entity_field_type(cls, chat_entity_type: str) -> Optional[str]:
+        return cls._CHAT_ENTITY_TO_FIELD_ENTITY.get(_normalize_entity_type(chat_entity_type))
+
+    @staticmethod
+    def _extract_field_value(fields_raw: Any, key: str) -> Optional[str]:
+        if not isinstance(fields_raw, list):
+            return None
+        expected_key = str(key or "").strip().lower()
+        if not expected_key:
+            return None
+
+        for row in fields_raw:
+            if isinstance(row, dict):
+                row_key = str(row.get("key") or "").strip().lower()
+                row_value = row.get("value")
+            else:
+                row_key = str(getattr(row, "key", "") or "").strip().lower()
+                row_value = getattr(row, "value", None)
+
+            if row_key != expected_key:
+                continue
+            value = str(row_value or "").strip()
+            if value:
+                return value
+        return None
+
+    @staticmethod
+    def _api_error_description(result: Any) -> str:
+        if isinstance(result, dict):
+            return str(result.get("description") or "").strip()
+        return str(result or "").strip()
+
+    @staticmethod
+    def _normalize_conversation_id(value: Any) -> Optional[str]:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        return text if text.startswith(("conv_", "conversation_")) else None
+
+    async def _get_entity_row(
+        self,
+        connected_integration_id: str,
+        chat_entity_type: str,
+        entity_id: int,
+    ) -> Dict[str, Any]:
+        field_entity_type = self._entity_field_type(chat_entity_type)
+        if not field_entity_type or entity_id <= 0:
+            return {}
+
+        response: Any = None
+        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+            if field_entity_type == "Lead":
+                response = await api.crm.lead.get(
+                    LeadGetRequest(ids=[int(entity_id)], limit=1, offset=0)
+                )
+            elif field_entity_type == "Deal":
+                response = await api.crm.deal.get(
+                    DealGetRequest(ids=[int(entity_id)], limit=1, offset=0)
+                )
+            elif field_entity_type == "Task":
+                response = await api.crm.project_task.get(
+                    ProjectTaskGetRequest(ids=[int(entity_id)], limit=1, offset=0)
+                )
+            elif field_entity_type == "Client":
+                response = await api.crm.client.get(
+                    ClientGetRequest(ids=[int(entity_id)], limit=1, offset=0)
+                )
+            elif field_entity_type == "Ticket":
+                response = await api.crm.ticket.get(
+                    TicketGetRequest(ids=[int(entity_id)], limit=1, offset=0)
+                )
+            else:
+                return {}
+        if not response.ok:
+            logger.warning(
+                "%s/Get rejected while loading entity: ci=%s entity_type=%s entity_id=%s payload=%s",
+                field_entity_type,
+                connected_integration_id,
+                chat_entity_type,
+                entity_id,
+                response.result,
+            )
+            return {}
+        if not isinstance(response.result, list) or not response.result:
+            return {}
+        row = response.result[0]
+        if isinstance(row, dict):
+            return row
+        if hasattr(row, "model_dump"):
+            dumped = row.model_dump(mode="json")
+            return dumped if isinstance(dumped, dict) else {}
+        return {}
+
+    async def _set_entity_thread_id(
+        self,
+        connected_integration_id: str,
+        chat_entity_type: str,
+        entity_id: int,
+        conversation_id: str,
+    ) -> bool:
+        field_entity_type = self._entity_field_type(chat_entity_type)
+        if not field_entity_type or entity_id <= 0 or not conversation_id:
+            return False
+
+        full_key = GptCrmChatAssistantConfig.THREAD_FIELD_FULL_KEY
+        response: Any = None
+        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+            if field_entity_type == "Lead":
+                response = await api.crm.lead.edit(
+                    LeadEditRequest(
+                        id=int(entity_id),
+                        fields=[{"key": full_key, "value": conversation_id}],
+                    )
+                )
+            elif field_entity_type == "Deal":
+                response = await api.crm.deal.edit(
+                    DealEditRequest(
+                        id=int(entity_id),
+                        fields=[{"key": full_key, "value": conversation_id}],
+                    )
+                )
+            elif field_entity_type == "Task":
+                response = await api.crm.project_task.edit(
+                    ProjectTaskEditRequest(
+                        id=int(entity_id),
+                        fields=[{"key": full_key, "value": conversation_id}],
+                    )
+                )
+            elif field_entity_type == "Client":
+                response = await api.crm.client.edit(
+                    ClientEditRequest(
+                        id=int(entity_id),
+                        fields=[{"key": full_key, "value": conversation_id}],
+                    )
+                )
+            elif field_entity_type == "Ticket":
+                response = await api.crm.ticket.edit(
+                    TicketEditRequest(
+                        id=int(entity_id),
+                        fields=[{"key": full_key, "value": conversation_id}],
+                    )
+                )
+            else:
+                return False
+        if response.ok:
+            return True
+
+        logger.warning(
+            "%s/Edit rejected while persisting conversation id: ci=%s entity_type=%s entity_id=%s payload=%s",
+            field_entity_type,
+            connected_integration_id,
+            chat_entity_type,
+            entity_id,
+            response.result,
+        )
+        return False
+
+    async def _create_openai_conversation(
+        self,
+        runtime: RuntimeConfig,
+        chat_id: str,
+        chat_entity_type: str,
+        entity_id: int,
+    ) -> Optional[str]:
+        headers = {
+            "Authorization": f"Bearer {runtime.assistant_api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "metadata": {
+                "integration_key": GptCrmChatAssistantConfig.INTEGRATION_KEY,
+                "connected_integration_id": runtime.connected_integration_id,
+                "chat_id": chat_id,
+                "entity_type": chat_entity_type,
+                "entity_id": str(int(entity_id)),
+            }
+        }
+        try:
+            response = await self.http_client.post(
+                GptCrmChatAssistantConfig.OPENAI_CONVERSATIONS_ENDPOINT,
+                headers=headers,
+                json=payload,
+            )
+            if response.status_code >= 400:
+                logger.warning(
+                    "OpenAI conversation create failed: status=%s chat_id=%s entity_type=%s entity_id=%s body=%s",
+                    response.status_code,
+                    chat_id,
+                    chat_entity_type,
+                    entity_id,
+                    response.text[:1000],
+                )
+                return None
+            raw = response.json()
+        except Exception as error:
+            logger.warning(
+                "OpenAI conversation create error: chat_id=%s entity_type=%s entity_id=%s error=%s",
+                chat_id,
+                chat_entity_type,
+                entity_id,
+                error,
+            )
+            return None
+
+        conversation_id = self._normalize_conversation_id((raw or {}).get("id"))
+        if not conversation_id:
+            logger.warning(
+                "OpenAI conversation create returned empty id: chat_id=%s entity_type=%s entity_id=%s payload=%s",
+                chat_id,
+                chat_entity_type,
+                entity_id,
+                str(raw)[:1000],
+            )
+            return None
+        return conversation_id
+
+    async def _resolve_or_create_chat_conversation(
+        self,
+        runtime: RuntimeConfig,
+        chat_id: str,
+    ) -> Dict[str, Any]:
+        chat_row = await self._get_chat_row(
+            connected_integration_id=runtime.connected_integration_id,
+            chat_id=chat_id,
+        )
+        if not chat_row:
+            return {"status": "chat_not_found"}
+
+        chat_entity_type = _normalize_entity_type(chat_row.get("entity_type"))
+        field_entity_type = self._entity_field_type(chat_entity_type)
+        if not field_entity_type:
+            return {
+                "status": "unsupported_entity_type",
+                "entity_type": chat_entity_type,
+            }
+
+        entity_id = _parse_int(chat_row.get("entity_id"), 0)
+        if entity_id <= 0:
+            return {
+                "status": "invalid_entity_binding",
+                "entity_type": chat_entity_type,
+                "entity_id": entity_id,
+            }
+
+        entity_row = await self._get_entity_row(
+            connected_integration_id=runtime.connected_integration_id,
+            chat_entity_type=chat_entity_type,
+            entity_id=entity_id,
+        )
+        if not entity_row:
+            return {
+                "status": "entity_not_found",
+                "entity_type": chat_entity_type,
+                "entity_id": entity_id,
+            }
+
+        existing = self._normalize_conversation_id(
+            self._extract_field_value(
+                entity_row.get("fields"),
+                GptCrmChatAssistantConfig.THREAD_FIELD_FULL_KEY,
+            )
+        )
+        if existing:
+            return {
+                "status": "ok",
+                "entity_type": chat_entity_type,
+                "entity_id": entity_id,
+                "conversation_id": existing,
+                "created": False,
+                "persisted": True,
+            }
+
+        created = await self._create_openai_conversation(
+            runtime=runtime,
+            chat_id=chat_id,
+            chat_entity_type=chat_entity_type,
+            entity_id=entity_id,
+        )
+        if not created:
+            return {
+                "status": "conversation_create_failed",
+                "entity_type": chat_entity_type,
+                "entity_id": entity_id,
+            }
+
+        persisted = await self._set_entity_thread_id(
+            connected_integration_id=runtime.connected_integration_id,
+            chat_entity_type=chat_entity_type,
+            entity_id=entity_id,
+            conversation_id=created,
+        )
+        return {
+            "status": "ok",
+            "entity_type": chat_entity_type,
+            "entity_id": entity_id,
+            "conversation_id": created,
+            "created": True,
+            "persisted": persisted,
+        }
+
+    async def _resolve_or_join_chatbot(
+        self,
+        runtime: RuntimeConfig,
+        chat_id: str,
+    ) -> Optional[int]:
+        cached_bot_id = await self._get_cached_bot_id(
+            connected_integration_id=runtime.connected_integration_id,
+            chat_id=chat_id,
+        )
+        if cached_bot_id:
+            return cached_bot_id
+
+        chat_row = await self._get_chat_row(
+            connected_integration_id=runtime.connected_integration_id,
+            chat_id=chat_id,
+        )
+        participants = self._extract_chatbot_participants(chat_row)
+        resolved = self._choose_chatbot_id(
+            participants=participants,
+            connected_integration_id=runtime.connected_integration_id,
+            cached_bot_id=cached_bot_id,
+        )
+        if resolved:
+            await self._set_cached_bot_id(
+                connected_integration_id=runtime.connected_integration_id,
+                chat_id=chat_id,
+                bot_id=resolved,
+            )
+            return resolved
+
+        chat_entity_type = _normalize_entity_type((chat_row or {}).get("entity_type"))
+        allow_auto_join = (
+            runtime.assistant_auto_join_enabled
+            and chat_entity_type in runtime.assistant_auto_join_entities
+        )
+        if not allow_auto_join:
+            return None
+
+        await self._add_bot_to_chat(
+            connected_integration_id=runtime.connected_integration_id,
+            chat_id=chat_id,
+        )
+        chat_row = await self._get_chat_row(
+            connected_integration_id=runtime.connected_integration_id,
+            chat_id=chat_id,
+        )
+        participants = self._extract_chatbot_participants(chat_row)
+        resolved = self._choose_chatbot_id(
+            participants=participants,
+            connected_integration_id=runtime.connected_integration_id,
+            cached_bot_id=cached_bot_id,
+        )
+        if resolved:
+            await self._set_cached_bot_id(
+                connected_integration_id=runtime.connected_integration_id,
+                chat_id=chat_id,
+                bot_id=resolved,
+            )
+        return resolved
+
+    async def _clear_cached_bot_id(
+        self,
+        connected_integration_id: str,
+        chat_id: str,
+    ) -> None:
+        cache_key = self._bot_cache_key(connected_integration_id, chat_id)
+        await self._redis_delete(cache_key)
+        async with self._LOCAL_BOT_CACHE_LOCK:
+            self._LOCAL_BOT_CACHE.pop(cache_key, None)
+
+    async def _refresh_chatbot_id(
+        self,
+        runtime: RuntimeConfig,
+        chat_id: str,
+    ) -> Optional[int]:
+        await self._clear_cached_bot_id(runtime.connected_integration_id, chat_id)
+        return await self._resolve_or_join_chatbot(runtime=runtime, chat_id=chat_id)
+
+    async def _get_chat_row(
+        self,
+        connected_integration_id: str,
+        chat_id: str,
+    ) -> Dict[str, Any]:
+        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+            response = await api.chat.chat.get(
+                ChatGetRequest(ids=[chat_id], limit=1, offset=0)
+            )
+        if not response.ok or not isinstance(response.result, list) or not response.result:
+            return {}
+        row = response.result[0]
+        if isinstance(row, dict):
+            return row
+        if hasattr(row, "model_dump"):
+            dumped = row.model_dump(mode="json")
+            return dumped if isinstance(dumped, dict) else {}
+        return {}
+
+    @staticmethod
+    def _extract_chatbot_participants(chat_row: Dict[str, Any]) -> List[Dict[str, Any]]:
+        participants_raw = chat_row.get("participants")
+        if not isinstance(participants_raw, list):
+            return []
+
+        parsed: List[Dict[str, Any]] = []
+        for row in participants_raw:
+            if not isinstance(row, dict):
+                continue
+            if _normalize_entity_type(row.get("entity_type")) != "chatbot":
+                continue
+            entity_id = _parse_int(row.get("entity_id"), 0)
+            if entity_id <= 0:
+                continue
+            chatbot_ci = str(row.get("connected_integration_id") or "").strip()
+            parsed.append(
+                {
+                    "entity_id": int(entity_id),
+                    "connected_integration_id": chatbot_ci,
+                }
+            )
+        return parsed
+
+    @staticmethod
+    def _choose_chatbot_id(
+        participants: List[Dict[str, Any]],
+        connected_integration_id: str,
+        cached_bot_id: Optional[int],
+    ) -> Optional[int]:
+        if cached_bot_id and any(int(row.get("entity_id") or 0) == int(cached_bot_id) for row in participants):
+            return int(cached_bot_id)
+
+        for row in participants:
+            ci = str(row.get("connected_integration_id") or "").strip()
+            if ci and ci == connected_integration_id:
+                return int(row.get("entity_id") or 0)
+
+        unique_ids = sorted(
+            {
+                int(row.get("entity_id") or 0)
+                for row in participants
+                if int(row.get("entity_id") or 0) > 0
+            }
+        )
+        if len(unique_ids) == 1:
+            return unique_ids[0]
+        return None
+
+    async def _add_bot_to_chat(
+        self,
+        connected_integration_id: str,
+        chat_id: str,
+    ) -> None:
+        async with RegosAPI(connected_integration_id=connected_integration_id) as api:
+            response = await api.chat.chat.add_bot(
+                ChatAddBotRequest(
+                    chat_id=chat_id,
+                    connected_integration_id=connected_integration_id,
+                )
+            )
+        if not response.ok:
+            logger.warning(
+                "Chat/AddBot rejected: ci=%s chat_id=%s payload=%s",
+                connected_integration_id,
+                chat_id,
+                response.result,
+            )
+
+    async def _get_cached_bot_id(
+        self,
+        connected_integration_id: str,
+        chat_id: str,
+    ) -> Optional[int]:
+        cache_key = self._bot_cache_key(connected_integration_id, chat_id)
+        raw = await self._redis_get(cache_key)
+        if raw:
+            parsed = _parse_int(raw, 0)
+            if parsed > 0:
+                return parsed
+
+        now = time.monotonic()
+        async with self._LOCAL_BOT_CACHE_LOCK:
+            row = self._LOCAL_BOT_CACHE.get(cache_key)
+            if row and row[1] > now:
+                return row[0]
+            if row:
+                self._LOCAL_BOT_CACHE.pop(cache_key, None)
+        return None
+
+    async def _set_cached_bot_id(
+        self,
+        connected_integration_id: str,
+        chat_id: str,
+        bot_id: int,
+    ) -> None:
+        if bot_id <= 0:
+            return
+        cache_key = self._bot_cache_key(connected_integration_id, chat_id)
+        await self._redis_set(
+            cache_key,
+            str(bot_id),
+            GptCrmChatAssistantConfig.BOT_CACHE_TTL_SEC,
+        )
+        async with self._LOCAL_BOT_CACHE_LOCK:
+            self._LOCAL_BOT_CACHE[cache_key] = (
+                int(bot_id),
+                time.monotonic() + GptCrmChatAssistantConfig.BOT_CACHE_TTL_SEC,
+            )
+
+    async def _generate_suggestions(
+        self,
+        runtime: RuntimeConfig,
+        source_message: ChatMessage,
+        context: str,
+        context_image_urls: Optional[List[str]] = None,
+        conversation_id: Optional[str] = None,
+        quick_replies: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        source_text = _normalize_text(source_message.text)
+        if not source_text and self._extract_message_file_ids(source_message):
+            source_text = "[клиент отправил вложение без текста]"
+        if not source_text:
+            return {"suggestions": [], "best_reply": "", "confidence": 0.0}
+
+        system_instruction = (
+            "Ты помощник оператора CRM. На основе диалога предложи короткие готовые ответы оператору. "
+            "Сохраняй язык клиента и деловой тон. "
+            "Верни только JSON-объект без markdown: "
+            '{"suggestions":["..."],"best_reply":"...","confidence":0.0}.'
+        )
+        user_payload = (
+            f"Количество подсказок: {runtime.assistant_suggestions_count}\n"
+            f"Последнее сообщение клиента: {source_text}\n\n"
+            f"Контекст диалога:\n{context}"
+        )
+        normalized_quick_replies = self._normalize_quick_reply_texts(
+            [{"text": item} for item in (quick_replies or [])]
+        )
+        quick_replies_for_prompt = normalized_quick_replies[
+            : GptCrmChatAssistantConfig.MAX_QUICK_REPLIES_IN_PROMPT
+        ]
+        if quick_replies_for_prompt:
+            quick_reply_rows = "\n".join(f"- {text}" for text in quick_replies_for_prompt)
+            user_payload += (
+                "\n\nДоступные шаблоны быстрых ответов CRM (используй их, если релевантны):\n"
+                f"{quick_reply_rows}\n"
+                "Если подходит один из шаблонов, отдай предпочтение ему без изменений "
+                "или с минимальной правкой."
+            )
+        unique_image_urls: List[str] = []
+        seen_image_urls: Set[str] = set()
+        for value in context_image_urls or []:
+            normalized_url = self._normalize_public_url(value)
+            if not normalized_url or normalized_url in seen_image_urls:
+                continue
+            seen_image_urls.add(normalized_url)
+            unique_image_urls.append(normalized_url)
+            if len(unique_image_urls) >= GptCrmChatAssistantConfig.MAX_CONTEXT_IMAGE_URLS:
+                break
+
+        user_content: Any = user_payload
+        if unique_image_urls:
+            user_parts: List[Dict[str, Any]] = [{"type": "input_text", "text": user_payload}]
+            for url in unique_image_urls:
+                user_parts.append({"type": "input_image", "image_url": url})
+            user_content = user_parts
+
+        use_conversation = (
+            runtime.assistant_context_source == "conversation"
+            and bool(self._normalize_conversation_id(conversation_id))
+        )
+        payload: Dict[str, Any] = {
+            "model": runtime.assistant_model,
+            "instructions": f"{runtime.assistant_prompt}\n\n{system_instruction}",
+            "input": [{"role": "user", "content": user_content}],
+            "temperature": runtime.assistant_temperature,
+            "max_output_tokens": GptCrmChatAssistantConfig.OPENAI_MAX_OUTPUT_TOKENS,
+            "store": bool(use_conversation),
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "crm_reply_suggestions",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["suggestions", "best_reply", "confidence"],
+                        "properties": {
+                            "suggestions": {
+                                "type": "array",
+                                "items": {"type": "string", "minLength": 1, "maxLength": 200},
+                                "minItems": 1,
+                                "maxItems": runtime.assistant_suggestions_count,
+                            },
+                            "best_reply": {"type": "string", "minLength": 1, "maxLength": 200},
+                            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                        },
+                    },
+                }
+            },
+        }
+        if use_conversation and conversation_id:
+            payload["conversation"] = str(conversation_id)
+
+        headers = {
+            "Authorization": f"Bearer {runtime.assistant_api_key}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            response = await self.http_client.post(
+                GptCrmChatAssistantConfig.OPENAI_RESPONSES_ENDPOINT,
+                headers=headers,
+                json=payload,
+            )
+            if response.status_code >= 400:
+                logger.warning(
+                    "OpenAI request failed: status=%s conversation=%s images=%s body=%s",
+                    response.status_code,
+                    "on" if use_conversation else "off",
+                    "on" if bool(unique_image_urls) else "off",
+                    response.text[:1000],
+                )
+                return {"suggestions": [], "best_reply": "", "confidence": 0.0}
+            raw = response.json()
+        except Exception as error:
+            logger.warning("OpenAI request error: %s", error)
+            return {"suggestions": [], "best_reply": "", "confidence": 0.0}
+
+        raw_text = self._extract_model_output(raw)
+        if not _normalize_text(raw_text):
+            logger.warning(
+                "OpenAI response parsed with empty text: keys=%s payload=%s",
+                sorted(list(raw.keys()))[:20] if isinstance(raw, dict) else [],
+                str(raw)[:1000],
+            )
+        return self._normalize_generation_output(
+            raw_text=raw_text,
+            max_items=runtime.assistant_suggestions_count,
+        )
+
+    @staticmethod
+    def _extract_model_output(payload: Dict[str, Any]) -> str:
+        output_text = payload.get("output_text")
+        if isinstance(output_text, str) and output_text.strip():
+            return output_text
+
+        responses_output = payload.get("output")
+        return _extract_text_from_responses_output(responses_output)
+
+    @staticmethod
+    def _normalize_suggestions(raw_text: str, max_items: int) -> List[str]:
+        payload = _extract_json_object(raw_text)
+        if not payload or not isinstance(payload.get("suggestions"), list):
+            return []
+        rows = [str(item or "") for item in payload.get("suggestions") or []]
+
+        normalized: List[str] = []
+        seen: Set[str] = set()
+        for row in rows:
+            text = _normalize_text(row)
+            if not text:
+                continue
+            if len(text) > 200:
+                text = text[:200].rstrip()
+            key = text.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(text)
+            if len(normalized) >= max_items:
+                break
+        return normalized
+
+    @classmethod
+    def _normalize_generation_output(
+        cls,
+        raw_text: str,
+        max_items: int,
+    ) -> Dict[str, Any]:
+        suggestions = cls._normalize_suggestions(raw_text, max_items)
+
+        payload = _extract_json_object(raw_text)
+        if not isinstance(payload, dict):
+            return {"suggestions": [], "best_reply": "", "confidence": 0.0}
+
+        confidence = _parse_float(payload.get("confidence"), 0.0)
+        confidence = min(max(confidence, 0.0), 1.0)
+
+        best_reply_candidate = _normalize_text(payload.get("best_reply"))
+        best_reply = best_reply_candidate[:200].rstrip() if best_reply_candidate else ""
+        if not best_reply and suggestions:
+            best_reply = suggestions[0]
+        if best_reply and not suggestions:
+            suggestions = [best_reply]
+
+        return {
+            "suggestions": suggestions,
+            "best_reply": best_reply,
+            "confidence": confidence,
+        }
+
+    @staticmethod
+    def _can_auto_send_reply(
+        runtime: RuntimeConfig,
+        confidence: float,
+        best_reply: str,
+    ) -> bool:
+        if not runtime.assistant_auto_send_enabled:
+            return False
+        if not best_reply:
+            return False
+        return confidence >= runtime.assistant_auto_send_confidence_threshold
+
+    @classmethod
+    def _auto_send_cooldown_key(cls, connected_integration_id: str, chat_id: str) -> str:
+        return cls._redis_key("auto_send", "cooldown", connected_integration_id, chat_id)
+
+    @classmethod
+    def _auto_send_hour_key(
+        cls, connected_integration_id: str, chat_id: str, hour_bucket: int
+    ) -> str:
+        return cls._redis_key("auto_send", "hour", connected_integration_id, chat_id, hour_bucket)
+
+    async def _acquire_auto_send_slot(
+        self,
+        runtime: RuntimeConfig,
+        chat_id: str,
+    ) -> bool:
+        if runtime.assistant_auto_send_cooldown_sec <= 0 and runtime.assistant_auto_send_max_per_chat_hour <= 0:
+            return True
+
+        now_unix = int(time.time())
+        hour_bucket = now_unix // 3600
+
+        cooldown_key = self._auto_send_cooldown_key(runtime.connected_integration_id, chat_id)
+        hour_key = self._auto_send_hour_key(runtime.connected_integration_id, chat_id, hour_bucket)
+
+        _require_redis()
+        if runtime.assistant_auto_send_cooldown_sec > 0:
+            ok = await self._redis_set_nx(
+                cooldown_key,
+                str(now_unix),
+                runtime.assistant_auto_send_cooldown_sec,
+            )
+            if not ok:
+                return False
+
+        max_per_hour = runtime.assistant_auto_send_max_per_chat_hour
+        if max_per_hour > 0:
+            try:
+                sent_count = int(await redis_ops.incr(hour_key))
+                if sent_count == 1:
+                    await redis_ops.expire(hour_key, 3700)
+                if sent_count > max_per_hour:
+                    return False
+            except Exception as error:
+                logger.warning(
+                    "Failed to enforce redis auto-send hour limit: ci=%s chat_id=%s error=%s",
+                    runtime.connected_integration_id,
+                    chat_id,
+                    error,
+                )
+
+        return True
+
+    async def _publish_auto_reply(
+        self,
+        runtime: RuntimeConfig,
+        chat_id: str,
+        source_message_id: str,
+        bot_entity_id: int,
+        text: str,
+    ) -> bool:
+        if not text:
+            return False
+
+        external_message_id = f"gptauto:{source_message_id}"[:150]
+        request = ChatMessageAddRequest(
+            chat_id=chat_id,
+            author_entity_type="ChatBot",
+            author_entity_id=int(bot_entity_id),
+            message_type=ChatMessageTypeEnum.Regular,
+            text=text,
+            external_message_id=external_message_id,
+        )
+        async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
+            response = await api.chat.chat_message.add(request)
+
+        if not response.ok:
+            logger.warning(
+                "ChatMessage/Add auto-reply rejected: ci=%s chat_id=%s source_message_id=%s payload=%s",
+                runtime.connected_integration_id,
+                chat_id,
+                source_message_id,
+                response.result,
+            )
+            return False
+        return True
+
+    async def _publish_suggestions(
+        self,
+        runtime: RuntimeConfig,
+        chat_id: str,
+        source_message_id: str,
+        bot_entity_id: int,
+        suggestions: List[str],
+    ) -> bool:
+        async with RegosAPI(connected_integration_id=runtime.connected_integration_id) as api:
+            response = await api.chat.chat_message.suggest(
+                ChatMessageSuggestRequest(
+                    chat_id=chat_id,
+                    author_entity_type="ChatBot",
+                    author_entity_id=int(bot_entity_id),
+                    suggestions=suggestions,
+                    source_message_id=source_message_id,
+                )
+            )
+        if response.ok:
+            return True
+
+        logger.warning(
+            "ChatMessage/Suggest rejected: ci=%s chat_id=%s source_message_id=%s payload=%s",
+            runtime.connected_integration_id,
+            chat_id,
+            source_message_id,
+            response.result,
+        )
+        return False

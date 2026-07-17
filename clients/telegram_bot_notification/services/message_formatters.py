@@ -1,0 +1,227 @@
+from decimal import Decimal
+from typing import List
+
+from schemas.api.docs.cash_amount_details import CashAmountDetails
+from schemas.api.docs.cash_session import DocCashSession
+from schemas.api.docs.cheque_payment import DocChequePayment
+from schemas.api.reports.retail_report.count import Counts
+from schemas.api.reports.retail_report.payment import Payment
+from ..utils import format_money, format_timestamp
+from schemas.api.docs.cheque import DocCheque
+from schemas.api.docs.cheque_operation import DocChequeOperation
+
+
+def format_cheque_notification(*, cheque: DocCheque, action: str) -> str:
+    """
+    Creates a formatted notification message for a cheque.
+    Expects a cheque object with attributes: code, amount, is_return, date.
+    The action parameter is either "DocChequeClosed" or "DocChequeCanceled".
+    """
+    # Determine status text based on action
+    status_text = (
+        "✅ ЧЕК ЗАКРЫТ"
+        if action.lower() == "DocChequeClosed".lower()
+        else "🚫 ЧЕК ОТМЕНЕН"
+    )
+
+    # Build the main message
+    message_parts = [
+        f"*{status_text}*",
+        "----------------------",
+        f"* {'Возврат' if cheque.is_return else 'Продажа'} *",
+        "----------------------",
+        f"*Код:* `{cheque.code}`",
+        f"*Дата:* `{format_timestamp(cheque.date)}`",
+        f"*Сумма:* `{format_money(cheque.amount) }`",
+        "----------------------",
+    ]
+
+    return "\n".join(message_parts)
+
+
+def format_session_notification(*, session: DocCashSession, action: str) -> str:
+    """
+    Creates a formatted notification message for a session.
+    Expects a session object with attributes: code, operating_cash_id, start_date, close_date, closed, close_amount.
+    The action parameter is either "DocSessionOpened" or "DocSessionClosed".
+    """
+    # Determine session state text
+    state_text = (
+        "ОТКРЫТА" if action.lower() == "DocSessionOpened".lower() else "ЗАКРЫТА"
+    )
+
+    # Build the message
+    message = [
+        f"*СМЕНА {state_text}*",
+        f"*{session.code}*",
+        "----------------------",
+        f"*Касса:* {session.operating_cash_id}",
+        "----------------------",
+        "*Открыл(а):*",
+        f"{format_timestamp(session.start_date)}",
+        f"_{session.start_user.full_name}_\n",
+    ]
+
+    if session.closed:
+        message.extend(
+            [
+                "----------------------",
+                "*Закрыл(а):*",
+                f"{format_timestamp(session.close_date)}",
+                f"_{session.close_user.full_name}_\n",
+            ]
+        )
+
+    return "\n".join(message)
+
+def format_cheque_details(
+    *,
+    cheque: DocCheque,
+    operations: List[DocChequeOperation],
+    payments: List[DocChequePayment],
+) -> str:
+
+    message_parts = [
+        "*ДЕТАЛИ ЧЕКА*",
+        "----------------------",
+        f"* {'Возврат' if cheque.is_return else 'Продажа'} *",
+        "----------------------",
+        f"*Код:* `{cheque.code}`",
+        f"*Дата:* `{format_timestamp(cheque.date)}`",
+        "----------------------",
+    ]
+
+    total_discount = Decimal("0")
+    total_without_discount = Decimal("0")
+
+    # === ОПЕРАЦИИ ===
+    if not operations:
+        message_parts.append("_Нет товаров._")
+    else:
+        max_items = 30
+        for index, operation in enumerate(operations, start=1):
+            item = getattr(operation, "item", None)
+            name = getattr(item, "name", None) or getattr(item, "fullname", None) or "No name"
+
+            quantity = operation.quantity
+            price = operation.price
+            price2 = operation.price2
+
+            total = quantity * price               # со скидкой
+            total2 = quantity * price2             # без скидки
+            discount_item = total2 - total
+
+            total_discount += discount_item
+            total_without_discount += total2
+
+            message_parts.append(
+                f"{index}. *{name}*\n"
+                f"`{quantity} × {format_money(price)} = {format_money(total)}`"
+            )
+
+            if discount_item > 0:
+                message_parts.append(
+                    f"  _Скидка:_ `{format_money(discount_item)}`"
+                )
+
+            if index >= max_items:
+                message_parts.append("_…Список товаров ограничен 30 позициями_")
+                break
+
+    message_parts.append("----------------------")
+
+    # === ИТОГО ПО ЧЕКУ ===
+    if total_without_discount > 0 and total_discount > 0:
+        discount_percent = (total_discount / total_without_discount) * 100
+        discount_percent = discount_percent.quantize(Decimal("0.1"))
+
+        message_parts.append(f"*Итого:* `{format_money(total_without_discount)}`")
+        message_parts.append(f"*Скидка:* `{format_money(total_discount)}`")
+        message_parts.append(f"*Скидка %:* `{discount_percent}%`")
+
+    message_parts.append(f"*К оплате:* `{format_money(cheque.amount)}`")
+    message_parts.append("----------------------")
+
+    # === ОПЛАТЫ ===
+    if not payments:
+        message_parts.append("_Нет оплат._")
+    else:
+        for payment in payments:
+            payment_type = payment.type.name
+            value = getattr(payment, "value", 0)
+            message_parts.append(f"{payment_type}: `{format_money(value)}`")
+
+    message_parts.append("━━━━━━━━━━━━━━")
+    return "\n".join(message_parts)
+
+
+def format_session_details(
+    *,
+    session: DocCashSession,
+    operations: CashAmountDetails,
+    counts: Counts,
+    payments: List[Payment],
+) -> str:
+
+    def _dec(x) -> Decimal:
+        if isinstance(x, Decimal):
+            return x
+        if x is None:
+            return Decimal("0")
+        return Decimal(str(x))
+
+    # Итоги по продажам и возвратам
+    total_sales: Decimal = sum((_dec(p.sale_amount) for p in payments), Decimal("0"))
+    total_returns: Decimal = sum(
+        (_dec(p.return_amount) for p in payments), Decimal("0")
+    )
+
+    count = counts[0] if counts else Counts()
+
+    message = [
+        "*ДЕТАЛИ СМЕНЫ*",
+        f"*{session.code}*",
+        "----------------------",
+        f"*Касса:* {session.operating_cash_id}",
+        "----------------------",
+        "*Открыл(а):*",
+        f"{format_timestamp(session.start_date)}",
+        f"_{session.start_user.full_name}_\n" "----------------------",
+        "*Закрыл(а):*",
+        f"{format_timestamp(session.close_date)}",
+        f"_{session.close_user.full_name}_\n" "----------------------",
+        "*ИТОГИ ПРОДАЖ*",
+        "----------------------",
+        f"*Кол-во чеков продаж:* `{(count.sale_count)}`",
+        f"*Сумма продаж:* `{format_money(total_sales)}`",
+        f"*Кол-во чеков возвратов:* `{(count.return_count)}`",
+        f"*Сумма возвратов:* `{format_money(total_returns)}`",
+        f"*Поступление:* `{format_money(total_sales - total_returns)}`",
+        f"*Выручка:* `{format_money(total_sales - total_returns - _dec(count.debt_paid_amount)) }`",
+        f"*Выдано в долг:* `{format_money(count.debt_amount)}`",
+        f"*Оплачено долга:* `{format_money(count.debt_paid_amount)}`",
+        "****************************",
+        f"*Валовая прибыль:* `{format_money(count.gross_profit)}`",
+    ]
+
+    if payments:
+        message.extend(
+            ["----------------------", "*ПЛАТЕЖИ*", "----------------------"]
+        )
+        for payment in payments:
+            message.append(f"*{payment.payment_type_name}*:")
+            message.append(f"_ - Продажи_: `{format_money(payment.sale_amount)}`")
+            message.append(f"_ - Возвраты_: `{format_money(payment.return_amount)}`")
+
+    message.extend(
+        [
+            "\n----------------------\n" "*КОНТРОЛЬ НАЛИЧНОЙ КАССЫ*",
+            "----------------------",
+            f"*На открытие:* `{format_money(operations.start_amount)}`",
+            f"*Внесения:* `{format_money(operations.income)}`",
+            f"*Изъятия:* `{format_money(operations.outcome)}`",
+            f"*На закрытие:* `{format_money(operations.end_amount)}`",
+        ]
+    )
+
+    return "\n".join(message)
